@@ -546,20 +546,27 @@ static const treg_param_t messaging_params[] = {
 static bool s_telegram_registered = false;
 static bool s_discord_registered = false;
 static bool s_slack_registered = false;
-/* Guards the flags + the register calls.  In practice the two callers don't
- * overlap (init runs before the WebUI accepts connections; the live refresh
- * runs on the lws service thread afterward), but the mutex closes the
- * theoretical race and documents the shared state. */
+/* The start phase has run: until then a refresh registers nothing, so no
+ * listener takes messages before the daemon can answer them. */
+static bool s_started = false;
+/* Guards the flags + the register calls: the start phase (main thread) and the
+ * live refresh (lws service thread, once the WebUI is up).  Cleanup holds it
+ * while the drivers' listeners are joined (under the registry lock), so no
+ * driver path may take the tool registry's lock or this one. */
 static pthread_mutex_t s_driver_reg_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Register the optional token-gated drivers whose tokens are present and which
  * aren't already registered.  Additive only — never tears a running driver down
  * (token rotation/removal is daemon-restart-to-apply; live teardown would join a
  * long-poll listener and the driver isn't cleanly unregisterable from the engine
- * today).  Called at init and again from set_secrets so adding a token in the
+ * today).  Called at start and again from set_secrets so adding a token in the
  * WebUI starts the driver without a restart. */
 static void register_token_drivers(void) {
    pthread_mutex_lock(&s_driver_reg_mutex);
+   if (!s_started) {
+      pthread_mutex_unlock(&s_driver_reg_mutex);
+      return;
+   }
    if (!s_telegram_registered && g_secrets.telegram_bot_token[0] != '\0') {
       if (messaging_telegram_register(g_secrets.telegram_bot_token) == SUCCESS) {
          s_telegram_registered = true;
@@ -604,8 +611,9 @@ static int messaging_tool_init(void) {
 
    /* Conditionally register drivers based on configured tokens.  When no token
     * is set, the engine still runs (the LLM-facing tool can report "no channels
-    * linked"), but no driver listens.  Adding a token later via the WebUI starts
-    * the driver live (messaging_tool_refresh_drivers); removing/rotating one is
+    * linked"), but no driver listens.  The drivers start in messaging_tool_start;
+    * adding a token later via the WebUI starts one live
+    * (messaging_tool_refresh_drivers); removing/rotating one is
     * daemon-restart-to-apply. */
    if (g_secrets.telegram_bot_token[0] == '\0') {
       OLOG_INFO("messaging_tool: no telegram_bot_token configured; Telegram disabled");
@@ -616,6 +624,15 @@ static int messaging_tool_init(void) {
    if (g_secrets.slack_app_token[0] == '\0' || g_secrets.slack_bot_token[0] == '\0') {
       OLOG_INFO("messaging_tool: no slack_app_token/slack_bot_token configured; Slack disabled");
    }
+   return SUCCESS;
+}
+
+/* The listeners start once the daemon can answer: each takes its backlog of
+ * messages on connect. */
+static int messaging_tool_start(void) {
+   pthread_mutex_lock(&s_driver_reg_mutex);
+   s_started = true;
+   pthread_mutex_unlock(&s_driver_reg_mutex);
    register_token_drivers();
    return SUCCESS;
 }
@@ -625,15 +642,17 @@ static void messaging_tool_cleanup(void) {
     * One that hasn't, past its own timeout, keeps them: the process is exiting,
     * and a driver torn down under a live send is a crash on the way out. */
    if (messaging_engine_quiesce() == SUCCESS) {
-      if (g_secrets.slack_app_token[0] != '\0' && g_secrets.slack_bot_token[0] != '\0') {
+      pthread_mutex_lock(&s_driver_reg_mutex);
+      if (s_slack_registered) {
          messaging_slack_shutdown();
       }
-      if (g_secrets.discord_bot_token[0] != '\0') {
+      if (s_discord_registered) {
          messaging_discord_shutdown();
       }
-      if (g_secrets.telegram_bot_token[0] != '\0') {
+      if (s_telegram_registered) {
          messaging_telegram_shutdown();
       }
+      pthread_mutex_unlock(&s_driver_reg_mutex);
       messaging_sms_shutdown();
    } else {
       OLOG_WARNING("messaging: a send is still running; leaving the drivers up");
@@ -682,6 +701,7 @@ static const tool_metadata_t messaging_metadata = {
    .validate_schedulable_action = messaging_validate_schedulable_action,
 
    .init = messaging_tool_init,
+   .start = messaging_tool_start,
    .cleanup = messaging_tool_cleanup,
    .callback = messaging_callback,
 };

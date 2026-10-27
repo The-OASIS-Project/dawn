@@ -560,6 +560,34 @@ bool tool_registry_is_locked(void) {
    return locked;
 }
 
+int tool_registry_start_tools(void) {
+   /* Called outside the registry lock: a start may look tools up.  The registry
+    * is locked against registration by now, so the entries don't move. */
+   tool_start_fn starts[TOOL_MAX_REGISTERED];
+   const char *names[TOOL_MAX_REGISTERED];
+   int n = 0;
+   pthread_mutex_lock(&s_registry_mutex);
+   for (int i = 0; i < s_tool_count; i++) {
+      const tool_entry_t *entry = &s_tools[i];
+      if (entry->registered && entry->initialized && entry->metadata.start) {
+         starts[n] = entry->metadata.start;
+         names[n] = entry->metadata.name;
+         n++;
+      }
+   }
+   pthread_mutex_unlock(&s_registry_mutex);
+
+   int failures = 0;
+   for (int i = 0; i < n; i++) {
+      OLOG_INFO("Starting tool: %s", names[i]);
+      if (starts[i]() != 0) {
+         OLOG_ERROR("tool_registry: Failed to start tool '%s'", names[i]);
+         failures++;
+      }
+   }
+   return failures > 0 ? 1 : 0;
+}
+
 void tool_registry_shutdown(void) {
    pthread_mutex_lock(&s_registry_mutex);
 

@@ -291,6 +291,19 @@ typedef void (*tool_config_writer_fn)(void *fp, const void *config);
 typedef int (*tool_init_fn)(void);
 
 /**
+ * @brief Tool start function type
+ *
+ * Called once the daemon has finished starting (storage, LLM, TTS and the
+ * WebUI are up).  Start here what can start a turn or deliver to the user,
+ * such as a listener that answers messages: it needs the whole daemon.  Work
+ * that needs only storage and the tool's own state may start in init.  Called
+ * without the registry lock, so a start may look tools up.
+ *
+ * @return 0 on success, non-zero on error
+ */
+typedef int (*tool_start_fn)(void);
+
+/**
  * @brief Tool cleanup function type
  *
  * Called at shutdown. Tool should free resources.
@@ -546,6 +559,7 @@ typedef struct {
 
    /* Lifecycle (optional - NULL if not needed) */
    tool_init_fn init;       /**< Called after config parse */
+   tool_start_fn start;     /**< Called once the daemon has finished starting */
    tool_cleanup_fn cleanup; /**< Called at shutdown */
 
    /* Callback (required) */
@@ -602,6 +616,16 @@ int tool_registry_init(void);
  * @return 0 on success, non-zero if any tool init fails
  */
 int tool_registry_init_tools(void);
+
+/**
+ * @brief Start every initialized tool that has a start function
+ *
+ * Calls start() in registration order.  Call it once, after the daemon has
+ * finished starting.  A tool whose init failed isn't started.
+ *
+ * @return 0 on success, non-zero if any tool start fails
+ */
+int tool_registry_start_tools(void);
 
 /**
  * @brief Lock the registry to prevent further registrations

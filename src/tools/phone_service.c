@@ -822,8 +822,9 @@ void phone_service_handle_event(const char *payload, int payload_len) {
                          : body);
 
       int64_t sms_id = 0;
-      phone_db_sms_log_insert(s_config.user_id, PHONE_DIR_INCOMING, sender, contact_name, safe_body,
-                              time(NULL), &sms_id);
+      const bool sms_saved = phone_db_sms_log_insert(s_config.user_id, PHONE_DIR_INCOMING, sender,
+                                                     contact_name, safe_body, time(NULL),
+                                                     &sms_id) == PHONE_DB_SUCCESS;
 
       /* Cached body length — used by both the HUD preview construction
        * (conditional, below) and the redacted log line (unconditional,
@@ -922,9 +923,12 @@ void phone_service_handle_event(const char *payload, int payload_len) {
                    contact_name[0] ? contact_name : "unknown", body_len);
       }
 
-      /* Delete from SIM after all processing (fire-and-forget — SMS is already in DB) */
-      if (sms_id >= 0 && sms_index >= 0) {
-         char idx_str[8];
+      /* Delete from SIM after all processing (fire-and-forget), and only once the
+       * SMS is saved: the SIM holds the only copy until then. */
+      if (!sms_saved) {
+         OLOG_ERROR("phone_service: SMS not saved; left on the SIM at index %d", sms_index);
+      } else if (sms_index >= 0) {
+         char idx_str[12]; /* any int */
          snprintf(idx_str, sizeof(idx_str), "%d", sms_index);
          if (publish_echo_cmd("delete_sms", idx_str, "fire_and_forget", NULL) != 0) {
             OLOG_WARNING("phone_service: failed to send delete_sms for index %d", sms_index);

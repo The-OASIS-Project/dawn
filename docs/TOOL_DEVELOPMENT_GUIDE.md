@@ -228,6 +228,7 @@ typedef struct {
 
    /* Lifecycle */
    tool_init_fn init;                                 /* Called after config parse */
+   tool_start_fn start;                               /* Called once the daemon is up */
    tool_cleanup_fn cleanup;                           /* Called at shutdown */
 
    /* Callback */
@@ -329,12 +330,14 @@ typedef struct {
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `init` | No | Called once after config parsing. Return 0 for success, non-zero to fail. |
-| `cleanup` | No | Called once at shutdown. Free any resources. |
+| `init` | No | Called once after config parsing, with the database open. Return 0 for success, non-zero to fail. |
+| `start` | No | Called once the daemon has finished starting (LLM, TTS, MQTT, the WebUI). Start here anything that can start a turn or deliver to the user, such as a listener that answers messages. Work that needs only storage and the tool's own state may start in `init`. Not called if `init` failed. |
+| `cleanup` | No | Called once at shutdown, whether or not `start` ran. Free any resources. |
 
 **Function signatures:**
 ```c
 int my_init(void);      /* Return 0 on success */
+int my_start(void);     /* Return 0 on success */
 void my_cleanup(void);  /* No return value */
 ```
 
@@ -708,6 +711,7 @@ static char *mytool_callback(const char *action, char *value, int *should_respon
  * Lifecycle Functions (Optional)
  *
  * init: Called once after config parsing, before tool is used
+ * start: Called once the daemon is up (listeners that answer messages)
  * cleanup: Called once at shutdown
  * ============================================================================= */
 

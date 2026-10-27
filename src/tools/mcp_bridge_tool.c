@@ -500,6 +500,11 @@ int mcp_bridge_init(void) {
       if (!srv->enabled) {
          continue;
       }
+      /* Every admin gets each configured server out of the box, whether or not
+       * it is up now (config requires an alias only on an enabled server). */
+      if (srv->alias[0] != '\0' && auth_db_is_ready()) {
+         auth_db_mcp_grant_all_admins(srv->alias);
+      }
       if (s_server_count >= MCP_SERVERS_MAX) {
          break;
       }
@@ -547,10 +552,6 @@ int mcp_bridge_init(void) {
                       "first use",
                       srv->alias, srv->url);
       }
-      /* Admin access bootstrap (auth_db_mcp_grant_all_admins) intentionally does
-       * NOT run here: mcp_bridge_init() executes during tools_register_all(),
-       * before auth_db_init(), so the grant would hit a closed DB. dawn.c runs it
-       * after auth_db_init() for every configured server instead. */
    }
 
    int connected = 0;
@@ -561,11 +562,14 @@ int mcp_bridge_init(void) {
    }
    OLOG_INFO("MCP bridge: %d configured server(s), %d connected", s_server_count, connected);
 
-   /* The cbm name-translation map is NOT captured here: mcp_bridge_init() runs
-    * during tools_register_all(), before auth_db_init(), so code_project_db is
-    * not open yet and the capture would silently fail. dawn.c captures it after
-    * auth_db_init() instead; a later lazy reconnect refreshes it (see
+#ifdef DAWN_ENABLE_CODE_PROJECTS
+   /* The cbm name-translation map (clean project name <-> cbm path slug).  A
+    * no-op if cbm isn't up; a later lazy reconnect builds it (see
     * mcp_bridge_ensure_connected). */
+   if (auth_db_is_ready()) {
+      code_project_namemap_capture();
+   }
+#endif
    return SUCCESS;
 }
 
@@ -703,8 +707,8 @@ int mcp_bridge_ensure_connected(const char *server_alias) {
 
 #ifdef DAWN_ENABLE_CODE_PROJECTS
    /* A cbm that comes up via lazy reconnect (down at boot) needs its
-    * name-translation map rebuilt — the dawn.c startup capture only fired once,
-    * when cbm wasn't up. Without this the map stays empty and the LLM must use
+    * name-translation map rebuilt — the startup capture only fired once, when
+    * cbm wasn't up. Without this the map stays empty and the LLM must use
     * raw cbm graph slugs. Only the slow path reaches here (the fast path above
     * returns on an already-connected server), so this runs once per reconnect,
     * not per call; the nested call_tool inside capture hits the fast path, so no

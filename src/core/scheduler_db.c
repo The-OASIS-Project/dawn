@@ -639,21 +639,24 @@ int scheduler_db_end_ring(int64_t id, time_t fired_at, sched_status_t status) {
  * Query Operations
  * ============================================================================= */
 
-time_t scheduler_db_next_fire_time(void) {
-   AUTH_DB_LOCK_OR_RETURN(0);
+int scheduler_db_next_fire_time(time_t *next_out) {
+   *next_out = 0;
+   AUTH_DB_LOCK_OR_RETURN(SCHED_DB_FAILURE);
 
    const char *sql = "SELECT MIN(fire_at) FROM scheduled_events "
                      "WHERE status IN ('pending', 'snoozed')";
    sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
       AUTH_DB_UNLOCK();
-      return 0;
+      return SCHED_DB_FAILURE;
    }
 
-   time_t result = 0;
-   if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL) {
-      result = (time_t)sqlite3_column_int64(stmt, 0);
+   int result = SCHED_DB_FAILURE;
+   if (sqlite3_step(stmt) == SQLITE_ROW) {
+      if (sqlite3_column_type(stmt, 0) != SQLITE_NULL) {
+         *next_out = (time_t)sqlite3_column_int64(stmt, 0);
+      }
+      result = SCHED_DB_SUCCESS;
    }
 
    sqlite3_finalize(stmt);

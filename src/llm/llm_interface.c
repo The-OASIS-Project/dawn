@@ -573,7 +573,9 @@ int llm_refresh_providers(void) {
    return 1;
 }
 
-int llm_set_type(llm_type_t type) {
+/* @p announce: say it (TTS) and log it.  Off for the silent set at startup,
+ * before TTS is up; the same type is set again, announced, once it is. */
+static int set_type(llm_type_t type, bool announce) {
    if (type == LLM_CLOUD) {
       // Check if API key is available for the current cloud provider
       int has_api_key = 0;
@@ -594,10 +596,12 @@ int llm_set_type(llm_type_t type) {
       }
 
       if (!has_api_key) {
-         OLOG_WARNING("Cannot switch to cloud LLM: %s API key not configured in secrets.toml - "
-                      "staying on local LLM",
-                      provider_name);
-         text_to_speech("Cannot switch to cloud. API key not configured. Staying on local.");
+         if (announce) {
+            OLOG_WARNING("Cannot switch to cloud LLM: %s API key not configured in secrets.toml - "
+                         "staying on local LLM",
+                         provider_name);
+            text_to_speech("Cannot switch to cloud. API key not configured. Staying on local.");
+         }
          // Don't change current_type, stay on whatever we were using
          return 1; /* Failure - API key not configured */
       }
@@ -611,33 +615,47 @@ int llm_set_type(llm_type_t type) {
                                        : NULL;
       if (current_cloud_provider == CLOUD_PROVIDER_CLAUDE) {
          snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint ? cloud_endpoint : CLAUDE_URL);
-         text_to_speech("Setting AI to cloud LLM using Claude.");
+         if (announce)
+            text_to_speech("Setting AI to cloud LLM using Claude.");
       } else if (current_cloud_provider == CLOUD_PROVIDER_GEMINI) {
          snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint ? cloud_endpoint : GEMINI_URL);
-         text_to_speech("Setting AI to cloud LLM using Gemini.");
+         if (announce)
+            text_to_speech("Setting AI to cloud LLM using Gemini.");
       } else if (current_cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
          snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint ? cloud_endpoint : OPENROUTER_URL);
-         text_to_speech("Setting AI to cloud LLM using OpenRouter.");
+         if (announce)
+            text_to_speech("Setting AI to cloud LLM using OpenRouter.");
       } else {
          snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint ? cloud_endpoint : CLOUDAI_URL);
-         text_to_speech("Setting AI to cloud LLM using OpenAI.");
+         if (announce)
+            text_to_speech("Setting AI to cloud LLM using OpenAI.");
       }
-      if (cloud_endpoint) {
+      if (announce && cloud_endpoint) {
          OLOG_INFO("LLM set to CLOUD (%s) via custom endpoint: %s", llm_get_cloud_provider_name(),
                    cloud_endpoint);
-      } else {
+      } else if (announce) {
          OLOG_INFO("LLM set to CLOUD (%s)", llm_get_cloud_provider_name());
       }
    } else if (type == LLM_LOCAL) {
       current_type = type;
       snprintf(llm_url, sizeof(llm_url), "%s", g_config.llm.local.endpoint);
-      text_to_speech("Setting AI to local LLM.");
-      OLOG_INFO("LLM set to LOCAL (%s)", g_config.llm.local.endpoint);
+      if (announce) {
+         text_to_speech("Setting AI to local LLM.");
+         OLOG_INFO("LLM set to LOCAL (%s)", g_config.llm.local.endpoint);
+      }
    }
 
    // Update metrics with current LLM configuration
    metrics_update_llm_config(current_type, current_cloud_provider);
    return 0; /* Success */
+}
+
+int llm_set_type(llm_type_t type) {
+   return set_type(type, true);
+}
+
+int llm_set_type_quiet(llm_type_t type) {
+   return set_type(type, false);
 }
 
 llm_type_t llm_get_type(void) {

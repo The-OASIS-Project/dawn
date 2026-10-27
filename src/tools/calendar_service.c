@@ -1670,8 +1670,8 @@ static void *sync_thread_func(void *arg) {
       calendar_account_t accounts[CALENDAR_MAX_ACCOUNTS];
       int acct_count = 0;
       if (calendar_db_account_list_enabled(accounts, CALENDAR_MAX_ACCOUNTS, &acct_count) != 0) {
-         /* The database isn't open yet (this thread starts with the tools,
-          * before it): try again shortly, not a whole interval later. */
+         /* The database couldn't be read: try again shortly, not a whole
+          * interval later. */
          next_periodic = mono_now() + CALENDAR_DB_RETRY_SEC;
          continue;
       }
