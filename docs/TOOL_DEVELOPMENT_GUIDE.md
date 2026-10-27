@@ -114,7 +114,23 @@ Determines how the parameter value is passed to your callback function:
 | `TOOL_MAPS_TO_VALUE` | `value` argument | Primary data (search query, filename, number) |
 | `TOOL_MAPS_TO_ACTION` | `action` argument | Subcommand/verb (play, stop, get, set) |
 | `TOOL_MAPS_TO_DEVICE` | Device lookup | Meta-tools that dispatch to other tools |
-| `TOOL_MAPS_TO_CUSTOM` | Named field | Special cases requiring custom field names |
+| `TOOL_MAPS_TO_CUSTOM` | Named field | Optional modifiers of the main input (a search's time range, a quote's date range) |
+
+#### More than one input: named fields or a JSON `arguments` value
+
+A tool that takes more than its one main input uses one of two shapes. Pick by what the actions take:
+
+- **Named fields** (`TOOL_MAPS_TO_CUSTOM`): one main input (`TOOL_MAPS_TO_VALUE`) plus a few optional
+  modifiers that mean the same thing for every action. Examples: `search`, `music`, `stocks`. Each field
+  rides in `value` as `base::field::value`; read them with `tool_param_extract_base()` and
+  `tool_param_extract_custom()`, never by splitting `value` yourself.
+- **A JSON `arguments` value** (one `TOOL_MAPS_TO_VALUE` param holding a JSON object): actions that each
+  take a different set of fields. Examples: `email`, `calendar`, `scheduler`. Read it with
+  `tool_parse_details()`.
+
+Either way, the value is built from the call's arguments in one place, `tool_pack_args()`, for every
+caller: a live LLM call, a plan step, and a scheduled task or briefing step stored as a JSON object. Don't
+parse a value any other way, and don't build one by hand in a new caller: call `tool_pack_args()`.
 
 **Callback signature reminder:**
 ```c

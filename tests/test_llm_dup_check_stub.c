@@ -120,6 +120,29 @@ const void *tool_registry_find(const char *name) {
    (void)name;
    return NULL;
 }
+/* No tool is ever found (above), so no call's arguments are packed. */
+int tool_pack_args(const void *meta,
+                   struct json_object *args,
+                   char *action_name,
+                   size_t action_len,
+                   char *value_buf,
+                   size_t value_len,
+                   char *device_name,
+                   size_t device_len,
+                   char *err,
+                   size_t err_len) {
+   (void)meta;
+   (void)args;
+   (void)action_name;
+   (void)action_len;
+   (void)value_buf;
+   (void)value_len;
+   (void)device_name;
+   (void)device_len;
+   (void)err;
+   (void)err_len;
+   return 1;
+}
 bool session_prefix_tag(void *session, char *out, size_t size) {
    (void)session;
    if (out && size) {
