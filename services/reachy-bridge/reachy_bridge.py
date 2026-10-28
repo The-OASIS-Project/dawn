@@ -782,7 +782,10 @@ class Mixer:
         if awake:
             log.info("waking up")
             self.mini.enable_motors()
-            self.mini.wake_up()
+            # The rise only: the SDK's wake_up() ends with a quick 20 degree head
+            # flick, which reads as a snap.
+            self.mini.goto_target(create_head_pose(0, 0, 0, 0, 0, 0, mm=True, degrees=True),
+                                  antennas=list(self.neutral_antennas), duration=2.0)
         else:
             log.info("going to sleep")
             self.mini.goto_sleep()
