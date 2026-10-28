@@ -123,7 +123,9 @@ typedef struct {
    music_nav_reason_t reason;
    music_nav_dir_t dir; /**< USER */
    bool commit;         /**< USER: false only asks whether a move happens; nothing is recorded */
-   int pos;             /**< The current track's position, -1 when the queue doesn't hold it */
+   int pos;             /**< The current track's position, or where the next track is when lost */
+   bool lost;           /**< The queue no longer holds the current track: next is the one at pos,
+                             previous the one before it */
    int failures;        /**< AUTO: tracks in a row that produced no audio */
    bool track_failed;   /**< AUTO: the track that ended did so on a decode error */
 } music_nav_request_t;

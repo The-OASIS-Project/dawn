@@ -206,7 +206,7 @@ typedef struct {
 
    /* Shared queue (per-user, or per-connection for unauthenticated) */
    user_music_queue_t *shared_queue; /**< Shared queue reference */
-   int queue_index;                  /**< Current track in queue (per-session) */
+   music_queue_pos_t pos;            /**< Place in the queue, attached to it (queue_mutex) */
    unsigned int shuffle_seed;        /**< Per-session PRNG seed for rand_r() */
 
    /* Settings */
@@ -530,9 +530,8 @@ int webui_music_queue_apply_paths(session_music_state_t *state,
 /**
  * @brief Remove the queue entry at a 0-based index
  *
- * Shifts remaining entries, adjusts this session's and sibling sessions'
- * queue_index, persists.  Removing the current track unloads it, and if it
- * was playing, starts the track that took its place.
+ * Shifts remaining entries (every attached player's place follows), persists.  Removing the current
+ * track unloads it, and if it was playing, starts the track that took its place.
  *
  * @pre control_mutex held
  * @return SUCCESS, or FAILURE if index is out of range
@@ -542,7 +541,7 @@ int webui_music_queue_remove_index(ws_connection_t *conn, session_music_state_t 
 /**
  * @brief Clear the queue and reset playback for this session
  *
- * Stops streaming, zeroes the queue, resets queue_index/playing, persists.
+ * Stops streaming, zeroes the queue (every player's place goes to 0), persists.
  * Transport-free.
  *
  * @pre control_mutex held

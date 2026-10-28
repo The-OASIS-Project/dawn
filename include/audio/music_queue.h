@@ -58,6 +58,16 @@ typedef struct {
 } music_queue_entry_t;
 
 /**
+ * A player's place in a queue, attached to it so inserts and removes move it
+ * with the tracks.  Guarded by the queue's queue_mutex.
+ */
+typedef struct music_queue_pos music_queue_pos_t;
+struct music_queue_pos {
+   music_queue_pos_t *next;
+   int index;
+};
+
+/**
  * A queue and its play modes.  queue_mutex guards every field but user_id
  * (fixed) and ref_count (the registry's).
  */
@@ -72,6 +82,7 @@ struct user_music_queue {
    int queue_length;
    bool shuffle;
    music_repeat_mode_t repeat_mode;
+   music_queue_pos_t *positions; /**< Attached players' places */
 };
 
 /** What music_queue_add() did with each track */
@@ -102,6 +113,12 @@ user_music_queue_t *music_queue_acquire(int user_id);
 /** Done with a queue from music_queue_acquire() (frees a private one) */
 void music_queue_release(user_music_queue_t *uq);
 
+/** Attach a player's place (index 0) so it follows inserts and removes; takes queue_mutex */
+void music_queue_attach(user_music_queue_t *uq, music_queue_pos_t *pos);
+
+/** Detach a place before the player goes; takes queue_mutex */
+void music_queue_detach(user_music_queue_t *uq, music_queue_pos_t *pos);
+
 /**
  * Where @p uq holds @p path: the copy nearest @p hint (a position it had),
  * or -1.  Caller holds queue_mutex.  Fits music_nav_find_fn's lookup.
@@ -111,13 +128,24 @@ int music_queue_find(const user_music_queue_t *uq, const char *path, int hint);
 /**
  * Put @p track at @p index (0 ≤ index ≤ queue_length); a full queue drops
  * its last track to make room, unless the track would be that last one.
+ * Attached places at or after @p index move down one (not on an append).
  * Caller holds queue_mutex, then calls music_queue_changed().
  * @return SUCCESS, or FAILURE (bad index, or full at the end)
  */
 int music_queue_insert(user_music_queue_t *uq, int index, const music_search_result_t *track);
 
-/** Remove the track at @p index; caller holds queue_mutex, then calls music_queue_changed() */
+/**
+ * Remove the track at @p index; attached places after it move up one, a
+ * place on it stays (now the track that took its place).  Caller holds
+ * queue_mutex, then calls music_queue_changed().
+ */
 void music_queue_remove_at(user_music_queue_t *uq, int index);
+
+/**
+ * Empty the queue (bumps replace_epoch); every attached place goes to 0.
+ * Caller holds queue_mutex, then calls music_queue_changed().
+ */
+void music_queue_clear(user_music_queue_t *uq);
 
 /**
  * A change to @p uq is done: other players see it (generation), and it's

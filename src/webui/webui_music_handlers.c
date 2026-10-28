@@ -44,39 +44,6 @@
  * Helpers
  * ============================================================================= */
 
-/**
- * @brief Callback context for adjusting sibling session queue_index on remove
- */
-typedef struct {
-   int removed_index;
-   ws_connection_t *exclude;
-} remove_adjust_ctx_t;
-
-/**
- * @brief Adjust queue_index for sibling sessions after a track removal
- *
- * Called via webui_for_each_conn_by_user for each sibling connection.
- * Locks state_mutex individually per session to adjust queue_index.
- */
-static void adjust_index_on_remove(ws_connection_t *conn, void *ctx) {
-   remove_adjust_ctx_t *rctx = (remove_adjust_ctx_t *)ctx;
-   if (conn == rctx->exclude) {
-      return;
-   }
-   session_music_state_t *s = (session_music_state_t *)conn->music_state;
-   if (!s) {
-      return;
-   }
-   pthread_mutex_lock(&s->state_mutex);
-   if (rctx->removed_index < s->queue_index) {
-      s->queue_index--;
-   } else if (s->queue_index >= s->shared_queue->queue_length &&
-              s->shared_queue->queue_length > 0) {
-      s->queue_index = s->shared_queue->queue_length - 1;
-   }
-   pthread_mutex_unlock(&s->state_mutex);
-}
-
 /* =============================================================================
  * Message Handlers
  * ============================================================================= */
@@ -274,13 +241,9 @@ static void music_control_locked(ws_connection_t *conn,
          pthread_mutex_lock(&uq->queue_mutex);
 
          music_queue_insert(uq, 0, &track_info); /* at the top (a full queue drops its last) */
+         state->pos.index = 0;
          music_queue_changed(uq, true);
          pthread_mutex_unlock(&uq->queue_mutex);
-
-         /* Set per-session index */
-         pthread_mutex_lock(&state->state_mutex);
-         state->queue_index = 0;
-         pthread_mutex_unlock(&state->state_mutex);
 
          /* Start playback */
          if (webui_music_start_playback(state, path) != 0) {
@@ -317,11 +280,7 @@ static void music_control_locked(ws_connection_t *conn,
          music_queue_add(uq, results, count, true, NULL, NULL);
          char first_path[MUSIC_PATH_MAX];
          snprintf(first_path, sizeof(first_path), "%s", results[0].path);
-         free(results);
-
-         pthread_mutex_lock(&state->state_mutex);
-         state->queue_index = 0;
-         pthread_mutex_unlock(&state->state_mutex);
+         free(results); /* the replace put every player's place at 0 */
 
          /* Start playback */
          if (webui_music_start_playback(state, first_path) != 0) {
@@ -352,10 +311,10 @@ static void music_control_locked(ws_connection_t *conn,
          int q_len = uq->queue_length;
          pthread_mutex_lock(&state->state_mutex);
          if (q_len > 0) {
-            if (state->queue_index < 0 || state->queue_index >= q_len) {
-               state->queue_index = 0;
+            if (state->pos.index < 0 || state->pos.index >= q_len) {
+               state->pos.index = 0;
             }
-            snprintf(play_path, sizeof(play_path), "%s", uq->queue[state->queue_index].path);
+            snprintf(play_path, sizeof(play_path), "%s", uq->queue[state->pos.index].path);
          }
          pthread_mutex_unlock(&state->state_mutex);
          pthread_mutex_unlock(&uq->queue_mutex);
@@ -455,11 +414,8 @@ static void music_control_locked(ws_connection_t *conn,
          return;
       }
       snprintf(play_path, sizeof(play_path), "%s", uq->queue[play_index].path);
+      state->pos.index = play_index;
       pthread_mutex_unlock(&uq->queue_mutex);
-
-      pthread_mutex_lock(&state->state_mutex);
-      state->queue_index = play_index;
-      pthread_mutex_unlock(&state->state_mutex);
 
       if (webui_music_start_playback(state, play_path) != 0) {
          webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
@@ -964,7 +920,6 @@ int webui_music_queue_remove_index(ws_connection_t *conn,
    bool gone = false; /* another tab or tool call removed it meanwhile */
    char gone_next[MUSIC_PATH_MAX] = { 0 };
    if (removing_current) {
-      int asked_index = index0;
       char target[MUSIC_PATH_MAX];
       snprintf(target, sizeof(target), "%s", uq->queue[index0].path);
       pthread_mutex_unlock(&state->state_mutex);
@@ -980,34 +935,36 @@ int webui_music_queue_remove_index(ws_connection_t *conn,
       in_range = index0 >= 0;
       gone = !in_range;
       if (in_range) {
-         state->queue_index = index0; /* the track that takes its place plays on */
-      } else if (was_playing && state->queue_index == asked_index &&
-                 state->queue_index < uq->queue_length) {
+         state->pos.index = index0; /* the track that takes its place plays on */
+      } else if (was_playing && state->pos.index < uq->queue_length) {
          /* Removed elsewhere meanwhile, and already unloaded here: play on with
-          * the track now in its place (unless a sibling's removal moved us) */
-         snprintf(gone_next, sizeof(gone_next), "%s", uq->queue[state->queue_index].path);
+          * the track now in its place (its place followed every edit meanwhile;
+          * after a replace, the new queue's top) */
+         snprintf(gone_next, sizeof(gone_next), "%s", uq->queue[state->pos.index].path);
       }
    }
 
    char next_path[MUSIC_PATH_MAX] = { 0 };
    if (in_range) {
+      /* Every player's place follows the remove: one after it moves up */
+      bool after_it = state->pos.index > index0;
       music_queue_remove_at(uq, index0);
 
-      if (state->queue_index > index0) {
-         state->queue_index--;
-      } else if (removing_current && was_playing) {
+      if (!after_it && removing_current && was_playing) {
          /* Play on from the track that took its place; past the end, follow
           * the end of the queue: wrap under repeat-all, else stop */
          if (index0 >= uq->queue_length && uq->repeat_mode == MUSIC_REPEAT_ALL) {
-            state->queue_index = 0;
+            state->pos.index = 0;
          }
-         if (state->queue_index < uq->queue_length) {
-            snprintf(next_path, sizeof(next_path), "%s", uq->queue[state->queue_index].path);
+         if (state->pos.index < uq->queue_length) {
+            snprintf(next_path, sizeof(next_path), "%s", uq->queue[state->pos.index].path);
          } else {
-            state->queue_index = 0;
+            state->pos.index = 0;
          }
-      } else if (state->queue_index >= uq->queue_length) {
-         state->queue_index = uq->queue_length > 0 ? uq->queue_length - 1 : 0;
+      } else if (!after_it && !state->track.path[0] && state->pos.index >= uq->queue_length) {
+         /* No track here: keep a selection in range.  A track the queue lost
+          * keeps its place past the end (nothing follows it). */
+         state->pos.index = uq->queue_length > 0 ? uq->queue_length - 1 : 0;
       }
    }
    pthread_mutex_unlock(&state->state_mutex);
@@ -1020,14 +977,8 @@ int webui_music_queue_remove_index(ws_connection_t *conn,
       webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
    }
 
-   if (in_range) {
-      /* Adjust sibling sessions' queue_index (after releasing queue_mutex) */
-      remove_adjust_ctx_t rctx = { .removed_index = index0, .exclude = state->conn };
-      webui_for_each_conn_by_user(uq->user_id, adjust_index_on_remove, &rctx);
-
-      if (next_path[0] && webui_music_start_playback(state, next_path) != SUCCESS) {
-         webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-      }
+   if (next_path[0] && webui_music_start_playback(state, next_path) != SUCCESS) {
+      webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
    }
    return rc;
 }
@@ -1043,14 +994,9 @@ int webui_music_queue_clear(session_music_state_t *state, int *removed_out) {
    if (removed_out) {
       *removed_out = uq->queue_length;
    }
-   uq->queue_length = 0;
-   uq->replace_epoch++;
+   music_queue_clear(uq); /* every player's place goes to 0 */
    music_queue_changed(uq, true);
    pthread_mutex_unlock(&uq->queue_mutex);
-
-   pthread_mutex_lock(&state->state_mutex);
-   state->queue_index = 0;
-   pthread_mutex_unlock(&state->state_mutex);
    return SUCCESS;
 }
 
