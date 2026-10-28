@@ -33,7 +33,6 @@
 #include "audio/audio_decoder.h"
 #include "audio/music_open.h"
 #include "audio/music_source.h"
-#include "audio/resampler.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "webui/webui_internal.h"
@@ -41,70 +40,57 @@
 #include "webui/webui_music_internal.h"
 
 /**
- * @brief Open a queue path for the stream
+ * @brief Hand a freshly opened track to the output (no lock held: it may open
+ *        a device)
  *
- * music_open_track() (library check, Plex download), then the formats the
- * stream can encode.  Blocks for the whole download: call without state_mutex.
- *
- * @param cancel Aborts a Plex download once set
- * @param unreachable Optional output: the Plex server couldn't be reached
- * @return Decoder, or NULL if it can't be opened or streamed
+ * @param gapless A natural advance: its audio follows what's buffered
+ * @param read_frames Out: frames per read, within the player's read buffer
+ * @return SUCCESS, or FAILURE if it can't be played here
  */
-static audio_decoder_t *stream_open_track(const char *path,
-                                          const atomic_bool *cancel,
-                                          bool *unreachable) {
-   audio_decoder_t *decoder = music_open_track(path, cancel, unreachable);
-   if (!decoder) {
-      return NULL;
-   }
-
-   /* Below the minimum one Opus frame needs more source frames than a read
-    * buffer holds; decoders hand out mono or stereo only. */
+static int begin_track(session_music_state_t *state,
+                       audio_decoder_t *decoder,
+                       const char *path,
+                       bool gapless,
+                       size_t *read_frames) {
    audio_decoder_info_t info;
    audio_decoder_get_info(decoder, &info);
-   if (info.sample_rate < WEBUI_MUSIC_MIN_SOURCE_RATE ||
-       info.sample_rate > WEBUI_MUSIC_MAX_SOURCE_RATE || info.channels < 1 || info.channels > 2) {
-      OLOG_ERROR("WebUI music: Can't stream %s (%u Hz, %u channels)", path, info.sample_rate,
+   *read_frames = 0;
+   if (info.channels < 1 || info.channels > 2 ||
+       state->ops->track_begin(state->ops_ctx, &info, gapless, read_frames) != SUCCESS ||
+       *read_frames < 1 || *read_frames > MUSIC_PLAYER_READ_FRAMES_MAX) {
+      OLOG_ERROR("WebUI music: Can't play %s (%u Hz, %u channels)", path, info.sample_rate,
                  info.channels);
-      audio_decoder_close(decoder);
-      return NULL;
+      return FAILURE;
    }
-   return decoder;
+   return SUCCESS;
 }
 
 /**
- * @brief Install a freshly opened decoder (state_mutex held)
- *
- * The resampler always runs stereo: the stream thread expands mono before
- * resampling.
- *
- * @return SUCCESS, or FAILURE if no resampler could be made (decoder closed)
+ * @brief Install a decoder begun on the output (state_mutex held)
  */
-static int music_install_decoder(session_music_state_t *state, audio_decoder_t *decoder) {
+static void music_install_decoder(session_music_state_t *state,
+                                  audio_decoder_t *decoder,
+                                  size_t read_frames) {
    audio_decoder_info_t info;
    audio_decoder_get_info(decoder, &info);
-
-   if (state->resampler) {
-      resampler_destroy(state->resampler);
-      state->resampler = NULL;
-   }
-   if (info.sample_rate != OPUS_SAMPLE_RATE) {
-      state->resampler = resampler_create(info.sample_rate, OPUS_SAMPLE_RATE, 2);
-      if (!state->resampler) {
-         OLOG_ERROR("WebUI music: Failed to create resampler");
-         audio_decoder_close(decoder);
-         return FAILURE;
-      }
-   }
-
+   state->read_frames = read_frames;
    state->decoder = decoder;
    state->seek_pending = false;
    state->source_rate = info.sample_rate;
    state->source_channels = info.channels;
    state->source_format = info.format;
    state->position_frames = 0;
-   state->resample_accum_count = 0;
-   return SUCCESS;
+}
+
+/* Tell the output's listener (no queue or state lock held) */
+static void notify_state(session_music_state_t *state, bool gapless) {
+   music_event_t ev = { .type = MUSIC_EVENT_STATE, .gapless = gapless };
+   state->ops->notify(state->ops_ctx, &ev);
+}
+
+static void notify_error(session_music_state_t *state, music_error_t error, const char *message) {
+   music_event_t ev = { .type = MUSIC_EVENT_ERROR, .error = error, .message = message };
+   state->ops->notify(state->ops_ctx, &ev);
 }
 
 /* ---- Play history (queue_mutex, then state_mutex, held) ----------------- */
@@ -227,7 +213,7 @@ static void *prefetch_thread(void *arg) {
    snprintf(path, sizeof(path), "%s", state->prefetch_path);
    pthread_mutex_unlock(&state->state_mutex);
 
-   audio_decoder_t *decoder = stream_open_track(path, &state->prefetch_cancel, NULL);
+   audio_decoder_t *decoder = music_open_track(path, &state->prefetch_cancel, NULL);
 
    pthread_mutex_lock(&state->state_mutex);
    bool keep = decoder && !atomic_load(&state->prefetch_cancel) &&
@@ -389,13 +375,11 @@ static uint32_t set_pending(session_music_state_t *state, const char *path, bool
  * webui_music_run_pending_open(), which calls back here.
  *
  * @param state Session music state (decoder already closed and NULL)
- * @param conn Connection to report to
  * @param track_failed The track that just ended did so on a decode error
  * @param failures In/out: tracks in a row that produced no audio
  * @return What happened
  */
 music_advance_t webui_music_advance(session_music_state_t *state,
-                                    ws_connection_t *conn,
                                     bool track_failed,
                                     int *failures) {
    user_music_queue_t *uq = state->shared_queue;
@@ -442,11 +426,11 @@ music_advance_t webui_music_advance(session_music_state_t *state,
          /* Nothing follows, so a prefetch (its track since removed) won't be used */
          prefetch_drop(state);
          if (stop_error) {
-            webui_music_send_error(conn, "DECODE_ERROR", stop_error);
+            notify_error(state, MUSIC_ERROR_DECODE, stop_error);
          }
          /* Tagged like a natural advance: the client still holds the ended
           * track's last ~2 s and plays them out before showing the stop */
-         webui_music_send_state_impl(conn, state, true);
+         notify_state(state, true);
          return MUSIC_ADVANCE_STOPPED;
       }
 
@@ -464,15 +448,13 @@ music_advance_t webui_music_advance(session_music_state_t *state,
       /* A remote track downloads first: tell the client (tagged, so it applies
        * once the ended track's buffered audio has played) */
       if (loading) {
-         webui_music_send_state_impl(conn, state, true);
+         notify_state(state, true);
       }
       return MUSIC_ADVANCE_PENDING;
    }
 }
 
-bool webui_music_run_pending_open(session_music_state_t *state,
-                                  ws_connection_t *conn,
-                                  int *failures) {
+bool webui_music_run_pending_open(session_music_state_t *state, int *failures) {
    char path[MUSIC_PATH_MAX];
    pthread_mutex_lock(&state->state_mutex);
    if (!state->pending_path[0]) {
@@ -491,7 +473,13 @@ bool webui_music_run_pending_open(session_music_state_t *state,
    bool unreachable = false;
    audio_decoder_t *decoder = prefetch_take(state, path);
    if (!decoder) {
-      decoder = stream_open_track(path, &state->stop_requested, &unreachable);
+      decoder = music_open_track(path, &state->stop_requested, &unreachable);
+   }
+   size_t read_frames = 0;
+   if (decoder && !atomic_load(&state->stop_requested) &&
+       begin_track(state, decoder, path, is_auto, &read_frames) != SUCCESS) {
+      audio_decoder_close(decoder);
+      decoder = NULL;
    }
 
    pthread_mutex_lock(&state->state_mutex);
@@ -506,14 +494,15 @@ bool webui_music_run_pending_open(session_music_state_t *state,
 
    state->pending_path[0] = '\0';
    state->loading = false;
-   if (decoder && music_install_decoder(state, decoder) == SUCCESS) {
+   if (decoder) {
+      music_install_decoder(state, decoder, read_frames);
       publish_open(state, seq, MUSIC_OPEN_PLAYING);
       OLOG_INFO("WebUI music: Playing %s (%s %u Hz, %u ch)", path,
                 audio_decoder_format_name(state->source_format), state->source_rate,
                 state->source_channels);
       pthread_mutex_unlock(&state->state_mutex);
       /* An auto-advance stays tagged so the client keeps its buffered lead */
-      webui_music_send_state_impl(conn, state, is_auto);
+      notify_state(state, is_auto);
       prefetch_plan(state);
       return true;
    }
@@ -532,11 +521,11 @@ bool webui_music_run_pending_open(session_music_state_t *state,
       state->paused = false;
       pthread_mutex_unlock(&state->state_mutex);
       if (unreachable) {
-         webui_music_send_error(conn, "PLEX_UNREACHABLE", "The Plex server isn't reachable");
+         notify_error(state, MUSIC_ERROR_UNREACHABLE, "The Plex server isn't reachable");
       } else {
-         webui_music_send_error(conn, "PLAYBACK_ERROR", "Couldn't play this track");
+         notify_error(state, MUSIC_ERROR_PLAYBACK, "Couldn't play this track");
       }
-      webui_music_send_state(conn, state);
+      notify_state(state, false);
       return true;
    }
    pthread_mutex_unlock(&state->state_mutex);
@@ -557,21 +546,20 @@ bool webui_music_run_pending_open(session_music_state_t *state,
       pthread_mutex_lock(&state->state_mutex);
       state->playing = false;
       pthread_mutex_unlock(&state->state_mutex);
-      webui_music_send_error(conn, "PLEX_UNREACHABLE", "The Plex server isn't reachable");
+      notify_error(state, MUSIC_ERROR_UNREACHABLE, "The Plex server isn't reachable");
       /* Tagged: the client plays out the ended track's last seconds first */
-      webui_music_send_state_impl(conn, state, true);
+      notify_state(state, true);
       return true;
    }
 
    OLOG_WARNING("WebUI music: Couldn't open %s%s", path, repeat_one ? "" : ", skipping it");
    (*failures)++;
    if (*failures == 1) {
-      webui_music_send_error(conn, "DECODE_ERROR",
-                             repeat_one ? "Couldn't play this track"
-                                        : "Couldn't play a track, skipping it");
+      notify_error(state, MUSIC_ERROR_DECODE,
+                   repeat_one ? "Couldn't play this track" : "Couldn't play a track, skipping it");
    }
    /* Picks the next one into the slot (or stops); the thread opens it next */
-   webui_music_advance(state, conn, true, failures);
+   webui_music_advance(state, true, failures);
    return true;
 }
 

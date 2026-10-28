@@ -400,51 +400,296 @@ void webui_music_broadcast_queue_state(user_music_queue_t *uq, ws_connection_t *
  * Streaming Thread
  * ============================================================================= */
 
+/* =============================================================================
+ * WebUI output: stereo 48 kHz Opus to the browser, paced on its buffer
+ * ============================================================================= */
+
+/* Playback was stopped or paused, or the thread asked to stop (state_mutex
+ * taken briefly) */
+static bool output_interrupted(session_music_state_t *state) {
+   pthread_mutex_lock(&state->state_mutex);
+   bool interrupted = state->paused || !state->playing;
+   pthread_mutex_unlock(&state->state_mutex);
+   return interrupted || atomic_load(&state->stop_requested);
+}
+
+static int webui_out_track_begin(void *ctx,
+                                 const audio_decoder_info_t *info,
+                                 bool gapless,
+                                 size_t *read_frames) {
+   session_music_state_t *state = (session_music_state_t *)ctx;
+   /* Below the minimum one Opus frame needs more source frames than a read
+    * buffer holds */
+   if (info->sample_rate < WEBUI_MUSIC_MIN_SOURCE_RATE ||
+       info->sample_rate > WEBUI_MUSIC_MAX_SOURCE_RATE) {
+      return FAILURE;
+   }
+   /* The resampler always runs stereo: mono is expanded before it */
+   if (state->resampler) {
+      resampler_destroy(state->resampler);
+      state->resampler = NULL;
+   }
+   if (info->sample_rate != OPUS_SAMPLE_RATE) {
+      state->resampler = resampler_create(info->sample_rate, OPUS_SAMPLE_RATE, 2);
+      if (!state->resampler) {
+         OLOG_ERROR("WebUI music: Failed to create resampler");
+         return FAILURE;
+      }
+   }
+   /* About one Opus frame's worth of source audio: below 48 kHz a full frame
+    * of source would resample to more than the buffers hold */
+   *read_frames = WEBUI_MUSIC_FRAME_SAMPLES;
+   if (info->sample_rate < OPUS_SAMPLE_RATE) {
+      *read_frames = (size_t)WEBUI_MUSIC_FRAME_SAMPLES * info->sample_rate / OPUS_SAMPLE_RATE;
+   }
+   state->resample_accum_count = 0;
+   state->stream_start_time = 0;
+   state->frames_sent = 0;
+   if (!gapless) {
+      state->est_buffered_us = 0; /* a natural advance keeps the buffered lead */
+   }
+   return SUCCESS;
+}
+
+static void webui_out_halt(void *ctx, music_halt_t kind) {
+   (void)kind; /* the browser keeps or flushes its own buffer */
+   session_music_state_t *state = (session_music_state_t *)ctx;
+   /* Restart pacing and the estimate when audio resumes.  A client resuming
+    * from a pause keeps its frozen buffer (it suspends playback rather than
+    * flushing), so the first frames over-refill until its next buffer report
+    * corrects the estimate; one resuming from a stop or seek has flushed. */
+   state->stream_start_time = 0;
+   state->frames_sent = 0;
+   state->est_buffered_us = 0;
+   state->was_closed_loop = false;
+   state->resample_accum_count = 0;
+}
+
+/* Hold the client buffer near the target depth.  Bookkeep the estimate (+frame
+ * queued, -sleep as the client plays it back in real time) and re-anchor it to
+ * each fresh client report; fall back to the real-time pacer when reports are
+ * stale (old clients, or a client whose report sender stalled), so a
+ * TTS-induced CPU preemption can't drain a near-empty buffer into silence. */
+static void pace_after_send(session_music_state_t *state, bool queued) {
+   const uint64_t frame_duration_us = (WEBUI_MUSIC_FRAME_SAMPLES * 1000000ULL) / OPUS_SAMPLE_RATE;
+   if (queued) {
+      state->est_buffered_us += frame_duration_us;
+   }
+
+   uint64_t now_ms = get_time_ms();
+   uint64_t rts = atomic_load(&state->last_buffer_report_ms);
+   bool report_fresh = (rts != 0) && ((now_ms - rts) <= WEBUI_MUSIC_REPORT_STALE_MS);
+   if (report_fresh && rts != state->last_seen_report_ms) {
+      state->est_buffered_us = (uint64_t)atomic_load(&state->client_buffered_ms) * 1000ULL;
+      state->last_seen_report_ms = rts;
+   }
+
+   if (report_fresh) {
+      state->was_closed_loop = true;
+      uint64_t target_us = (uint64_t)WEBUI_MUSIC_TARGET_BUFFER_MS * 1000ULL;
+      if (state->est_buffered_us > target_us) {
+         /* At/above target: pace so the client drains back toward it. */
+         uint64_t sleep_us = state->est_buffered_us - target_us;
+         if (sleep_us > WEBUI_MUSIC_MAX_PACE_SLEEP_US) {
+            sleep_us = WEBUI_MUSIC_MAX_PACE_SLEEP_US;
+         }
+         if (sleep_us >= 1000) {
+            usleep((useconds_t)sleep_us);
+            state->est_buffered_us -= sleep_us; /* wall time the client drained */
+         }
+      } else {
+         /* Below target: refill faster than real time, but gate on the send
+          * ring so the burst can't overflow the 8-slot ring (dropped frames
+          * would defeat the refill). */
+         uint64_t sleep_us = (state->write_ring_count >= WEBUI_MUSIC_REFILL_RING_HIGH)
+                                 ? frame_duration_us      /* ring backing up: ~1x */
+                                 : frame_duration_us / 4; /* headroom: ~4x fill */
+         usleep((useconds_t)sleep_us);
+         state->est_buffered_us = (state->est_buffered_us > sleep_us)
+                                      ? (state->est_buffered_us - sleep_us)
+                                      : 0;
+      }
+
+      if ((++state->pace_log_counter % 250) == 0) {
+         OLOG_INFO("WebUI music: buffer est=%llums target=%dms ring=%d/%d",
+                   (unsigned long long)(state->est_buffered_us / 1000),
+                   WEBUI_MUSIC_TARGET_BUFFER_MS, state->write_ring_count, WEBUI_MUSIC_WRITE_RING);
+      }
+   } else {
+      /* No fresh report: fall back to the real-time pacer. On the transition
+       * out of closed-loop, re-baseline its clock to NOW — otherwise an
+       * accumulated lead in frames_sent makes expected_time race ahead of
+       * wall-clock and the sanity clamp skips the sleep entirely, blasting
+       * the ring unpaced (the exact stutter this feature removes). */
+      struct timespec ts;
+      clock_gettime(CLOCK_MONOTONIC, &ts);
+      uint64_t current_time = (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
+      if (state->was_closed_loop) {
+         state->stream_start_time = current_time - (state->frames_sent * frame_duration_us);
+         state->was_closed_loop = false;
+      }
+      uint64_t expected_time = state->stream_start_time + (state->frames_sent * frame_duration_us);
+      if (current_time < expected_time) {
+         uint64_t sleep_us = expected_time - current_time;
+         if (sleep_us > 1000 && sleep_us < 100000) { /* Sanity check: 1ms - 100ms */
+            usleep((useconds_t)sleep_us);
+         }
+      }
+   }
+}
+
+static void webui_out_write(void *ctx, int16_t *pcm, size_t frames) {
+   session_music_state_t *state = (session_music_state_t *)ctx;
+   /* resample_buffer needs extra space for upsampling (e.g., 44.1kHz -> 48kHz
+    * = 1.088x); 3x accommodates upsampling + resampler margin requirements */
+   int16_t resample_buffer[WEBUI_MUSIC_FRAME_SAMPLES * 3];
+   uint8_t opus_buffer[OPUS_MAX_FRAME_SIZE + 2];      /* Opus frame + length prefix */
+   float float_buffer[WEBUI_MUSIC_FRAME_SAMPLES * 3]; /* Float conversion for Opus */
+
+   /* A quality change, applied between frames */
+   if (atomic_load(&state->reconfigure_requested)) {
+      pthread_mutex_lock(&state->state_mutex);
+      music_quality_t new_quality = state->pending_quality;
+      music_bitrate_mode_t new_bitrate_mode = state->pending_bitrate_mode;
+      atomic_store(&state->reconfigure_requested, false);
+      pthread_mutex_unlock(&state->state_mutex);
+
+      state->quality = new_quality;
+      state->bitrate_mode = new_bitrate_mode;
+      if (webui_music_configure_encoder(state, new_quality) == 0) {
+         OLOG_INFO("WebUI music: Reconfigured encoder to %s %s", QUALITY_NAMES[new_quality],
+                   new_bitrate_mode == MUSIC_BITRATE_VBR ? "VBR" : "CBR");
+      }
+   }
+
+   /* Expand mono to stereo in place (backwards, so nothing is overwritten
+    * before it's read); the buffer holds a full stereo frame. */
+   size_t samples = frames * 2;
+   if (state->source_channels == 1) {
+      for (size_t i = frames; i-- > 0;) {
+         pcm[i * 2] = pcm[i];
+         pcm[i * 2 + 1] = pcm[i];
+      }
+   }
+
+   /* Resample to 48kHz if needed */
+   int16_t *audio_data = pcm;
+   if (state->resampler && state->source_rate != OPUS_SAMPLE_RATE) {
+      samples = resampler_process(state->resampler, pcm, samples, resample_buffer,
+                                  sizeof(resample_buffer) / sizeof(resample_buffer[0]));
+      audio_data = resample_buffer;
+   }
+
+   /* Append resampled samples to accumulation buffer */
+   if (state->resample_accum_count + samples <= state->resample_accum_size) {
+      memcpy(state->resample_accum + state->resample_accum_count, audio_data,
+             samples * sizeof(int16_t));
+      state->resample_accum_count += samples;
+   } else {
+      /* Buffer overflow - this shouldn't happen with proper sizing */
+      OLOG_WARNING("WebUI music: Resample accumulator overflow, dropping samples");
+   }
+
+   /* Encode and send while we have enough samples (960 stereo frames = 1920 samples) */
+   while (state->resample_accum_count >= WEBUI_MUSIC_FRAME_SAMPLES * 2) {
+      /* A read and resample may hold enough for many frames: stop between
+       * them on a pause or stop */
+      if (output_interrupted(state)) {
+         break;
+      }
+
+      /* Start the real-time pacer's clock on the first frame */
+      if (state->stream_start_time == 0) {
+         struct timespec ts;
+         clock_gettime(CLOCK_MONOTONIC, &ts);
+         state->stream_start_time = (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
+         state->frames_sent = 0;
+      }
+
+      /* Convert first 960 stereo frames to float for Opus encoder */
+      for (size_t i = 0; i < WEBUI_MUSIC_FRAME_SAMPLES * 2; i++) {
+         float_buffer[i] = state->resample_accum[i] / 32768.0f;
+      }
+
+      /* Encode to Opus */
+      int opus_bytes = opus_encode_float(state->encoder, float_buffer, WEBUI_MUSIC_FRAME_SAMPLES,
+                                         opus_buffer + 2, sizeof(opus_buffer) - 2);
+      if (opus_bytes < 0) {
+         OLOG_WARNING("WebUI music: Opus encode error: %s", opus_strerror(opus_bytes));
+         break;
+      }
+
+      /* Prepend length prefix (little-endian) */
+      opus_buffer[0] = opus_bytes & 0xFF;
+      opus_buffer[1] = (opus_bytes >> 8) & 0xFF;
+
+      /* Send to client — dedicated music socket if available, else main socket.
+       * A WEBUI_MUSIC_QUEUE_DROPPED return means the send ring was full, so we
+       * must NOT credit the estimate for a frame the client never received. */
+      int qrc = queue_music_direct(state, opus_buffer, opus_bytes + 2);
+      state->frames_sent++;
+      pace_after_send(state, qrc == SUCCESS);
+
+      /* Shift remaining samples to beginning of buffer */
+      size_t remaining = state->resample_accum_count - WEBUI_MUSIC_FRAME_SAMPLES * 2;
+      if (remaining > 0) {
+         memmove(state->resample_accum, state->resample_accum + WEBUI_MUSIC_FRAME_SAMPLES * 2,
+                 remaining * sizeof(int16_t));
+      }
+      state->resample_accum_count = remaining;
+   }
+}
+
+static void webui_out_notify(void *ctx, const music_event_t *ev) {
+   session_music_state_t *state = (session_music_state_t *)ctx;
+   switch (ev->type) {
+      case MUSIC_EVENT_STATE:
+         webui_music_send_state_impl(state->conn, state, ev->gapless);
+         break;
+      case MUSIC_EVENT_POSITION:
+         send_position_update(state->conn, state);
+         break;
+      case MUSIC_EVENT_ERROR: {
+         const char *code = ev->error == MUSIC_ERROR_UNREACHABLE ? "PLEX_UNREACHABLE"
+                            : ev->error == MUSIC_ERROR_PLAYBACK  ? "PLAYBACK_ERROR"
+                                                                 : "DECODE_ERROR";
+         webui_music_send_error(state->conn, code, ev->message);
+         break;
+      }
+   }
+}
+
+static const music_output_ops_t s_webui_output = {
+   .track_begin = webui_out_track_begin,
+   .write = webui_out_write,
+   .halt = webui_out_halt,
+   .notify = webui_out_notify,
+};
+
+/* =============================================================================
+ * Stream thread: decodes the playing track and hands it to the output
+ * ============================================================================= */
+
 /**
  * @brief Music streaming thread
  *
- * Reads audio from decoder, resamples to 48kHz, encodes to Opus,
- * and sends to client via WebSocket.
+ * Opens the pending track, applies a seek, reads the decoder and writes what
+ * it read to the output; at a track's end it picks the next one.
  *
- * NOTE: This runs on its own thread, NOT the LWS service thread.
- * All WebSocket sends must use thread-safe paths: queue_response(),
- * webui_music_send_state(), webui_music_send_error(), or
- * queue_music_direct(). Never call send_json_response() or
- * lws_write() directly from here.
+ * NOTE: This runs on its own thread, NOT the LWS service thread.  The output
+ * sends through thread-safe paths only (queue_response(), queue_music_direct());
+ * never send_json_response() or lws_write() from here.
  */
 static void *music_stream_thread(void *arg) {
    session_music_state_t *state = (session_music_state_t *)arg;
-   ws_connection_t *conn = state->conn;
 
    OLOG_INFO("WebUI music: Streaming thread started");
    atomic_fetch_add(&s_active_streams, 1);
 
-   /* Buffers for audio processing
-    * resample_buffer needs extra space for upsampling (e.g., 44.1kHz -> 48kHz = 1.088x)
-    * Using 3x to accommodate upsampling + resampler margin requirements */
-   int16_t decode_buffer[WEBUI_MUSIC_FRAME_SAMPLES * 2]; /* Stereo decode buffer */
-   int16_t
-       resample_buffer[WEBUI_MUSIC_FRAME_SAMPLES * 3]; /* Resampled output (extra for upsampling) */
-   uint8_t opus_buffer[OPUS_MAX_FRAME_SIZE + 2];       /* Opus frame + length prefix */
-   float float_buffer[WEBUI_MUSIC_FRAME_SAMPLES * 3];  /* Float conversion for Opus */
-
-   /* Time-based pacing to prevent audio speedup */
-   uint64_t stream_start_time = 0;
-   uint64_t frames_sent = 0;
-   const uint64_t frame_duration_us = (WEBUI_MUSIC_FRAME_SAMPLES * 1000000ULL) / OPUS_SAMPLE_RATE;
+   /* One read's frames, room to expand mono to stereo in place */
+   int16_t decode_buffer[MUSIC_PLAYER_READ_FRAMES_MAX * 2];
    bool was_sending = false; /* Diagnostic: track state transitions for logging */
    int failures = 0;         /* Tracks in a row that produced no audio */
-
-   /* Closed-loop flow control: hold the client worklet buffer near
-    * WEBUI_MUSIC_TARGET_BUFFER_MS using periodic client reports, so a TTS-induced
-    * CPU preemption can't drain a near-empty buffer into silence. Estimate is
-    * bookkept (+frame on send, -sleep as the client drains) and re-anchored to
-    * each fresh report; falls back to the real-time pacer above when reports go
-    * stale (old clients, or a client whose report sender stalled). */
-   uint64_t est_buffered_us = 0;     /* server's estimate of client buffer depth */
-   uint64_t last_seen_report_ms = 0; /* last report timestamp already consumed */
-   bool was_closed_loop = false;     /* were we closed-loop last frame? (fallback re-baseline) */
-   unsigned pace_log_counter = 0;    /* throttle for the periodic pacing log */
 
    while (!atomic_load(&state->stop_requested)) {
       /* Quick check without lock first */
@@ -453,32 +698,11 @@ static void *music_stream_thread(void *arg) {
          continue;
       }
 
-      /* Check for pending reconfiguration (safe between frames) */
-      if (atomic_load(&state->reconfigure_requested)) {
-         pthread_mutex_lock(&state->state_mutex);
-         music_quality_t new_quality = state->pending_quality;
-         music_bitrate_mode_t new_bitrate_mode = state->pending_bitrate_mode;
-         atomic_store(&state->reconfigure_requested, false);
-         pthread_mutex_unlock(&state->state_mutex);
-
-         /* Reconfigure encoder outside the lock */
-         state->quality = new_quality;
-         state->bitrate_mode = new_bitrate_mode;
-         if (webui_music_configure_encoder(state, new_quality) == 0) {
-            OLOG_INFO("WebUI music: Reconfigured encoder to %s %s", QUALITY_NAMES[new_quality],
-                      new_bitrate_mode == MUSIC_BITRATE_VBR ? "VBR" : "CBR");
-         }
-      }
-
       /* A requested or auto-advanced track waiting to be opened */
-      if (webui_music_run_pending_open(state, conn, &failures)) {
-         /* Reset stream timing for the new track */
-         stream_start_time = 0;
-         frames_sent = 0;
+      if (webui_music_run_pending_open(state, &failures)) {
          continue;
       }
 
-      /* Brief lock to check state and mark decoder busy */
       pthread_mutex_lock(&state->state_mutex);
 
       /* A seek, applied here between frames (paused too), so it never stops
@@ -487,15 +711,12 @@ static void *music_stream_thread(void *arg) {
          state->seek_pending = false;
          if (state->decoder && audio_decoder_seek(state->decoder, state->seek_frames) == 0) {
             state->position_frames = state->seek_frames;
-            state->resample_accum_count = 0;
          }
          pthread_mutex_unlock(&state->state_mutex);
-         /* The client flushed for the seek: restart pacing and the estimate */
-         stream_start_time = 0;
-         frames_sent = 0;
-         est_buffered_us = 0;
-         was_closed_loop = false;
-         webui_music_send_state(conn, state);
+         /* The client flushed for the seek */
+         state->ops->halt(state->ops_ctx, MUSIC_HALT_FLUSH);
+         music_event_t ev = { .type = MUSIC_EVENT_STATE };
+         state->ops->notify(state->ops_ctx, &ev);
          continue;
       }
 
@@ -504,40 +725,25 @@ static void *music_stream_thread(void *arg) {
             OLOG_INFO("WebUI music: Streaming paused (decoder=%p playing=%d paused=%d)",
                       (void *)state->decoder, state->playing, state->paused);
             was_sending = false;
+            music_halt_t kind = state->paused && state->decoder ? MUSIC_HALT_PAUSE
+                                                                : MUSIC_HALT_IDLE;
+            pthread_mutex_unlock(&state->state_mutex);
+            state->ops->halt(state->ops_ctx, kind);
+         } else {
+            pthread_mutex_unlock(&state->state_mutex);
          }
-         pthread_mutex_unlock(&state->state_mutex);
          usleep(50000); /* 50ms idle sleep */
          continue;
       }
       if (!was_sending) {
          OLOG_INFO("WebUI music: Streaming resumed");
          was_sending = true;
-         /* Reset pacing so we don't fast-forward after a pause */
-         stream_start_time = 0;
-         frames_sent = 0;
-         state->resample_accum_count = 0;
-         /* Reset the estimate on resume.  A client resuming from a pause keeps its
-          * frozen buffer (it suspends playback rather than flushing), so this
-          * briefly over-refills until its next buffer report corrects the
-          * estimate; one resuming from a stop or seek has flushed. (Natural auto-advance, by
-          * contrast, is gapless and must NOT reset the estimate; it stays continuous across the
-          * boundary.) */
-         est_buffered_us = 0;
       }
 
       /* Grab what the read needs */
       audio_decoder_t *decoder = state->decoder;
-      resampler_t *resampler = state->resampler;
-      uint32_t source_rate = state->source_rate;
-      uint8_t source_channels = state->source_channels;
+      size_t want = state->read_frames;
       pthread_mutex_unlock(&state->state_mutex);
-
-      /* Read about one Opus frame's worth of source audio: below 48 kHz a
-       * full frame of source would resample to more than the buffers hold. */
-      size_t want = WEBUI_MUSIC_FRAME_SAMPLES;
-      if (source_rate < OPUS_SAMPLE_RATE) {
-         want = (size_t)WEBUI_MUSIC_FRAME_SAMPLES * source_rate / OPUS_SAMPLE_RATE;
-      }
 
       /* Read from decoder WITHOUT holding mutex */
       ssize_t frames_read = audio_decoder_read(decoder, decode_buffer, want);
@@ -569,179 +775,31 @@ static void *music_stream_thread(void *arg) {
             }
             /* One toast per run of failures, not one per skipped track */
             if (!no_audio || failures == 1) {
-               webui_music_send_error(conn, "DECODE_ERROR",
-                                      no_audio ? "Couldn't play this track"
-                                               : "Couldn't play the rest of this track");
+               music_event_t ev = { .type = MUSIC_EVENT_ERROR,
+                                    .error = MUSIC_ERROR_DECODE,
+                                    .message = no_audio ? "Couldn't play this track"
+                                                        : "Couldn't play the rest of this track" };
+               state->ops->notify(state->ops_ctx, &ev);
             }
          }
 
          /* Picks the next track into the pending slot (opened above), or stops */
-         webui_music_advance(state, conn, track_failed, &failures);
+         webui_music_advance(state, track_failed, &failures);
          continue;
       }
       failures = 0;
 
-      /* Expand mono to stereo in place (backwards, so nothing is overwritten
-       * before it's read); the buffer holds a full stereo frame. */
-      size_t samples = (size_t)frames_read * 2;
-      if (source_channels == 1) {
-         for (ssize_t i = frames_read - 1; i >= 0; i--) {
-            decode_buffer[i * 2] = decode_buffer[i];
-            decode_buffer[i * 2 + 1] = decode_buffer[i];
-         }
-      }
-
-      /* Resample to 48kHz if needed (using local vars, no mutex needed) */
-      int16_t *audio_data = decode_buffer;
-      if (resampler && source_rate != OPUS_SAMPLE_RATE) {
-         size_t resampled = resampler_process(resampler, decode_buffer, samples, resample_buffer,
-                                              sizeof(resample_buffer) / sizeof(resample_buffer[0]));
-         audio_data = resample_buffer;
-         samples = resampled;
-      }
-
-      /* Brief lock to update state */
       pthread_mutex_lock(&state->state_mutex);
       state->position_frames += frames_read;
-
-      /* Append resampled samples to accumulation buffer */
-      if (state->resample_accum_count + samples <= state->resample_accum_size) {
-         memcpy(state->resample_accum + state->resample_accum_count, audio_data,
-                samples * sizeof(int16_t));
-         state->resample_accum_count += samples;
-      } else {
-         /* Buffer overflow - this shouldn't happen with proper sizing */
-         OLOG_WARNING("WebUI music: Resample accumulator overflow, dropping samples");
-      }
       pthread_mutex_unlock(&state->state_mutex);
 
-      /* Encode and send while we have enough samples (960 stereo frames = 1920 samples) */
-      while (state->resample_accum_count >= WEBUI_MUSIC_FRAME_SAMPLES * 2) {
-         /* Check pause/stop in inner loop too — the outer loop only checks at the
-          * top of each iteration, and audio_decoder_read + resampling may accumulate
-          * enough samples for many frames between checks. */
-         if (state->paused || !state->playing || atomic_load(&state->stop_requested))
-            break;
+      state->ops->write(state->ops_ctx, decode_buffer, (size_t)frames_read);
 
-         /* Initialize stream timing on first frame. NOTE: est_buffered_us is
-          * deliberately NOT reset here — a brand-new thread (fresh play / user
-          * skip) starts with est=0 as a thread local, while a natural
-          * auto-advance reaches this point on the SAME thread and must keep its
-          * estimate (the buffered lead is continuous across the gapless boundary).
-          * The in-thread flush boundaries, a seek and resume-from-pause, reset
-          * est above. */
-         if (stream_start_time == 0) {
-            struct timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            stream_start_time = (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
-            frames_sent = 0;
-         }
-
-         /* Convert first 960 stereo frames to float for Opus encoder */
-         for (size_t i = 0; i < WEBUI_MUSIC_FRAME_SAMPLES * 2; i++) {
-            float_buffer[i] = state->resample_accum[i] / 32768.0f;
-         }
-
-         /* Encode to Opus */
-         int opus_bytes = opus_encode_float(state->encoder, float_buffer, WEBUI_MUSIC_FRAME_SAMPLES,
-                                            opus_buffer + 2, sizeof(opus_buffer) - 2);
-
-         if (opus_bytes < 0) {
-            OLOG_WARNING("WebUI music: Opus encode error: %s", opus_strerror(opus_bytes));
-            break;
-         }
-
-         /* Prepend length prefix (little-endian) */
-         opus_buffer[0] = opus_bytes & 0xFF;
-         opus_buffer[1] = (opus_bytes >> 8) & 0xFF;
-
-         /* Send to client — dedicated music socket if available, else main socket.
-          * A WEBUI_MUSIC_QUEUE_DROPPED return means the send ring was full, so we
-          * must NOT credit the estimate for a frame the client never received. */
-         int qrc = queue_music_direct(state, opus_buffer, opus_bytes + 2);
-         frames_sent++;
-
-         /* ---- Closed-loop pacing (see the est_buffered_us notes above) ----------
-          * Hold the client buffer near the target depth. Bookkeep the estimate
-          * (+frame queued, -sleep as the client plays it back in real time) and
-          * re-anchor to each fresh client report; fall back to the real-time pacer
-          * when reports are stale. */
-         if (qrc == SUCCESS) {
-            est_buffered_us += frame_duration_us;
-         }
-
-         uint64_t now_ms = get_time_ms();
-         uint64_t rts = atomic_load(&state->last_buffer_report_ms);
-         bool report_fresh = (rts != 0) && ((now_ms - rts) <= WEBUI_MUSIC_REPORT_STALE_MS);
-         if (report_fresh && rts != last_seen_report_ms) {
-            est_buffered_us = (uint64_t)atomic_load(&state->client_buffered_ms) * 1000ULL;
-            last_seen_report_ms = rts;
-         }
-
-         if (report_fresh) {
-            was_closed_loop = true;
-            uint64_t target_us = (uint64_t)WEBUI_MUSIC_TARGET_BUFFER_MS * 1000ULL;
-            if (est_buffered_us > target_us) {
-               /* At/above target: pace so the client drains back toward it. */
-               uint64_t sleep_us = est_buffered_us - target_us;
-               if (sleep_us > WEBUI_MUSIC_MAX_PACE_SLEEP_US) {
-                  sleep_us = WEBUI_MUSIC_MAX_PACE_SLEEP_US;
-               }
-               if (sleep_us >= 1000) {
-                  usleep((useconds_t)sleep_us);
-                  est_buffered_us -= sleep_us; /* wall time the client drained */
-               }
-            } else {
-               /* Below target: refill faster than real time, but gate on the send
-                * ring so the burst can't overflow the 8-slot ring (dropped frames
-                * would defeat the refill). */
-               uint64_t sleep_us = (state->write_ring_count >= WEBUI_MUSIC_REFILL_RING_HIGH)
-                                       ? frame_duration_us      /* ring backing up: ~1x */
-                                       : frame_duration_us / 4; /* headroom: ~4x fill */
-               usleep((useconds_t)sleep_us);
-               est_buffered_us = (est_buffered_us > sleep_us) ? (est_buffered_us - sleep_us) : 0;
-            }
-
-            if ((++pace_log_counter % 250) == 0) {
-               OLOG_INFO("WebUI music: buffer est=%llums target=%dms ring=%d/%d",
-                         (unsigned long long)(est_buffered_us / 1000), WEBUI_MUSIC_TARGET_BUFFER_MS,
-                         state->write_ring_count, WEBUI_MUSIC_WRITE_RING);
-            }
-         } else {
-            /* No fresh report: fall back to the real-time pacer. On the transition
-             * out of closed-loop, re-baseline its clock to NOW — otherwise an
-             * accumulated lead in frames_sent makes expected_time race ahead of
-             * wall-clock and the sanity clamp skips the sleep entirely, blasting
-             * the ring unpaced (the exact stutter this feature removes). */
-            struct timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            uint64_t current_time = (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
-            if (was_closed_loop) {
-               stream_start_time = current_time - (frames_sent * frame_duration_us);
-               was_closed_loop = false;
-            }
-            uint64_t expected_time = stream_start_time + (frames_sent * frame_duration_us);
-            if (current_time < expected_time) {
-               uint64_t sleep_us = expected_time - current_time;
-               if (sleep_us > 1000 && sleep_us < 100000) { /* Sanity check: 1ms - 100ms */
-                  usleep((useconds_t)sleep_us);
-               }
-            }
-         }
-
-         /* Shift remaining samples to beginning of buffer */
-         size_t remaining = state->resample_accum_count - WEBUI_MUSIC_FRAME_SAMPLES * 2;
-         if (remaining > 0) {
-            memmove(state->resample_accum, state->resample_accum + WEBUI_MUSIC_FRAME_SAMPLES * 2,
-                    remaining * sizeof(int16_t));
-         }
-         state->resample_accum_count = remaining;
-      }
-
-      /* Send position update periodically (no mutex needed - queue_response is thread-safe) */
+      /* Position about once a second */
       uint64_t now = get_time_ms();
       if (now - state->last_position_update_ms >= POSITION_UPDATE_INTERVAL_MS) {
-         send_position_update(conn, state);
+         music_event_t ev = { .type = MUSIC_EVENT_POSITION };
+         state->ops->notify(state->ops_ctx, &ev);
          state->last_position_update_ms = now;
       }
    }
@@ -750,6 +808,8 @@ static void *music_stream_thread(void *arg) {
     * hangs; the slot itself stays for whoever stopped the thread */
    webui_music_cancel_pending_ticket(state);
    webui_music_prefetch_stop(state);
+   /* Stopped for a skip, a stop or a closing tab: what's buffered is stale */
+   state->ops->halt(state->ops_ctx, MUSIC_HALT_FLUSH);
    OLOG_INFO("WebUI music: Streaming thread stopped");
    atomic_fetch_sub(&s_active_streams, 1);
    atomic_store(&state->streaming, false);
@@ -760,8 +820,9 @@ static void *music_stream_thread(void *arg) {
 /**
  * @brief Start streaming for a session
  *
- * Stack requirements: The streaming thread allocates ~25KB on the stack for
- * audio buffers (decode, resample, opus, float conversion). Default pthread
+ * Stack requirements: The streaming thread uses ~25KB of stack for audio
+ * buffers (its read buffer, and the output's resample, Opus and float buffers
+ * in webui_out_write()). Default pthread
  * stack size (2-8MB on Linux) is sufficient; no custom stack size needed.
  */
 int webui_music_start_streaming(session_music_state_t *state) {
@@ -896,6 +957,8 @@ int webui_music_session_init(ws_connection_t *conn) {
    music_history_init(&state->history);
    atomic_store(&state->reconfigure_requested, false);
    state->conn = conn;
+   state->ops = &s_webui_output;
+   state->ops_ctx = state;
    state->quality = s_config.default_quality;
    state->bitrate_mode = s_config.bitrate_mode;
    state->shuffle_seed = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)state;

@@ -37,6 +37,7 @@
 #include "audio/audio_decoder.h"
 #include "audio/music_db.h"
 #include "audio/music_nav.h"
+#include "audio/music_player.h"
 #include "audio/music_queue.h"
 #include "audio/resampler.h"
 #include "webui/webui_internal.h"
@@ -224,6 +225,21 @@ typedef struct {
    /* Position update tracking */
    uint64_t last_position_update_ms;
 
+   /* The output the stream thread renders to, and how many frames a read
+    * hands it (set when a track starts; stream thread) */
+   const music_output_ops_t *ops;
+   void *ops_ctx;
+   size_t read_frames;
+
+   /* WebUI output pacing (stream thread only).  Kept across threads: a
+    * natural advance carries the buffer estimate on, a halt resets it. */
+   uint64_t stream_start_time;   /**< Real-time pacer's start, 0 to restart it */
+   uint64_t frames_sent;         /**< Frames sent since stream_start_time */
+   uint64_t est_buffered_us;     /**< Estimate of the client's buffered audio */
+   uint64_t last_seen_report_ms; /**< Last client buffer report already used */
+   bool was_closed_loop;         /**< The last frame was paced on a fresh report */
+   unsigned pace_log_counter;    /**< Throttles the periodic pacing log */
+
    /* Dedicated music WebSocket (direct streaming).
     *
     * A small ring of pre-framed buffers, not a single slot: the music thread
@@ -319,15 +335,11 @@ typedef enum {
  * Defined in webui_music_track.c.
  *
  * @param state Session music state (decoder already closed and NULL)
- * @param conn Connection to report to
  * @param track_failed The track that just ended did so on a decode error
  * @param failures In/out: tracks in a row that produced no audio
  * @return What happened
  */
-music_advance_t webui_music_advance(session_music_state_t *state,
-                                    ws_connection_t *conn,
-                                    bool track_failed,
-                                    int *failures);
+music_advance_t webui_music_advance(session_music_state_t *state, bool track_failed, int *failures);
 
 /**
  * @brief Send music_state, optionally tagged as a natural advance
@@ -386,11 +398,9 @@ music_open_result_t webui_music_await_track(session_music_state_t *state,
  * @brief Open the pending track, if any (stream thread)
  *
  * @param failures In/out: tracks in a row that produced no audio
- * @return true if a pending request was handled (the caller resets pacing)
+ * @return true if a pending request was handled
  */
-bool webui_music_run_pending_open(session_music_state_t *state,
-                                  ws_connection_t *conn,
-                                  int *failures);
+bool webui_music_run_pending_open(session_music_state_t *state, int *failures);
 
 /**
  * @brief Cancel and join the Plex prefetch helper, if running (stream thread)
