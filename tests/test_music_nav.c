@@ -18,7 +18,8 @@
  *
  * Unit tests for the music play history (music_nav.c): walking back and
  * forward, cutting forward entries, the planned next track, entries no longer
- * queued, a failed track, the queue replace epoch and the size cap.
+ * queued, a failed track, the queue replace epoch and the size cap; and the
+ * rule for what plays next (music_nav_pick), one case per rule.
  */
 
 #include <stdio.h>
@@ -186,6 +187,186 @@ static void test_cap_drops_oldest(void) {
    TEST_ASSERT_EQUAL_INT(5, last); /* t0..t4 were dropped */
 }
 
+/* ---- music_nav_pick: one case per rule ---------------------------------- */
+
+static const char *path_at(void *ctx, int index) {
+   (void)ctx;
+   return s_queue[index];
+}
+
+static music_nav_queue_t q;
+static unsigned int seed = 7;
+
+static void queue_modes(bool shuffle, bool repeat_all, bool repeat_one) {
+   q = (music_nav_queue_t){ .find = find,
+                            .path_at = path_at,
+                            .length = s_queue_len,
+                            .shuffle = shuffle,
+                            .repeat_all = repeat_all,
+                            .repeat_one = repeat_one };
+}
+
+static music_nav_pick_t pick(music_nav_reason_t reason, int pos) {
+   music_nav_request_t rq = { .reason = reason, .dir = MUSIC_NAV_NEXT, .commit = true, .pos = pos };
+   music_nav_pick_t out;
+   music_nav_pick(&h, &q, &rq, &seed, &out);
+   return out;
+}
+
+static music_nav_pick_t pick_rq(const music_nav_request_t *rq) {
+   music_nav_pick_t out;
+   music_nav_pick(&h, &q, rq, &seed, &out);
+   return out;
+}
+
+static void test_auto_in_order(void) {
+   queue_modes(false, false, false);
+   music_nav_pick_t p = pick(MUSIC_NAV_AUTO, 1);
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_PLAY, p.result);
+   TEST_ASSERT_EQUAL_INT(2, p.index);
+   TEST_ASSERT_TRUE(p.fresh);
+   TEST_ASSERT_EQUAL_STRING("c", music_history_current(&h));
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_STOP_END, pick(MUSIC_NAV_AUTO, 3).result);
+   queue_modes(false, true, false);
+   p = pick(MUSIC_NAV_AUTO, 3); /* repeat-all wraps */
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_PLAY, p.result);
+   TEST_ASSERT_EQUAL_INT(0, p.index);
+   p = pick(MUSIC_NAV_AUTO, -1); /* the queue doesn't hold the track: its top */
+   TEST_ASSERT_EQUAL_INT(0, p.index);
+   p = pick(MUSIC_NAV_AUTO, 9); /* a stale position past the end */
+   TEST_ASSERT_EQUAL_INT(0, p.index);
+}
+
+static void test_auto_stops(void) {
+   queue_modes(false, false, true);
+   music_nav_request_t rq = { .reason = MUSIC_NAV_AUTO, .pos = 1, .track_failed = true };
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_STOP_REPEAT_FAILED, pick_rq(&rq).result);
+   queue_modes(false, false, false);
+   rq = (music_nav_request_t){ .reason = MUSIC_NAV_AUTO, .pos = 1, .failures = 4 };
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_STOP_ALL_FAILED, pick_rq(&rq).result);
+   static const char *const many[] = { "1", "2", "3", "4", "5", "6", "7", "8" };
+   queue_set(many, 8);
+   queue_modes(false, false, false);
+   rq.failures = MUSIC_NAV_MAX_FAILED;
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_STOP_TOO_MANY, pick_rq(&rq).result);
+   queue_set(many, 0);
+   queue_modes(false, true, false);
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_STOP_END, pick(MUSIC_NAV_AUTO, -1).result);
+}
+
+static void test_auto_repeat_one(void) {
+   queue_modes(false, false, true);
+   music_history_push(&h, "b", 1);
+   music_nav_pick_t p = pick(MUSIC_NAV_AUTO, 1);
+   TEST_ASSERT_EQUAL_INT(1, p.index);
+   TEST_ASSERT_FALSE(p.fresh); /* a replay adds nothing */
+   music_nav_request_t rq = { .reason = MUSIC_NAV_AUTO, .pos = -1, .track_failed = true };
+   p = pick_rq(&rq); /* not held (replaced): repeat-one doesn't apply, so no repeat stop */
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_PLAY, p.result);
+   TEST_ASSERT_EQUAL_INT(0, p.index);
+   music_history_clear(&h);
+   p = pick(MUSIC_NAV_AUTO, 9); /* the queue shrank under it: its top */
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_PLAY, p.result);
+   TEST_ASSERT_EQUAL_INT(0, p.index);
+   TEST_ASSERT_TRUE(p.fresh);
+}
+
+static void test_auto_shuffle(void) {
+   queue_modes(true, false, false);
+   music_history_push(&h, "a", 0);
+   music_nav_pick_t p = pick(MUSIC_NAV_AUTO, 0);
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_PLAY, p.result);
+   TEST_ASSERT_TRUE(p.index > 0 && p.index < 4); /* never the current track */
+   TEST_ASSERT_TRUE(p.fresh);
+   int first = p.index;
+   TEST_ASSERT_EQUAL_INT(0, back()); /* the forward entry is walked before a new pick */
+   p = pick(MUSIC_NAV_AUTO, 0);
+   TEST_ASSERT_EQUAL_INT(first, p.index);
+   TEST_ASSERT_TRUE(p.fresh);
+   /* After a failure, in order (wrapping) */
+   music_nav_request_t rq = { .reason = MUSIC_NAV_AUTO, .pos = 3, .failures = 1 };
+   TEST_ASSERT_EQUAL_INT(0, pick_rq(&rq).index);
+}
+
+static void test_auto_shuffle_one_track(void) {
+   static const char *const one[] = { "x" };
+   queue_set(one, 1);
+   queue_modes(true, false, false);
+   music_nav_pick_t p = pick(MUSIC_NAV_AUTO, 0); /* replays it, as today */
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_PLAY, p.result);
+   TEST_ASSERT_EQUAL_INT(0, p.index);
+}
+
+static void test_user_in_order(void) {
+   queue_modes(false, false, false);
+   music_nav_request_t dry = { .reason = MUSIC_NAV_USER, .dir = MUSIC_NAV_NEXT, .pos = 1 };
+   TEST_ASSERT_EQUAL_INT(2, pick_rq(&dry).index);
+   TEST_ASSERT_EQUAL_INT(0, h.len); /* asked, not committed: nothing recorded */
+   TEST_ASSERT_EQUAL_INT(2, pick(MUSIC_NAV_USER, 1).index);
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_NONE, pick(MUSIC_NAV_USER, 3).result);
+   music_nav_request_t rq = { .reason = MUSIC_NAV_USER, .dir = MUSIC_NAV_PREVIOUS, .commit = true };
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_NONE, pick_rq(&rq).result); /* pos 0 */
+   rq.pos = -1; /* not held: nothing is before the top */
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_NONE, pick_rq(&rq).result);
+   TEST_ASSERT_EQUAL_INT(0, pick(MUSIC_NAV_USER, -1).index); /* next is the top */
+   queue_modes(false, true, true); /* repeat-all wraps; repeat-one is ignored */
+   TEST_ASSERT_EQUAL_INT(0, pick(MUSIC_NAV_USER, 3).index);
+   rq.pos = 0;
+   TEST_ASSERT_EQUAL_INT(3, pick_rq(&rq).index);
+   rq.pos = 9; /* past the end: from the last track */
+   TEST_ASSERT_EQUAL_INT(2, pick_rq(&rq).index);
+}
+
+static void test_user_shuffle(void) {
+   queue_modes(true, false, false);
+   music_nav_request_t rq = { .reason = MUSIC_NAV_USER, .dir = MUSIC_NAV_PREVIOUS, .commit = true };
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_NONE, pick_rq(&rq).result); /* nothing earlier: no wrap */
+   music_history_push(&h, "a", 0);
+   rq = (music_nav_request_t){ .reason = MUSIC_NAV_USER, .dir = MUSIC_NAV_NEXT, .pos = 0 };
+   music_nav_pick_t p = pick_rq(&rq); /* asked, not committed: a move, nothing drawn */
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_PLAY, p.result);
+   TEST_ASSERT_EQUAL_INT(-1, p.index);
+   TEST_ASSERT_EQUAL_INT(1, h.len);
+   rq.commit = true;
+   p = pick_rq(&rq);
+   TEST_ASSERT_TRUE(p.index > 0);
+   TEST_ASSERT_EQUAL_INT(2, h.len);
+   rq.dir = MUSIC_NAV_PREVIOUS;
+   TEST_ASSERT_EQUAL_INT(0, pick_rq(&rq).index); /* walks back */
+}
+
+static void test_plan(void) {
+   queue_modes(false, false, true);
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_NONE, pick(MUSIC_NAV_PLAN, 1).result); /* repeat-one */
+   queue_modes(false, true, false);
+   TEST_ASSERT_EQUAL_INT(2, pick(MUSIC_NAV_PLAN, 1).index);
+   TEST_ASSERT_EQUAL_INT(0, pick(MUSIC_NAV_PLAN, 3).index); /* wraps */
+   queue_modes(false, false, false);
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_NONE, pick(MUSIC_NAV_PLAN, 3).result);
+   /* Shuffle: planned as the forward entry, which the advance then plays */
+   queue_modes(true, false, false);
+   music_history_push(&h, "a", 0);
+   music_nav_pick_t planned = pick(MUSIC_NAV_PLAN, 0);
+   TEST_ASSERT_TRUE(planned.index > 0);
+   TEST_ASSERT_EQUAL_STRING("a", music_history_current(&h));            /* planning doesn't move */
+   TEST_ASSERT_EQUAL_INT(planned.index, pick(MUSIC_NAV_PLAN, 0).index); /* planned once */
+   TEST_ASSERT_EQUAL_INT(planned.index, pick(MUSIC_NAV_AUTO, 0).index);
+   static const char *const one[] = { "x" };
+   queue_set(one, 1);
+   queue_modes(true, false, false);
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_NONE, pick(MUSIC_NAV_PLAN, 0).result);
+}
+
+static void test_pick_clears_replaced_history(void) {
+   queue_modes(true, false, false);
+   music_history_push(&h, "a", 0);
+   music_history_push(&h, "b", 1);
+   q.epoch = h.epoch + 1; /* another tab replaced the queue */
+   music_nav_request_t rq = { .reason = MUSIC_NAV_USER, .dir = MUSIC_NAV_PREVIOUS, .commit = true };
+   TEST_ASSERT_EQUAL_INT(MUSIC_NAV_NONE, pick_rq(&rq).result);
+   TEST_ASSERT_EQUAL_INT(0, h.len);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_empty);
@@ -197,5 +378,14 @@ int main(void) {
    RUN_TEST(test_failed_track_is_dropped);
    RUN_TEST(test_epoch_clears);
    RUN_TEST(test_cap_drops_oldest);
+   RUN_TEST(test_auto_in_order);
+   RUN_TEST(test_auto_stops);
+   RUN_TEST(test_auto_repeat_one);
+   RUN_TEST(test_auto_shuffle);
+   RUN_TEST(test_auto_shuffle_one_track);
+   RUN_TEST(test_user_in_order);
+   RUN_TEST(test_user_shuffle);
+   RUN_TEST(test_plan);
+   RUN_TEST(test_pick_clears_replaced_history);
    return UNITY_END();
 }

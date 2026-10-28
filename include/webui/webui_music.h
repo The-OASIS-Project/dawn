@@ -218,34 +218,6 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload);
 void handle_music_queue(ws_connection_t *conn, struct json_object *payload);
 
 /* =============================================================================
- * State Query Functions
- * ============================================================================= */
-
-/**
- * @brief Get current playback state for a connection
- *
- * Returns JSON object with:
- * - playing: bool
- * - paused: bool
- * - track: current track info or null
- * - position_sec: float
- * - duration_sec: int
- * - queue_length: int
- * - quality: string
- *
- * @param conn WebSocket connection
- * @return JSON object (caller must free), or NULL on error
- */
-struct json_object *webui_music_get_state(ws_connection_t *conn);
-
-/**
- * @brief Get number of active music streams
- *
- * @return Number of connections currently streaming music
- */
-int webui_music_get_stream_count(void);
-
-/* =============================================================================
  * Configuration
  * ============================================================================= */
 

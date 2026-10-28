@@ -84,21 +84,6 @@ const char *QUALITY_NAMES[MUSIC_QUALITY_COUNT] = {
 /* session_music_state_t is in webui_music_internal.h; the queue types are in
  * audio/music_queue.h */
 
-/**
- * @brief Pick a random queue index different from the current one.
- *
- * Uses rand_r() with the provided seed for thread-safety.
- */
-int webui_music_pick_random_index(int current_index, int queue_length, unsigned int *shuffle_seed) {
-   if (queue_length <= 1)
-      return current_index;
-   int idx;
-   do {
-      idx = rand_r(shuffle_seed) % queue_length;
-   } while (idx == current_index);
-   return idx;
-}
-
 /* =============================================================================
  * Module State
  * ============================================================================= */
@@ -140,55 +125,6 @@ static uint64_t get_time_ms(void) {
 
 /* Forward declarations */
 static int queue_music_direct(session_music_state_t *state, const uint8_t *data, size_t len);
-
-/**
- * @brief Wait for decoder to become idle using condition variable
- *
- * Uses proper synchronization to wait for the streaming thread to finish
- * using the decoder. Falls back to timeout if condition isn't signaled.
- *
- * @param state Music session state
- * @param timeout_ms Maximum time to wait in milliseconds
- * @return true if decoder is idle, false on timeout
- */
-bool wait_decoder_idle(session_music_state_t *state, int timeout_ms) {
-   /* Quick check without lock */
-   if (!atomic_load(&state->decoder_busy)) {
-      return true;
-   }
-
-   pthread_mutex_lock(&state->state_mutex);
-
-   /* Check again with lock held */
-   if (!atomic_load(&state->decoder_busy)) {
-      pthread_mutex_unlock(&state->state_mutex);
-      return true;
-   }
-
-   /* Wait with timeout */
-   struct timespec ts;
-   clock_gettime(CLOCK_REALTIME, &ts);
-   ts.tv_sec += timeout_ms / 1000;
-   ts.tv_nsec += (timeout_ms % 1000) * 1000000;
-   if (ts.tv_nsec >= 1000000000) {
-      ts.tv_sec++;
-      ts.tv_nsec -= 1000000000;
-   }
-
-   int ret = 0;
-   while (atomic_load(&state->decoder_busy) && ret == 0) {
-      ret = pthread_cond_timedwait(&state->decoder_idle_cond, &state->state_mutex, &ts);
-   }
-
-   bool idle = !atomic_load(&state->decoder_busy);
-   pthread_mutex_unlock(&state->state_mutex);
-
-   if (!idle) {
-      OLOG_WARNING("WebUI music: Timeout waiting for decoder to become idle");
-   }
-
-   return idle;
-}
 
 /**
  * @brief Parse quality string to enum
@@ -589,8 +525,7 @@ static void *music_stream_thread(void *arg) {
          est_buffered_us = 0;
       }
 
-      /* Mark decoder busy and grab what we need */
-      atomic_store(&state->decoder_busy, true);
+      /* Grab what the read needs */
       audio_decoder_t *decoder = state->decoder;
       resampler_t *resampler = state->resampler;
       uint32_t source_rate = state->source_rate;
@@ -608,10 +543,8 @@ static void *music_stream_thread(void *arg) {
       ssize_t frames_read = audio_decoder_read(decoder, decode_buffer, want);
 
       if (frames_read <= 0) {
-         /* End of track or error - clear busy flag and signal waiters */
-         atomic_store(&state->decoder_busy, false);
+         /* End of track or error */
          pthread_mutex_lock(&state->state_mutex);
-         pthread_cond_signal(&state->decoder_idle_cond);
          OLOG_INFO("WebUI music: Track finished (read returned %zd)", frames_read);
          audio_decoder_close(state->decoder);
          state->decoder = NULL;
@@ -667,12 +600,8 @@ static void *music_stream_thread(void *arg) {
          samples = resampled;
       }
 
-      /* Done with decoder and resampler, safe for control operations now */
-      atomic_store(&state->decoder_busy, false);
-
-      /* Brief lock to update state and signal waiters */
+      /* Brief lock to update state */
       pthread_mutex_lock(&state->state_mutex);
-      pthread_cond_signal(&state->decoder_idle_cond);
       state->position_frames += frames_read;
 
       /* Append resampled samples to accumulation buffer */
@@ -958,7 +887,6 @@ int webui_music_session_init(ws_connection_t *conn) {
    pthread_mutex_init(&state->state_mutex, NULL);
    pthread_mutex_init(&state->write_mutex, NULL);
    pthread_mutex_init(&state->control_mutex, NULL);
-   pthread_cond_init(&state->decoder_idle_cond, NULL);
    /* Monotonic, so a wall-clock step can't stretch the LLM tool's wait */
    pthread_condattr_t open_attr;
    pthread_condattr_init(&open_attr);
@@ -966,7 +894,6 @@ int webui_music_session_init(ws_connection_t *conn) {
    pthread_cond_init(&state->open_cond, &open_attr);
    pthread_condattr_destroy(&open_attr);
    music_history_init(&state->history);
-   atomic_store(&state->shutdown_ack, false);
    atomic_store(&state->reconfigure_requested, false);
    state->conn = conn;
    state->quality = s_config.default_quality;
@@ -1107,7 +1034,6 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
    music_queue_release(state->shared_queue);
    state->shared_queue = NULL;
 
-   pthread_cond_destroy(&state->decoder_idle_cond);
    pthread_cond_destroy(&state->open_cond);
    pthread_mutex_destroy(&state->state_mutex);
    pthread_mutex_destroy(&state->write_mutex);
@@ -1123,53 +1049,6 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
 }
 
 /* Message handlers are in webui_music_handlers.c */
-
-/* =============================================================================
- * State Query Functions
- * ============================================================================= */
-
-struct json_object *webui_music_get_state(ws_connection_t *conn) {
-   session_music_state_t *state = (session_music_state_t *)conn->music_state;
-   if (!state || !state->shared_queue) {
-      return NULL;
-   }
-
-   struct json_object *result = json_object_new_object();
-   user_music_queue_t *uq = state->shared_queue;
-
-   /* Lock order: queue, then state */
-   pthread_mutex_lock(&uq->queue_mutex);
-   pthread_mutex_lock(&state->state_mutex);
-   json_object_object_add(result, "playing", json_object_new_boolean(state->playing));
-   json_object_object_add(result, "paused", json_object_new_boolean(state->paused));
-   double position_sec = 0.0;
-   if (state->source_rate > 0) {
-      position_sec = (double)state->position_frames / state->source_rate;
-   }
-   const music_queue_entry_t *track = NULL;
-   (void)webui_music_current(state, uq, &track);
-   music_quality_t quality = state->quality;
-   if (track) {
-      struct json_object *track_obj = json_object_new_object();
-      json_object_object_add(track_obj, "title", json_object_new_string(track->title));
-      json_object_object_add(track_obj, "artist", json_object_new_string(track->artist));
-      json_object_object_add(track_obj, "album", json_object_new_string(track->album));
-      json_object_object_add(track_obj, "duration_sec", json_object_new_int(track->duration_sec));
-      json_object_object_add(result, "track", track_obj);
-   }
-   pthread_mutex_unlock(&state->state_mutex);
-   json_object_object_add(result, "queue_length", json_object_new_int(uq->queue_length));
-   pthread_mutex_unlock(&uq->queue_mutex);
-
-   json_object_object_add(result, "position_sec", json_object_new_double(position_sec));
-   json_object_object_add(result, "quality", json_object_new_string(QUALITY_NAMES[quality]));
-
-   return result;
-}
-
-int webui_music_get_stream_count(void) {
-   return atomic_load(&s_active_streams);
-}
 
 /* =============================================================================
  * Configuration

@@ -37,6 +37,11 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
      unlinked once open) or a local open
    - The WebUI stream adds its own sample-rate and channel limits on top
 
+- **music_nav.c/h**: What a player plays next, shared by every player
+   - A play history (back and forward under shuffle), in memory, cleared when the queue is replaced or cleared
+   - `music_nav_pick()`: end of queue, repeat-all/one, failure caps (`MUSIC_NAV_MAX_FAILED`),
+     shuffle; pure, the caller holds its queue's lock
+
 - **music_db.c/h**: Unified music metadata database
    - SQLite-based cache for artist/title/album/genre tags with source tracking
    - Multi-source support (local files + Plex) via `music_source_t` enum
@@ -49,7 +54,8 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 - **music_source.c/h**: Music source abstraction layer
    - `music_source_provider_t` callback interface for pluggable sources
    - Source name/prefix helpers (`music_source_name()`, `music_source_path_prefix()`)
-   - Path-to-source detection (`music_source_from_path()`)
+   - Path-to-source detection (`music_source_from_path()`), and `music_source_is_remote()`
+     (downloaded before it plays: prefetched, and its server can be unreachable)
 
 - **plex_db.c/h**: Plex-to-unified-DB sync layer
    - Fetches all Plex tracks via `plex_client_list_all_tracks()`

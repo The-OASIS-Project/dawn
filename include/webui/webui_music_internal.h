@@ -73,11 +73,6 @@ extern "C" {
  *  can declare any rate, and the resampler takes an int rate and ratio. */
 #define WEBUI_MUSIC_MAX_SOURCE_RATE 768000
 
-/** Auto-advance stops after this many tracks in a row produced no audio, even
- *  when the queue holds more, so a run of failures (each a timeout, perhaps)
- *  isn't walked silently. */
-#define WEBUI_MUSIC_MAX_FAILED_TRACKS 5
-
 /* Closed-loop music buffer flow control (see music_stream_thread pacing in
  * webui_music.c). The server holds the client's worklet ring near a target depth
  * using periodic client buffer reports, bursting to refill after a drain. */
@@ -188,10 +183,6 @@ typedef struct {
    bool prefetch_running;       /**< Stream thread only */
    atomic_bool prefetch_cancel; /**< Aborts the helper's download */
 
-   /* Thread synchronization for safe shutdown */
-   pthread_cond_t decoder_idle_cond; /**< Signaled when decoder is not busy */
-   atomic_bool shutdown_ack;         /**< Thread acknowledged shutdown request */
-
    /* Encoder */
    OpusEncoder *encoder;   /**< Opus encoder (quality-specific) */
    resampler_t *resampler; /**< Source rate -> 48kHz resampler */
@@ -203,7 +194,6 @@ typedef struct {
 
    /* Decoder */
    audio_decoder_t *decoder; /**< Current file decoder */
-   atomic_bool decoder_busy; /**< True while decoder is being read */
 
    /* Playback state */
    bool playing;                      /**< True if playback in progress */
@@ -412,12 +402,6 @@ void webui_music_prefetch_stop(session_music_state_t *state);
  */
 void webui_music_cancel_pending_ticket(session_music_state_t *state);
 
-/** Direction for webui_music_nav_step() */
-typedef enum {
-   MUSIC_NAV_NEXT,
-   MUSIC_NAV_PREVIOUS,
-} music_nav_dir_t;
-
 /**
  * @brief Move the session's queue index one step, as next/previous do
  *
@@ -489,18 +473,6 @@ void webui_music_stop_streaming(session_music_state_t *state);
  * @pre control_mutex held
  */
 int webui_music_start_streaming(session_music_state_t *state);
-
-/**
- * @brief Wait for the decoder to become idle.
- */
-bool wait_decoder_idle(session_music_state_t *state, int timeout_ms);
-
-/**
- * @brief Pick a random queue index different from the current one.
- *
- * Returns current_index if queue_length <= 1.
- */
-int webui_music_pick_random_index(int current_index, int queue_length, unsigned int *shuffle_seed);
 
 /**
  * @brief Broadcast queue state to all tabs for the same user
