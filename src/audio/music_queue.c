@@ -166,9 +166,12 @@ int music_queue_insert(user_music_queue_t *uq, int index, const music_search_res
       return FAILURE;
    }
    if (index < uq->queue_length) { /* an append moves nothing */
+      /* A full queue drops its last track: a place on it (or already past
+       * the end) stays just past the end */
+      int end = uq->queue_length < MUSIC_QUEUE_MAX ? uq->queue_length + 1 : MUSIC_QUEUE_MAX;
       for (music_queue_pos_t *p = uq->positions; p; p = p->next) {
          if (p->index >= index) {
-            p->index++; /* a full queue's dropped last track: past the end */
+            p->index = p->index < end ? p->index + 1 : end;
          }
       }
    }

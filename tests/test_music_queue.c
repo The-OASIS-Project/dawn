@@ -241,6 +241,13 @@ static void test_place_on_dropped_track(void) {
    music_queue_insert(uq, 0, &top);
    TEST_ASSERT_EQUAL_INT(MUSIC_QUEUE_MAX, a.index);
    TEST_ASSERT_EQUAL_INT(MUSIC_QUEUE_MAX, uq->queue_length);
+   music_queue_insert(uq, 0, &top); /* again: it stays just past the end */
+   TEST_ASSERT_EQUAL_INT(MUSIC_QUEUE_MAX, a.index);
+   music_queue_remove_at(uq, 0);
+   music_search_result_t tail = track("/m/tail.flac");
+   music_queue_insert(uq, uq->queue_length, &tail); /* an append lands on its place: next */
+   TEST_ASSERT_EQUAL_INT(uq->queue_length - 1, a.index);
+   TEST_ASSERT_EQUAL_STRING("/m/tail.flac", uq->queue[a.index].path);
    music_queue_detach(uq, &a);
    music_queue_release(uq);
 }

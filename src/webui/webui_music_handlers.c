@@ -961,7 +961,9 @@ int webui_music_queue_remove_index(ws_connection_t *conn,
          } else {
             state->pos.index = 0;
          }
-      } else if (!after_it && state->pos.index >= uq->queue_length) {
+      } else if (!after_it && !state->track.path[0] && state->pos.index >= uq->queue_length) {
+         /* No track here: keep a selection in range.  A track the queue lost
+          * keeps its place past the end (nothing follows it). */
          state->pos.index = uq->queue_length > 0 ? uq->queue_length - 1 : 0;
       }
    }
