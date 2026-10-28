@@ -2286,6 +2286,14 @@ dawn_add_unit_test(test_tool_registry
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# A tool call's JSON arguments become the callback's value the same way on
+# every path (a live call, a scheduled call stored as JSON).
+dawn_add_unit_test(test_tool_pack_args
+   SOURCES test_tool_pack_args.c test_tool_registry_stub.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Shutdown tool: the passphrase check.  system() is wrapped, so an accepted
 # request never runs the real shutdown; the wrap reaches only objects linked
 # here, so shutdown_tool.c must stay a direct source, not a shared library.

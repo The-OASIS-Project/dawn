@@ -114,7 +114,23 @@ Determines how the parameter value is passed to your callback function:
 | `TOOL_MAPS_TO_VALUE` | `value` argument | Primary data (search query, filename, number) |
 | `TOOL_MAPS_TO_ACTION` | `action` argument | Subcommand/verb (play, stop, get, set) |
 | `TOOL_MAPS_TO_DEVICE` | Device lookup | Meta-tools that dispatch to other tools |
-| `TOOL_MAPS_TO_CUSTOM` | Named field | Special cases requiring custom field names |
+| `TOOL_MAPS_TO_CUSTOM` | Named field | Optional modifiers of the main input (a search's time range, a quote's date range) |
+
+#### More than one input: named fields or a JSON `arguments` value
+
+A tool that takes more than its one main input uses one of two shapes. Pick by what the actions take:
+
+- **Named fields** (`TOOL_MAPS_TO_CUSTOM`): one main input (`TOOL_MAPS_TO_VALUE`) plus a few optional
+  modifiers that mean the same thing for every action. Examples: `search`, `music`, `stocks`. Each field
+  rides in `value` as `base::field::value`; read them with `tool_param_extract_base()` and
+  `tool_param_extract_custom()`, never by splitting `value` yourself.
+- **A JSON `arguments` value** (one `TOOL_MAPS_TO_VALUE` param holding a JSON object): actions that each
+  take a different set of fields. Examples: `email`, `calendar`, `scheduler`. Read it with
+  `tool_parse_details()`.
+
+Either way, the value is built from the call's arguments in one place, `tool_pack_args()`, for every
+caller: a live LLM call, a plan step, and a scheduled task or briefing step stored as a JSON object. Don't
+parse a value any other way, and don't build one by hand in a new caller: call `tool_pack_args()`.
 
 **Callback signature reminder:**
 ```c
@@ -212,6 +228,7 @@ typedef struct {
 
    /* Lifecycle */
    tool_init_fn init;                                 /* Called after config parse */
+   tool_start_fn start;                               /* Called once the daemon is up */
    tool_cleanup_fn cleanup;                           /* Called at shutdown */
 
    /* Callback */
@@ -313,12 +330,14 @@ typedef struct {
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `init` | No | Called once after config parsing. Return 0 for success, non-zero to fail. |
-| `cleanup` | No | Called once at shutdown. Free any resources. |
+| `init` | No | Called once after config parsing, with the database open. Return 0 for success, non-zero to fail. |
+| `start` | No | Called once the daemon has finished starting (LLM, TTS, MQTT, the WebUI). Start here anything that can start a turn or deliver to the user, such as a listener that answers messages. Work that needs only storage and the tool's own state may start in `init`. Not called if `init` failed. |
+| `cleanup` | No | Called once at shutdown, whether or not `start` ran. Free any resources. |
 
 **Function signatures:**
 ```c
 int my_init(void);      /* Return 0 on success */
+int my_start(void);     /* Return 0 on success */
 void my_cleanup(void);  /* No return value */
 ```
 
@@ -692,6 +711,7 @@ static char *mytool_callback(const char *action, char *value, int *should_respon
  * Lifecycle Functions (Optional)
  *
  * init: Called once after config parsing, before tool is used
+ * start: Called once the daemon is up (listeners that answer messages)
  * cleanup: Called once at shutdown
  * ============================================================================= */
 

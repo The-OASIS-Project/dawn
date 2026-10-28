@@ -70,6 +70,187 @@ struct json_object *tool_parse_details(const char *value, bool no_required_field
    return no_required_fields ? json_object_new_object() : NULL;
 }
 
+/* One argument into the (action, value, device) call: the action and device
+ * as sent, the value escaped when @p packed, a custom field appended as
+ * ::field::value.  The names of the params that fill the action, value and
+ * device are noted for the flat-args fallback.  FAILURE (with @p result set)
+ * when a custom field doesn't fit. */
+static int pack_param(const tool_metadata_t *meta,
+                      const treg_param_t *param,
+                      const char *val_str,
+                      bool packed,
+                      char *action_name,
+                      size_t action_len,
+                      char *value_buf,
+                      size_t value_len,
+                      char *device_name,
+                      size_t device_len,
+                      const char **action_param_name,
+                      const char **value_param_name,
+                      const char **device_param_name,
+                      char *err,
+                      size_t err_len) {
+   switch (param->maps_to) {
+      case TOOL_MAPS_TO_ACTION:
+         *action_param_name = param->name;
+         if (val_str && action_name) {
+            safe_strncpy(action_name, val_str, action_len);
+         }
+         return SUCCESS;
+      case TOOL_MAPS_TO_VALUE:
+         *value_param_name = param->name;
+         if (val_str) {
+            if (packed) {
+               tool_value_escape(val_str, strlen(val_str), value_buf, value_len);
+            } else {
+               safe_strncpy(value_buf, val_str, value_len);
+            }
+         }
+         return SUCCESS;
+      case TOOL_MAPS_TO_DEVICE:
+         *device_param_name = param->name;
+         if (val_str && device_name) {
+            safe_strncpy(device_name, val_str, device_len);
+         }
+         return SUCCESS;
+      case TOOL_MAPS_TO_CUSTOM:
+         break;
+   }
+   /* A custom field, appended as ::field_name::value.  An ARRAY's val_str is
+    * its serialized JSON (json_object_get_string on a non-string). */
+   if (!val_str) {
+      return SUCCESS;
+   }
+   if (!param->field_name || !param->field_name[0]) {
+      if (value_buf[0] == '\0') {
+         /* No field name: the value itself, escaped like a base so it can't
+          * pose as the fields appended after it. */
+         if (packed) {
+            tool_value_escape(val_str, strlen(val_str), value_buf, value_len);
+         } else {
+            safe_strncpy(value_buf, val_str, value_len);
+         }
+      }
+      return SUCCESS;
+   }
+   /* A cut-off field would reach the callback as a different value (a
+    * truncated array parses as invalid JSON), so it is refused instead. */
+   const size_t cur_len = strlen(value_buf);
+   const size_t remaining = value_len - cur_len;
+   const size_t name_len = strlen(param->field_name);
+   const size_t val_len = tool_value_escape(val_str, strlen(val_str), NULL, 0);
+   /* 4 = the "::" x2 delimiters; the strict >= leaves room for the NUL. */
+   if (name_len + val_len + 4 >= remaining) {
+      OLOG_ERROR("Tool '%s' param '%s' too large to encode (%zu >= %zu)", meta->name,
+                 param->field_name, name_len + val_len + 4, remaining);
+      snprintf(err, err_len, "Error: too many items for '%s' — try fewer at a time",
+               param->field_name);
+      return FAILURE;
+   }
+   char *at = value_buf + cur_len;
+   /* tool_value_escape writes the terminating NUL after the delimiters */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
+   memcpy(at, "::", 2);
+   memcpy(at + 2, param->field_name, name_len);
+   /* tool_value_escape writes the terminating NUL after the delimiters */
+   // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
+   memcpy(at + 2 + name_len, "::", 2);
+   tool_value_escape(val_str, strlen(val_str), at + 4 + name_len, remaining - 4 - name_len);
+   return SUCCESS;
+}
+
+int tool_pack_args(const tool_metadata_t *meta,
+                   struct json_object *args,
+                   char *action_name,
+                   size_t action_len,
+                   char *value_buf,
+                   size_t value_len,
+                   char *device_name,
+                   size_t device_len,
+                   char *err,
+                   size_t err_len) {
+   value_buf[0] = '\0';
+   if (action_name) {
+      action_name[0] = '\0';
+   }
+   if (device_name) {
+      device_name[0] = '\0';
+   }
+
+   /* Track which param names map to action/device so we can build a fallback value */
+   const char *action_param_name = NULL;
+   const char *device_param_name = NULL;
+   const char *value_param_name = NULL;
+
+   /* A tool with CUSTOM params gets its value packed as base::field::value;
+    * each part is escaped (tool_value_escape) so its own "::" can't be read as a
+    * separator.  A tool without them gets its value as sent. */
+   bool packed = false;
+   for (int i = 0; i < meta->param_count; i++) {
+      if (meta->params[i].maps_to == TOOL_MAPS_TO_CUSTOM && meta->params[i].field_name &&
+          meta->params[i].field_name[0]) {
+         packed = true;
+         break;
+      }
+   }
+
+   /* The base first, then the custom fields after it, whatever the params'
+    * declared order. */
+   for (int pass = 0; pass < 2; pass++) {
+      for (int i = 0; i < meta->param_count; i++) {
+         const treg_param_t *param = &meta->params[i];
+         if ((param->maps_to == TOOL_MAPS_TO_CUSTOM) != (pass == 1)) {
+            continue;
+         }
+         struct json_object *val_obj = NULL;
+         if (args) {
+            json_object_object_get_ex(args, param->name, &val_obj);
+         }
+         const char *val_str = val_obj ? json_object_get_string(val_obj) : NULL;
+         if (pack_param(meta, param, val_str, packed, action_name, action_len, value_buf, value_len,
+                        device_name, device_len, &action_param_name, &value_param_name,
+                        &device_param_name, err, err_len) != SUCCESS) {
+            return FAILURE;
+         }
+      }
+   }
+
+   /* Fallback: if value_buf is empty and the LLM sent a flat JSON (no "arguments" key),
+    * collect all non-extracted fields into a JSON object as the value.
+    * This handles LLMs that flatten {"action":"create","type":"timer",...}
+    * instead of nesting {"action":"create","arguments":"{\"type\":\"timer\",...}"}. */
+   if (value_buf[0] == '\0' && args && value_param_name) {
+      struct json_object *remaining = json_object_new_object();
+      json_object_object_foreach(args, key, val) {
+         /* Skip keys already extracted as action/device/value params */
+         if ((action_param_name && strcmp(key, action_param_name) == 0) ||
+             (device_param_name && strcmp(key, device_param_name) == 0) ||
+             (value_param_name && strcmp(key, value_param_name) == 0))
+            continue;
+         json_object_object_add(remaining, key, json_object_get(val));
+      }
+      if (json_object_object_length(remaining) > 0) {
+         const char *remaining_str = json_object_to_json_string(remaining);
+         const size_t len = packed ? tool_value_escape(remaining_str, strlen(remaining_str),
+                                                       value_buf, value_len)
+                                   : strlen(remaining_str);
+         if (!packed && len < value_len) {
+            memcpy(value_buf, remaining_str, len + 1);
+         }
+         /* Cut-off JSON would reach the tool as different arguments. */
+         if (len >= value_len) {
+            snprintf(err, err_len, "Error: the arguments to '%s' are too long", meta->name);
+            json_object_put(remaining);
+            return FAILURE;
+         }
+         OLOG_INFO("Tool '%s': flat args, value rebuilt from the remaining fields", meta->name);
+      }
+      json_object_put(remaining);
+   }
+
+   return SUCCESS;
+}
+
 /* =============================================================================
  * Module State
  * ============================================================================= */
@@ -377,6 +558,34 @@ bool tool_registry_is_locked(void) {
    bool locked = s_locked;
    pthread_mutex_unlock(&s_registry_mutex);
    return locked;
+}
+
+int tool_registry_start_tools(void) {
+   /* Called outside the registry lock: a start may look tools up.  The registry
+    * is locked against registration by now, so the entries don't move. */
+   tool_start_fn starts[TOOL_MAX_REGISTERED];
+   const char *names[TOOL_MAX_REGISTERED];
+   int n = 0;
+   pthread_mutex_lock(&s_registry_mutex);
+   for (int i = 0; i < s_tool_count; i++) {
+      const tool_entry_t *entry = &s_tools[i];
+      if (entry->registered && entry->initialized && entry->metadata.start) {
+         starts[n] = entry->metadata.start;
+         names[n] = entry->metadata.name;
+         n++;
+      }
+   }
+   pthread_mutex_unlock(&s_registry_mutex);
+
+   int failures = 0;
+   for (int i = 0; i < n; i++) {
+      OLOG_INFO("Starting tool: %s", names[i]);
+      if (starts[i]() != 0) {
+         OLOG_ERROR("tool_registry: Failed to start tool '%s'", names[i]);
+         failures++;
+      }
+   }
+   return failures > 0 ? 1 : 0;
 }
 
 void tool_registry_shutdown(void) {

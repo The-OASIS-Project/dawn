@@ -323,7 +323,7 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    tion, started at a slot or hold     │
 │                    release (any thread); holds a slot  │
 │  Music scanner   — periodic local + Plex sync          │
-│  Scheduler       — 1-second polling loop               │
+│  Scheduler       — waits for its next event            │
 │  CalDAV sync     — background event pull               │
 │  WebUI audio     — per-connection ASR/TTS pipeline     │
 │  Messaging recv  — per-provider listener (Telegram/    │
@@ -379,6 +379,15 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    the search returns                  │
 └────────────────────────────────────────────────────────┘
 ```
+
+**Startup order.** `main()` (`src/dawn.c`) brings DAWN up in a fixed order, and code may rely on it:
+storage first (`auth.db` with its migrations, auth crypto, the image and document stores), before any
+other thread exists; then the tools' `init`, the LLM type, the session manager, and the state the
+database backs (the local owner, watches, interrupted jobs, OTA releases, embeddings); then audio,
+TTS and the WebUI, whose turns have all of that. Last come the inputs that start the moment they
+connect: MQTT's loop and the tools' `start` (the Telegram, Discord and Slack listeners, which take their
+backlog at once), then the scheduler, whose first pass fires the events missed while DAWN was down. No
+thread waits a fixed time for another to be ready.
 
 **Turn serialization (background-jobs era).** All WebUI LLM turns — user text, push-to-talk
 voice, and background-job re-engagements — funnel through the per-session **turn queue**
