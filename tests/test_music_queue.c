@@ -184,6 +184,81 @@ static void test_kept_across_restart(void) {
    music_queue_release(other);
 }
 
+static void fill(user_music_queue_t *uq, int n) {
+   for (int i = 0; i < n; i++) {
+      char path[32];
+      snprintf(path, sizeof(path), "/m/%d.flac", i);
+      music_search_result_t x = track(path);
+      music_queue_insert(uq, uq->queue_length, &x);
+   }
+}
+
+/* Players' places follow other players' inserts and removes */
+static void test_places_follow_edits(void) {
+   user_music_queue_t *uq = music_queue_acquire(0);
+   music_queue_pos_t a, b;
+   music_queue_attach(uq, &a);
+   music_queue_attach(uq, &b);
+   fill(uq, 5);
+   TEST_ASSERT_EQUAL_INT(0, a.index); /* appends move nothing */
+   a.index = 3;
+   b.index = 1;
+   music_search_result_t top = track("/m/top.flac");
+   music_queue_insert(uq, 0, &top); /* at the top: both move down */
+   TEST_ASSERT_EQUAL_INT(4, a.index);
+   TEST_ASSERT_EQUAL_INT(2, b.index);
+   TEST_ASSERT_EQUAL_STRING("/m/3.flac", uq->queue[a.index].path);
+   music_queue_insert(uq, 3, &top); /* between them: only the later one */
+   TEST_ASSERT_EQUAL_INT(5, a.index);
+   TEST_ASSERT_EQUAL_INT(2, b.index);
+   music_queue_remove_at(uq, 0); /* before both */
+   TEST_ASSERT_EQUAL_INT(4, a.index);
+   TEST_ASSERT_EQUAL_INT(1, b.index);
+   music_queue_remove_at(uq, 1); /* b's own track: b stays, on the one in its place */
+   TEST_ASSERT_EQUAL_INT(3, a.index);
+   TEST_ASSERT_EQUAL_INT(1, b.index);
+   TEST_ASSERT_EQUAL_STRING("/m/3.flac", uq->queue[a.index].path);
+   music_queue_detach(uq, &b);
+   music_queue_remove_at(uq, 0); /* a detached place doesn't follow */
+   TEST_ASSERT_EQUAL_INT(2, a.index);
+   TEST_ASSERT_EQUAL_INT(1, b.index);
+   pthread_mutex_lock(&uq->queue_mutex);
+   music_queue_clear(uq); /* every place to the top */
+   pthread_mutex_unlock(&uq->queue_mutex);
+   TEST_ASSERT_EQUAL_INT(0, a.index);
+   music_queue_detach(uq, &a);
+   music_queue_release(uq);
+}
+
+/* A full queue's insert drops its last track: a place on it is past the end */
+static void test_place_on_dropped_track(void) {
+   user_music_queue_t *uq = music_queue_acquire(0);
+   music_queue_pos_t a;
+   music_queue_attach(uq, &a);
+   fill(uq, MUSIC_QUEUE_MAX);
+   a.index = MUSIC_QUEUE_MAX - 1;
+   music_search_result_t top = track("/m/top.flac");
+   music_queue_insert(uq, 0, &top);
+   TEST_ASSERT_EQUAL_INT(MUSIC_QUEUE_MAX, a.index);
+   TEST_ASSERT_EQUAL_INT(MUSIC_QUEUE_MAX, uq->queue_length);
+   music_queue_detach(uq, &a);
+   music_queue_release(uq);
+}
+
+/* A replace puts every place at the top (no drift from re-appending) */
+static void test_replace_resets_places(void) {
+   user_music_queue_t *uq = music_queue_acquire(0);
+   music_queue_pos_t a;
+   music_queue_attach(uq, &a);
+   fill(uq, 5);
+   a.index = 3;
+   music_search_result_t t[3] = { track("/n/a"), track("/n/b"), track("/n/c") };
+   music_queue_add(uq, t, 3, true, NULL, NULL);
+   TEST_ASSERT_EQUAL_INT(0, a.index);
+   music_queue_detach(uq, &a);
+   music_queue_release(uq);
+}
+
 /* Two users save at once: each holds only its own queue_mutex, and both go
  * through the one connection */
 #define CONCURRENT_SAVES 200
@@ -231,5 +306,8 @@ int main(void) {
    RUN_TEST(test_remove_and_nearest_copy);
    RUN_TEST(test_kept_across_restart);
    RUN_TEST(test_two_users_save_at_once);
+   RUN_TEST(test_places_follow_edits);
+   RUN_TEST(test_place_on_dropped_track);
+   RUN_TEST(test_replace_resets_places);
    return UNITY_END();
 }

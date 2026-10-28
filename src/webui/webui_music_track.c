@@ -130,7 +130,7 @@ static void set_track(session_music_state_t *state,
    int found = queue_find(uq, path, index);
    if (found >= 0) {
       state->track = uq->queue[found];
-      state->queue_index = found;
+      state->pos.index = found;
    } else {
       memset(&state->track, 0, sizeof(state->track));
       snprintf(state->track.path, sizeof(state->track.path), "%s", path);
@@ -138,31 +138,45 @@ static void set_track(session_music_state_t *state,
    }
 }
 
-/* Where next steps from: queue_index.  After another tab replaced the queue,
- * the track's position in the new queue when it holds it (adopted: the
- * session is back on the queue), else -1, so the new queue's top follows. */
-static int step_base(session_music_state_t *state, user_music_queue_t *uq) {
+/* Where next steps from: the session's place.  After another tab replaced
+ * the queue, the track's place in the new queue when it holds it (adopted:
+ * the session is back on the queue), else its top, lost.  When the track
+ * at its place isn't this session's any more (another tab removed it, or a
+ * full queue's insert dropped it), that place, lost: next is the track
+ * that took its place. */
+static void step_base(session_music_state_t *state,
+                      user_music_queue_t *uq,
+                      music_nav_request_t *rq) {
+   rq->lost = false;
    if (off_queue(state, uq)) {
-      int found = queue_find(uq, state->track.path, state->queue_index);
+      int found = queue_find(uq, state->track.path, state->pos.index);
       if (found >= 0) {
          state->track_epoch = uq->replace_epoch;
-         state->queue_index = found;
-         return found;
+         state->pos.index = found;
+         rq->pos = found;
+         return;
       }
-      return -1;
+      rq->lost = true;
+      rq->pos = 0;
+      return;
    }
-   return state->queue_index;
+   rq->pos = state->pos.index;
+   if (state->track.path[0] &&
+       (rq->pos >= uq->queue_length || strcmp(uq->queue[rq->pos].path, state->track.path) != 0)) {
+      rq->lost = true;
+   }
 }
 
 static const char *queue_path_at(void *ctx, int index) {
    return ((const user_music_queue_t *)ctx)->queue[index].path;
 }
 
-/* What plays next from pos (step_base()'s position), by music_nav_pick() */
+/* What plays next from the session's place (step_base()), by music_nav_pick() */
 static void pick(session_music_state_t *state,
                  user_music_queue_t *uq,
-                 const music_nav_request_t *rq,
+                 music_nav_request_t *rq,
                  music_nav_pick_t *out) {
+   step_base(state, uq, rq);
    music_nav_queue_t q = {
       .find = queue_find,
       .path_at = queue_path_at,
@@ -179,7 +193,7 @@ static void pick(session_music_state_t *state,
 int webui_music_current(const session_music_state_t *state,
                         const user_music_queue_t *uq,
                         const music_queue_entry_t **track_out) {
-   int index = state->queue_index;
+   int index = state->pos.index;
    if (state->track.path[0] && (state->playing || state->paused)) {
       *track_out = &state->track;
       return queue_find((void *)uq, state->track.path, index);
@@ -286,7 +300,7 @@ static void prefetch_plan(session_music_state_t *state) {
    pthread_mutex_lock(&state->state_mutex);
    /* A shuffle pick is planned as the history's next entry, so next and
     * auto-advance play the track prefetched here */
-   music_nav_request_t rq = { .reason = MUSIC_NAV_PLAN, .pos = step_base(state, uq) };
+   music_nav_request_t rq = { .reason = MUSIC_NAV_PLAN };
    music_nav_pick_t planned;
    pick(state, uq, &rq, &planned);
    int next = planned.result == MUSIC_NAV_PLAY ? planned.index : -1;
@@ -402,7 +416,6 @@ music_advance_t webui_music_advance(session_music_state_t *state,
        * the new one, or its top when it doesn't hold the track (nothing to replay) */
       music_nav_request_t rq = {
          .reason = MUSIC_NAV_AUTO,
-         .pos = step_base(state, uq),
          .failures = *failures,
          .track_failed = track_failed,
       };
@@ -420,7 +433,7 @@ music_advance_t webui_music_advance(session_music_state_t *state,
       if (stop) {
          state->playing = false;
          if (end_of_queue) {
-            state->queue_index = 0;
+            state->pos.index = 0;
             state->position_frames = 0; /* nothing is loaded; don't report the old end */
             state->track.path[0] = '\0';
          }
@@ -439,7 +452,7 @@ music_advance_t webui_music_advance(session_music_state_t *state,
 
       int next_index = next.index;
       state->history_fresh = next.fresh;
-      state->queue_index = next_index;
+      state->pos.index = next_index;
       set_track(state, uq, next_index, uq->queue[next_index].path);
       state->cached_duration_sec = uq->queue[next_index].duration_sec;
       state->position_frames = 0;
@@ -619,7 +632,6 @@ static int nav_pick(session_music_state_t *state,
       .reason = MUSIC_NAV_USER,
       .dir = dir,
       .commit = commit,
-      .pos = step_base(state, uq),
    };
    music_nav_pick_t next;
    pick(state, uq, &rq, &next);
@@ -659,7 +671,7 @@ bool webui_music_nav_step(session_music_state_t *state,
    pthread_mutex_lock(&state->state_mutex);
    target = nav_pick(state, uq, dir, true);
    if (target >= 0 && target < uq->queue_length) {
-      state->queue_index = target;
+      state->pos.index = target;
       snprintf(path_out, path_size, "%s", uq->queue[target].path);
       if (title_out && title_size > 0) {
          snprintf(title_out, title_size, "%s", uq->queue[target].title);
@@ -715,13 +727,13 @@ int webui_music_request_track(session_music_state_t *state,
    pthread_mutex_lock(&uq->queue_mutex);
    pthread_mutex_lock(&state->state_mutex);
    uint32_t duration = 0;
-   if (state->queue_index >= 0 && state->queue_index < uq->queue_length) {
-      duration = uq->queue[state->queue_index].duration_sec;
-      if (strcmp(uq->queue[state->queue_index].path, path) == 0) {
-         history_record(state, uq, state->queue_index);
+   if (state->pos.index >= 0 && state->pos.index < uq->queue_length) {
+      duration = uq->queue[state->pos.index].duration_sec;
+      if (strcmp(uq->queue[state->pos.index].path, path) == 0) {
+         history_record(state, uq, state->pos.index);
       }
    }
-   set_track(state, uq, state->queue_index, path);
+   set_track(state, uq, state->pos.index, path);
    pthread_mutex_unlock(&uq->queue_mutex);
 
    if (state->decoder) {

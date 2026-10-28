@@ -1044,25 +1044,6 @@ void webui_login_sweep_request(void);
 /** @brief The service thread's wake: a requested sweep runs. */
 void webui_login_sweep_run_pending(void);
 
-/* =============================================================================
- * Connection Iterator (defined in webui_server.c, used by webui_music.c)
- * ============================================================================= */
-
-/**
- * @brief Iterate all authenticated connections for a given user
- *
- * Calls callback for each active, authenticated connection with matching
- * auth_user_id and non-NULL music_state. Holds s_conn_registry_mutex
- * during iteration.
- *
- * @param user_id User ID to filter by (must be > 0)
- * @param callback Function to call for each matching connection
- * @param ctx Opaque context passed to callback
- */
-void webui_for_each_conn_by_user(int user_id,
-                                 void (*callback)(ws_connection_t *conn, void *ctx),
-                                 void *ctx);
-
 /* Audio send wrappers (webui_send_audio, webui_send_audio_end,
  * webui_sentence_audio_callback) moved to webui/webui_send.h. */
 

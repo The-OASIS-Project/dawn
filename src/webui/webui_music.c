@@ -916,7 +916,6 @@ int webui_music_session_init(ws_connection_t *conn) {
       return 1;
    }
    state->shared_queue = uq;
-   state->queue_index = 0;
 
    /* Allocate resampling accumulation buffer
     * Size: enough for ~100ms of stereo audio at 48kHz = 4800 * 2 = 9600 samples */
@@ -944,6 +943,7 @@ int webui_music_session_init(ws_connection_t *conn) {
       return 1;
    }
 
+   music_queue_attach(uq, &state->pos); /* its place follows other tabs' edits */
    conn->music_state = state;
    OLOG_INFO("WebUI music: Session initialized (user_id=%d, shared=%s)", conn->auth_user_id,
              conn->auth_user_id > 0 ? "yes" : "no");
@@ -1031,6 +1031,7 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
 
    pthread_mutex_unlock(&state->state_mutex);
 
+   music_queue_detach(state->shared_queue, &state->pos);
    music_queue_release(state->shared_queue);
    state->shared_queue = NULL;
 

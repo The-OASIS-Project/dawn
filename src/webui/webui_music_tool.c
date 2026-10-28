@@ -62,7 +62,7 @@
  * @brief Append a compact "[queue: ... | now ... | shuffle | repeat]" footer
  *
  * Gives the LLM the resulting player state after every mutating action so it
- * never has to call list to stay oriented. queue_index is read under
+ * never has to call list to stay oriented. The session's place is read under
  * queue_mutex (display-only, matches the existing list action's pattern).
  */
 static void append_state_footer(strbuf_t *sb, session_music_state_t *state) {
@@ -74,8 +74,8 @@ static void append_state_footer(strbuf_t *sb, session_music_state_t *state) {
    int len = uq->queue_length;
    bool shuffle = uq->shuffle;
    music_repeat_mode_t rep = uq->repeat_mode;
-   /* queue_index is a per-session field guarded by state_mutex; snapshot it under
-    * that lock (nested inside queue_mutex — correct order) to avoid a torn read. */
+   /* The current track is read under state_mutex (nested inside queue_mutex,
+    * the correct order) to avoid a torn read. */
    pthread_mutex_lock(&state->state_mutex);
    const music_queue_entry_t *now = NULL;
    int idx = webui_music_current(state, uq, &now);
@@ -411,7 +411,7 @@ static int music_tool_locked(ws_connection_t *conn,
             char first_path[MUSIC_PATH_MAX] = { 0 };
             pthread_mutex_lock(&uq->queue_mutex);
             pthread_mutex_lock(&state->state_mutex);
-            state->queue_index = 0;
+            state->pos.index = 0;
             if (uq->queue_length > 0) {
                snprintf(first_path, sizeof(first_path), "%s", uq->queue[0].path);
             }
@@ -492,11 +492,8 @@ static int music_tool_locked(ws_connection_t *conn,
       }
 
       webui_music_clear_track(state);
-      pthread_mutex_lock(&state->state_mutex);
-      state->queue_index = 0;
-      pthread_mutex_unlock(&state->state_mutex);
 
-      user_music_queue_t *uq = state->shared_queue;
+      user_music_queue_t *uq = state->shared_queue; /* the replace puts every place at 0 */
       char first_title[MUSIC_STRING_MAX] = { 0 };
       char first_path[MUSIC_PATH_MAX] = { 0 };
       int total_queued = 0;

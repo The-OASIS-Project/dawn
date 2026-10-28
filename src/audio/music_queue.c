@@ -126,6 +126,25 @@ void music_queue_release(user_music_queue_t *uq) {
    pthread_mutex_unlock(&s_user_queues_mutex);
 }
 
+void music_queue_attach(user_music_queue_t *uq, music_queue_pos_t *pos) {
+   pthread_mutex_lock(&uq->queue_mutex);
+   pos->index = 0;
+   pos->next = uq->positions;
+   uq->positions = pos;
+   pthread_mutex_unlock(&uq->queue_mutex);
+}
+
+void music_queue_detach(user_music_queue_t *uq, music_queue_pos_t *pos) {
+   pthread_mutex_lock(&uq->queue_mutex);
+   for (music_queue_pos_t **p = &uq->positions; *p; p = &(*p)->next) {
+      if (*p == pos) {
+         *p = pos->next;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&uq->queue_mutex);
+}
+
 int music_queue_find(const user_music_queue_t *uq, const char *path, int hint) {
    if (hint >= 0 && hint < uq->queue_length && strcmp(uq->queue[hint].path, path) == 0) {
       return hint; /* still where it was: the nearest copy */
@@ -143,10 +162,17 @@ int music_queue_insert(user_music_queue_t *uq, int index, const music_search_res
    if (index < 0 || index > uq->queue_length) {
       return FAILURE;
    }
-   if (uq->queue_length >= MUSIC_QUEUE_MAX) {
-      if (index >= MUSIC_QUEUE_MAX) {
-         return FAILURE;
+   if (uq->queue_length >= MUSIC_QUEUE_MAX && index >= MUSIC_QUEUE_MAX) {
+      return FAILURE;
+   }
+   if (index < uq->queue_length) { /* an append moves nothing */
+      for (music_queue_pos_t *p = uq->positions; p; p = p->next) {
+         if (p->index >= index) {
+            p->index++; /* a full queue's dropped last track: past the end */
+         }
       }
+   }
+   if (uq->queue_length >= MUSIC_QUEUE_MAX) {
       uq->queue_length--; /* full: the last track makes room */
    }
    memmove(&uq->queue[index + 1], &uq->queue[index],
@@ -169,6 +195,19 @@ void music_queue_remove_at(user_music_queue_t *uq, int index) {
    memmove(&uq->queue[index], &uq->queue[index + 1],
            (size_t)(uq->queue_length - index - 1) * sizeof(uq->queue[0]));
    uq->queue_length--;
+   for (music_queue_pos_t *p = uq->positions; p; p = p->next) {
+      if (p->index > index) {
+         p->index--;
+      }
+   }
+}
+
+void music_queue_clear(user_music_queue_t *uq) {
+   uq->queue_length = 0;
+   uq->replace_epoch++;
+   for (music_queue_pos_t *p = uq->positions; p; p = p->next) {
+      p->index = 0;
+   }
 }
 
 void music_queue_changed(user_music_queue_t *uq, bool tracks) {
@@ -189,8 +228,7 @@ void music_queue_add(user_music_queue_t *uq,
    int added = 0;
    pthread_mutex_lock(&uq->queue_mutex);
    if (replace) {
-      uq->queue_length = 0;
-      uq->replace_epoch++;
+      music_queue_clear(uq);
    }
    for (int i = 0; i < n; i++) {
       music_queue_outcome_t oc;
