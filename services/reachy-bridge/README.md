@@ -57,5 +57,11 @@ that your config lacks are logged once and do nothing.
   start downloads the dataset from Hugging Face.
 - **Accepted input:** DAWN's state, speaking events and vocabulary expression names. Nothing on MQTT can
   move the robot directly.
+- **Mic and speaker health:** the robot's XVF3800 mic array can stall, sending only exact zeros with no
+  USB event, so DAWN hears nothing. After `stalled_after_s` of that (a mute or 0% in PulseAudio doesn't
+  count) the bridge reboots the array while DAWN is idle, at most twice per stall; PulseAudio puts
+  DAWN's streams back on its own. It also keeps the speaker's channels equal: the array takes its echo
+  cancellation reference from the left channel, and a low left channel lets every reply back in as
+  input. Both find the device by `device_match` in its PulseAudio name.
 - **SDK internals:** the speech offsets use the SDK's own protocol model (`SetSpeechOffsetsCmd`), not
   its public API: check it on every `reachy-mini` upgrade.

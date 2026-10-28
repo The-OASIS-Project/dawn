@@ -2836,16 +2836,18 @@ add_test(NAME check_reachy_vocab_mirror
          WORKING_DIRECTORY ${SRC_ROOT})
 set_tests_properties(check_reachy_vocab_mirror PROPERTIES LABELS "ci")
 
-# The bridge's robot-free expression logic (services/reachy-bridge/expression.py),
-# standard library only.
+# The bridge's robot-free logic (services/reachy-bridge/expression.py and
+# audio_health.py), standard library only.
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
-   add_test(NAME test_reachy_expression
-            COMMAND ${Python3_EXECUTABLE} -I ${SRC_ROOT}/tests/test_reachy_expression.py
-            WORKING_DIRECTORY ${SRC_ROOT})
-   set_tests_properties(test_reachy_expression PROPERTIES LABELS "ci")
+   foreach(t test_reachy_expression test_reachy_audio_health)
+      add_test(NAME ${t}
+               COMMAND ${Python3_EXECUTABLE} -I ${SRC_ROOT}/tests/${t}.py
+               WORKING_DIRECTORY ${SRC_ROOT})
+      set_tests_properties(${t} PROPERTIES LABELS "ci")
+   endforeach()
 else()
-   message(STATUS "python3 not found: test_reachy_expression is not registered")
+   message(STATUS "python3 not found: the reachy-bridge tests are not registered")
 endif()
 
 # SECTION_CATEGORIES in schema.js is the settings render gate — a section absent

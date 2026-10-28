@@ -33,6 +33,7 @@ import logging
 import math
 import os
 import queue
+import select
 import signal
 import socket
 import subprocess
@@ -50,10 +51,12 @@ from scipy.spatial.transform import Rotation
 
 # The bridge's own modules sit beside it (python -I leaves its directory off sys.path).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import audio_health  # noqa: E402
 import expression  # noqa: E402
 
 from reachy_mini import ReachyMini
 from reachy_mini.io.protocol import SetSpeechOffsetsCmd
+from reachy_mini.media.audio_control_utils import init_respeaker_usb
 from reachy_mini.media.audio_doa import AudioDoA
 from reachy_mini.motion.recorded_move import RecordedMoves
 from reachy_mini.utils import create_head_pose
@@ -371,33 +374,137 @@ class DoaTracker:
 # --------------------------------------------------------------------------
 
 
+PA_ENV = {**os.environ, "LC_ALL": "C"}  # pactl translates its output otherwise ("Stumm: ja")
+
+
+def pactl(*args: str) -> str:
+    """A pactl command's output; empty when PulseAudio can't be reached."""
+    try:
+        return subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=5,
+                              env=PA_ENV).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+class PaError(Exception):
+    """pactl gave no answer: whether the device is there is unknown."""
+
+
+def pa_find(kind: str, wanted) -> tuple[str, str] | None:
+    """The first source or sink whose name passes @p wanted, as (index, name),
+    or None when there is none.  The index changes every time a device comes
+    back.  Raises PaError when pactl answers nothing (there are always monitors)."""
+    out = pactl("list", "short", kind)
+    if not out:
+        raise PaError(f"pactl list {kind} gave nothing")
+    for line in out.splitlines():
+        cols = line.split("\t")
+        if len(cols) > 1 and wanted(cols[1]):
+            return cols[0], cols[1]
+    return None
+
+
+def spawn_parec(name: str, latency_ms: int) -> subprocess.Popen | None:
+    """16 kHz mono s16 from one named source."""
+    try:
+        return subprocess.Popen(
+            ["parec", "--raw", "--format=s16le", "--rate=16000", "--channels=1",
+             f"--latency-msec={latency_ms}", "-d", name],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        log.error("parec: %s", e)
+        return None
+
+
+class PaEvents:
+    """One `pactl subscribe` for the bridge.  When the robot's audio drops (a
+    reboot, a power cycle), PulseAudio moves running streams to another source,
+    the mic included, rather than ending them, so the readers must re-find their
+    device.  A source, sink or server change bumps `generation` and the readers
+    look again only then, instead of running pactl every second."""
+
+    def __init__(self):
+        self.generation = 0
+
+    def run(self, stop: threading.Event) -> None:
+        while not stop.is_set():
+            try:
+                proc = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, text=True, env=PA_ENV)
+            except OSError as e:
+                log.error("pactl subscribe: %s", e)
+                stop.wait(5)
+                continue
+            self.generation += 1  # anything may have changed while it wasn't running
+            try:
+                for line in proc.stdout:  # "Event 'change' on sink #217"
+                    what = line.split(" on ", 1)
+                    if len(what) == 2 and what[1].split(" ", 1)[0] in ("source", "sink", "server"):
+                        self.generation += 1
+                    if stop.is_set():
+                        break
+            finally:
+                proc.kill()
+                proc.wait()
+            stop.wait(1)
+
+
 class SpeechEnvelope:
-    RATE = 16000
     FRAME = 320  # 20 ms
 
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, events: PaEvents):
         self.source = cfg["speech"]["monitor_source"]
+        self.events = events
         self.level = 0.0
         self.attack = cfg["speech"]["attack"]
         self.release = cfg["speech"]["release"]
         self.gain = cfg["speech"]["gain"]
 
+    def resolve(self) -> tuple[str, str] | None:
+        """The monitor to read; @DEFAULT_MONITOR@ is resolved here, not by parec,
+        so the reader can tell when it should move."""
+        name = self.source
+        if name == "@DEFAULT_MONITOR@":
+            sink = pactl("get-default-sink").strip()
+            if not sink:
+                return None
+            name = sink + ".monitor"
+        return pa_find("sources", lambda n: n == name)
+
     def run(self, stop: threading.Event) -> None:
-        cmd = ["parec", "--raw", "--format=s16le", f"--rate={self.RATE}", "--channels=1",
-               "--latency-msec=20", "-d", self.source]
         while not stop.is_set():
+            seen = self.events.generation
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            except OSError as e:
-                log.error("parec: %s", e)
-                stop.wait(5)
+                source = self.resolve()
+            except PaError:
+                source = None
+            proc = spawn_parec(source[1], 20) if source else None
+            if proc is None:
+                self.level = 0.0
+                stop.wait(2)
                 continue
-            log.info("speech envelope: reading %s", self.source)
+            log.info("speech envelope: reading %s", source[1])
+            pending = b""  # an odd byte left by a short read
             try:
+                fd = proc.stdout.fileno()
                 while not stop.is_set():
-                    data = proc.stdout.read(self.FRAME * 2)
+                    if self.events.generation != seen:
+                        seen = self.events.generation
+                        try:
+                            if self.resolve() != source:
+                                break
+                        except PaError:
+                            seen = -1  # ask again next time round
+                    if not select.select([fd], [], [], 0.5)[0]:
+                        continue
+                    data = os.read(fd, self.FRAME * 2)
                     if not data:
+                        log.warning("parec ended; retrying")
+                        stop.wait(1)
                         break
+                    data, pending = pending + data, b""
+                    if len(data) % 2:
+                        data, pending = data[:-1], data[-1:]
                     x = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
                     rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
                     target = min(1.0, rms * self.gain)
@@ -406,9 +513,155 @@ class SpeechEnvelope:
             finally:
                 proc.kill()
                 proc.wait()
-            if not stop.is_set():
-                log.warning("parec ended; retrying")
-                stop.wait(2)
+            self.level = 0.0
+
+
+# --------------------------------------------------------------------------
+# The mic array's health: a stalled mic rebooted, the speaker kept balanced
+# --------------------------------------------------------------------------
+
+
+class AudioHealth:
+    """The XVF3800 can stall: PulseAudio keeps delivering samples, all zero,
+    with no USB event, and DAWN hears nothing for hours.  Its REBOOT control
+    restarts it (~1 s) and PulseAudio puts DAWN's streams back.  Separately,
+    the robot's speaker drifts out of balance (PulseAudio restoring an old
+    per-channel volume, a settings panel), and a low left channel (the
+    echo-cancellation reference) lets every reply back in as input."""
+
+    BLOCK = 3200  # 100 ms of mono s16
+
+    def __init__(self, cfg: dict, dawn: DawnState, events: PaEvents):
+        audio = cfg.get("audio", {})
+        self.match = audio.get("device_match", "Pollen_Robotics_Reachy_Mini_Audio")
+        self.watch = audio_health.MicWatch(float(audio.get("stalled_after_s", 60)),
+                                           time.monotonic())
+        self.dawn = dawn
+        self.events = events
+        self.seen = None  # the PulseAudio generation last checked
+        self.proc = None
+        self.source = None  # (index, name) the reader is on
+        self.muted_logged = False
+
+    def robot(self, prefix: str):
+        return lambda name: name.startswith(prefix) and self.match in name
+
+    def stop_reader(self) -> None:
+        if self.proc is not None:
+            self.proc.kill()
+            self.proc.wait()
+            self.proc = None
+
+    def follow_source(self, now: float) -> None:
+        """Read the robot's mic, and only it."""
+        source = pa_find("sources", self.robot("alsa_input."))
+        if source == self.source and self.proc is not None:
+            return
+        self.stop_reader()
+        self.source = source
+        self.watch.restart(now)
+        if source is not None:
+            self.proc = spawn_parec(source[1], 100)
+
+    def read_second(self, stop: threading.Event) -> None:
+        """About a second of the mic into the watch; no data at all counts as silence."""
+        end = time.monotonic() + 1.0
+        while not stop.is_set():
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            if self.proc is None:
+                stop.wait(left)
+                self.watch.feed(True, time.monotonic())
+                return
+            fd = self.proc.stdout.fileno()
+            if not select.select([fd], [], [], left)[0]:
+                self.watch.feed(True, time.monotonic())
+                return
+            data = os.read(fd, self.BLOCK)
+            if not data:  # parec ended: look for the mic again
+                self.stop_reader()
+                self.seen = None
+                stop.wait(1)
+                return
+            if self.watch.feed(data.count(0) == len(data), time.monotonic()):
+                log.info("Reachy mic back after %d reboot(s)", self.watch.reboots)
+
+    def muted(self, now: float) -> bool:
+        """Zeros the user asked for (muted, or at 0%, in PulseAudio): not a stall."""
+        if self.source is None:
+            return False
+        name = self.source[1]
+        volumes = audio_health.parse_volumes(pactl("get-source-volume", name))
+        if "yes" not in pactl("get-source-mute", name) and not (volumes and max(volumes) == 0):
+            self.muted_logged = False
+            return False
+        if not self.muted_logged:
+            log.info("Reachy mic muted in PulseAudio: not checking it")
+            self.muted_logged = True
+        self.watch.cancel(now)
+        return True
+
+    def check_mic(self, now: float) -> None:
+        if self.source is not None and self.watch.due(now) and not self.muted(now):
+            self.watch.stall(now)
+            log.warning("Reachy mic sent only zeros for %.0f s: rebooting the mic array",
+                        self.watch.stalled_after)
+        if self.watch.should_reboot(now, self.dawn.mode() == "idle"):
+            if self.muted(now):  # muted since the stall began
+                return
+            self.watch.rebooted(now)
+            self.reboot()
+        elif self.watch.give_up(now):
+            log.error("Reachy mic still silent after %d reboots: power-cycle the robot",
+                      self.watch.reboots)
+
+    @staticmethod
+    def reboot() -> None:
+        dev = init_respeaker_usb()
+        if dev is None:
+            log.error("Reachy mic: no mic array on USB to reboot")
+            return
+        try:
+            dev.write("REBOOT", [1])
+        except Exception as e:  # the chip usually resets before the transfer completes
+            log.debug("REBOOT transfer: %s", e)
+        try:
+            dev.close()
+        except Exception:
+            pass
+
+    def check_balance(self) -> None:
+        """On any sink change (a volume change is one): channels kept equal."""
+        sink = pa_find("sinks", self.robot("alsa_output."))
+        if sink is None:
+            return
+        volumes = audio_health.parse_volumes(pactl("get-sink-volume", sink[1]))
+        target = audio_health.balance_target(volumes)
+        if target is None:
+            return
+        pactl("set-sink-volume", sink[1], *[str(target)] * len(volumes))
+        log.warning("Reachy speaker channels were %s: set all to %d%% (the mic array's echo "
+                    "cancellation listens to the left one)",
+                    "/".join(f"{round(v * 100 / 65536)}%" for v in volumes),
+                    round(target * 100 / 65536))
+
+    def run(self, stop: threading.Event) -> None:
+        try:
+            while not stop.is_set():
+                try:
+                    if self.events.generation != self.seen:
+                        self.seen = self.events.generation
+                        self.follow_source(time.monotonic())
+                        self.check_balance()
+                    self.read_second(stop)
+                    self.check_mic(time.monotonic())
+                except Exception as e:  # pyusb, pactl not answering: keep watching
+                    log.warning("audio health: %s", e)
+                    self.seen = None  # look at the devices again
+                    stop.wait(5)
+        finally:
+            self.stop_reader()
 
 
 # --------------------------------------------------------------------------
@@ -772,12 +1025,16 @@ def main() -> int:
 
     dawn = DawnState(cfg)
     doa = DoaTracker(cfg)
-    speech = SpeechEnvelope(cfg)
+    events = PaEvents()
+    speech = SpeechEnvelope(cfg, events)
+    health = AudioHealth(cfg, dawn, events)
     link = Link(cfg, dawn, doa)
     link.start()
 
-    threads = [threading.Thread(target=doa.run, args=(stop,), daemon=True),
-               threading.Thread(target=speech.run, args=(stop,), daemon=True)]
+    threads = [threading.Thread(target=events.run, args=(stop,), daemon=True),
+               threading.Thread(target=doa.run, args=(stop,), daemon=True),
+               threading.Thread(target=speech.run, args=(stop,), daemon=True),
+               threading.Thread(target=health.run, args=(stop,), daemon=True)]
     for th in threads:
         th.start()
 

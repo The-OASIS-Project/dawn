@@ -80,6 +80,10 @@ roll_deg = 3.0
 pitch_deg = 4.0
 yaw_deg = 2.0
 
+[audio]                      # the mic array's health (a stalled mic is rebooted, the speaker kept balanced)
+device_match = "Pollen_Robotics_Reachy_Mini_Audio"   # in the PulseAudio source/sink names
+stalled_after_s = 60         # only exact zeros this long: the XVF3800 has stalled
+
 [limits]                     # hard clamps on everything the mixer sends
 xyz_mm = [10, 10, 15]
 rpy_deg = [25, 25, 60]

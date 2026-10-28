@@ -54,7 +54,8 @@ uv python install "$PYTHON_VERSION"
 [ -d "$SHARE_DIR/venv" ] || uv venv --python "$PYTHON_VERSION" "$SHARE_DIR/venv"
 uv pip install --python "$SHARE_DIR/venv/bin/python" -r "$SCRIPT_DIR/requirements.txt"
 
-install -m 644 "$SCRIPT_DIR/reachy_bridge.py" "$SCRIPT_DIR/expression.py" "$SHARE_DIR/"
+install -m 644 "$SCRIPT_DIR/reachy_bridge.py" "$SCRIPT_DIR/expression.py" \
+   "$SCRIPT_DIR/audio_health.py" "$SHARE_DIR/"
 if [ -f "$CONFIG_DIR/reachy-bridge.toml" ]; then
    log "Keeping existing $CONFIG_DIR/reachy-bridge.toml (new defaults: $SCRIPT_DIR/reachy-bridge.toml)"
 else
