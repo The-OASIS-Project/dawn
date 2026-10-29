@@ -179,7 +179,7 @@ int music_player_running(void);
  * and start it again).  Outermost for the player: taken before queue_mutex
  * and any lock the output's notify takes.
  *
- * @param preempt True on a thread that must not wait (the WebSocket thread):
+ * @param preempt True on the one thread that must never wait (a network service thread):
  *        a holder waiting in music_player_await() stops waiting and releases
  *        it.  False on other threads, which wait.
  */

@@ -16,10 +16,11 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * WebUI music: opening tracks.  The one place a queue path becomes a playing
- * decoder: path and format checks, the Plex download, installing the decoder,
- * starting a track on request and moving to the next one at the end of a
- * track (skipping ones that won't play).
+ * Music player: opening tracks and choosing what plays.  The one place a
+ * queue path becomes a playing decoder (music_open_track(): path and format
+ * checks, a remote download), installing it, starting a track on request,
+ * moving to the next one at a track's end (skipping ones that won't play),
+ * and the queue actions that change what's playing.
  */
 
 #include <errno.h>
@@ -32,12 +33,10 @@
 
 #include "audio/audio_decoder.h"
 #include "audio/music_open.h"
+#include "audio/music_player_internal.h"
 #include "audio/music_source.h"
 #include "dawn_error.h"
 #include "logging.h"
-#include "webui/webui_internal.h"
-#include "webui/webui_music.h"
-#include "webui/webui_music_internal.h"
 
 /**
  * @brief Hand a freshly opened track to the output (no lock held: it may open
@@ -58,7 +57,7 @@ static int begin_track(music_player_t *p,
    if (info.channels < 1 || info.channels > 2 ||
        p->ops->track_begin(p->ops_ctx, &info, gapless, read_frames) != SUCCESS ||
        *read_frames < 1 || *read_frames > MUSIC_PLAYER_READ_FRAMES_MAX) {
-      OLOG_ERROR("WebUI music: Can't play %s (%u Hz, %u channels)", path, info.sample_rate,
+      OLOG_ERROR("Music player: Can't play %s (%u Hz, %u channels)", path, info.sample_rate,
                  info.channels);
       return FAILURE;
    }
@@ -98,13 +97,13 @@ static int queue_find(void *ctx, const char *path, int hint) {
    return music_queue_find((const user_music_queue_t *)ctx, path, hint);
 }
 
-/* Another tab replaced the queue since this session picked its track */
+/* Another player replaced the queue since this one picked its track */
 static bool off_queue(const music_player_t *p, const user_music_queue_t *uq) {
    return p->track.path[0] != '\0' && p->track_epoch != uq->replace_epoch;
 }
 
-/* Note the track this session picked: the queue entry at index, or where
- * else the queue holds path; a path it doesn't hold (another tab replaced the
+/* Note the track this player picked: the queue entry at index, or where
+ * else the queue holds path; a path it doesn't hold (another player replaced the
  * queue since the pick) is noted as off the queue */
 static void set_track(music_player_t *p, user_music_queue_t *uq, int index, const char *path) {
    p->track_epoch = uq->replace_epoch;
@@ -119,10 +118,10 @@ static void set_track(music_player_t *p, user_music_queue_t *uq, int index, cons
    }
 }
 
-/* Where next steps from: the session's place.  After another tab replaced
+/* Where next steps from: the player's place.  After another player replaced
  * the queue, the track's place in the new queue when it holds it (adopted:
- * the session is back on the queue), else its top, lost.  When the track
- * at its place isn't this session's any more (another tab removed it, or a
+ * the player is back on the queue), else its top, lost.  When the track
+ * at its place isn't this player's any more (another player removed it, or a
  * full queue's insert dropped it), that place, lost: next is the track
  * that took its place. */
 static void step_base(music_player_t *p, user_music_queue_t *uq, music_nav_request_t *rq) {
@@ -150,7 +149,7 @@ static const char *queue_path_at(void *ctx, int index) {
    return ((const user_music_queue_t *)ctx)->queue[index].path;
 }
 
-/* What plays next from the session's place (step_base()), by music_nav_pick() */
+/* What plays next from the player's place (step_base()), by music_nav_pick() */
 static void pick(music_player_t *p,
                  user_music_queue_t *uq,
                  music_nav_request_t *rq,
@@ -225,7 +224,7 @@ void music_player_snapshot(music_player_t *p, music_player_status_t *out) {
    pthread_mutex_unlock(&uq->queue_mutex);
 }
 
-/* The session's history, cleared first if the queue was replaced since */
+/* The player's history, cleared first if the queue was replaced since */
 static music_history_t *history_of(music_player_t *p, user_music_queue_t *uq) {
    music_history_sync(&p->history, uq->replace_epoch);
    return &p->history;
@@ -262,7 +261,7 @@ static void *prefetch_thread(void *arg) {
       audio_decoder_close(decoder);
    }
    if (keep) {
-      OLOG_INFO("WebUI music: Prefetched %s", path);
+      OLOG_INFO("Music player: Prefetched %s", path);
    }
    return NULL;
 }
@@ -426,7 +425,7 @@ music_advance_t music_player_advance(music_player_t *p, bool track_failed, int *
          return MUSIC_ADVANCE_EXIT;
       }
 
-      /* After another tab replaced the queue: from the ended track's position in
+      /* After another player replaced the queue: from the ended track's position in
        * the new one, or its top when it doesn't hold the track (nothing to replay) */
       music_nav_request_t rq = {
          .reason = MUSIC_NAV_AUTO,
@@ -458,7 +457,7 @@ music_advance_t music_player_advance(music_player_t *p, bool track_failed, int *
          if (stop_error) {
             notify_error(p, MUSIC_ERROR_DECODE, stop_error);
          }
-         /* Tagged like a natural advance: the client still holds the ended
+         /* Tagged like a natural advance: the listener still holds the ended
           * track's last ~2 s and plays them out before showing the stop */
          notify_state(p, true);
          return MUSIC_ADVANCE_STOPPED;
@@ -475,7 +474,7 @@ music_advance_t music_player_advance(music_player_t *p, bool track_failed, int *
       pthread_mutex_unlock(&p->state_mutex);
       pthread_mutex_unlock(&uq->queue_mutex);
 
-      /* A remote track downloads first: tell the client (tagged, so it applies
+      /* A remote track downloads first: tell the listener (tagged, so it applies
        * once the ended track's buffered audio has played) */
       if (loading) {
          notify_state(p, true);
@@ -496,7 +495,7 @@ bool music_player_run_pending_open(music_player_t *p, int *failures) {
    uint32_t seq = p->pending_seq;
    pthread_mutex_unlock(&p->state_mutex);
 
-   /* Open without the lock: a Plex track is downloaded first.  A request that
+   /* Open without the lock: a remote track is downloaded first.  A request that
     * stops this thread sets stop_requested, which cancels the download, so its
     * join waits about a second at most.  Every path that replaces the decoder
     * stops this thread first, so nothing else installs one meanwhile. */
@@ -527,10 +526,10 @@ bool music_player_run_pending_open(music_player_t *p, int *failures) {
    if (decoder) {
       music_install_decoder(p, decoder, read_frames);
       publish_open(p, seq, MUSIC_OPEN_PLAYING);
-      OLOG_INFO("WebUI music: Playing %s (%s %u Hz, %u ch)", path,
+      OLOG_INFO("Music player: Playing %s (%s %u Hz, %u ch)", path,
                 audio_decoder_format_name(p->source_format), p->source_rate, p->source_channels);
       pthread_mutex_unlock(&p->state_mutex);
-      /* An auto-advance stays tagged so the client keeps its buffered lead */
+      /* An auto-advance stays tagged so the listener keeps its buffered lead */
       notify_state(p, is_auto);
       prefetch_plan(p);
       return true;
@@ -576,12 +575,12 @@ bool music_player_run_pending_open(music_player_t *p, int *failures) {
       p->playing = false;
       pthread_mutex_unlock(&p->state_mutex);
       notify_error(p, MUSIC_ERROR_UNREACHABLE, "The Plex server isn't reachable");
-      /* Tagged: the client plays out the ended track's last seconds first */
+      /* Tagged: the listener plays out the ended track's last seconds first */
       notify_state(p, true);
       return true;
    }
 
-   OLOG_WARNING("WebUI music: Couldn't open %s%s", path, repeat_one ? "" : ", skipping it");
+   OLOG_WARNING("Music player: Couldn't open %s%s", path, repeat_one ? "" : ", skipping it");
    (*failures)++;
    if (*failures == 1) {
       notify_error(p, MUSIC_ERROR_DECODE,
@@ -622,7 +621,7 @@ music_open_result_t music_player_await(music_player_t *p, uint32_t ticket, int t
          break;
       }
       if (atomic_load(&p->control_cancel)) {
-         break; /* a browser control wants the lock; the open carries on */
+         break; /* a preempting request wants the lock; the open carries on */
       }
       if (pthread_cond_timedwait(&p->open_cond, &p->state_mutex, &deadline) == ETIMEDOUT) {
          break;
@@ -634,11 +633,11 @@ music_open_result_t music_player_await(music_player_t *p, uint32_t ticket, int t
 
 /* Where a next/previous step lands, -1 for nowhere.  With commit the step is
  * made (the history moves, or the pick is recorded); without, nothing changes
- * but an adoption after another tab's replace and stale history entries, and a
+ * but an adoption after another player's replace and stale history entries, and a
  * shuffle next returns 0 to mean "a move happens" (its pick is drawn only when
  * committed). */
 static int nav_pick(music_player_t *p, user_music_queue_t *uq, music_nav_dir_t dir, bool commit) {
-   /* After another tab's replace, from where the new queue holds the track
+   /* After another player's replace, from where the new queue holds the track
     * (adopted), so a shuffle pick doesn't land on it again */
    music_nav_request_t rq = {
       .reason = MUSIC_NAV_USER,
@@ -692,7 +691,7 @@ bool music_player_step(music_player_t *p,
    pthread_mutex_unlock(&p->state_mutex);
    pthread_mutex_unlock(&uq->queue_mutex);
    if (!path_out[0]) {
-      /* Another tab changed the queue during the stop: nothing to move to
+      /* Another player changed the queue during the stop: nothing to move to
        * after all, so the current track plays on (if the track had just ended,
        * there's nothing left to play and the restarted thread idles) */
       music_player_start_thread(p);
@@ -732,7 +731,7 @@ int music_player_play(music_player_t *p, const char *path, int hint, uint32_t *t
 
    /* Set everything the caller's own state frame reports, so it describes
     * the new track (the thread's frame once it plays then matches it, and the
-    * client doesn't flush twice).  Lock order: queue, then state. */
+    * listener doesn't flush twice).  Lock order: queue, then state. */
    user_music_queue_t *uq = p->shared_queue;
    pthread_mutex_lock(&uq->queue_mutex);
    pthread_mutex_lock(&p->state_mutex);

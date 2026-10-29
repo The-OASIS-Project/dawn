@@ -42,6 +42,19 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - `music_nav_pick()`: end of queue, repeat-all/one, failure caps (`MUSIC_NAV_MAX_FAILED`),
      shuffle; pure, the caller holds its queue's lock
 
+- **music_player.c, music_player_track.c, music_player.h**: The music player
+   - Plays a user's queue (shared with the user's other players; each keeps its own place,
+     which follows their edits) to one output given as `music_output_ops_t`: `track_begin`,
+     `write` (paces the player), `halt` (pause, flush, idle) and `notify` (state, position,
+     error), each on the player's thread with no player lock held
+   - Its thread opens the pending track (`music_open_track()`), applies seeks, reads the
+     decoder, writes to the output, and at a track's end picks the next with `music_nav_pick()`,
+     skipping tracks that won't open; a helper prefetches the next remote track
+   - Controls under its control lock (play, step, stop, remove, clear, await a track's
+     outcome) and without it (pause, seek, snapshot); internals in `music_player_internal.h`
+   - Used by the WebUI stream today (`webui_music.c` is its output); the local speaker
+     (`flac_playback.c`) still plays on its own
+
 - **music_db.c/h**: Unified music metadata database
    - SQLite-based cache for artist/title/album/genre tags with source tracking
    - Multi-source support (local files + Plex) via `music_source_t` enum
