@@ -1004,6 +1004,7 @@ class Link:
         if cfg["mqtt"].get("tls"):
             self.client.tls_set(ca_certs=cfg["mqtt"].get("ca_file") or None)
         self.client.on_connect = self.on_connect
+        self.client.on_disconnect = self.on_disconnect
         self.client.on_message = self.on_message
 
     @staticmethod
@@ -1021,12 +1022,20 @@ class Link:
             log.error("MQTT connect failed: %s", reason_code)
             return
         log.info("MQTT connected")
-        # Events missed while away can't be trusted; the presence stands until
-        # dawn/status (retained) says otherwise.
+        # Events missed while away can't be trusted.  DAWN counts as gone since
+        # the link dropped (on_disconnect) until its retained dawn/status says.
         self.dawn.reset(self.dawn.dawn_online)
         client.subscribe([(EVENTS_TOPIC, 0), (DAWN_STATUS_TOPIC, 1)])
         if self.online:
             self.publish_status(True)
+
+    def on_disconnect(self, client, userdata, flags, reason_code, properties) -> None:
+        """Nothing DAWN does now reaches the bridge: as if it had gone, so a
+        turn in progress (thinking has no ceiling) doesn't hold the robot in
+        it.  offline_grace_s covers a quick reconnect."""
+        if self.dawn.dawn_online:
+            log.warning("MQTT disconnected (%s)", reason_code)
+            self.dawn.reset(False)
 
     def on_message(self, client, userdata, msg) -> None:
         try:
@@ -1123,11 +1132,11 @@ def main() -> int:
             with ReachyMini(connection_mode="localhost_only", media_backend="no_media",
                             port=cfg["daemon"]["port"]) as mini:
                 log.info("connected to the Reachy Mini daemon")
-                down_since = None
+                # Online (to DAWN) only once the mixer has held: one that fails at
+                # once, over and over, mustn't keep the outage timer at zero.
                 connected_at = time.monotonic()
-                link.publish_status(True)
                 mixer = Mixer(cfg, mini, dawn, doa, speech, moves)
-                last_beat = time.monotonic()
+                last_beat = 0.0  # set when it turns healthy
                 mixer_thread = threading.Thread(target=mixer.run, args=(stop,), daemon=True)
                 mixer_thread.start()
                 while not stop.is_set() and mixer_thread.is_alive():
@@ -1137,7 +1146,10 @@ def main() -> int:
                     if connected_at and time.monotonic() - connected_at >= HEALTHY_S:
                         recovery.connected()
                         connected_at = 0.0
-                    if time.monotonic() - last_beat >= HEARTBEAT_SEC:
+                        down_since = None
+                        link.publish_status(True)
+                        last_beat = time.monotonic()
+                    if not connected_at and time.monotonic() - last_beat >= HEARTBEAT_SEC:
                         link.publish_status(True)
                         last_beat = time.monotonic()
                 if stop.is_set():
