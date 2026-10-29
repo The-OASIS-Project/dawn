@@ -353,6 +353,25 @@ void handle_get_config(ws_connection_t *conn) {
  * over the wire must not be able to bypass the bounds the TOML path enforces.
  *
  * Checklist: docs/CONFIGURATION_GUIDE.md.  Guard: tests/test_config_roundtrip.c. */
+/* [llm.cloud] provider: empty (not selected) or one of the providers config_validate
+ * accepts. */
+static bool cloud_provider_setting_valid(const char *provider) {
+   return provider[0] == '\0' || strcmp(provider, "openai") == 0 ||
+          strcmp(provider, "claude") == 0 || strcmp(provider, "gemini") == 0 ||
+          strcmp(provider, "openrouter") == 0;
+}
+
+/* The provider a set_config payload names, or NULL when it names none. */
+static const char *payload_cloud_provider(struct json_object *payload) {
+   struct json_object *llm, *cloud, *provider;
+   if (json_object_object_get_ex(payload, "llm", &llm) &&
+       json_object_object_get_ex(llm, "cloud", &cloud) &&
+       json_object_object_get_ex(cloud, "provider", &provider)) {
+      return json_object_get_string(provider);
+   }
+   return NULL;
+}
+
 static void apply_config_from_json(dawn_config_t *config, struct json_object *payload) {
    struct json_object *section;
 
@@ -450,16 +469,15 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
 
       struct json_object *cloud;
       if (json_object_object_get_ex(section, "cloud", &cloud)) {
+         /* handle_set_config refuses an unknown provider before applying; this keeps the
+          * previous value rather than picking a vendor if one ever gets here. */
+         char old_provider[sizeof(config->llm.cloud.provider)];
+         safe_strscpy(old_provider, config->llm.cloud.provider);
          JSON_TO_CONFIG_STR(cloud, "provider", config->llm.cloud.provider);
-         /* Validate cloud provider - must be openai, claude, gemini, or openrouter */
-         if (config->llm.cloud.provider[0] != '\0' &&
-             strcmp(config->llm.cloud.provider, "openai") != 0 &&
-             strcmp(config->llm.cloud.provider, "claude") != 0 &&
-             strcmp(config->llm.cloud.provider, "gemini") != 0 &&
-             strcmp(config->llm.cloud.provider, "openrouter") != 0) {
-            OLOG_WARNING("WebUI: Invalid cloud.provider '%s', using 'openai'",
-                         config->llm.cloud.provider);
-            safe_strscpy(config->llm.cloud.provider, "openai");
+         if (!cloud_provider_setting_valid(config->llm.cloud.provider)) {
+            OLOG_WARNING("WebUI: Invalid cloud.provider '%s', keeping '%s'",
+                         config->llm.cloud.provider, old_provider);
+            safe_strscpy(config->llm.cloud.provider, old_provider);
          }
          JSON_TO_CONFIG_STR(cloud, "endpoint", config->llm.cloud.endpoint);
          JSON_TO_CONFIG_BOOL(cloud, "vision_enabled", config->llm.cloud.vision_enabled);
@@ -1308,6 +1326,18 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
    json_object *response = json_object_new_object();
    json_object_object_add(response, "type", json_object_new_string("set_config_response"));
    json_object *resp_payload = json_object_new_object();
+
+   /* An unknown provider is refused, not replaced: DAWN never picks a vendor for the user. */
+   const char *provider = payload_cloud_provider(payload);
+   if (provider && !cloud_provider_setting_valid(provider)) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Unknown cloud provider"));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn, response);
+      json_object_put(response);
+      return;
+   }
 
    /* Get the config file path */
    const char *config_path = config_get_loaded_path();

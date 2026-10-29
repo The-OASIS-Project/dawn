@@ -393,6 +393,20 @@
                options: ['cloud', 'local'],
                hint: 'Server default: cloud uses APIs, local uses llama-server. Users can override per-session.',
             },
+            cloud_provider: {
+               type: 'select',
+               label: 'Cloud Provider',
+               configPath: 'llm.cloud.provider',
+               options: [
+                  { value: '', label: 'Not selected' },
+                  'openai',
+                  'claude',
+                  'gemini',
+                  'openrouter',
+               ],
+               showWhen: { key: 'llm.type', value: 'cloud' },
+               hint: 'Which cloud service handles chat. A provider\'s API key is used only when it is selected here; Not selected uses the local LLM. OpenRouter fronts many vendors via one key — its model list uses "vendor/model" IDs.',
+            },
             max_tokens: {
                type: 'number',
                label: 'Max Tokens',
@@ -405,12 +419,6 @@
                label: 'Cloud Settings',
                advanced: true,
                fields: {
-                  provider: {
-                     type: 'select',
-                     label: 'Provider',
-                     options: ['openai', 'claude', 'gemini', 'openrouter'],
-                     hint: 'Cloud LLM provider. OpenRouter fronts many vendors via one key — its model list uses "vendor/model" IDs.',
-                  },
                   endpoint: {
                      type: 'text',
                      label: 'Custom Endpoint',
