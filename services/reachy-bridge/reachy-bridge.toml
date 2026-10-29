@@ -91,6 +91,9 @@ antenna_deg = 60
 
 [moments]
 clip_sway = 0.3              # speech motion under a playing expression (1.0 = unchanged)
+think_after_s = 2.5          # thinking this long with nothing said: a look from the `thinking` moves
+think_repeat_gap_s = 4.0     # and another only this long after the last one ended
+yawn = { moves = ["tired1"], scale = 0.6 }   # before the idle sleep; "" for none
 
 # DAWN's expression vocabulary -> moves from the clips dataset, picked at random
 # (never the one just played; none of the last three while others remain).  Names must match EMOTE_FEELINGS and

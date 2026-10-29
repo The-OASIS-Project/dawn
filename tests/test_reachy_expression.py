@@ -110,5 +110,76 @@ class PickerTest(unittest.TestCase):
         self.assertEqual([picker.pick(["only"]) for _ in range(3)], ["only"] * 3)
 
 
+class EndRuleTest(unittest.TestCase):
+    def test_a_tag_ends_every_kind(self):
+        for kind in ("model", "think", "greet", "yawn"):
+            self.assertTrue(expression.clip_should_end(kind, "speaking", True, "idle"))
+
+    def test_each_kind_lasts_while_its_moment_does(self):
+        end = expression.clip_should_end
+        self.assertFalse(end("model", "speaking", False, None))
+        self.assertTrue(end("model", "idle", False, None))
+        self.assertFalse(end("think", "thinking", False, None))
+        self.assertTrue(end("think", "speaking", False, None))
+        self.assertFalse(end("greet", "speaking", False, None))
+        self.assertFalse(end("greet", "idle", False, None))
+        self.assertTrue(end("greet", "listening", False, None))
+        self.assertFalse(end("yawn", "idle", False, "idle"))
+        self.assertTrue(end("yawn", "idle", False, None))
+
+
+class ThinkTimerTest(unittest.TestCase):
+    def test_after_threshold_then_gap(self):
+        t = expression.ThinkTimer(2.5, 4.0)
+        t.update(True, 10.0)
+        self.assertFalse(t.due(12.0))
+        self.assertTrue(t.due(12.5))
+        t.clip_ended(14.0)
+        self.assertFalse(t.due(17.0))
+        self.assertTrue(t.due(18.0))
+
+    def test_new_stretch_rearms(self):
+        t = expression.ThinkTimer(2.5, 4.0)
+        t.update(True, 0.0)
+        t.clip_ended(4.0)
+        t.update(False, 4.5)  # she speaks a line
+        self.assertFalse(t.due(5.0))
+        t.update(True, 6.0)  # and thinks again: the gap doesn't carry over
+        self.assertFalse(t.due(8.0))
+        self.assertTrue(t.due(8.5))
+
+
+class GreetingTest(unittest.TestCase):
+    def test_no_greeting_without_a_wake(self):
+        g = expression.Greeting(0.0)
+        self.assertFalse(g.sentence(5.0, 5.0, True))
+
+    def test_first_untagged_sentence_after_a_wake(self):
+        g = expression.Greeting(0.0)
+        g.woke(10.0)
+        self.assertFalse(g.sentence(0.0, 11.0, True))  # nothing said yet
+        self.assertTrue(g.sentence(12.0, 12.0, True))
+        self.assertFalse(g.sentence(15.0, 15.0, True))  # once
+
+    def test_a_tagged_sentence_drops_it(self):
+        g = expression.Greeting(0.0)
+        g.woke(10.0)
+        self.assertFalse(g.sentence(12.0, 12.0, False))
+        self.assertFalse(g.sentence(15.0, 15.0, True))  # dropped, not saved
+
+    def test_expires(self):
+        g = expression.Greeting(0.0)
+        g.woke(10.0)
+        self.assertFalse(g.sentence(50.0, 50.0, True))
+
+
+class MomentSecondsTest(unittest.TestCase):
+    def test_moment_seconds(self):
+        self.assertEqual(expression.moment_seconds({}, "x", 2.5), 2.5)
+        self.assertEqual(expression.moment_seconds({"x": 3}, "x", 2.5), 3.0)
+        self.assertEqual(expression.moment_seconds({"x": -1}, "x", 2.5), 2.5)
+        self.assertEqual(expression.moment_seconds({"x": True}, "x", 2.5), 2.5)
+
+
 if __name__ == "__main__":
     unittest.main()

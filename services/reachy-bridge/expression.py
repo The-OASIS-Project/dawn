@@ -88,3 +88,86 @@ class MovePicker:
         move = self.rng.choice(candidates or moves)  # only a one-move name repeats
         self.recent = (self.recent + [move])[-RECENT_MOVES:]
         return move
+
+
+# --------------------------------------------------------------------------
+# Moments: clips the bridge starts itself, and when any clip ends
+# --------------------------------------------------------------------------
+
+GREET_EXPIRE_S = 30.0  # a greeting not used by then is dropped (a later alarm never greets)
+
+
+def moment_seconds(moments: dict, key: str, default: float) -> float:
+    """A [moments] duration, checked: positive seconds."""
+    value = moments.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        log.warning("[moments] %s %r must be positive seconds, using %s", key, value, default)
+        return default
+    return float(value)
+
+
+def clip_should_end(kind: str, mode: str, tag_queued: bool, sleep_reason) -> bool:
+    """Whether the playing clip should fade out now.  A tag from the model
+    always wins; otherwise each kind lasts while its moment does."""
+    if tag_queued:
+        return True
+    if kind == "model":
+        return mode != "speaking"  # the expression lasts while she speaks
+    if kind == "think":
+        return mode != "thinking"
+    if kind == "greet":
+        return mode == "listening"  # the user started talking
+    if kind == "yawn":
+        return sleep_reason != "idle"  # something happened: stay awake
+    return False
+
+
+class ThinkTimer:
+    """The long-think clip: after after_s of continuous thinking, and again only
+    repeat_gap_s after the last one ended, so a long wait gets an occasional
+    look, not a loop.  Each new stretch of thinking (a tool loop thinks, speaks
+    a line, thinks again) starts over."""
+
+    def __init__(self, after_s: float, repeat_gap_s: float):
+        self.after = after_s
+        self.gap = repeat_gap_s
+        self.since = None
+        self.last_end = None
+
+    def update(self, thinking: bool, now: float) -> None:
+        if not thinking:
+            self.since = None
+        elif self.since is None:
+            self.since = now
+            self.last_end = None
+
+    def due(self, now: float) -> bool:
+        return (self.since is not None and now - self.since >= self.after and
+                (self.last_end is None or now - self.last_end >= self.gap))
+
+    def clip_ended(self, now: float) -> None:
+        self.last_end = now
+
+
+class Greeting:
+    """A wave when the robot wakes from sleep, shown on the next sentence DAWN
+    says if that sentence brought no tag of its own (a tagged one wins, and the
+    greeting is dropped, not saved).  DAWN starting is the same moment: by then
+    the robot has gone to sleep, and DAWN's untagged boot line is the sentence."""
+
+    def __init__(self, speaking_since: float):
+        self.pending_at = None
+        self.seen = speaking_since  # DAWN's last sentence start already seen
+
+    def woke(self, now: float) -> None:
+        self.pending_at = now
+
+    def sentence(self, speaking_since: float, now: float, free: bool) -> bool:
+        """Called every tick with DAWN's latest sentence start.  True when a new
+        sentence should carry the greeting; @p free is no clip playing and no
+        tag waiting."""
+        if speaking_since == self.seen:
+            return False
+        self.seen = speaking_since
+        pending, self.pending_at = self.pending_at, None
+        return pending is not None and now - pending <= GREET_EXPIRE_S and free

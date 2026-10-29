@@ -115,6 +115,7 @@ def pose_from_matrix(head: np.ndarray, antennas, neutral_antennas: np.ndarray) -
 
 @dataclass
 class Clip:
+    kind: str     # model (a tag), think, greet or yawn: each ends its own way
     move: object  # a RecordedMove
     name: str     # the move's name, for the log
     started: float
@@ -142,7 +143,9 @@ class DawnState:
         self.speaking = False
         self.speaking_end_at = 0.0
         self.speaking_since = 0.0
-        self.offline_since = 0.0
+        # As if DAWN had only just gone: until its retained status arrives, a
+        # starting bridge mustn't put the robot through a sleep and a rise.
+        self.offline_since = time.monotonic()
         self.last_activity = time.monotonic()  # a turn or speech: keeps the robot awake
         self.expressions: "queue.Queue[str]" = queue.Queue(maxsize=4)
         self.last_expression = 0.0
@@ -221,18 +224,22 @@ class DawnState:
                 except queue.Full:
                     pass
 
-    def awake_wanted(self) -> bool:
-        """Awake while DAWN is online and something happened in the last
-        sleep_after_s.  Speech near the mic alone (WAKEWORD_LISTEN: the TV,
-        people talking) doesn't count, or it would never sleep."""
+    def sleep_reason(self) -> str | None:
+        """None while it should be awake: DAWN online and something happened in
+        the last sleep_after_s.  "idle" when the timer ran out (the robot yawns
+        first), "offline" when DAWN is gone (it sleeps at once).  Speech near the
+        mic alone (WAKEWORD_LISTEN: the TV, people talking) doesn't count, or it
+        would never sleep."""
         # Briefly offline counts as online: a quick reconnect (its will says
         # offline, then online again) shouldn't put it through a sleep and wake.
         if (not self.dawn_online and
                 time.monotonic() - self.offline_since >= self.cfg["timing"]["offline_grace_s"]):
-            return False
+            return "offline"
         if self.mode() != "idle":
-            return True
-        return time.monotonic() - self.last_activity < self.cfg["idle"].get("sleep_after_s", 900)
+            return None
+        if time.monotonic() - self.last_activity < self.cfg["idle"].get("sleep_after_s", 900):
+            return None
+        return "idle"
 
     def mode(self) -> str:
         """idle / listening / thinking / speaking, with the speaking gaps debounced."""
@@ -684,6 +691,10 @@ class Mixer:
         self.clip: Clip | None = None
         self.clip_weight = 0.0  # how much of the clip is showing (its fades)
         self.picker = expression.MovePicker()
+        moments = cfg["moments"]
+        self.think = expression.ThinkTimer(moments["think_after_s"], moments["think_repeat_gap_s"])
+        self.greeting = expression.Greeting(dawn.speaking_since)
+        self.yawned = False
         self.awake = None  # unknown until the first decision
         self.speech_sent = True  # clear what an earlier mixer may have left
 
@@ -700,24 +711,28 @@ class Mixer:
             np.radians(np.array([i["antenna_drift_deg"], -i["antenna_drift_deg"]])) * drift,
         ).scaled(damp)
 
-    def start_clip(self, name: str) -> None:
-        if self.moves is None:
+    def start_clip(self, kind: str, name: str, spec: dict | None) -> None:
+        """@p spec: a normalized {"moves", "scale"} entry (every move exists), or
+        None when that expression or moment isn't configured."""
+        if self.moves is None or spec is None:
             return
-        spec = self.cfg["expressions"][name]  # normalized: every move exists
         move_name = self.picker.pick(spec["moves"])
         try:
             move = self.moves.get(move_name)
         except Exception as e:
-            log.warning("expression %s: move %s failed to load: %s", name, move_name, e)
+            log.warning("%s %s: move %s failed to load: %s", kind, name, move_name, e)
             return
-        self.clip = Clip(move, move_name, time.monotonic(), move.duration, spec["scale"])
-        log.info("expression %s (%s, up to %.1fs)", name, move_name, move.duration)
+        self.clip = Clip(kind, move, move_name, time.monotonic(), move.duration, spec["scale"])
+        if kind == "model":
+            log.info("expression %s (%s, up to %.1fs)", name, move_name, move.duration)
+        else:
+            log.info("moment %s (%s, up to %.1fs)", kind, move_name, move.duration)
 
     def end_clip(self) -> None:
-        """Fade the clip out now, once it has had its minimum hold (its sentence's
-        speech may not have started yet when it does)."""
+        """Fade the clip out now.  A tag's clip first has its minimum hold (its
+        sentence's speech may not have started yet when it does)."""
         age = time.monotonic() - self.clip.started
-        if age >= self.cfg["timing"].get("clip_min_s", 1.0):
+        if self.clip.kind != "model" or age >= self.cfg["timing"].get("clip_min_s", 1.0):
             self.clip.end = min(self.clip.end, age + self.cfg["timing"]["clip_fade_out_s"])
 
     def clip_pose(self, base: Pose) -> Pose:
@@ -726,7 +741,10 @@ class Mixer:
         if age >= clip.end:
             # How much of each clip gets shown, to judge whether picking moves
             # by sentence length is worth it.
-            log.info("clip %s played %.1f of %.1f s", clip.name, clip.end, clip.move.duration)
+            log.info("clip %s %s played %.1f of %.1f s", clip.kind, clip.name, clip.end,
+                     clip.move.duration)
+            if clip.kind == "think":
+                self.think.clip_ended(time.monotonic())
             self.clip = None
             self.clip_weight = 0.0
             return base
@@ -773,7 +791,8 @@ class Mixer:
         self.clip = None
         self.clip_weight = 0.0
         self.current = Pose()
-        self.dawn.drain_expressions()
+        if not awake:
+            self.dawn.drain_expressions()  # waking keeps the tag of the sentence that woke it
         self.mini.client.send_command(SetSpeechOffsetsCmd(offsets=[0.0] * 6))
         self.speech_sent = False
         # The daemon starts with torque off; asleep, the robot rests in its sleep
@@ -790,6 +809,45 @@ class Mixer:
             log.info("going to sleep")
             self.mini.goto_sleep()
             self.mini.disable_motors()
+
+    def stay_awake(self, reason: str | None) -> bool:
+        """The sleep timer running out yawns first: awake until the yawn (or a
+        clip already playing) is over.  DAWN going offline sleeps at once."""
+        if reason is None:
+            self.yawned = False
+            return True
+        if reason == "idle" and self.awake:
+            if self.clip is None and not self.yawned:
+                self.yawned = True
+                self.start_clip("yawn", "yawn", self.cfg["moments"]["yawn"])
+            return self.clip is not None
+        return False
+
+    def moments(self, mode: str, reason: str | None, now: float) -> None:
+        """Which clip plays: the model's tags first, then the bridge's own."""
+        queued = not self.dawn.expressions.empty()
+        # A clip fades out when its moment is over, or for a newer tag (cutting
+        # it off would jump the head).
+        if self.clip is not None and expression.clip_should_end(self.clip.kind, mode, queued,
+                                                                 reason):
+            self.end_clip()
+        if self.clip is None:
+            name = None  # only the newest of the tags waiting is worth showing
+            while True:
+                try:
+                    name = self.dawn.expressions.get_nowait()
+                except queue.Empty:
+                    break
+            if name is not None:
+                self.start_clip("model", name, self.cfg["expressions"][name])
+        self.think.update(mode == "thinking", now)
+        free = self.clip is None and self.dawn.expressions.empty()
+        if self.greeting.sentence(self.dawn.speaking_since, now, free):
+            self.start_clip("greet", "greeting", self.cfg["expressions"].get("greeting"))
+        elif free and self.think.due(now):
+            self.start_clip("think", "thinking", self.cfg["expressions"].get("thinking"))
+            if self.clip is None:  # none configured, or it failed to load: not every tick
+                self.think.clip_ended(now)
 
     def run(self, stop: threading.Event) -> None:
         try:
@@ -815,30 +873,19 @@ class Mixer:
             dt, last = min(tick - last, slow), tick
             self.dawn.changed.clear()
             was_awake = self.awake
-            self.set_awake(self.dawn.awake_wanted())
+            reason = self.dawn.sleep_reason()
+            self.set_awake(self.stay_awake(reason))
             if self.awake != was_awake:
-                # Waking blocked ~2.5 s in the wake-up move: start timing afresh.
+                # Waking blocked ~2 s in the rise: start timing afresh.
                 tick = last = time.monotonic()
                 dt = fast
+                if self.awake and was_awake is False:  # not the bridge's own first decision
+                    self.greeting.woke(tick)
             period = slow
             if self.awake:
                 t = tick - t0
                 mode = self.dawn.mode()
-                # An expression lasts while she speaks, up to its clip's length.  A
-                # newer one fades it out first (cutting it off would jump the head);
-                # only the newest of those waiting is worth showing.
-                if self.clip is not None and (mode != "speaking" or
-                                              not self.dawn.expressions.empty()):
-                    self.end_clip()
-                if self.clip is None:
-                    name = None
-                    while True:
-                        try:
-                            name = self.dawn.expressions.get_nowait()
-                        except queue.Empty:
-                            break
-                    if name is not None:
-                        self.start_clip(name)
+                self.moments(mode, reason, tick)
 
                 gaze = self.doa.yaw(engaged=mode != "idle")
                 target = self.postures[mode] + Pose(rpy=np.array([0.0, 0.0, gaze]))
@@ -1023,8 +1070,13 @@ def main() -> int:
     # Before anything reads it: only names with a move the library has.
     cfg["expressions"] = expression.normalize_expressions(
         cfg["expressions"], moves.list_moves() if moves else None)
-    cfg.setdefault("moments", {})
-    cfg["moments"]["clip_sway"] = expression.clip_sway(cfg["moments"])
+    m = cfg.setdefault("moments", {})
+    m["clip_sway"] = expression.clip_sway(m)
+    m["think_after_s"] = expression.moment_seconds(m, "think_after_s", 2.5)
+    m["think_repeat_gap_s"] = expression.moment_seconds(m, "think_repeat_gap_s", 4.0)
+    yawn = m.get("yawn", {"moves": ["tired1"], "scale": 0.6})  # "" turns it off
+    m["yawn"] = expression.normalize_expressions(
+        {"yawn": yawn}, moves.list_moves() if moves else None).get("yawn") if yawn else None
 
     dawn = DawnState(cfg)
     doa = DoaTracker(cfg)
