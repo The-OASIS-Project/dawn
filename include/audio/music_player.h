@@ -139,8 +139,9 @@ typedef struct {
  * @brief A player for a queue, rendering to an output
  *
  * Attaches its place to the queue (it follows other players' edits) and
- * starts no thread.  Takes over the caller's music_queue_acquire()
- * reference; on failure the caller keeps it.
+ * starts no thread, so an output can be handed the player after this returns
+ * (for music_player_interrupted()).  Takes over the caller's
+ * music_queue_acquire() reference; on failure the caller keeps it.
  *
  * @return The player, or NULL if it couldn't be created
  */
