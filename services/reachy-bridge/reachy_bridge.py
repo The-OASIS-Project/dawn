@@ -825,7 +825,10 @@ class Mixer:
             if self.clip is None and not self.yawned:
                 self.yawned = True
                 self.start_clip("yawn", "yawn", self.cfg["moments"]["yawn"])
-            return self.clip is not None
+            # Someone spoke as it was falling asleep: DAWN only knows whether it was the
+            # wake word once the utterance ends, so sleep waits for that check
+            # (speech alone still doesn't keep it awake).
+            return self.clip is not None or self.dawn.state == "WAKEWORD_LISTEN"
         return False
 
     def moments(self, mode: str, reason: str | None, now: float) -> None:
