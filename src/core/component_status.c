@@ -65,17 +65,20 @@ typedef enum {
 typedef struct {
    const char *topic;
    const char *name;
+   /* What follows it coming or going, called with no lock held.  @p was_seen:
+    * it had been online before since DAWN started. */
+   void (*changed)(bool online, bool was_seen);
    bool online;
+   bool seen;
    time_t last_seen;
 } peer_t;
 
-/* The body has been online since DAWN started: only then is its coming back news
- * (at start-up the standing directions say it). */
-static bool s_reachy_seen = false;
+static void hud_changed(bool online, bool was_seen);
+static void reachy_changed(bool online, bool was_seen);
 
 static peer_t s_peers[PEER_COUNT] = {
-   [PEER_HUD] = { STATUS_TOPIC_HUD, "HUD", false, 0 },
-   [PEER_REACHY] = { STATUS_TOPIC_REACHY, "Reachy", false, 0 },
+   [PEER_HUD] = { STATUS_TOPIC_HUD, "HUD", hud_changed, false, false, 0 },
+   [PEER_REACHY] = { STATUS_TOPIC_REACHY, "Reachy", reachy_changed, false, false, 0 },
 };
 
 /* =============================================================================
@@ -132,7 +135,11 @@ static int publish_status(struct mosquitto *mosq, const char *status, bool retai
 /**
  * @brief The HUD came or went: the armor tools follow it
  */
-static void hud_changed(void) {
+static void hud_changed(bool online, bool was_seen) {
+   (void)was_seen;
+   if (online && s_mosq) {
+      hud_discovery_request_update(s_mosq); /* what it offers now */
+   }
    llm_tools_refresh();
    llm_tools_invalidate_cache();
    /* Each conversation's next turn tells the model what is unavailable
@@ -148,6 +155,8 @@ static void hud_changed(void) {
  * it once, in the next turn's context.
  */
 static void reachy_changed(bool online, bool was_seen) {
+   /* Its first coming online since DAWN started isn't news: the standing
+    * directions say it. */
    if (online && !was_seen) {
       return;
    }
@@ -157,12 +166,10 @@ static void reachy_changed(bool online, bool was_seen) {
 /**
  * @brief Mark peers whose heartbeat stopped offline
  *
- * Only the HUD has anything to do when that happens; the rest are read when
- * needed (the prompt builder asks every turn).
+ * Each lost peer's changed() runs after the lock is released.
  */
 static void check_peer_timeouts(void) {
-   bool hud_lost = false;
-   bool reachy_lost = false;
+   bool lost[PEER_COUNT] = { false };
    time_t now = time(NULL);
 
    pthread_mutex_lock(&s_status_mutex);
@@ -172,17 +179,15 @@ static void check_peer_timeouts(void) {
          OLOG_WARNING("%s heartbeat timeout (%ld seconds), marking offline", peer->name,
                       (long)(now - peer->last_seen));
          peer->online = false;
-         hud_lost = hud_lost || i == PEER_HUD;
-         reachy_lost = reachy_lost || i == PEER_REACHY;
+         lost[i] = true;
       }
    }
    pthread_mutex_unlock(&s_status_mutex);
 
-   if (hud_lost) {
-      hud_changed();
-   }
-   if (reachy_lost) {
-      reachy_changed(false, true);
+   for (int i = 0; i < PEER_COUNT; i++) {
+      if (lost[i]) {
+         s_peers[i].changed(false, true); /* it was online, so seen */
+      }
    }
 }
 
@@ -328,9 +333,9 @@ void component_status_shutdown(void) {
    pthread_mutex_lock(&s_status_mutex);
    s_initialized = false;
    s_mosq = NULL;
-   s_reachy_seen = false;
    for (int i = 0; i < PEER_COUNT; i++) {
       s_peers[i].online = false;
+      s_peers[i].seen = false;
       s_peers[i].last_seen = 0;
    }
    pthread_mutex_unlock(&s_status_mutex);
@@ -396,10 +401,8 @@ void component_status_handle_message(const char *topic, const char *payload, int
    /* Update state */
    pthread_mutex_lock(&s_status_mutex);
    bool was_online = s_peers[id].online;
-   bool was_seen = s_reachy_seen;
-   if (id == PEER_REACHY && is_online) {
-      s_reachy_seen = true;
-   }
+   bool was_seen = s_peers[id].seen;
+   s_peers[id].seen = s_peers[id].seen || is_online;
    s_peers[id].online = is_online;
    if (is_online) {
       s_peers[id].last_seen = time(NULL);
@@ -413,17 +416,9 @@ void component_status_handle_message(const char *topic, const char *payload, int
                 timestamp == 0 ? "yes" : "no");
    }
 
-   if (id == PEER_REACHY && is_online != was_online) {
-      reachy_changed(is_online, was_seen);
+   if (is_online != was_online) {
+      s_peers[id].changed(is_online, was_seen);
    }
-   if (id != PEER_HUD || is_online == was_online) {
-      return;
-   }
-   /* Request discovery now that HUD is online */
-   if (is_online && s_mosq) {
-      hud_discovery_request_update(s_mosq);
-   }
-   hud_changed();
 }
 
 /* =============================================================================
