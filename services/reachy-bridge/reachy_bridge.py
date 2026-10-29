@@ -143,6 +143,8 @@ class DawnState:
         self.speaking = False
         self.speaking_end_at = 0.0
         self.speaking_since = 0.0
+        self.ack_next = False  # a bare wake word: DAWN's next sentence acknowledges it
+        self.sentence_is_ack = False  # the sentence now starting is that acknowledgement
         # As if DAWN had only just gone: until its retained status arrives, a
         # starting bridge mustn't put the robot through a sleep and a rise.
         self.offline_since = time.monotonic()
@@ -190,16 +192,19 @@ class DawnState:
                     return
                 self.state = state
                 if state == "PROCESS_COMMAND":
+                    self.ack_next = False  # its "Hello." never came (a discard): not the reply
                     self.last_activity = now  # a typed command wakes it too
                 if state == "WAKEWORD_LISTEN":
                     doa.open_window()
                 elif state == "COMMAND_RECORDING":
                     self.listening_until = now + self.cfg["timing"]["listen_hold_s"]
             elif event == "wake_word":
+                self.ack_next = msg.get("with_command") is False  # DAWN says "Hello." next
                 self.last_activity = now
                 self.listening_until = now + self.cfg["timing"]["listen_hold_s"]
                 doa.aim_from_window()
             elif event == "speaking_start":
+                self.sentence_is_ack, self.ack_next = self.ack_next, False
                 self.speaking = True
                 self.speaking_since = now
                 self.last_activity = now  # an alarm or announcement wakes it
@@ -842,7 +847,11 @@ class Mixer:
                 self.start_clip("model", name, self.cfg["expressions"][name])
         self.think.update(mode == "thinking", now)
         free = self.clip is None and self.dawn.expressions.empty()
-        if self.greeting.sentence(self.dawn.speaking_since, now, free):
+        # Not on the acknowledgement of a bare wake word: the user's command comes
+        # next, so the wave would be cut off at once (the rise says it).
+        started = self.dawn.speaking_since  # first: apply() sets the ack flag before it
+        greet_ok = free and not self.dawn.sentence_is_ack
+        if self.greeting.sentence(started, now, greet_ok):
             self.start_clip("greet", "greeting", self.cfg["expressions"].get("greeting"))
         elif free and self.think.due(now):
             self.start_clip("think", "thinking", self.cfg["expressions"].get("thinking"))
