@@ -299,9 +299,9 @@ learns the state from the next event.  Every message is an event:
 | `event` | Fields | Meaning |
 |---------|--------|---------|
 | `state_change` | `state`: `SILENCE`, `WAKEWORD_LISTEN`, `COMMAND_RECORDING`, `PROCESS_COMMAND` | The voice state machine changed state (`PROCESS_COMMAND` while a reply is being generated) |
-| `wake_word` | `with_command`: bool | The wake word was heard (no `state_change` marks this) |
+| `wake_word` | `with_command`: bool | The wake word was heard (no `state_change` marks this). Without a command, the next speech is DAWN's short acknowledgement ("Hello.") before it records the command |
 | `speaking_start` | — | Speech started playing on the local speaker |
-| `speaking_end` | `interrupted`: bool | That speech finished, or was cut off |
+| `speaking_end` | `interrupted`: bool | That speech finished, or was cut off (stopped, or discarded by a wake word) |
 | `expression` | `name`: one of DAWN's expression names (`EMOTE_FEELINGS` and `EMOTE_ACTS` in `include/core/text_filter.h`) | The sentence starting now carries this feeling or act |
 
 `surface` names the interface the event came from; only `local` (Dawn's own

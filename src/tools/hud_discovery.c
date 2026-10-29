@@ -352,7 +352,8 @@ int hud_discovery_init(struct mosquitto *mosq) {
 
    pthread_mutex_unlock(&s_discovery_mutex);
 
-   /* Discovery request is triggered by component_status when HUD comes online */
+   /* The request comes later: from component_status when the HUD comes online,
+    * and from on_connect after a reconnect. */
    return subscribe_discovery(mosq);
 }
 

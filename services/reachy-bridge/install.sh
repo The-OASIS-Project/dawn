@@ -6,7 +6,7 @@
 #
 # Installs:
 #   ~/.local/share/reachy-bridge/venv        uv-managed CPython 3.12 + reachy-mini
-#   ~/.local/share/reachy-bridge/{reachy_bridge,expression}.py
+#   ~/.local/share/reachy-bridge/{reachy_bridge,expression,audio_health}.py
 #   ~/.config/reachy-bridge/reachy-bridge.toml   (kept if it exists)
 #   ~/.config/reachy-bridge/env                  (MQTT credentials, mode 600)
 #   ~/.config/systemd/user/{reachy-mini-daemon,reachy-bridge}.service

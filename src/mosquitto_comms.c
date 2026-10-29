@@ -330,7 +330,7 @@ void on_connect(struct mosquitto *mosq, void *obj, int reason_code) {
    }
 #endif
 
-   /* Initialize HUD discovery (subscribes to hud/discovery/# and requests state) */
+   /* Initialize HUD discovery (subscribes to hud/discovery/#) */
    if (hud_discovery_init(mosq) != 0) {
       OLOG_WARNING("HUD discovery initialization failed - using defaults");
    } else if (component_status_is_hud_online()) {
