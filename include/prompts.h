@@ -175,8 +175,10 @@
    "you speak: begin a sentence with " EMOTE_TAG_OPEN "NAME] to show how you feel (NAME "   \
    "one of:" EMOTE_FEELINGS_TEXT ") or what you are doing (one of:" EMOTE_ACTS_TEXT         \
    "). Open nearly every reply with the one that fits it best: an answer that starts with " \
-   "yes or no opens with nod or no, a joke or a laugh with laugh. Add another only where "  \
-   "the mood changes, never more than one per sentence. The tag is never spoken or shown."
+   "yes or no opens with nod or no, an acknowledgement with nod, owning a small slip with " \
+   "oops, a joke or a laugh with laugh. Use thinking for working something out or going "   \
+   "to look, not for the answer itself. Add another only where the mood changes, never "    \
+   "more than one per sentence. The tag is never spoken or shown."
 
 // Told to the local voice surface's next turn when the robot body goes or comes
 // back (component_status.c); the expression directive leaves or returns with it.
