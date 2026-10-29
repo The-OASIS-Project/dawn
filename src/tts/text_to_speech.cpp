@@ -455,6 +455,7 @@ void *tts_thread_function(void *arg) {
        * mode synthesizes alarms with no playback device). */
       const bool announce = tts_handle.playback_handle != NULL;
       bool started = false;
+      bool discarded = false; /* a wake word threw it away mid-playback */
 
       // Process text-to-speech
       SynthesisResult result;
@@ -533,6 +534,7 @@ void *tts_thread_function(void *arg) {
                 if (was_paused) {
                    if (tts_playback_state == TTS_PLAYBACK_DISCARD) {
                       OLOG_WARNING("TTS unpaused to DISCARD.");
+                      discarded = true;
                       tts_playback_state = TTS_PLAYBACK_IDLE;
                       audioBuffer.clear();
                       OLOG_WARNING("Emptying TTS queue.");
@@ -740,7 +742,8 @@ void *tts_thread_function(void *arg) {
          struct json_object *fields = json_object_new_object();
          if (fields) {
             json_object_object_add(fields, "interrupted",
-                                   json_object_new_boolean(tts_stop_processing.load()));
+                                   json_object_new_boolean(discarded ||
+                                                           tts_stop_processing.load()));
          }
          dawn_events_publish("speaking_end", fields);
       }
