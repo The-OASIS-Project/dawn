@@ -138,6 +138,7 @@ class DawnState:
         self.lock = threading.Lock()
         self.cfg = cfg
         self.dawn_online = False
+        self.status_known = False  # no dawn/status yet (it's retained: one comes at once)
         self.state = "SILENCE"
         self.listening_until = 0.0
         self.speaking = False
@@ -154,18 +155,23 @@ class DawnState:
         self.unknown_names: set[str] = set()
         self.changed = threading.Event()  # wakes the mixer: a slow tick never delays a reaction
 
-    def reset(self, online: bool) -> None:
+    def reset(self, online: bool, long_gone: bool = False) -> None:
         """DAWN came or went: nothing it said before still holds (a crash mid-reply
-        never sends speaking_end)."""
+        never sends speaking_end).  @p long_gone: the first status a starting
+        bridge sees says offline, so it has been gone a while (no grace)."""
         with self.lock:
             if online and not self.dawn_online:
                 self.last_activity = time.monotonic()  # DAWN starting wakes it
             if not online and self.dawn_online:
                 self.offline_since = time.monotonic()
+            if long_gone:
+                self.offline_since = 0.0
             self.dawn_online = online
             self.state = "SILENCE"
             self.speaking = False
             self.listening_until = 0.0
+            self.ack_next = False  # an acknowledgement belongs to the DAWN that sent it
+            self.sentence_is_ack = False
         self.drain_expressions()
         self.changed.set()
 
@@ -517,8 +523,8 @@ class SpeechEnvelope:
                     data, pending = pending + data, b""
                     if len(data) % 2:
                         data, pending = data[:-1], data[-1:]
-                    x = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-                    rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
+                    x = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+                    rms = math.sqrt(float(np.dot(x, x)) / x.size) / 32768.0 if x.size else 0.0
                     target = min(1.0, rms * self.gain)
                     k = self.attack if target > self.level else self.release
                     self.level += (target - self.level) * k
@@ -691,6 +697,10 @@ class Mixer:
         self.speech = speech
         self.moves = moves
         self.neutral_antennas = np.radians(np.array(cfg["neutral"]["antennas_deg"], dtype=float))
+        lim = cfg["limits"]  # the hard clamps on every target, built once
+        self.lim_rpy = np.array(lim["rpy_deg"], dtype=float)
+        self.lim_xyz = np.array(lim["xyz_mm"], dtype=float)
+        self.lim_antenna = math.radians(lim["antenna_deg"])
         self.postures = {k: pose_from_table(v) for k, v in cfg["posture"].items()}
         self.current = Pose()
         self.clip: Clip | None = None
@@ -781,12 +791,10 @@ class Mixer:
     # -- the loop -------------------------------------------------------------
 
     def send(self, pose: Pose) -> None:
-        lim = self.cfg["limits"]
-        rpy = np.clip(pose.rpy, -np.array(lim["rpy_deg"]), np.array(lim["rpy_deg"]))
-        xyz = np.clip(pose.xyz, -np.array(lim["xyz_mm"]), np.array(lim["xyz_mm"]))
+        rpy = np.clip(pose.rpy, -self.lim_rpy, self.lim_rpy)
+        xyz = np.clip(pose.xyz, -self.lim_xyz, self.lim_xyz)
         head = create_head_pose(*xyz, *rpy, mm=True, degrees=True)
-        antennas = self.neutral_antennas + np.clip(pose.antennas, -math.radians(lim["antenna_deg"]),
-                                                   math.radians(lim["antenna_deg"]))
+        antennas = self.neutral_antennas + np.clip(pose.antennas, -self.lim_antenna, self.lim_antenna)
         self.mini.set_target(head=head, antennas=list(antennas))
 
     def set_awake(self, awake: bool) -> None:
@@ -1034,8 +1042,10 @@ class Link:
             return
         if msg.topic == DAWN_STATUS_TOPIC:
             online = data.get("status") == "online"
-            if online != self.dawn.dawn_online:
-                self.dawn.reset(online)
+            first = not self.dawn.status_known
+            self.dawn.status_known = True
+            if online != self.dawn.dawn_online or first:
+                self.dawn.reset(online, long_gone=first and not online)
                 log.info("DAWN is %s", "online" if online else "offline")
         elif msg.topic == EVENTS_TOPIC and data.get("msg_type") == "event":
             if data.get("surface") == "local":
