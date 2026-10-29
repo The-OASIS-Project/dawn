@@ -481,6 +481,12 @@ static void test_emote_strip_utf8_neighbours_untouched(void) {
    expect_emote("[emote:surprised] Café — naïve.", "Café — naïve.", "surprised");
 }
 
+static void test_emote_strip_mid_text_keeps_words_apart(void) {
+   expect_emote("Sure,[emote:happy] glad to.", "Sure, glad to.", "happy");
+   expect_emote("Sure, [emote:happy] glad to.", "Sure, glad to.", "happy");
+   expect_emote("Done.\n[emote:done] Next.", "Done.\nNext.", "done");
+}
+
 static void test_emote_strip_null_and_no_name_out(void) {
    TEST_ASSERT_FALSE(text_filter_emote_strip(NULL, NULL, 0));
    char buf[] = "[emote:calm] Ok.";
@@ -546,6 +552,7 @@ int main(void) {
    RUN_TEST(test_emote_strip_opener_any_case);
    RUN_TEST(test_emote_strip_unclosed_left_as_text);
    RUN_TEST(test_emote_strip_utf8_neighbours_untouched);
+   RUN_TEST(test_emote_strip_mid_text_keeps_words_apart);
    RUN_TEST(test_emote_strip_null_and_no_name_out);
    return UNITY_END();
 }

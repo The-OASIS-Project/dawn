@@ -512,6 +512,11 @@ bool text_filter_emote_strip(char *text, char *name_out, size_t name_size) {
             snprintf(name_out, name_size, "%s", name);
          }
       }
+      /* Its trailing space goes too, unless the tag sat against a word:
+       * "Sure,[emote:happy] glad" keeps the words apart. */
+      if (end[-1] == ' ' && s > text && !isspace((unsigned char)s[-1])) {
+         end--;
+      }
       memmove(s, end, strlen(end) + 1);
    }
    return found;
