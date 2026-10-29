@@ -533,8 +533,10 @@ Per-module locks (scoped to a single subsystem):
                                                                      then the write ring (LEAF).  Also held across the state's lazy
                                                                      creation (webui_music_state_get_or_init, the music server), which
                                                                      takes s_user_queues_mutex and loads the queue, then attaches the
-                                                                     state's place (queue_mutex), and cleanup detaches it under it;
-                                                                     nothing takes those and then teardown
+                                                                     state's place (queue_mutex); nothing takes those and then
+                                                                     teardown.  Cleanup stops the player (control_mutex, joining its
+                                                                     thread) before taking it, then under it unpublishes the state
+                                                                     and frees the player (detaching its place) and the state
   music_queue::s_user_queues_mutex (src/audio/music_queue.c)    — the per-user queue registry (held across a queue's first load
                                                                      from music.db; taken under s_music_teardown_mutex, never the reverse)
   music_queue_db::s_db_mutex (src/audio/music_queue_db.c)      — the one music.db connection queues are saved through (LEAF: held
