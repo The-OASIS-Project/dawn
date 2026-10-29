@@ -121,10 +121,8 @@ static int publish_status(struct mosquitto *mosq, const char *status, bool retai
 
    int rc = mosquitto_publish(mosq, NULL, STATUS_TOPIC_DAWN, (int)strlen(payload), payload, 1,
                               retain);
-   if (rc != MOSQ_ERR_SUCCESS) {
+   if (rc != MOSQ_ERR_SUCCESS) { /* success isn't logged: it's every heartbeat */
       OLOG_ERROR("Failed to publish dawn status: %s", mosquitto_strerror(rc));
-   } else {
-      OLOG_INFO("Published dawn status: %s", status);
    }
 
    free(payload);

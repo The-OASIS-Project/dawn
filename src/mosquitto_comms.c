@@ -589,18 +589,19 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
    }
 #endif
 
+   /* Peer status (hud/status, reachy/status): a heartbeat every 30 s, so before
+    * the per-message INFO log; component_status logs when a peer comes or goes. */
+   if (strcmp(msg->topic, STATUS_TOPIC_HUD) == 0 || strcmp(msg->topic, STATUS_TOPIC_REACHY) == 0) {
+      component_status_handle_message(msg->topic, (const char *)msg->payload, msg->payloadlen);
+      return;
+   }
+
    /* The phone's topics carry texts (a reply code received or sent, a /link
     * code, anyone's message): the phone service logs what may be kept. */
    if (strncmp(msg->topic, "echo/", 5) == 0) {
       OLOG_INFO("%s %d (%d bytes)", msg->topic, msg->qos, msg->payloadlen);
    } else {
       OLOG_INFO("%s %d %s", msg->topic, msg->qos, (char *)msg->payload);
-   }
-
-   /* Check for component status messages (hud/status, reachy/status) */
-   if (strcmp(msg->topic, STATUS_TOPIC_HUD) == 0 || strcmp(msg->topic, STATUS_TOPIC_REACHY) == 0) {
-      component_status_handle_message(msg->topic, (const char *)msg->payload, msg->payloadlen);
-      return;
    }
 
    /* Route ECHO modem daemon messages to phone service */
