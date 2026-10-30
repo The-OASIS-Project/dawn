@@ -908,7 +908,20 @@ List stored memory facts for the current user.
 (newest first), or `"created_asc"` (oldest first). An absent or unrecognized value uses
 the default.
 
-Response: `list_memory_facts_response`
+Response: `list_memory_facts_response`, with `success` (and `error` on failure), `facts`,
+`count` (facts in this page) and `has_more` (the page was full: ask again with a larger
+`offset`).  Each fact:
+
+| Field | Meaning |
+|---|---|
+| `id` | The fact's id |
+| `fact_text` | The fact |
+| `confidence` | 0 to 1 |
+| `source` | How it was stored, raw (`explicit`, `inferred`, `import`, ...) |
+| `kind` | How it was learned, as the panel shows it: `told`, `inferred`, `imported`, or `noted` (filed from a note). Absent when none applies |
+| `created_at`, `last_accessed` | Unix seconds |
+| `access_count` | Times it was recalled |
+| `source_conversation_id`, `source_msg_id_start`, `source_msg_id_end` | The conversation and message range it was learned from; present only when known |
 
 #### `list_memory_preferences`
 List stored user preferences.
