@@ -293,10 +293,17 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
       printf("Attempting reconnection with saved session secret...\n");
    }
 
-   ws_capabilities_t caps = { .local_asr = true, /* Will have local ASR */
-                              .local_tts = true, /* Will have local TTS */
-                              .wake_word = true, /* Will have wake word */
-                              .ota = true /* Supports server-driven OTA */ };
+   ws_capabilities_t caps = {
+      .local_asr = true, /* Will have local ASR */
+      .local_tts = true, /* Will have local TTS */
+      .wake_word = true, /* Will have wake word */
+      .ota = true,       /* Supports server-driven OTA */
+#ifdef HAVE_OPUS
+      .music = true /* Plays streamed music */
+#else
+      .music = false
+#endif
+   };
 
    printf("Registering satellite '%s'...\n", identity.name);
    if (ws_client_register(ws, &identity, &caps) != 0) {

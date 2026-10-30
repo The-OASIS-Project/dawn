@@ -562,8 +562,12 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
       return;
    }
 
-   /* Parse capabilities (defaults match Tier 1: local ASR + TTS) */
-   dap2_capabilities_t caps = { .local_asr = true, .local_tts = true, .wake_word = true };
+   /* Parse capabilities (defaults match Tier 1: local ASR + TTS; firmware that
+    * doesn't say whether it plays music predates the flag, and played it) */
+   dap2_capabilities_t caps = { .local_asr = true,
+                                .local_tts = true,
+                                .wake_word = true,
+                                .music = true };
    if (json_object_object_get_ex(payload, "capabilities", &caps_obj)) {
       struct json_object *asr_obj, *tts_obj, *ww_obj;
       if (json_object_object_get_ex(caps_obj, "local_asr", &asr_obj)) {
@@ -578,6 +582,10 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
       struct json_object *ota_obj;
       if (json_object_object_get_ex(caps_obj, "ota", &ota_obj)) {
          caps.ota = json_object_get_boolean(ota_obj);
+      }
+      struct json_object *music_obj;
+      if (json_object_object_get_ex(caps_obj, "music", &music_obj)) {
+         caps.music = json_object_get_boolean(music_obj);
       }
    }
 

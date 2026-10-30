@@ -757,6 +757,7 @@ typedef struct {
    music_player_t *p;
    uint32_t ticket;
    music_open_result_t result;
+   atomic_bool requested; /**< Holds the control lock, its track requested */
 } waiter_t;
 
 /* An LLM tool's request: the control lock without preempting, play, await */
@@ -766,9 +767,19 @@ static void *tool_request(void *arg) {
       return NULL;
    }
    music_player_play(w->p, "plex:/library/parts/slow/1.flac", 0, &w->ticket);
+   atomic_store(&w->requested, true);
    w->result = music_player_await(w->p, w->ticket, 5000);
    music_player_control_unlock(w->p);
    return NULL;
+}
+
+/* Wait (up to 5 s) until the tool holds the lock and has requested its track:
+ * an open of the path alone could be an earlier test's straggler */
+static bool wait_requested(waiter_t *w) {
+   for (int i = 0; i < 5000 && !atomic_load(&w->requested); i++) {
+      usleep(1000);
+   }
+   return atomic_load(&w->requested);
 }
 
 /* A preempting control ends a waiting request's wait; its open carries on */
@@ -780,7 +791,7 @@ static void test_preempt_ends_wait(void) {
    waiter_t w = { .p = p, .result = MUSIC_OPEN_PLAYING };
    pthread_t t;
    TEST_ASSERT_EQUAL_INT(0, pthread_create(&t, NULL, tool_request, &w));
-   bool opened = wait_opened("plex:/library/parts/slow/1.flac");
+   bool opened = wait_requested(&w) && wait_opened("plex:/library/parts/slow/1.flac");
    struct timespec t0, t1;
    clock_gettime(CLOCK_MONOTONIC, &t0);
    lock_control(p, true);
@@ -900,7 +911,7 @@ static void test_shutdown_cancels_waiting_request(void) {
    waiter_t w = { .p = p, .result = MUSIC_OPEN_PLAYING };
    pthread_t t;
    TEST_ASSERT_EQUAL_INT(0, pthread_create(&t, NULL, tool_request, &w));
-   bool opened = wait_opened("plex:/library/parts/slow/1.flac");
+   bool opened = wait_requested(&w) && wait_opened("plex:/library/parts/slow/1.flac");
    free_player(p); /* shutdown preempts the waiting tool */
    pthread_join(t, NULL);
    TEST_ASSERT_TRUE(opened);

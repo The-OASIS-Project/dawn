@@ -79,6 +79,7 @@
       repeat: localStorage.getItem('musicRepeat') || 'none', // Display hint until server syncs
       lastQueueLength: -1, // Track queue changes for auto-refresh
       lastQueueIndex: -1,
+      lastQueueRev: -1,
       queueRestored: false, // Track if we've restored saved queue
       browseOffset: 0,
       browseTotalCount: 0,
@@ -813,14 +814,17 @@
          musicBtn.classList.toggle('playing', state.playing && !state.paused);
       }
 
-      // Refresh queue if it changed (length or current index)
+      // Refresh queue if it changed (length or current index), or was edited
+      // (a replace can keep both)
       const queueChanged =
          state.queueLength !== localState.lastQueueLength ||
          state.queueIndex !== localState.lastQueueIndex;
+      const queueEdited = state.queueRev !== localState.lastQueueRev;
       localState.lastQueueLength = state.queueLength;
       localState.lastQueueIndex = state.queueIndex;
+      localState.lastQueueRev = state.queueRev;
 
-      if (queueChanged) {
+      if (queueChanged || queueEdited) {
          DawnMusicPlayback.queue('list');
       }
 

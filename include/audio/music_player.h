@@ -137,6 +137,7 @@ typedef struct {
    music_queue_entry_t track;
    int queue_index; /**< Where the queue holds it, or -1 */
    int queue_length;
+   uint32_t queue_rev; /**< The queue's generation: changes with every edit */
    bool shuffle;
    music_repeat_mode_t repeat_mode;
 } music_player_status_t;

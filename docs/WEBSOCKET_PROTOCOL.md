@@ -1582,7 +1582,8 @@ Register a satellite device with the daemon.
       "capabilities": {
          "local_asr": true,
          "local_tts": true,
-         "wake_word": true
+         "wake_word": true,
+         "music": true
       },
       "reconnect_secret": "prev_secret_here"
    }
@@ -1592,7 +1593,9 @@ Register a satellite device with the daemon.
 - `name`: Display name (default: "Satellite")
 - `location`: Room/location string
 - `tier`: 1 (text-first, local ASR/TTS) or 2 (audio path, server ASR/TTS)
-- `capabilities`: Tier 2 must NOT claim `local_asr` or `local_tts`
+- `capabilities`: Tier 2 must NOT claim `local_asr` or `local_tts`. `music` is false
+  for a Tier 1 that can't play streamed music (built without Opus); the music tool
+  then refuses there. Absent means true (older firmware)
 - `reconnect_secret`: Provided on reconnection to reclaim previous session
 - Response: `satellite_register_ack`
 
@@ -2444,6 +2447,7 @@ Current music playback state (sent on subscribe, control actions, track changes)
       "position_sec": 42.5,
       "queue_length": 12,
       "queue_index": 3,
+      "queue_rev": 57,
       "source_format": "flac",
       "source_rate": 44100,
       "quality": "high",
@@ -2452,6 +2456,9 @@ Current music playback state (sent on subscribe, control actions, track changes)
    }
 }
 ```
+- `queue_rev`: the queue's revision, changed by every edit. Fetch the list again
+  when it changes, even when `queue_length` and `queue_index` don't (a replace can
+  keep both)
 
 #### `music_position`
 Periodic playback position update.

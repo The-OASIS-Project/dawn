@@ -76,7 +76,7 @@ struct user_music_queue {
    int user_id; /**< Owner; 0 for a private queue */
    pthread_mutex_t queue_mutex;
    int ref_count;
-   uint32_t generation;    /**< Bumped on every change */
+   uint32_t generation;    /**< Bumped on every change (music_state's queue_rev) */
    uint32_t replace_epoch; /**< Bumped when the queue is replaced or cleared (play history) */
    music_queue_entry_t queue[MUSIC_QUEUE_MAX];
    int queue_length;

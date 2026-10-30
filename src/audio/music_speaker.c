@@ -73,6 +73,7 @@ typedef struct {
    int16_t *out_buf;                       /**< Converted audio */
    size_t out_samples;                     /**< out_buf's size in samples */
    uint64_t last_open_log_ms;              /**< Throttles the open-failure log */
+   uint64_t last_write_fail_ms;            /**< Throttles write-failure logs (and reopens') */
    unsigned device_gen;                    /**< s_device_gen when the device opened */
 } speaker_output_t;
 
@@ -139,8 +140,11 @@ static bool device_open(speaker_output_t *o) {
    o->hw_rate = hw.sample_rate;
    o->hw_channels = hw.channels;
    atomic_store(&o->open, true);
-   OLOG_INFO("Music speaker: Opened %s (%u Hz, %u ch, buffer %zu frames)", device, hw.sample_rate,
-             hw.channels, hw.buffer_frames);
+   /* Quiet while a device that opens fails every write (one line per period) */
+   if (get_time_ms() - o->last_write_fail_ms >= SPEAKER_OPEN_LOG_MS) {
+      OLOG_INFO("Music speaker: Opened %s (%u Hz, %u ch, buffer %zu frames)", device,
+                hw.sample_rate, hw.channels, hw.buffer_frames);
+   }
    return true;
 }
 
@@ -220,7 +224,9 @@ static int speaker_track_begin(void *ctx,
    return SUCCESS;
 }
 
-/* Write all of buf, retrying a partial write and an underrun once */
+/* Write all of buf, retrying a partial write and an underrun once.  On a
+ * failure the device closes (the next write reopens it) and the rest of buf
+ * takes its playing time, so the queue doesn't race on in silence. */
 static void device_write(speaker_output_t *o, const int16_t *buf, size_t frames) {
    bool recovered = false;
    while (frames > 0) {
@@ -236,9 +242,14 @@ static void device_write(speaker_output_t *o, const int16_t *buf, size_t frames)
          recovered = true;
          continue;
       }
-      OLOG_WARNING("Music speaker: Write failed (%s); reopening",
-                   n < 0 ? audio_error_string((audio_error_t)err) : "no progress");
+      uint64_t now = get_time_ms();
+      if (now - o->last_write_fail_ms >= SPEAKER_OPEN_LOG_MS) {
+         OLOG_WARNING("Music speaker: Write failed (%s); reopening",
+                      n < 0 ? audio_error_string((audio_error_t)err) : "no progress");
+      }
+      o->last_write_fail_ms = now;
       device_close(o, false); /* the next write reopens it */
+      usleep((useconds_t)(frames * 1000000ULL / (o->hw_rate ? o->hw_rate : 48000)));
       return;
    }
 }

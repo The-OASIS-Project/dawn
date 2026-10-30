@@ -216,6 +216,9 @@ void webui_music_send_state_impl(ws_connection_t *conn,
    json_object_object_add(payload, "position_sec", json_object_new_double(st.position_sec));
    json_object_object_add(payload, "queue_length", json_object_new_int(st.queue_length));
    json_object_object_add(payload, "queue_index", json_object_new_int(st.queue_index));
+   /* Changes with every edit: a replace keeping the length and index still
+    * tells clients to fetch the list again */
+   json_object_object_add(payload, "queue_rev", json_object_new_int64(st.queue_rev));
 
    json_object_object_add(payload, "source_format",
                           json_object_new_string(audio_decoder_format_name(st.source_format)));
@@ -310,6 +313,10 @@ void webui_music_send_error(ws_connection_t *conn, const char *code, const char 
  * @brief Send music_state to every tab whose player plays @p uq, except the
  *        player that changed it (also the queue's listener)
  *
+ * Only to a connection still entitled to the queue: a browser logged in as the
+ * queue's user (a revoked login is marked unauthenticated), or a registered
+ * satellite (its player was made for its session's user).
+ *
  * Sends to each matching connection WHILE HOLDING s_conn_registry_mutex, so a
  * conn cannot be freed by the lws thread mid-iteration (the lws CLOSED handler's
  * unregister_connection takes this same lock). This is what makes the broadcast
@@ -335,7 +342,10 @@ void webui_music_broadcast_queue_state(user_music_queue_t *uq, const void *exclu
       session_music_state_t *s = conn ? (session_music_state_t *)__atomic_load_n(&conn->music_state,
                                                                                  __ATOMIC_ACQUIRE)
                                       : NULL;
-      if (s && (const void *)s->player != exclude && music_player_queue(s->player) == uq) {
+      bool entitled = conn_is_satellite_session(conn) ||
+                      (conn && conn->authenticated && conn->auth_user_id == uq->user_id);
+      if (s && entitled && (const void *)s->player != exclude &&
+          music_player_queue(s->player) == uq) {
          webui_music_send_state(conn, s);
       }
    }
@@ -791,8 +801,9 @@ static ws_connection_t *pin_connection(session_t *session) {
 /* The connection's player, created on first use, for a session with a live
  * WebUI or Tier-1 connection (overrides music_tool.c's weak default) */
 music_player_t *music_player_for_session(session_t *session) {
-   if (session && session->type == SESSION_TYPE_DAP2 && session->tier == DAP2_TIER_2) {
-      return NULL; /* a Tier-2 satellite has no music socket */
+   if (session && session->type == SESSION_TYPE_DAP2 &&
+       (session->tier == DAP2_TIER_2 || !session->capabilities.music)) {
+      return NULL; /* no music socket: a Tier-2, or a Tier-1 built without Opus */
    }
    ws_connection_t *conn = pin_connection(session);
    if (!conn) {

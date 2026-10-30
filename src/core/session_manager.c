@@ -608,6 +608,11 @@ session_t *session_create_dap2(int client_fd,
          existing->disconnected = false;
          existing->last_activity = time(NULL);
          pthread_mutex_unlock(&existing->fd_mutex);
+         /* An update may have changed them.  Read without a lock: flags that
+          * change only here, across a reconnect */
+         if (capabilities) {
+            existing->capabilities = *capabilities;
+         }
 
          /* Increment ref count */
          pthread_mutex_lock(&existing->ref_mutex);
@@ -631,6 +636,11 @@ session_t *session_create_dap2(int client_fd,
          existing->client_fd = client_fd;
          existing->last_activity = time(NULL);
          pthread_mutex_unlock(&existing->fd_mutex);
+         /* An update may have changed them.  Read without a lock: flags that
+          * change only here, across a reconnect */
+         if (capabilities) {
+            existing->capabilities = *capabilities;
+         }
 
          /* Increment ref count */
          pthread_mutex_lock(&existing->ref_mutex);

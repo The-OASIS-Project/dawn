@@ -204,6 +204,7 @@ void music_player_snapshot(music_player_t *p, music_player_status_t *out) {
    /* Lock order: queue, then state */
    pthread_mutex_lock(&uq->queue_mutex);
    out->queue_length = uq->queue_length;
+   out->queue_rev = uq->generation;
    out->shuffle = uq->shuffle;
    out->repeat_mode = uq->repeat_mode;
    pthread_mutex_lock(&p->state_mutex);

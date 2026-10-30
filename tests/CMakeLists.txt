@@ -1654,6 +1654,14 @@ dawn_add_unit_test(test_music_speaker
    LABEL   ci)
 set_tests_properties(test_music_speaker PROPERTIES TIMEOUT 30)
 
+# The audio converter's channel and rate combinations
+dawn_add_unit_test(test_audio_converter
+   SOURCES test_audio_converter.c
+           ${SRC_ROOT}/src/audio/audio_converter.c
+           ${SRC_ROOT}/common/src/logging.c
+   LIBS    unity ${SAMPLERATE_LIBRARIES} m
+   LABEL   ci)
+
 # Who may play on the local speaker without a player of its own
 dawn_add_unit_test(test_music_tool_route
    SOURCES test_music_tool_route.c
