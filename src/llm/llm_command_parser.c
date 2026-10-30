@@ -234,10 +234,12 @@ static void localization_text(char *localization_context) {
    }
 }
 
-/* The persona with the longest name fits the buffers it is built into. */
-_Static_assert(sizeof(AI_PERSONA_VALUES "\n\n" AI_PERSONA_VOICE) + CONFIG_NAME_MAX <=
-                   CONFIG_DESCRIPTION_MAX,
-               "default persona too long for CONFIG_DESCRIPTION_MAX");
+/* Each built-in half fits the buffers it is built into, the values with the
+ * longest name. */
+_Static_assert(sizeof(AI_PERSONA_VALUES) + CONFIG_NAME_MAX <= CONFIG_DESCRIPTION_MAX,
+               "built-in persona values too long for CONFIG_DESCRIPTION_MAX");
+_Static_assert(sizeof(AI_PERSONA_VOICE) <= CONFIG_DESCRIPTION_MAX,
+               "built-in persona voice too long for CONFIG_DESCRIPTION_MAX");
 
 /* The assistant's name as the persona says it: general.ai_name (AI_NAME when
  * unset), first letter capitalized. */
@@ -247,12 +249,6 @@ static void persona_name(char *name, size_t size) {
    if (name[0] >= 'a' && name[0] <= 'z') {
       name[0] -= 32;
    }
-}
-
-void llm_persona_default(char *out, size_t size) {
-   char name[CONFIG_NAME_MAX];
-   persona_name(name, sizeof(name));
-   snprintf(out, size, AI_PERSONA_VALUES "\n\n" AI_PERSONA_VOICE, name);
 }
 
 void llm_persona_half(persona_half_t half, char *out, size_t size) {

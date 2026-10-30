@@ -58,12 +58,22 @@ void handle_get_my_settings(ws_connection_t *conn) {
    if (result == AUTH_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
 
-      /* Include base persona (from config or dynamic default) for UI display */
-      char base_persona[CONFIG_DESCRIPTION_MAX];
-      llm_persona_effective(base_persona, sizeof(base_persona));
-      json_object_object_add(resp_payload, "base_persona", json_object_new_string(base_persona));
+      /* The server's half of each, which the user's text adds to or replaces */
+      char base[CONFIG_DESCRIPTION_MAX];
+      llm_persona_half(PERSONA_VALUES, base, sizeof(base));
+      json_object_object_add(resp_payload, "base_values", json_object_new_string(base));
+      llm_persona_half(PERSONA_VOICE, base, sizeof(base));
+      json_object_object_add(resp_payload, "base_voice", json_object_new_string(base));
 
-      /* User's custom settings */
+      /* The user's halves, and the older single text (shown while it's set) */
+      json_object_object_add(resp_payload, "persona_values",
+                             json_object_new_string(settings.persona_values));
+      json_object_object_add(resp_payload, "persona_values_mode",
+                             json_object_new_string(settings.persona_values_mode));
+      json_object_object_add(resp_payload, "persona_voice",
+                             json_object_new_string(settings.persona_voice));
+      json_object_object_add(resp_payload, "persona_voice_mode",
+                             json_object_new_string(settings.persona_voice_mode));
       json_object_object_add(resp_payload, "persona_description",
                              json_object_new_string(settings.persona_description));
       json_object_object_add(resp_payload, "persona_mode",
@@ -95,6 +105,30 @@ void handle_get_my_settings(ws_connection_t *conn) {
    json_object_put(response);
 }
 
+/* A text field of @p payload into @p dest, when present and a string; a
+ * character the size cut in half is dropped (the text goes into prompts). */
+static void take_text(json_object *payload, const char *key, char *dest, size_t size) {
+   json_object *field = NULL;
+   if (json_object_object_get_ex(payload, key, &field) &&
+       json_object_is_type(field, json_type_string)) {
+      safe_strncpy(dest, json_object_get_string(field), size);
+      utf8_trim_incomplete(dest);
+   }
+}
+
+/* A persona mode field of @p payload into @p dest, when "append" or "replace". */
+static void take_mode(json_object *payload, const char *key, char *dest, size_t size) {
+   json_object *field = NULL;
+   if (!json_object_object_get_ex(payload, key, &field) ||
+       !json_object_is_type(field, json_type_string)) {
+      return;
+   }
+   const char *mode = json_object_get_string(field);
+   if (strcmp(mode, "append") == 0 || strcmp(mode, "replace") == 0) {
+      safe_strncpy(dest, mode, size);
+   }
+}
+
 /**
  * @brief Update current user's personal settings
  */
@@ -107,28 +141,35 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
    json_object_object_add(response, "type", json_object_new_string("set_my_settings_response"));
    json_object *resp_payload = json_object_new_object();
 
-   /* Get current settings as defaults */
+   /* The stored settings are the base: a field the payload leaves out keeps
+    * its value.  Without them nothing is saved (a save would blank them). */
    auth_user_settings_t settings;
-   auth_db_get_user_settings(conn->auth_user_id, &settings);
+   if (auth_db_get_user_settings(conn->auth_user_id, &settings) != AUTH_DB_SUCCESS) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Failed to load settings"));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn, response);
+      json_object_put(response);
+      return;
+   }
 
    /* Update with any provided fields */
    json_object *field_obj;
 
-   if (json_object_object_get_ex(payload, "persona_description", &field_obj)) {
-      safe_strscpy(settings.persona_description, json_object_get_string(field_obj));
-   }
+   take_text(payload, "persona_values", settings.persona_values, sizeof(settings.persona_values));
+   take_mode(payload, "persona_values_mode", settings.persona_values_mode,
+             sizeof(settings.persona_values_mode));
+   take_text(payload, "persona_voice", settings.persona_voice, sizeof(settings.persona_voice));
+   take_mode(payload, "persona_voice_mode", settings.persona_voice_mode,
+             sizeof(settings.persona_voice_mode));
+   /* The older single text (clearing it, from this page) and its mode (an
+    * older page still sends it). */
+   take_text(payload, "persona_description", settings.persona_description,
+             sizeof(settings.persona_description));
+   take_mode(payload, "persona_mode", settings.persona_mode, sizeof(settings.persona_mode));
 
-   if (json_object_object_get_ex(payload, "persona_mode", &field_obj)) {
-      const char *mode = json_object_get_string(field_obj);
-      /* Validate mode value */
-      if (strcmp(mode, "append") == 0 || strcmp(mode, "replace") == 0) {
-         safe_strscpy(settings.persona_mode, mode);
-      }
-   }
-
-   if (json_object_object_get_ex(payload, "location", &field_obj)) {
-      safe_strscpy(settings.location, json_object_get_string(field_obj));
-   }
+   take_text(payload, "location", settings.location, sizeof(settings.location));
 
    if (json_object_object_get_ex(payload, "timezone", &field_obj)) {
       /* "" is the server's zone; anything else must be a zone (stored by its
@@ -154,7 +195,7 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
    if (json_object_object_get_ex(payload, "units", &field_obj)) {
       const char *units = json_object_get_string(field_obj);
       /* Validate units value */
-      if (strcmp(units, "metric") == 0 || strcmp(units, "imperial") == 0) {
+      if (units && (strcmp(units, "metric") == 0 || strcmp(units, "imperial") == 0)) {
          safe_strscpy(settings.units, units);
       }
    }
@@ -173,28 +214,18 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
    /* v44 identity fields — read existing values, overlay any provided
     * fields, write back.  Persisted on the users table (not user_settings)
     * via auth_db_set_user_identity which NULLIFs empty strings. */
+   /* Not written when the stored ones can't be read (a write would blank
+    * them). */
    auth_user_identity_t identity;
    memset(&identity, 0, sizeof(identity));
-   auth_db_get_user_identity(conn->auth_user_id, &identity);
-   if (json_object_object_get_ex(payload, "real_name", &field_obj)) {
-      const char *v = json_object_get_string(field_obj);
-      if (v) {
-         safe_strscpy(identity.real_name, v);
-      }
+   if (auth_db_get_user_identity(conn->auth_user_id, &identity) == AUTH_DB_SUCCESS) {
+      take_text(payload, "real_name", identity.real_name, sizeof(identity.real_name));
+      take_text(payload, "preferred_address", identity.preferred_address,
+                sizeof(identity.preferred_address));
+      take_text(payload, "identity_aliases", identity.identity_aliases,
+                sizeof(identity.identity_aliases));
+      auth_db_set_user_identity(conn->auth_user_id, &identity);
    }
-   if (json_object_object_get_ex(payload, "preferred_address", &field_obj)) {
-      const char *v = json_object_get_string(field_obj);
-      if (v) {
-         safe_strscpy(identity.preferred_address, v);
-      }
-   }
-   if (json_object_object_get_ex(payload, "identity_aliases", &field_obj)) {
-      const char *v = json_object_get_string(field_obj);
-      if (v) {
-         safe_strscpy(identity.identity_aliases, v);
-      }
-   }
-   auth_db_set_user_identity(conn->auth_user_id, &identity);
 
    /* Phase 2 entity-merge: if real_name is now set and no user-self
     * anchor exists yet for this user, sweep existing canonicals and

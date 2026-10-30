@@ -188,13 +188,6 @@ void handle_get_config(ws_connection_t *conn) {
       json_object_object_add(payload, "config", config_json);
    }
 
-   /* Add effective default persona (built-in fallback when config field is empty) */
-   {
-      char default_persona[CONFIG_DESCRIPTION_MAX];
-      llm_persona_default(default_persona, sizeof(default_persona));
-      json_object_object_add(payload, "default_persona", json_object_new_string(default_persona));
-   }
-
    /* Add secrets status (only is_set flags, never actual values) */
    json_object *secrets_status = secrets_to_json_status(config_get_secrets());
    if (secrets_status) {

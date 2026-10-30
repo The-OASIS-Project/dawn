@@ -470,9 +470,6 @@
     * Handle get_config response from server
     * @param {Object} payload - Response payload
     */
-   // Built-in default persona from backend (for display when config field is empty)
-   let defaultPersona = '';
-
    function handleGetConfigResponse(payload) {
       // Preserve unsaved edits across a refetch (reconnect / panel re-open): if
       // the user has pending config changes and the panel has already rendered,
@@ -483,7 +480,6 @@
       currentConfig = payload.config;
       currentSecrets = payload.secrets;
       restartRequiredFields = payload.requires_restart || [];
-      defaultPersona = payload.default_persona || '';
       if (!preserveEdits) changedFields.clear();
 
       // Update path displays
@@ -990,8 +986,5 @@
       initMemoryExtractionHandlers,
       updateMemoryExtractionModels,
       renderSecretsFields,
-      getDefaultPersona: function () {
-         return defaultPersona;
-      },
    };
 })();

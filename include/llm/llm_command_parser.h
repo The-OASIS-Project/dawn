@@ -107,18 +107,6 @@ int is_vision_enabled_for_current_llm(void);
 void invalidate_system_instructions(void);
 
 /**
- * @brief Write the built-in persona (AI_PERSONA_VALUES, a blank line, then
- *        AI_PERSONA_VOICE, prompts.h) into @p out
- *
- * Uses general.ai_name (AI_NAME when unset), first letter capitalized.  Not the
- * effective persona: [persona] values / voice / description change it.
- *
- * @param out  Buffer to write into (always NUL-terminated)
- * @param size Size of @p out
- */
-void llm_persona_default(char *out, size_t size);
-
-/**
  * @brief Write the server's half @p half of the persona into @p out
  *
  * The configured [persona] half when set, else the built-in one; while the

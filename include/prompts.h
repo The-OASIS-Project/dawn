@@ -104,13 +104,15 @@
  * default that dawn.toml can replace ([persona], [tts], [asr]).
  * ============================================================================= */
 
-/* The default persona: who the assistant is, as its values, then its tone.
- * Arg: the assistant's name (general.ai_name, first letter capitalized), in
- * "Your name is %s." only.  Built by llm_persona_default() as
- * AI_PERSONA_VALUES "\n\n" AI_PERSONA_VOICE; [persona] values / voice replace
- * a half, and the older [persona] description replaces both.  Before changing
- * either, paste the current text into s_builtin_personas
- * (llm_command_parser.c), which drops a stored copy of it. */
+/* The default persona in two halves: its values (who the assistant is), then
+ * its voice (how it talks), joined by a blank line.  Arg: the assistant's name
+ * (general.ai_name, first letter capitalized), in "Your name is %s." only.
+ * [persona] values / voice replace a half, a user's own text adds to or
+ * replaces it (llm_persona_half, prompt_builder.c).  The Default Persona
+ * panel (www/js/ui/settings/schema.js) quotes the first words of each half as
+ * its placeholders: change them together.  Before changing either, paste the
+ * current text into s_builtin_personas (llm_command_parser.c), which drops a
+ * stored copy of it. */
 #define AI_PERSONA_VALUES                                                                          \
    "Your name is %s. Iron-Man-style AI assistant running on DAWN, in the mold of JARVIS and "      \
    "FRIDAY: you anticipate what your user needs, you know their world, you speak plainly, you "    \
