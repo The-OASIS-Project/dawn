@@ -219,70 +219,93 @@ char *prompt_framed(const char *name,
    return out;
 }
 
-/* The identity block of a user who gave an address but no real name. */
-#define IDENTITY_ADDRESS_ONLY_FMT "\n\n## User Identity\nThe user prefers to be addressed as %s.\n"
+/* The most entries the identity block names from one list (aliases, or the
+ * ways to address the user). */
+#define IDENTITY_LIST_MAX 16
 
-/* The most aliases the identity block names. */
-#define IDENTITY_ALIASES_MAX 16
+/* How the model may address the user (after "When you address them
+ * directly, "): a single form, or a choice.  The list follows the colon. */
+#define IDENTITY_ADDRESS_ONE "use: "
+#define IDENTITY_ADDRESS_ANY "use any of: "
+#define IDENTITY_ADDRESS_END "; most replies don't need one."
 
-static bool is_line_blank(char c) {
-   return c == ' ' || c == '\t' || c == '\r';
+/* Split @p buf (modified in place) on @p sep into @p out: each entry trimmed,
+ * empties dropped, repeats (case aside) kept once, at most IDENTITY_LIST_MAX.
+ * Returns the count. */
+static int split_list(char *buf, const char *sep, const char *out[IDENTITY_LIST_MAX]) {
+   int n = 0;
+   char *save = NULL;
+   for (char *item = strtok_r(buf, sep, &save); item != NULL && n < IDENTITY_LIST_MAX;
+        item = strtok_r(NULL, sep, &save)) {
+      while (is_blank(*item)) {
+         item++;
+      }
+      item[trimmed_len(item)] = '\0';
+      bool dup = (*item == '\0');
+      for (int i = 0; i < n && !dup; i++) {
+         dup = strcasecmp(out[i], item) == 0;
+      }
+      if (!dup) {
+         out[n++] = item;
+      }
+   }
+   return n;
 }
 
-/* " They may also be referred to as: A, B." onto @p sb from @p aliases (one
- * per line): each trimmed, empties dropped, repeats (case aside) named once.
- * Nothing when none is left. */
-static void append_aliases(strbuf_t *sb, const char *aliases) {
-   char *buf = strdup(aliases);
-   if (!buf) {
-      return;
-   }
-   const char *seen[IDENTITY_ALIASES_MAX];
-   int seen_count = 0;
-   char *save = NULL;
-   for (char *line = strtok_r(buf, "\n", &save); line != NULL && seen_count < IDENTITY_ALIASES_MAX;
-        line = strtok_r(NULL, "\n", &save)) {
-      while (is_line_blank(*line))
-         line++;
-      char *end = line + strlen(line);
-      while (end > line && is_line_blank(end[-1]))
-         end--;
-      *end = '\0';
-      bool dup = (*line == '\0');
-      for (int i = 0; i < seen_count && !dup; i++) {
-         dup = strcasecmp(seen[i], line) == 0;
+/* @p items onto @p sb, comma-separated. */
+static void append_joined(strbuf_t *sb, const char *const items[], int n) {
+   for (int i = 0; i < n; i++) {
+      if (i > 0) {
+         strbuf_append(sb, ", ");
       }
-      if (dup)
-         continue;
-      strbuf_append(sb, seen_count == 0 ? " They may also be referred to as: " : ", ");
-      strbuf_append(sb, line);
-      seen[seen_count++] = line;
+      strbuf_append(sb, items[i]);
    }
-   if (seen_count > 0) {
-      strbuf_append(sb, ".");
-   }
-   free(buf);
+}
+
+/* "use: A; most replies…" or "use any of: A, B; most replies…" onto @p sb. */
+static void append_address(strbuf_t *sb, const char *const forms[], int n) {
+   strbuf_append(sb, n == 1 ? IDENTITY_ADDRESS_ONE : IDENTITY_ADDRESS_ANY);
+   append_joined(sb, forms, n);
+   strbuf_append(sb, IDENTITY_ADDRESS_END);
 }
 
 char *prompt_identity_text(const char *real_name, const char *address, const char *aliases) {
    real_name = real_name ? real_name : "";
-   address = address ? address : "";
-   aliases = aliases ? aliases : "";
+   char *address_buf = strdup(address ? address : "");
+   char *aliases_buf = strdup(aliases ? aliases : "");
+   if (!address_buf || !aliases_buf) {
+      free(address_buf);
+      free(aliases_buf);
+      return NULL;
+   }
+   const char *forms[IDENTITY_LIST_MAX];
+   const int n_forms = split_list(address_buf, ",", forms);
    strbuf_t sb;
    strbuf_init(&sb, 0);
    if (real_name[0] == '\0') {
-      if (address[0] == '\0') {
-         return NULL;
+      /* Aliases name the user for memory matching, which needs the name. */
+      if (n_forms > 0) {
+         strbuf_append(&sb, "\n\n## User Identity\nWhen you address the user directly, ");
+         append_address(&sb, forms, n_forms);
+         strbuf_append(&sb, "\n");
       }
-      strbuf_appendf(&sb, IDENTITY_ADDRESS_ONLY_FMT, address);
-      return strbuf_steal_or_null(&sb);
+   } else {
+      strbuf_appendf(&sb, "\n\n## User Identity\nYou are speaking with %s.", real_name);
+      if (n_forms > 0) {
+         strbuf_append(&sb, " When you address them directly, ");
+         append_address(&sb, forms, n_forms);
+      }
+      const char *names[IDENTITY_LIST_MAX];
+      const int n_names = split_list(aliases_buf, "\n", names);
+      if (n_names > 0) {
+         strbuf_append(&sb, " They may also be referred to as: ");
+         append_joined(&sb, names, n_names);
+         strbuf_append(&sb, ".");
+      }
+      strbuf_append(&sb, " Use this information to recognize when memory facts or extracted "
+                         "entities refer to them.\n");
    }
-   strbuf_appendf(&sb, "\n\n## User Identity\nYou are speaking with %s.", real_name);
-   if (address[0] != '\0') {
-      strbuf_appendf(&sb, " They prefer to be addressed as %s.", address);
-   }
-   append_aliases(&sb, aliases);
-   strbuf_append(&sb, " Use this information to recognize when memory facts or extracted entities "
-                      "refer to them.\n");
+   free(address_buf);
+   free(aliases_buf);
    return strbuf_steal_or_null(&sb);
 }

@@ -552,15 +552,16 @@ static void test_panel_not_told_when_disabled(void) {
  * who gave neither gets no block. */
 static void test_identity_address_without_a_real_name(void) {
    char *t = prompt_identity_text("", "sir", "");
-   TEST_ASSERT_EQUAL_STRING("\n\n## User Identity\nThe user prefers to be addressed as sir.\n", t);
+   TEST_ASSERT_EQUAL_STRING("\n\n## User Identity\nWhen you address the user directly, use: sir; "
+                            "most replies don't need one.\n",
+                            t);
    free(t);
    TEST_ASSERT_NULL(prompt_identity_text("", "", "Ace"));
    t = prompt_identity_text("Pat Doe", "boss", "Pat\n pat \nPD");
    TEST_ASSERT_EQUAL_STRING(
-       "\n\n## User Identity\nYou are speaking with Pat Doe. They prefer to be "
-       "addressed as boss. They may also be referred to as: Pat, PD. Use "
-       "this information to recognize when memory facts or extracted "
-       "entities refer to them.\n",
+       "\n\n## User Identity\nYou are speaking with Pat Doe. When you address them directly, "
+       "use: boss; most replies don't need one. They may also be referred to as: Pat, PD. Use "
+       "this information to recognize when memory facts or extracted entities refer to them.\n",
        t);
    free(t);
    t = prompt_identity_text("Pat Doe", "", " \n");
@@ -569,6 +570,50 @@ static void test_identity_address_without_a_real_name(void) {
                             "refer to them.\n",
                             t);
    free(t);
+}
+
+/* Preferred address is a comma-separated choice: trimmed, empties dropped,
+ * repeats (case aside) kept once; one form reads "use:", several "use any
+ * of:"; nothing left means no address sentence, and with no real name, no
+ * block. */
+static void test_identity_address_list(void) {
+   static const struct {
+      const char *address, *forms; /* forms: NULL for no address sentence */
+   } cases[] = {
+      { "Jon", "use: Jon" },
+      { " sir ,boss, Sir,  chief ", "use any of: sir, boss, chief" },
+      { " , ,", NULL },
+      { "Jon,", "use: Jon" },
+   };
+   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      char want[512];
+      char *t = prompt_identity_text("", cases[i].address, "");
+      if (cases[i].forms) {
+         snprintf(want, sizeof(want),
+                  "\n\n## User Identity\nWhen you address the user directly, %s; most replies "
+                  "don't need one.\n",
+                  cases[i].forms);
+         TEST_ASSERT_EQUAL_STRING(want, t);
+      } else {
+         TEST_ASSERT_NULL(t);
+      }
+      free(t);
+
+      t = prompt_identity_text("Pat Doe", cases[i].address, "");
+      if (cases[i].forms) {
+         snprintf(want, sizeof(want),
+                  "\n\n## User Identity\nYou are speaking with Pat Doe. When you address them "
+                  "directly, %s; most replies don't need one. Use this information to recognize "
+                  "when memory facts or extracted entities refer to them.\n",
+                  cases[i].forms);
+      } else {
+         snprintf(want, sizeof(want),
+                  "\n\n## User Identity\nYou are speaking with Pat Doe. Use this information to "
+                  "recognize when memory facts or extracted entities refer to them.\n");
+      }
+      TEST_ASSERT_EQUAL_STRING(want, t);
+      free(t);
+   }
 }
 
 /* The persona's composition, both levels, through the pure helpers in the
@@ -716,6 +761,7 @@ int main(void) {
    RUN_TEST(test_focus_filter_rejection_no_items);
    RUN_TEST(test_cross_turn_no_content_leak);
    RUN_TEST(test_identity_address_without_a_real_name);
+   RUN_TEST(test_identity_address_list);
    RUN_TEST(test_failed_then_successful_refresh_no_carry);
    RUN_TEST(test_disabled_after_enabled_returns_nothing);
    RUN_TEST(test_memory_cycle_1000x_reusing_the_prompt);

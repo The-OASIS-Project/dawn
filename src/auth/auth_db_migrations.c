@@ -1423,8 +1423,9 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
     *   real_name         — required by the link-user-self synthetic-seed path
     *                       (gate enforced in memory_alias_link_user_self_run).
     *                       Surfaced in WebUI Settings → User → Real name.
-    *   preferred_address — optional; injected into the LLM system prompt as
-    *                       "They prefer to be addressed as ..." for personas.
+    *   preferred_address — optional comma-separated forms; injected into the
+    *                       LLM system prompt as "When you address them
+    *                       directly, use any of: ..." (prompt_identity_text).
     *   identity_aliases  — optional newline-separated list of alternate names
     *                       (nicknames, formal names, email handles).  Parsed
     *                       at use-site (split on \n, strip whitespace, drop

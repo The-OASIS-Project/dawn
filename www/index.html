@@ -2883,17 +2883,18 @@ Format rules:
                         </div>
 
                         <div class="settings-group">
-                           <label for="my-preferred-address">Preferred form of address</label>
+                           <label for="my-preferred-address">Ways to address you</label>
                            <input
                               type="text"
                               id="my-preferred-address"
                               name="preferred_address"
-                              maxlength="64"
-                              placeholder="e.g., Jon"
+                              maxlength="63"
+                              placeholder="sir, boss, Jon"
+                              aria-describedby="my-preferred-address-hint"
                            />
-                           <p class="setting-hint">
-                              What you'd like DAWN to call you. E.g. "Jon" if your real name is
-                              "Jonathan Smith".
+                           <p class="setting-hint" id="my-preferred-address-hint">
+                              Comma-separated, e.g. sir, boss, Jon. DAWN uses one now and then, not
+                              in every reply.
                            </p>
                         </div>
 
