@@ -108,6 +108,85 @@ static void test_genre_bounded_no_overflow(void) {
    TEST_ASSERT_EQUAL_CHAR('\0', m.genre[AUDIO_GENRE_STRING_MAX - 1]);
 }
 
+/* ---- Track and disc numbers ---------------------------------------------- */
+
+static void test_number_forms(void) {
+   TEST_ASSERT_EQUAL_UINT32(3, audio_metadata_parse_number("3"));
+   TEST_ASSERT_EQUAL_UINT32(3, audio_metadata_parse_number("3/12"));
+   TEST_ASSERT_EQUAL_UINT32(7, audio_metadata_parse_number(" 07 "));
+   TEST_ASSERT_EQUAL_UINT32(0, audio_metadata_parse_number("A1"));
+   TEST_ASSERT_EQUAL_UINT32(0, audio_metadata_parse_number(""));
+   TEST_ASSERT_EQUAL_UINT32(0, audio_metadata_parse_number(NULL));
+}
+
+/* ---- Vorbis comments (FLAC, Ogg) ----------------------------------------- */
+
+static void take(audio_metadata_t *m, const char *entry) {
+   audio_metadata_take_vorbis_comment(m, entry, strlen(entry));
+}
+
+static void test_vorbis_keys(void) {
+   audio_metadata_t m;
+   memset(&m, 0, sizeof(m));
+   take(&m, "title=Main Title");
+   take(&m, "ARTIST=John Williams");
+   take(&m, "Album=Star Wars");
+   take(&m, "ALBUMARTIST=Various Artists");
+   take(&m, "TRACKNUMBER=2/14");
+   take(&m, "DISCNUMBER=1/2");
+   take(&m, "GENRE=Soundtrack");
+   take(&m, "GENRE=Score");
+   TEST_ASSERT_EQUAL_STRING("Main Title", m.title);
+   TEST_ASSERT_EQUAL_STRING("John Williams", m.artist);
+   TEST_ASSERT_EQUAL_STRING("Star Wars", m.album);
+   TEST_ASSERT_EQUAL_STRING("Various Artists", m.album_artist);
+   TEST_ASSERT_EQUAL_UINT32(2, m.track_no);
+   TEST_ASSERT_EQUAL_UINT32(1, m.disc_no);
+   TEST_ASSERT_EQUAL_STRING("Soundtrack, Score", m.genre);
+}
+
+/* The other album-artist spellings; a repeated tag keeps its first value */
+static void test_vorbis_album_artist_spellings_and_first_wins(void) {
+   audio_metadata_t m;
+   memset(&m, 0, sizeof(m));
+   take(&m, "ALBUM ARTIST=Ramin Djawadi");
+   take(&m, "ALBUM_ARTIST=Someone Else");
+   take(&m, "ARTIST=First");
+   take(&m, "ARTIST=Second");
+   TEST_ASSERT_EQUAL_STRING("Ramin Djawadi", m.album_artist);
+   TEST_ASSERT_EQUAL_STRING("First", m.artist);
+}
+
+/* DATE wins over YEAR in either order */
+static void test_vorbis_date_over_year(void) {
+   audio_metadata_t m;
+   memset(&m, 0, sizeof(m));
+   take(&m, "YEAR=1999");
+   take(&m, "DATE=2008-04-29");
+   TEST_ASSERT_EQUAL_UINT32(2008, m.year);
+   memset(&m, 0, sizeof(m));
+   take(&m, "DATE=2008");
+   take(&m, "YEAR=1999");
+   TEST_ASSERT_EQUAL_UINT32(2008, m.year);
+}
+
+/* Malformed entries are ignored; values are bounded and need no NUL */
+static void test_vorbis_malformed_and_bounded(void) {
+   audio_metadata_t m;
+   memset(&m, 0, sizeof(m));
+   take(&m, "NOEQUALS");
+   take(&m, "=value");
+   take(&m, "TITLE=");
+   TEST_ASSERT_EQUAL_STRING("", m.title);
+   char longv[600];
+   memset(longv, 'x', sizeof(longv));
+   memcpy(longv, "ALBUM=", 6);
+   audio_metadata_take_vorbis_comment(&m, longv, sizeof(longv)); /* no NUL */
+   TEST_ASSERT_EQUAL_size_t(AUDIO_METADATA_STRING_MAX - 1, strlen(m.album));
+   audio_metadata_take_vorbis_comment(&m, "ARTIST=Cut", 8); /* "ARTIST=C" */
+   TEST_ASSERT_EQUAL_STRING("C", m.artist);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_year_plain);
@@ -121,5 +200,10 @@ int main(void) {
    RUN_TEST(test_genre_comma_join);
    RUN_TEST(test_genre_ignores_null_and_empty);
    RUN_TEST(test_genre_bounded_no_overflow);
+   RUN_TEST(test_number_forms);
+   RUN_TEST(test_vorbis_keys);
+   RUN_TEST(test_vorbis_album_artist_spellings_and_first_wins);
+   RUN_TEST(test_vorbis_date_over_year);
+   RUN_TEST(test_vorbis_malformed_and_bounded);
    return UNITY_END();
 }
