@@ -128,11 +128,16 @@ static const char *SCHEMA_SQL =
     ");"
     "CREATE INDEX IF NOT EXISTS idx_log_timestamp ON auth_log(timestamp);"
 
-    /* Per-user settings (added in schema v2, persona_mode added in v3) */
+    /* Per-user settings (added in schema v2, persona_mode added in v3, the
+     * persona's values and voice halves in v112) */
     "CREATE TABLE IF NOT EXISTS user_settings ("
     "   user_id INTEGER PRIMARY KEY,"
     "   persona_description TEXT,"
     "   persona_mode TEXT DEFAULT 'append',"
+    "   persona_values TEXT,"
+    "   persona_values_mode TEXT DEFAULT 'append',"
+    "   persona_voice TEXT,"
+    "   persona_voice_mode TEXT DEFAULT 'append',"
     "   location TEXT,"
     "   timezone TEXT DEFAULT '',"
     "   units TEXT DEFAULT 'metric',"
