@@ -419,12 +419,37 @@ static bool s_command_unattended = false;
  * as for an interrupt that brings a new request. */
 static bool s_reply_stopped_by_user = false;
 
+/* The command interrupted a reply of hers: "Okay Friday, stop" said in one
+ * breath while she was speaking, thinking or holding a request (main-thread
+ * state, decided at the wake word: by PROCESS_COMMAND the interrupted turn may
+ * already be gone).  A cancel phrase then means her, not the music.  A bare
+ * wake word stops her by itself, so the command after it starts fresh. */
+static bool s_wake_cut_reply = false;
+
 
 /* A cancel phrase: stop the reply (its speech, and its generation if still
  * running) and confirm out loud, since silence can't be told apart from not
- * having been heard.  A fixed line on the local speaker: no LLM turn, nothing
- * added to the conversation. */
+ * having been heard.  With no reply of hers going, it means the music: the
+ * speaker pauses, keeping its place.  A fixed line on the local speaker: no
+ * LLM turn, nothing added to the conversation. */
 static void acknowledge_cancel(void) {
+   pthread_mutex_lock(&tts_mutex);
+   const bool speaking = tts_playback_state == TTS_PLAYBACK_PAUSE;
+   pthread_mutex_unlock(&tts_mutex);
+   const bool replying = local_llm_busy() || s_pending_voice_command || speaking ||
+                         s_wake_cut_reply;
+   s_wake_cut_reply = false;
+   if (!replying && music_speaker_is_playing()) {
+      if (music_speaker_pause()) {
+         const size_t n = sizeof(cancelResponses) / sizeof(cancelResponses[0]);
+         OLOG_INFO("Cancel phrase: music paused, confirming");
+         text_to_speech(cancelResponses[randombytes_uniform((uint32_t)n)]);
+      } else {
+         OLOG_WARNING("Cancel phrase: couldn't pause the music");
+         text_to_speech("I couldn't pause the music, Sir.");
+      }
+      return;
+   }
    if (llm_processing) {
       s_reply_stopped_by_user = true; /* keep its question (see the completion) */
       llm_request_interrupt();
@@ -1158,6 +1183,7 @@ static int check_and_process_input_queue(char **command_text_out,
 
    *command_text_out = strdup(input.text);
    s_next_command_unattended = *command_text_out && input.source == INPUT_SOURCE_MQTT;
+   s_wake_cut_reply = false; /* a typed command came with no wake word */
    if (*command_text_out == NULL) {
       OLOG_ERROR("Failed to allocate memory for text input from %s",
                  input_source_name(input.source));
@@ -3520,6 +3546,9 @@ mqtt_disabled:
 
                   if (i < numWakeWords) {
                      pthread_mutex_lock(&tts_mutex);
+                     /* Whether this wake word cut a reply off, for a cancel phrase */
+                     s_wake_cut_reply = tts_playback_state == TTS_PLAYBACK_PAUSE ||
+                                        local_llm_busy() || s_pending_voice_command;
                      if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
                         tts_playback_state = TTS_PLAYBACK_DISCARD;
                         pthread_cond_signal(&tts_cond);
@@ -3553,6 +3582,9 @@ mqtt_disabled:
                         // No command after wake word - transition to DAWN_STATE_COMMAND_RECORDING
                         OLOG_WARNING("Wake word detected with no command, transitioning to "
                                      "COMMAND_RECORDING.\n");
+                        /* The wake word alone stopped any reply of hers: what comes
+                         * next is a new request ("pause" then means the music) */
+                        s_wake_cut_reply = false;
                         text_to_speech("Hello.");
 
                         commandTimeout = 0;
