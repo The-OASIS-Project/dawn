@@ -450,7 +450,7 @@ typedef struct session {
    // DAP2-specific fields (only valid when type == SESSION_TYPE_DAP2)
    dap2_tier_t tier;                  // Tier 1 (text) or Tier 2 (audio)
    dap2_identity_t identity;          // UUID, name, location
-   dap2_capabilities_t capabilities;  // Local ASR/TTS/wake word
+   dap2_capabilities_t capabilities;  // fd_mutex; read with session_capabilities()
 
    // Messaging-specific fields (only valid when type == SESSION_TYPE_MESSAGING).
    // Populated by the messaging engine at session creation from the
@@ -1252,6 +1252,14 @@ void session_release(session_t *session);
  * @note Does NOT increment ref_count (local session is never destroyed)
  */
 session_t *session_get_local(void);
+
+/**
+ * @brief A satellite session's capabilities, as of its latest registration
+ *        (a reclaim takes the new registration's)
+ *
+ * @locks session->fd_mutex
+ */
+dap2_capabilities_t session_capabilities(session_t *session);
 
 // =============================================================================
 // Session Destruction

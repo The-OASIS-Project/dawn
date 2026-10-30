@@ -481,7 +481,7 @@ Global daemon locks (src/dawn.c):
 Per-session locks (src/core/session_manager.c):
   session->history_mutex    — session conversation history
   session->metrics_mutex    — session-scoped metrics (tokens, timings)
-  session->fd_mutex         — WebSocket file-descriptor state
+  session->fd_mutex         — WebSocket file-descriptor state, and a satellite's capabilities
   session->ref_mutex        — session reference counting
   session->llm_config_mutex — per-session LLM config overrides
   session->tools_mutex      — the tools running now, and a render_visual result waiting for the reply to save

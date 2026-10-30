@@ -300,7 +300,7 @@ static void *satellite_worker_thread(void *arg) {
    /* Call LLM with TTS callback for Tier 2 satellites (server-side TTS).
     * Tier 1 satellites have local TTS and only need the text response, but
     * Tier 2 devices need the daemon to synthesize speech and send PCM audio. */
-   bool needs_server_tts = !session->capabilities.local_tts;
+   bool needs_server_tts = !session_capabilities(session).local_tts;
    response = session_llm_call_with_tts_no_add(session, text,
                                                needs_server_tts ? webui_sentence_audio_callback
                                                                 : NULL,

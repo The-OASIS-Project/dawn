@@ -167,6 +167,18 @@ int webui_music_configure_encoder(session_music_state_t *state, music_quality_t 
    return 0;
 }
 
+/*
+ * The session to deliver a connection's music frames to, or NULL when a newer
+ * connection has taken the session over (a reconnected tab, a reassigned
+ * satellite) or the connection has let it go: frames are delivered by
+ * session, so they'd reach the newer connection, perhaps of another user.  A
+ * session outlives its connection's close (kept for a reconnect).
+ */
+static session_t *music_reply_session(ws_connection_t *conn) {
+   session_t *session = conn_get_session(conn);
+   return session && session->client_data == conn ? session : NULL;
+}
+
 /**
  * @brief Send music state update to client
  *
@@ -176,6 +188,10 @@ int webui_music_configure_encoder(session_music_state_t *state, music_quality_t 
 void webui_music_send_state_impl(ws_connection_t *conn,
                                  session_music_state_t *state,
                                  bool advance_auto) {
+   session_t *session = music_reply_session(conn);
+   if (!session) {
+      return;
+   }
    music_player_status_t st;
    music_player_snapshot(state->player, &st);
    bool has_track = st.track.path[0] != '\0';
@@ -244,7 +260,7 @@ void webui_music_send_state_impl(ws_connection_t *conn,
       json_object_put(response);
       return;
    }
-   ws_response_t resp = { .session = conn->session,
+   ws_response_t resp = { .session = session,
                           .type = WS_RESP_MUSIC_STATE,
                           .music_json = { .json = json_copy } };
    queue_response(&resp);
@@ -265,7 +281,11 @@ void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state)
  * for calling from the player's thread.
  */
 static void send_position_update(ws_connection_t *conn, const music_event_t *ev) {
-   ws_response_t resp = { .session = conn->session,
+   session_t *session = music_reply_session(conn);
+   if (!session) {
+      return;
+   }
+   ws_response_t resp = { .session = session,
                           .type = WS_RESP_MUSIC_POSITION,
                           .music_position = { .position_sec = ev->position_sec,
                                               .duration_sec = ev->duration_sec } };
@@ -279,6 +299,10 @@ static void send_position_update(ws_connection_t *conn, const music_event_t *ev)
  * Uses the response queue — safe to call from any thread.
  */
 void webui_music_send_error(ws_connection_t *conn, const char *code, const char *message) {
+   session_t *session = music_reply_session(conn);
+   if (!session) {
+      return;
+   }
    struct json_object *response = json_object_new_object();
    json_object_object_add(response, "type", json_object_new_string("music_error"));
 
@@ -295,7 +319,7 @@ void webui_music_send_error(ws_connection_t *conn, const char *code, const char 
       json_object_put(response);
       return;
    }
-   ws_response_t resp = { .session = conn->session,
+   ws_response_t resp = { .session = session,
                           .type = WS_RESP_MUSIC_ERROR,
                           .music_json = { .json = json_copy } };
    queue_response(&resp);
@@ -802,7 +826,7 @@ static ws_connection_t *pin_connection(session_t *session) {
  * WebUI or Tier-1 connection (overrides music_tool.c's weak default) */
 music_player_t *music_player_for_session(session_t *session) {
    if (session && session->type == SESSION_TYPE_DAP2 &&
-       (session->tier == DAP2_TIER_2 || !session->capabilities.music)) {
+       (session->tier == DAP2_TIER_2 || !session_capabilities(session).music)) {
       return NULL; /* no music socket: a Tier-2, or a Tier-1 built without Opus */
    }
    ws_connection_t *conn = pin_connection(session);
