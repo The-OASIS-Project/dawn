@@ -52,8 +52,8 @@ void music_speaker_set_device(const char *device);
 music_player_t *music_speaker_acquire(int owner_user_id);
 
 /**
- * @brief Pause the speaker for an interruption (a phone call), waiting
- *        briefly for its device to close
+ * @brief Pause the speaker (a phone call, or the local mic's spoken cancel),
+ *        keeping its place, waiting briefly for its device to close
  *
  * @return true if music was playing and is now paused
  */

@@ -409,6 +409,12 @@ std::atomic<bool> tts_thread_running(false);
 static std::atomic<bool> tts_stop_processing(false);
 
 /**
+ * @brief The worker holds an item: from taking it off the queue until it has
+ * played (synthesis included, when the playback state still reads idle)
+ */
+static std::atomic<bool> tts_item_in_hand(false);
+
+/**
  * @brief TTS playback state (mutex-protected)
  *
  * All accesses must be protected by tts_mutex to ensure thread safety.
@@ -449,6 +455,7 @@ void *tts_thread_function(void *arg) {
       std::string inputText = std::move(tts_queue.front().text);
       std::string expression = std::move(tts_queue.front().expression);
       tts_queue.pop();
+      tts_item_in_hand.store(true);
       pthread_mutex_unlock(&tts_queue_mutex);
 
       /* What it says goes on dawn/events only when it reaches a speaker (server
@@ -763,9 +770,20 @@ void *tts_thread_function(void *arg) {
       }
 
       tts_stop_processing.store(false);
+      tts_item_in_hand.store(false);
    }
 
    return NULL;
+}
+
+bool tts_is_speaking(void) {
+   if (!tts_handle.is_initialized) {
+      return false; /* a failed init destroyed the queue's mutex */
+   }
+   pthread_mutex_lock(&tts_queue_mutex);
+   bool busy = !tts_queue.empty() || tts_item_in_hand.load();
+   pthread_mutex_unlock(&tts_queue_mutex);
+   return busy;
 }
 
 /**
@@ -1111,15 +1129,13 @@ int tts_wait_for_completion(int timeout_ms) {
 
    while (1) {
       // Check if queue is empty and playback is idle
-      pthread_mutex_lock(&tts_queue_mutex);
-      bool queue_empty = tts_queue.empty();
-      pthread_mutex_unlock(&tts_queue_mutex);
+      bool speaking = tts_is_speaking(); /* queued, or synthesizing between phrases */
 
       pthread_mutex_lock(&tts_mutex);
       bool playback_idle = (tts_playback_state == TTS_PLAYBACK_IDLE);
       pthread_mutex_unlock(&tts_mutex);
 
-      if (queue_empty && playback_idle) {
+      if (!speaking && playback_idle) {
          return 0;  // TTS complete
       }
 

@@ -33,7 +33,9 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Holds the speaker's volume (`setMusicVolume`/`getMusicVolume`) and ducking, applied to the
      samples as they're written (ducking never changes the set volume)
    - Who may play on it is the music tool's rule (`music_tool_speaker_allowed`): the owner,
-     from the local mic, a messaging channel or no session (the scheduler, MQTT)
+     from the local mic, a messaging channel or no session (the scheduler, MQTT). Pausing
+     it isn't gated: a phone call pauses it, and so does a cancel phrase on the local mic
+     ("Okay Friday, stop") when no reply of hers is going
 
 - **music_open.c/h**: Opening a library track, shared by every player
    - `music_path_is_valid()`: a local path must resolve inside `[paths] music_dir`; a `plex:`
