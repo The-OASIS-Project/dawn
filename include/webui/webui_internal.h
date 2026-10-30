@@ -131,6 +131,9 @@ typedef struct {
    bool is_satellite;    /* True if this is a DAP2 satellite connection */
    bool logged_out;      /* Its login ended (webui_conn_end_login): closing, and
                           * nothing it sends is handled */
+   bool login_unchecked; /* Its login couldn't be checked when it connected (the
+                          * database was down): closing with 1013 so it connects
+                          * again, and nothing it sends is handled */
    bool client_noted;    /* Its `client` self-description was logged */
 
    /* Text message fragmentation support (for large JSON payloads) */
@@ -568,6 +571,18 @@ void queue_init_messages(ws_connection_t *conn, const char *token);
  * www/js client. */
 #define WEBUI_CLOSE_LOGGED_OUT 4002
 
+/** WS close code: the server couldn't check the login just now (its database
+ *  is down or busy); connect again shortly.  The standard 1013 "try again
+ *  later" */
+#define WEBUI_CLOSE_TRY_AGAIN 1013
+
+/** WS close code: the server is shutting down or restarting; connect again
+ *  (the standard 1012 "service restart") */
+#define WEBUI_CLOSE_RESTART 1012
+
+/** Shutdown has begun (webui_server_quiesce()): refuse new work */
+bool webui_server_quiescing(void);
+
 /**
  * @brief Evict the connection currently owning @p existing so a newer reconnect
  *        can take over, closing it with WS code 4001 "superseded".
@@ -693,12 +708,28 @@ void webui_security_headers_init(void);
  * ============================================================================= */
 
 #ifdef ENABLE_AUTH
+/** What a request's login cookie turned out to be */
+typedef enum {
+   WEBUI_LOGIN_VALID,       /**< A live login */
+   WEBUI_LOGIN_NONE,        /**< No cookie, or its login has ended */
+   WEBUI_LOGIN_UNAVAILABLE, /**< Couldn't be checked (the database is down or busy) */
+} webui_login_t;
+
+/**
+ * @brief Check a request's login cookie
+ *
+ * @param wsi HTTP connection
+ * @param session_out If not NULL, filled with session info when valid
+ */
+webui_login_t request_login(struct lws *wsi, auth_session_t *session_out);
+
 /**
  * @brief Check if HTTP request has valid session cookie
  *
  * @param wsi HTTP connection
  * @param session_out If not NULL, filled with session info on success
- * @return true if authenticated, false otherwise
+ * @return true if authenticated, false otherwise (also when the login couldn't
+ *         be checked: use request_login() where that must not read as signed out)
  */
 bool is_request_authenticated(struct lws *wsi, auth_session_t *session_out);
 #endif

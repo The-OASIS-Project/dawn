@@ -912,7 +912,12 @@ static void test_shutdown_cancels_waiting_request(void) {
    pthread_t t;
    TEST_ASSERT_EQUAL_INT(0, pthread_create(&t, NULL, tool_request, &w));
    bool opened = wait_requested(&w) && wait_opened("plex:/library/parts/slow/1.flac");
-   free_player(p); /* shutdown preempts the waiting tool */
+   /* Not free_player(): that lets the slow open finish first, and the request
+    * could then truthfully resolve as playing.  The shutdown cancels the open
+    * itself and preempts the waiting tool. */
+   s_live[live_slot(p)] = NULL;
+   music_player_shutdown(p);
+   music_player_release(p);
    pthread_join(t, NULL);
    TEST_ASSERT_TRUE(opened);
    TEST_ASSERT_EQUAL_INT(MUSIC_OPEN_CLOSED, w.result);
