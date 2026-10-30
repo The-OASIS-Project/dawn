@@ -699,6 +699,12 @@ int music_db_list_albums_by_artist(const char *artist,
  * Albums: copies grouped into albums
  * ============================================================================= */
 
+/* Dedup within one copy: a track the folder holds twice (a FLAC and an MP3 of it)
+ * counts and plays once.  Other copies keep theirs. */
+#define MUSIC_DEDUP_SAME_COPY                                               \
+   MUSIC_DEDUP_EXISTS_2(" AND 0", " AND m2.source = music_metadata.source " \
+                                  "AND m2.album_id IS music_metadata.album_id")
+
 /* One row per copy with a track matching ?1 (album words, NULL = any) and ?2
  * (artist words against album artist or artist, NULL = any). A copy is the
  * tracks of one album_id (a folder, a Plex album) sharing an album name, editions
@@ -712,11 +718,11 @@ static const char *SQL_ALBUM_COPIES =
     "   AND (?1 IS NULL OR music_match(album, ?1) >= ?3) "
     "   AND (?2 IS NULL OR music_match(album_artist, ?2) >= ?3 "
     "        OR music_match(artist, ?2) >= ?3)), "
-    "trk AS (SELECT m.album_id, c.akey, m.id, m.album, m.source, m.track_no, m.album_artist, "
-    "   m.artist, ROW_NUMBER() OVER (PARTITION BY m.album_id, c.akey "
-    "      ORDER BY COALESCE(m.disc_no, 1), m.track_no IS NULL, m.track_no, m.path) AS pos "
-    "   FROM music_metadata m JOIN cand c ON c.album_id = m.album_id "
-    "   AND music_album_key(m.album, NULL) = c.akey), "
+    "trk AS (SELECT music_metadata.album_id, c.akey, id, album, source, track_no, "
+    "   album_artist, artist, ROW_NUMBER() OVER (PARTITION BY music_metadata.album_id, c.akey "
+    "      ORDER BY COALESCE(disc_no, 1), track_no IS NULL, track_no, path) AS pos "
+    "   FROM cand c CROSS JOIN music_metadata ON music_metadata.album_id = c.album_id "
+    "   AND music_album_key(album, NULL) = c.akey WHERE " MUSIC_DEDUP_SAME_COPY "), "
     "names AS (SELECT album_id, akey, v, ROW_NUMBER() OVER "
     "   (PARTITION BY album_id, akey ORDER BY k, n DESC, v) AS rn FROM "
     "   (SELECT album_id, akey, k, MIN(v) AS v, COUNT(*) AS n FROM "
@@ -903,6 +909,7 @@ static const char *SQL_ALBUM_TRACKS =
     "WHERE album_id = (SELECT album_id FROM music_metadata WHERE id = ?1) "
     "AND music_album_key(album, NULL) = "
     "   (SELECT music_album_key(album, NULL) FROM music_metadata WHERE id = ?1) "
+    "AND " MUSIC_DEDUP_SAME_COPY
     "ORDER BY COALESCE(disc_no, 1), track_no IS NULL, track_no, path LIMIT ?2";
 
 int music_db_album_tracks(int64_t id, music_search_result_t *results, int max, int *count_out) {

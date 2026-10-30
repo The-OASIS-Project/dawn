@@ -474,6 +474,30 @@ static void test_album_find_flat_folder(void) {
    clear_tracks();
 }
 
+/* A folder holding each track twice (FLAC and MP3) counts and plays it once;
+ * another copy of the album keeps its own tracks */
+static void test_album_same_folder_formats(void) {
+   clear_tracks();
+   const int L = MUSIC_SOURCE_LOCAL;
+   add_album_track("/m/flac/A/01.flac", "One", "Band", "Album", "/m/flac/A", NULL, 1, 0, L);
+   add_album_track("/m/flac/A/01.mp3", "One", "Band", "Album", "/m/flac/A", NULL, 1, 0, L);
+   add_album_track("/m/flac/A/02.flac", "Two", "Band", "Album", "/m/flac/A", NULL, 2, 0, L);
+   add_album_track("/m/flac/A/02.mp3", "Two", "Band", "Album", "/m/flac/A", NULL, 2, 0, L);
+   add_album_track("/m/mp3/A/01.mp3", "One", "Band", "Album", "/m/mp3/A", NULL, 1, 0, L);
+
+   music_album_choice_t a[2];
+   TEST_ASSERT_EQUAL_INT(1, find_albums("Album", NULL, a, 2, NULL));
+   TEST_ASSERT_EQUAL_INT(2, a[0].copies);
+   TEST_ASSERT_EQUAL_INT(2, a[0].track_count);
+   music_search_result_t t[8];
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_album_tracks(a[0].id, t, 8, &count));
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_STRING("One", t[0].title);
+   TEST_ASSERT_EQUAL_STRING("Two", t[1].title);
+   clear_tracks();
+}
+
 /* A copy plays by disc, then track number (unknown last), then path; an unknown
  * disc is disc 1 */
 static void test_album_tracks_order(void) {
@@ -1456,6 +1480,7 @@ int main(void) {
    RUN_TEST(test_album_find_copies_and_sequels);
    RUN_TEST(test_album_find_various_and_ties);
    RUN_TEST(test_album_find_flat_folder);
+   RUN_TEST(test_album_same_folder_formats);
    RUN_TEST(test_album_tracks_order);
    RUN_TEST(test_search_basic);
    RUN_TEST(test_search_by_title);

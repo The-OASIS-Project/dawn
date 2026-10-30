@@ -386,20 +386,6 @@ int music_db_list_artists_with_stats(music_artist_info_t *artists,
                                      int *count_out);
 
 /**
- * @brief List albums with statistics (track count, artist)
- *
- * @param albums Output array for album info
- * @param max_albums Maximum number of albums to return
- * @param offset Number of albums to skip (for pagination)
- * @param count_out Output for number of albums found
- * @return SUCCESS or FAILURE
- */
-int music_db_list_albums_with_stats(music_album_info_t *albums,
-                                    int max_albums,
-                                    int offset,
-                                    int *count_out);
-
-/**
  * @brief List an artist's albums (discography-style inventory)
  *
  * Albums with at least one track whose artist matches @p artist as whole words
@@ -493,20 +479,6 @@ int music_db_get_by_artist(const char *artist,
                            music_search_result_t *results,
                            int max_results,
                            int *count_out);
-
-/**
- * @brief Get all tracks in a specific album
- *
- * @param album Album name (exact match)
- * @param results Output array for results
- * @param max_results Maximum number of results
- * @param count_out Output for number of tracks found
- * @return SUCCESS or FAILURE
- */
-int music_db_get_by_album(const char *album,
-                          music_search_result_t *results,
-                          int max_results,
-                          int *count_out);
 
 #ifdef __cplusplus
 }

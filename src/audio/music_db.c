@@ -133,26 +133,11 @@ static const char *SQL_LIST_ARTISTS_WITH_STATS =
     "ORDER BY artist COLLATE NOCASE "
     "LIMIT ? OFFSET ?";
 
-/* List albums with stats (track count, artist) - dedup applied before GROUP BY */
-static const char *SQL_LIST_ALBUMS_WITH_STATS = "SELECT album, "
-                                                "       COUNT(*) as track_count, "
-                                                "       MAX(artist) as artist "
-                                                "FROM music_metadata "
-                                                "WHERE album != '' " MUSIC_DEDUP_CLAUSE
-                                                "GROUP BY album "
-                                                "ORDER BY album COLLATE NOCASE "
-                                                "LIMIT ? OFFSET ?";
-
 /* Get tracks by artist (deduped) */
 static const char *SQL_GET_BY_ARTIST = "SELECT " MUSIC_ROW_COLS " FROM music_metadata "
                                        "WHERE artist = ? " MUSIC_DEDUP_CLAUSE
                                        "ORDER BY album COLLATE NOCASE, title COLLATE NOCASE "
                                        "LIMIT ?";
-
-/* Get tracks by album (deduped) */
-static const char *SQL_GET_BY_ALBUM = "SELECT " MUSIC_ROW_COLS " FROM music_metadata "
-                                      "WHERE album = ? " MUSIC_DEDUP_CLAUSE "ORDER BY path "
-                                      "LIMIT ?";
 
 /* =============================================================================
  * Module State
@@ -1218,59 +1203,6 @@ int music_db_list_artists_with_stats(music_artist_info_t *artists,
    return SUCCESS;
 }
 
-int music_db_list_albums_with_stats(music_album_info_t *albums,
-                                    int max_albums,
-                                    int offset,
-                                    int *count_out) {
-   if (!albums || max_albums <= 0 || !count_out) {
-      return FAILURE;
-   }
-   *count_out = 0;
-   if (offset < 0)
-      offset = 0;
-
-   pthread_mutex_lock(&g_music_db_mutex);
-
-   if (!g_music_db_initialized) {
-      pthread_mutex_unlock(&g_music_db_mutex);
-      return FAILURE;
-   }
-
-   sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(g_music_db, SQL_LIST_ALBUMS_WITH_STATS, -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("music_db_list_albums_with_stats: prepare failed: %s", sqlite3_errmsg(g_music_db));
-      pthread_mutex_unlock(&g_music_db_mutex);
-      return FAILURE;
-   }
-
-   sqlite3_bind_int(stmt, 1, max_albums);
-   sqlite3_bind_int(stmt, 2, offset);
-
-   int count = 0;
-   while (sqlite3_step(stmt) == SQLITE_ROW && count < max_albums) {
-      const char *name = (const char *)sqlite3_column_text(stmt, 0);
-      if (name) {
-         memset(&albums[count], 0, sizeof(albums[count])); /* by-artist-only fields = 0 */
-         safe_strncpy(albums[count].name, name, AUDIO_METADATA_STRING_MAX);
-         albums[count].track_count = sqlite3_column_int(stmt, 1);
-         const char *artist = (const char *)sqlite3_column_text(stmt, 2);
-         if (artist) {
-            safe_strncpy(albums[count].artist, artist, AUDIO_METADATA_STRING_MAX);
-         } else {
-            albums[count].artist[0] = '\0';
-         }
-         count++;
-      }
-   }
-
-   sqlite3_finalize(stmt);
-   pthread_mutex_unlock(&g_music_db_mutex);
-
-   *count_out = count;
-   return SUCCESS;
-}
-
 int music_db_get_by_artist(const char *artist,
                            music_search_result_t *results,
                            int max_results,
@@ -1296,46 +1228,6 @@ int music_db_get_by_artist(const char *artist,
    }
 
    sqlite3_bind_text(stmt, 1, artist, -1, SQLITE_STATIC);
-   sqlite3_bind_int(stmt, 2, max_results);
-
-   int count = 0;
-   while (sqlite3_step(stmt) == SQLITE_ROW && count < max_results) {
-      music_db_populate_row(stmt, &results[count]);
-      count++;
-   }
-
-   sqlite3_finalize(stmt);
-   pthread_mutex_unlock(&g_music_db_mutex);
-
-   *count_out = count;
-   return SUCCESS;
-}
-
-int music_db_get_by_album(const char *album,
-                          music_search_result_t *results,
-                          int max_results,
-                          int *count_out) {
-   if (!album || !results || max_results <= 0 || !count_out) {
-      return FAILURE;
-   }
-   *count_out = 0;
-
-   pthread_mutex_lock(&g_music_db_mutex);
-
-   if (!g_music_db_initialized) {
-      pthread_mutex_unlock(&g_music_db_mutex);
-      return FAILURE;
-   }
-
-   sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(g_music_db, SQL_GET_BY_ALBUM, -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("music_db_get_by_album: prepare failed: %s", sqlite3_errmsg(g_music_db));
-      pthread_mutex_unlock(&g_music_db_mutex);
-      return FAILURE;
-   }
-
-   sqlite3_bind_text(stmt, 1, album, -1, SQLITE_STATIC);
    sqlite3_bind_int(stmt, 2, max_results);
 
    int count = 0;
