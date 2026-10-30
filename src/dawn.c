@@ -419,12 +419,18 @@ static bool s_command_unattended = false;
  * as for an interrupt that brings a new request. */
 static bool s_reply_stopped_by_user = false;
 
-/* The command interrupted a reply of hers: "Okay Friday, stop" said in one
- * breath while she was speaking, thinking or holding a request (main-thread
- * state, decided at the wake word: by PROCESS_COMMAND the interrupted turn may
- * already be gone).  A cancel phrase then means her, not the music.  A bare
- * wake word stops her by itself, so the command after it starts fresh. */
-static bool s_wake_cut_reply = false;
+/* What a cancel phrase in the next command means, decided when the command
+ * arrives (main-thread state): by PROCESS_COMMAND her speech has been
+ * discarded and an interrupted turn may be gone or still finishing.
+ * "Okay Friday, stop" in one breath over her speaking, thinking or a held
+ * request means her; the command after a bare wake word (which stopped her by
+ * itself) means the music; a typed one while she speaks or works means her. */
+typedef enum {
+   CANCEL_TARGET_AUTO,  /**< Decided when the cancel is handled */
+   CANCEL_TARGET_REPLY, /**< Her reply */
+   CANCEL_TARGET_MUSIC, /**< The speaker's music */
+} cancel_target_t;
+static cancel_target_t s_cancel_target = CANCEL_TARGET_AUTO;
 
 
 /* A cancel phrase: stop the reply (its speech, and its generation if still
@@ -436,9 +442,11 @@ static void acknowledge_cancel(void) {
    pthread_mutex_lock(&tts_mutex);
    const bool speaking = tts_playback_state == TTS_PLAYBACK_PAUSE;
    pthread_mutex_unlock(&tts_mutex);
-   const bool replying = local_llm_busy() || s_pending_voice_command || speaking ||
-                         s_wake_cut_reply;
-   s_wake_cut_reply = false;
+   const cancel_target_t target = s_cancel_target;
+   s_cancel_target = CANCEL_TARGET_AUTO;
+   const bool replying = target == CANCEL_TARGET_REPLY ||
+                         (target == CANCEL_TARGET_AUTO &&
+                          (local_llm_busy() || s_pending_voice_command || speaking));
    if (!replying && music_speaker_is_playing()) {
       if (music_speaker_pause()) {
          const size_t n = sizeof(cancelResponses) / sizeof(cancelResponses[0]);
@@ -1183,7 +1191,10 @@ static int check_and_process_input_queue(char **command_text_out,
 
    *command_text_out = strdup(input.text);
    s_next_command_unattended = *command_text_out && input.source == INPUT_SOURCE_MQTT;
-   s_wake_cut_reply = false; /* a typed command came with no wake word */
+   /* A typed command came with no wake word (and only once the pipeline is
+    * free): one while she's still speaking is about her (her speech plays on,
+    * not paused) */
+   s_cancel_target = tts_is_speaking() ? CANCEL_TARGET_REPLY : CANCEL_TARGET_AUTO;
    if (*command_text_out == NULL) {
       OLOG_ERROR("Failed to allocate memory for text input from %s",
                  input_source_name(input.source));
@@ -3488,6 +3499,7 @@ mqtt_disabled:
                   pthread_mutex_unlock(&tts_mutex);
                   if (speaking && wake_word_is_cancel(input_text)) {
                      OLOG_WARNING("Cancel word detected.\n");
+                     s_cancel_target = CANCEL_TARGET_REPLY; /* said over her speech */
                      acknowledge_cancel();
                      silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
                      recState = DAWN_STATE_SILENCE;
@@ -3547,8 +3559,11 @@ mqtt_disabled:
                   if (i < numWakeWords) {
                      pthread_mutex_lock(&tts_mutex);
                      /* Whether this wake word cut a reply off, for a cancel phrase */
-                     s_wake_cut_reply = tts_playback_state == TTS_PLAYBACK_PAUSE ||
-                                        local_llm_busy() || s_pending_voice_command;
+                     s_cancel_target = tts_playback_state == TTS_PLAYBACK_PAUSE ||
+                                               tts_is_speaking() || local_llm_busy() ||
+                                               s_pending_voice_command
+                                           ? CANCEL_TARGET_REPLY
+                                           : CANCEL_TARGET_AUTO;
                      if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
                         tts_playback_state = TTS_PLAYBACK_DISCARD;
                         pthread_cond_signal(&tts_cond);
@@ -3583,8 +3598,9 @@ mqtt_disabled:
                         OLOG_WARNING("Wake word detected with no command, transitioning to "
                                      "COMMAND_RECORDING.\n");
                         /* The wake word alone stopped any reply of hers: what comes
-                         * next is a new request ("pause" then means the music) */
-                        s_wake_cut_reply = false;
+                         * next is a new request ("pause" then means the music, even
+                         * while an interrupted tool call is still finishing) */
+                        s_cancel_target = CANCEL_TARGET_MUSIC;
                         text_to_speech("Hello.");
 
                         commandTimeout = 0;
