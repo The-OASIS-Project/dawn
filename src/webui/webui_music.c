@@ -167,31 +167,52 @@ int webui_music_configure_encoder(session_music_state_t *state, music_quality_t 
    return 0;
 }
 
+/* Whether @p conn is still registered (s_conn_registry_mutex held): until it's
+ * unregistered, which CLOSED does under that lock before releasing its
+ * session, the connection holds its session reference */
+static bool conn_registered_locked(const ws_connection_t *conn) {
+   for (int i = 0; conn && i < MAX_ACTIVE_CONNECTIONS; i++) {
+      if (s_active_connections[i] == conn) {
+         return true;
+      }
+   }
+   return false;
+}
+
 /*
  * The session to deliver a connection's music frames to, or NULL when a newer
  * connection has taken the session over (a reconnected tab, a reassigned
  * satellite) or the connection has let it go: frames are delivered by
- * session, so they'd reach the newer connection, perhaps of another user.  A
- * session outlives its connection's close (kept for a reconnect).
+ * session, so they'd reach the newer connection, perhaps of another user.
+ * s_conn_registry_mutex held: a registered connection keeps its session
+ * reference (webui_detach_session() drops it under the same lock).
  */
-static session_t *music_reply_session(ws_connection_t *conn) {
+static session_t *music_reply_session_locked(ws_connection_t *conn) {
+   if (!conn_registered_locked(conn)) {
+      return NULL;
+   }
    session_t *session = conn_get_session(conn);
    return session && session->client_data == conn ? session : NULL;
 }
 
-/**
- * @brief Send music state update to client
- *
- * Reads the player through music_player_snapshot() (queue_mutex, then the
- * player's state_mutex), so callers must not hold either.
- */
-void webui_music_send_state_impl(ws_connection_t *conn,
-                                 session_music_state_t *state,
-                                 bool advance_auto) {
-   session_t *session = music_reply_session(conn);
-   if (!session) {
-      return;
+/* music_reply_session_locked(), referenced so it lives until the frame is
+ * queued (queued frames are purged before a session is freed): release it
+ * with session_release() */
+static session_t *music_reply_session_pin(ws_connection_t *conn) {
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   session_t *session = music_reply_session_locked(conn);
+   if (session) {
+      session_retain(session);
    }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+   return session;
+}
+
+/* Queue @p conn's music_state for @p session (alive for the call) */
+static void send_state_to(ws_connection_t *conn,
+                          session_t *session,
+                          session_music_state_t *state,
+                          bool advance_auto) {
    music_player_status_t st;
    music_player_snapshot(state->player, &st);
    bool has_track = st.track.path[0] != '\0';
@@ -270,6 +291,23 @@ void webui_music_send_state_impl(ws_connection_t *conn,
    json_object_put(response);
 }
 
+/**
+ * @brief Send music state update to client
+ *
+ * Reads the player through music_player_snapshot() (queue_mutex, then the
+ * player's state_mutex), so callers must not hold either, nor
+ * s_conn_registry_mutex.
+ */
+void webui_music_send_state_impl(ws_connection_t *conn,
+                                 session_music_state_t *state,
+                                 bool advance_auto) {
+   session_t *session = music_reply_session_pin(conn);
+   if (session) {
+      send_state_to(conn, session, state, advance_auto);
+      session_release(session);
+   }
+}
+
 void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state) {
    webui_music_send_state_impl(conn, state, false);
 }
@@ -281,7 +319,7 @@ void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state)
  * for calling from the player's thread.
  */
 static void send_position_update(ws_connection_t *conn, const music_event_t *ev) {
-   session_t *session = music_reply_session(conn);
+   session_t *session = music_reply_session_pin(conn);
    if (!session) {
       return;
    }
@@ -291,18 +329,11 @@ static void send_position_update(ws_connection_t *conn, const music_event_t *ev)
                                               .duration_sec = ev->duration_sec } };
 
    queue_response(&resp);
+   session_release(session);
 }
 
-/**
- * @brief Send music error to client (thread-safe)
- *
- * Uses the response queue — safe to call from any thread.
- */
-void webui_music_send_error(ws_connection_t *conn, const char *code, const char *message) {
-   session_t *session = music_reply_session(conn);
-   if (!session) {
-      return;
-   }
+/* Queue music_error for @p session (alive for the call) */
+static void send_error_to(session_t *session, const char *code, const char *message) {
    struct json_object *response = json_object_new_object();
    json_object_object_add(response, "type", json_object_new_string("music_error"));
 
@@ -329,6 +360,20 @@ void webui_music_send_error(ws_connection_t *conn, const char *code, const char 
    json_object_put(response);
 }
 
+/**
+ * @brief Send music error to client (thread-safe)
+ *
+ * Uses the response queue — safe to call from any thread not holding
+ * s_conn_registry_mutex (taken here).
+ */
+void webui_music_send_error(ws_connection_t *conn, const char *code, const char *message) {
+   session_t *session = music_reply_session_pin(conn);
+   if (session) {
+      send_error_to(session, code, message);
+      session_release(session);
+   }
+}
+
 /* =============================================================================
  * Broadcast
  * ============================================================================= */
@@ -348,12 +393,14 @@ void webui_music_send_error(ws_connection_t *conn, const char *code, const char 
  * queue's listener, among them; the previous collect-then-send-off-lock raced
  * connection teardown and could deref a freed conn (use-after-free).
  *
- * Deadlock-safe: s_conn_registry_mutex is the OUTERMOST lock here. webui_music_
- * send_state acquires uq->queue_mutex / the player's state_mutex and ultimately
- * queue_response's s_queue_mutex, and NONE of those paths ever re-acquire the
- * registry lock (verified: webui_music.c and webui_send.c never lock it), and
- * every caller releases uq->queue_mutex before broadcasting. So registry →
- * {queue_mutex, state_mutex, s_queue_mutex} never inverts.
+ * Deadlock-safe: s_conn_registry_mutex is the OUTERMOST lock here. The loop
+ * must use music_reply_session_locked() + send_state_to(), never the public
+ * webui_music_send_state*(), which take the registry lock themselves (it isn't
+ * recursive).  send_state_to acquires uq->queue_mutex / the player's
+ * state_mutex and ultimately queue_response's s_queue_mutex, none of which
+ * re-acquires the registry lock, and every caller releases uq->queue_mutex
+ * before broadcasting. So registry → {queue_mutex, state_mutex, s_queue_mutex}
+ * never inverts.
  */
 void webui_music_broadcast_queue_state(user_music_queue_t *uq, const void *exclude) {
    if (!uq) {
@@ -368,9 +415,10 @@ void webui_music_broadcast_queue_state(user_music_queue_t *uq, const void *exclu
                                       : NULL;
       bool entitled = conn_is_satellite_session(conn) ||
                       (conn && conn->authenticated && conn->auth_user_id == uq->user_id);
-      if (s && entitled && (const void *)s->player != exclude &&
+      session_t *session = s ? music_reply_session_locked(conn) : NULL;
+      if (session && entitled && (const void *)s->player != exclude &&
           music_player_queue(s->player) == uq) {
-         webui_music_send_state(conn, s);
+         send_state_to(conn, session, s, false); /* the registry lock keeps it */
       }
    }
    pthread_mutex_unlock(&s_conn_registry_mutex);
@@ -801,11 +849,7 @@ static ws_connection_t *pin_connection(session_t *session) {
       /* Registered first (a destroyed session's client_data may point at a
        * freed connection), then still this session's */
       ws_connection_t *conn = (ws_connection_t *)session->client_data;
-      bool live = false;
-      for (int i = 0; conn && i < MAX_ACTIVE_CONNECTIONS && !live; i++) {
-         live = s_active_connections[i] == conn;
-      }
-      live = live && conn_get_session(conn) == session;
+      bool live = conn_registered_locked(conn) && conn_get_session(conn) == session;
       if (!live) {
          pthread_mutex_unlock(&s_conn_registry_mutex);
          return NULL;

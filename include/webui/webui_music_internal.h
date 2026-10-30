@@ -189,6 +189,9 @@ int webui_music_configure_encoder(session_music_state_t *state, music_quality_t 
 
 /**
  * @brief Send current music state to client
+ *
+ * Takes s_conn_registry_mutex (the caller must not hold it) and drops the
+ * frame when a newer connection owns the session.
  */
 void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state);
 
@@ -197,6 +200,8 @@ void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state)
  *
  * @param advance_auto Tag the frame advance:"auto" (a natural track change or
  *        end, which the client applies when its buffered audio has played)
+ *
+ * Takes s_conn_registry_mutex (the caller must not hold it).
  */
 void webui_music_send_state_impl(ws_connection_t *conn,
                                  session_music_state_t *state,
@@ -204,6 +209,8 @@ void webui_music_send_state_impl(ws_connection_t *conn,
 
 /**
  * @brief Send error message to client
+ *
+ * Takes s_conn_registry_mutex (the caller must not hold it).
  */
 void webui_music_send_error(ws_connection_t *conn, const char *code, const char *message);
 
