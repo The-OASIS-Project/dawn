@@ -222,6 +222,7 @@ static int bulk_insert_tracks(plex_track_t *tracks, int count, int *inserted_out
       OLOG_WARNING("Plex sync: stale deletion error: %s", err_msg);
       sqlite3_free(err_msg);
    }
+   music_db_library_changed();
 
    pthread_mutex_unlock(&g_plex_db_mutex);
    if (inserted_out)

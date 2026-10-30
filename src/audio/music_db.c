@@ -31,6 +31,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -409,7 +410,7 @@ int music_db_insert_track(const char *path, time_t mtime, const audio_metadata_t
       OLOG_ERROR("Failed to insert track: %s", sqlite3_errmsg(g_music_db));
       return FAILURE;
    }
-
+   music_db_library_changed();
    return SUCCESS;
 }
 
@@ -787,9 +788,22 @@ void music_db_cleanup(void) {
       g_music_db = NULL;
    }
    g_music_db_initialized = false;
+   music_db_album_cache_clear();
+   music_db_library_changed(); /* a browse in flight mustn't keep its list */
 
    pthread_mutex_unlock(&g_music_db_mutex);
    OLOG_INFO("Music database closed");
+}
+
+/* Bumped by every write to music_metadata; the album list cache compares it */
+static atomic_uint s_library_generation;
+
+void music_db_library_changed(void) {
+   atomic_fetch_add(&s_library_generation, 1);
+}
+
+unsigned music_db_library_generation(void) {
+   return atomic_load(&s_library_generation);
 }
 
 bool music_db_is_initialized(void) {
@@ -876,6 +890,7 @@ int music_db_scan(const char *music_dir, music_db_scan_stats_t *stats) {
                "AND path NOT IN (SELECT path FROM seen_paths)",
                MUSIC_SOURCE_LOCAL);
       exec_sql(delete_sql);
+      music_db_library_changed();
    }
    if (seen.count > 0 && !seen.incomplete) {
       exec_sql("DROP TABLE IF EXISTS seen_paths");
@@ -919,8 +934,11 @@ int music_db_remove_source(music_source_t source, int *removed_out) {
       rc = sqlite3_step(stmt);
    }
    sqlite3_finalize(stmt);
-   if (rc == SQLITE_DONE && removed_out) {
-      *removed_out = sqlite3_changes(g_music_db);
+   if (rc == SQLITE_DONE) {
+      music_db_library_changed();
+      if (removed_out) {
+         *removed_out = sqlite3_changes(g_music_db);
+      }
    }
    if (rc != SQLITE_DONE) {
       /* Read the message before another thread's statement replaces it */

@@ -400,7 +400,9 @@ char *music_library_albums_text(const char *artist, int page, int per_page) {
          }
          strbuf_appendf(&sb, "\n");
       }
-      strbuf_appendf(&sb, "To list an album's tracks: search album:'<name>'.");
+      strbuf_appendf(&sb,
+                     "To list an album's tracks: search album:'<name>'; to play or queue it whole: "
+                     "play/enqueue album:'<name>'.");
    }
    free(albums);
 

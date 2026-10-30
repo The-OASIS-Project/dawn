@@ -432,6 +432,12 @@ typedef struct {
 } music_album_choice_t;
 
 /**
+ * @brief Note that rows changed outside this module's writes (the Plex sync's own
+ *        connection), so the cached album list is rebuilt
+ */
+void music_db_library_changed(void);
+
+/**
  * @brief Find albums by name and artist
  *
  * Albums with a track whose album matches @p album as whole words and, when @p artist

@@ -145,6 +145,12 @@ void music_db_album_folder(const char *path, char *out, size_t cap, uint32_t *di
  */
 int music_db_insert_track(const char *path, time_t mtime, const audio_metadata_t *meta);
 
+/** How many times the library has changed (music_db_library_changed()) */
+unsigned music_db_library_generation(void);
+
+/** Drop the cached album list. Caller holds g_music_db_mutex. */
+void music_db_album_cache_clear(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -125,6 +125,7 @@ static void insert_track(const char *path,
 /** Clear all rows between test groups */
 static void clear_tracks(void) {
    sqlite3_exec(g_test_db, "DELETE FROM music_metadata", NULL, NULL, NULL);
+   music_db_library_changed();
 }
 
 /** Free-text search through the ranked query core (strict). */
@@ -329,6 +330,7 @@ static void add_album_track(const char *path,
    }
    TEST_ASSERT_EQUAL_INT(SQLITE_DONE, sqlite3_step(st));
    sqlite3_finalize(st);
+   music_db_library_changed();
 }
 
 static int find_albums(const char *album,
@@ -495,6 +497,45 @@ static void test_album_same_folder_formats(void) {
    TEST_ASSERT_EQUAL_INT(2, count);
    TEST_ASSERT_EQUAL_STRING("One", t[0].title);
    TEST_ASSERT_EQUAL_STRING("Two", t[1].title);
+
+   /* A title on two discs of one copy is two tracks */
+   add_album_track("/m/flac/A/Disc 2/01.flac", "One", "Band", "Album", "/m/flac/A", NULL, 1, 2, L);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_album_tracks(a[0].id, t, 8, &count));
+   TEST_ASSERT_EQUAL_INT(3, count);
+   clear_tracks();
+}
+
+/* A browse is kept for the next page and rebuilt once the library changes */
+static void test_album_browse_cache(void) {
+   clear_tracks();
+   add_album_track("/m/A/01.flac", "One", "Band", "Alpha", "/m/A", NULL, 1, 0, MUSIC_SOURCE_LOCAL);
+   music_album_choice_t a[4];
+   int total = 0;
+   TEST_ASSERT_EQUAL_INT(1, find_albums(NULL, NULL, a, 4, &total));
+
+   /* A write behind the module's back isn't seen until it's announced */
+   sqlite3_exec(g_test_db,
+                "INSERT INTO music_metadata (path, mtime, title, artist, album, source, album_id) "
+                "VALUES ('/m/B/01.flac', 1, 'Two', 'Band', 'Beta', 0, '/m/B')",
+                NULL, NULL, NULL);
+   TEST_ASSERT_EQUAL_INT(1, find_albums(NULL, NULL, a, 4, &total));
+   music_db_library_changed();
+   TEST_ASSERT_EQUAL_INT(2, find_albums(NULL, NULL, a, 4, &total));
+   TEST_ASSERT_EQUAL_INT(2, total);
+
+   /* The scan's write announces itself; paging reads the kept list */
+   audio_metadata_t meta;
+   memset(&meta, 0, sizeof(meta));
+   strcpy(meta.title, "Three");
+   strcpy(meta.album, "Gamma");
+   pthread_mutex_lock(&g_music_db_mutex);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_insert_track("/m/C/01.flac", 1, &meta));
+   pthread_mutex_unlock(&g_music_db_mutex);
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_album_find(NULL, NULL, a, 1, 2, &count, &total));
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT(3, total);
+   TEST_ASSERT_EQUAL_STRING("Gamma", a[0].name);
    clear_tracks();
 }
 
@@ -1481,6 +1522,7 @@ int main(void) {
    RUN_TEST(test_album_find_various_and_ties);
    RUN_TEST(test_album_find_flat_folder);
    RUN_TEST(test_album_same_folder_formats);
+   RUN_TEST(test_album_browse_cache);
    RUN_TEST(test_album_tracks_order);
    RUN_TEST(test_search_basic);
    RUN_TEST(test_search_by_title);

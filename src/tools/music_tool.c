@@ -151,8 +151,9 @@ static const treg_param_t music_params[] = {
        .name = "album",
        .description = "For 'search': restrict matching to the ALBUM field (e.g. album:'Whatever "
                       "and Ever Amen' lists that album's tracks). For 'play'/'enqueue': the "
-                      "whole album in track order (play replaces the queue, enqueue appends; "
-                      "with query, play starts at that title). If several albums match, nothing "
+                      "whole album in track order (play replaces the queue, enqueue appends). "
+                      "With a query, play starts the album at that title, while enqueue adds "
+                      "just the query's best match. If several albums match, nothing "
                       "changes and the reply lists them with ids. Combine with artist: to "
                       "narrow.",
        .type = TOOL_PARAM_TYPE_STRING,

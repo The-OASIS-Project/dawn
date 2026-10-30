@@ -425,10 +425,24 @@ static int tool_resume(music_player_t *player,
 }
 
 /* "[id N] 'Name' by Artist, M tracks (1-M)" for a choice list */
+/* A tag for one line of the list: control characters (a newline that would start a
+ * line of its own) as spaces */
+static void choice_text(const char *in, char *out, size_t cap) {
+   safe_strncpy(out, in, cap);
+   for (char *p = out; *p; p++) {
+      if ((unsigned char)*p < 0x20 || *p == 0x7f) {
+         *p = ' ';
+      }
+   }
+}
+
 static void append_choice(strbuf_t *sb, const music_album_choice_t *c) {
-   strbuf_appendf(sb, "\n[id %lld] '%s' by %s, %d track%s", (long long)c->id, c->name,
-                  c->artist[0] ? c->artist : "Unknown", c->track_count,
-                  c->track_count == 1 ? "" : "s");
+   char name[sizeof(c->name)];
+   char artist[sizeof(c->artist)];
+   choice_text(c->name, name, sizeof(name));
+   choice_text(c->artist[0] ? c->artist : "Unknown", artist, sizeof(artist));
+   strbuf_appendf(sb, "\n[id %lld] '%s' by %s, %d track%s", (long long)c->id, name, artist,
+                  c->track_count, c->track_count == 1 ? "" : "s");
    if (c->first_track > 0) {
       strbuf_appendf(sb, " (%d-%d)", c->first_track, c->last_track);
    }
@@ -573,7 +587,9 @@ static int album_to_queue(music_player_t *player,
    if (n_ids > 1) {
       snprintf(album, sizeof(album), "%zu albums", n_ids);
    } else {
-      snprintf(album, sizeof(album), "the album '%s'", tracks[0].album);
+      char name[AUDIO_METADATA_STRING_MAX];
+      choice_text(tracks[0].album, name, sizeof(name));
+      snprintf(album, sizeof(album), "the album '%s'", name);
    }
    safe_strncpy(first_title, tracks[start].title, sizeof(first_title));
    safe_strncpy(first_path, tracks[start].path, sizeof(first_path));
@@ -775,7 +791,8 @@ static int music_tool_locked(music_player_t *player,
          json_object_put(ids);
          ids = NULL;
       }
-      if (ids || (!items && filters.album[0])) {
+      /* With a query, enqueue adds that one track (album: isn't used for it) */
+      if (ids || (!items && filters.album[0] && base_query[0] == '\0')) {
          int rc = album_to_queue(player, &filters, ids, NULL, false, for_model, result_out);
          json_object_put(ids);
          return rc;

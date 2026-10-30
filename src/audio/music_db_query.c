@@ -699,11 +699,19 @@ int music_db_list_albums_by_artist(const char *artist,
  * Albums: copies grouped into albums
  * ============================================================================= */
 
-/* Dedup within one copy: a track the folder holds twice (a FLAC and an MP3 of it)
- * counts and plays once.  Other copies keep theirs. */
-#define MUSIC_DEDUP_SAME_COPY                                               \
-   MUSIC_DEDUP_EXISTS_2(" AND 0", " AND m2.source = music_metadata.source " \
-                                  "AND m2.album_id IS music_metadata.album_id")
+/* A copy's match key (its tracks share it within their album_id) and play order */
+#define MUSIC_COPY_KEY "music_album_key(album, NULL)"
+#define MUSIC_COPY_ORDER "COALESCE(disc_no, 1), track_no IS NULL, track_no, path"
+
+/* Dedup within one copy: a track the folder holds twice (a FLAC and an MP3 of it,
+ * same disc and number) counts and plays once; a title repeated on another disc
+ * stays.  Other copies keep theirs. */
+#define MUSIC_DEDUP_SAME_COPY                                                                \
+   MUSIC_DEDUP_EXISTS_2(" AND 0",                                                            \
+                        " AND m2.source = music_metadata.source "                            \
+                        "AND m2.album_id IS music_metadata.album_id "                        \
+                        "AND COALESCE(m2.disc_no, 1) = COALESCE(music_metadata.disc_no, 1) " \
+                        "AND m2.track_no IS music_metadata.track_no")
 
 /* One row per copy with a track matching ?1 (album words, NULL = any) and ?2
  * (artist words against album artist or artist, NULL = any). A copy is the
@@ -713,16 +721,16 @@ int music_db_list_albums_by_artist(const char *artist,
  * range; and its album artist (the most common album-artist tag, else the most common track
  * artist). */
 static const char *SQL_ALBUM_COPIES =
-    "WITH cand AS (SELECT DISTINCT album_id, music_album_key(album, NULL) AS akey "
+    "WITH cand AS (SELECT DISTINCT album_id, " MUSIC_COPY_KEY " AS akey "
     "   FROM music_metadata WHERE album_id IS NOT NULL AND album <> '' "
     "   AND (?1 IS NULL OR music_match(album, ?1) >= ?3) "
     "   AND (?2 IS NULL OR music_match(album_artist, ?2) >= ?3 "
     "        OR music_match(artist, ?2) >= ?3)), "
     "trk AS (SELECT music_metadata.album_id, c.akey, id, album, source, track_no, "
     "   album_artist, artist, ROW_NUMBER() OVER (PARTITION BY music_metadata.album_id, c.akey "
-    "      ORDER BY COALESCE(disc_no, 1), track_no IS NULL, track_no, path) AS pos "
+    "      ORDER BY " MUSIC_COPY_ORDER ") AS pos "
     "   FROM cand c CROSS JOIN music_metadata ON music_metadata.album_id = c.album_id "
-    "   AND music_album_key(album, NULL) = c.akey WHERE " MUSIC_DEDUP_SAME_COPY "), "
+    "   AND " MUSIC_COPY_KEY " = c.akey WHERE " MUSIC_DEDUP_SAME_COPY "), "
     "names AS (SELECT album_id, akey, v, ROW_NUMBER() OVER "
     "   (PARTITION BY album_id, akey ORDER BY k, n DESC, v) AS rn FROM "
     "   (SELECT album_id, akey, k, MIN(v) AS v, COUNT(*) AS n FROM "
@@ -840,6 +848,32 @@ static int read_copies(const char *album,
    return SUCCESS;
 }
 
+/* The whole-library album list (a browse), as it was at s_browse_gen: every page
+ * of a browse is the same list until the library changes.  Guarded by
+ * g_music_db_mutex. */
+static music_album_choice_t *s_browse;
+static int s_browse_n;
+static unsigned s_browse_gen;
+
+void music_db_album_cache_clear(void) {
+   free(s_browse);
+   s_browse = NULL;
+   s_browse_n = 0;
+}
+
+/* Copy page [offset, offset + max) of @p list into @p out */
+static int album_page(const music_album_choice_t *list,
+                      int n,
+                      int offset,
+                      music_album_choice_t *out,
+                      int max) {
+   int count = 0;
+   for (int i = offset; i < n && count < max; i++) {
+      out[count++] = list[i];
+   }
+   return count;
+}
+
 int music_db_album_find(const char *album,
                         const char *artist,
                         music_album_choice_t *out,
@@ -857,11 +891,21 @@ int music_db_album_find(const char *album,
    if (offset < 0) {
       offset = 0;
    }
+   bool browse = !(album && album[0]) && !(artist && artist[0]);
 
    pthread_mutex_lock(&g_music_db_mutex);
    if (!g_music_db_initialized) {
       pthread_mutex_unlock(&g_music_db_mutex);
       return FAILURE;
+   }
+   unsigned gen = music_db_library_generation();
+   if (browse && s_browse && s_browse_gen == gen) {
+      *count_out = album_page(s_browse, s_browse_n, offset, out, max);
+      if (total_out) {
+         *total_out = s_browse_n;
+      }
+      pthread_mutex_unlock(&g_music_db_mutex);
+      return SUCCESS;
    }
    album_copy_t *copies = NULL;
    int n = 0;
@@ -892,25 +936,41 @@ int music_db_album_find(const char *album,
    }
    qsort(copies, (size_t)albums, sizeof(*copies), cmp_choice);
 
-   int count = 0;
-   for (int i = offset; i < albums && count < max; i++) {
-      out[count++] = copies[i].c;
+   music_album_choice_t *list = malloc((size_t)(albums > 0 ? albums : 1) * sizeof(*list));
+   if (!list) {
+      free(copies);
+      return FAILURE;
+   }
+   for (int i = 0; i < albums; i++) {
+      list[i] = copies[i].c;
    }
    free(copies);
-   *count_out = count;
+   *count_out = album_page(list, albums, offset, out, max);
    if (total_out) {
       *total_out = albums;
    }
+
+   /* Keep a browse for the next page; a write since it was read makes it stale */
+   if (browse) {
+      pthread_mutex_lock(&g_music_db_mutex);
+      if (g_music_db_initialized) {
+         free(s_browse);
+         s_browse = list;
+         s_browse_n = albums;
+         s_browse_gen = gen;
+         list = NULL;
+      }
+      pthread_mutex_unlock(&g_music_db_mutex);
+   }
+   free(list);
    return SUCCESS;
 }
 
 static const char *SQL_ALBUM_TRACKS =
     "SELECT " MUSIC_ROW_COLS " FROM music_metadata "
     "WHERE album_id = (SELECT album_id FROM music_metadata WHERE id = ?1) "
-    "AND music_album_key(album, NULL) = "
-    "   (SELECT music_album_key(album, NULL) FROM music_metadata WHERE id = ?1) "
-    "AND " MUSIC_DEDUP_SAME_COPY
-    "ORDER BY COALESCE(disc_no, 1), track_no IS NULL, track_no, path LIMIT ?2";
+    "AND " MUSIC_COPY_KEY " = (SELECT " MUSIC_COPY_KEY " FROM music_metadata WHERE id = ?1) "
+    "AND " MUSIC_DEDUP_SAME_COPY "ORDER BY " MUSIC_COPY_ORDER " LIMIT ?2";
 
 int music_db_album_tracks(int64_t id, music_search_result_t *results, int max, int *count_out) {
    if (!results || max <= 0 || !count_out) {

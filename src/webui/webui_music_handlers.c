@@ -30,6 +30,7 @@
 
 #include "audio/music_db.h"
 #include "audio/music_open.h"
+#include "audio/music_rank.h"
 #include "audio/music_source.h"
 #include "core/path_utils.h"
 #include "core/strbuf.h"
@@ -45,9 +46,9 @@
 
 /*
  * The tracks of the album a request names, in order: album_key (an id an albums
- * browse sent), else, or when that id is gone after a rescan, the album name an
- * older client sends: the album with that exact name (the largest when several;
- * artist narrows when sent), else the first found.
+ * browse sent), when it still names that album; else, as when a rescan or Plex
+ * sync has changed the ids, or a client sends only a name, the album with that
+ * exact name (artist narrows it; the largest when several), else the first found.
  */
 static void requested_album_tracks(struct json_object *payload,
                                    music_search_result_t *tracks,
@@ -55,15 +56,23 @@ static void requested_album_tracks(struct json_object *payload,
                                    int *count_out) {
    *count_out = 0;
    struct json_object *o;
+   const char *name = json_object_object_get_ex(payload, "album", &o) ? json_object_get_string(o)
+                                                                      : NULL;
    if (json_object_object_get_ex(payload, "album_key", &o)) {
       int64_t id = json_object_get_int64(o);
       if (id > 0 && music_db_album_tracks(id, tracks, max, count_out) == SUCCESS &&
           *count_out > 0) {
-         return;
+         /* An id a rescan gave to another album: the name says which was meant */
+         char want[MUSIC_RANK_FOLD_MAX];
+         char got[MUSIC_RANK_FOLD_MAX];
+         music_rank_album_key(name, NULL, want, sizeof(want));
+         music_rank_album_key(tracks[0].album, NULL, got, sizeof(got));
+         if (!name || !name[0] || strcmp(want, got) == 0) {
+            return;
+         }
+         *count_out = 0;
       }
    }
-   const char *name = json_object_object_get_ex(payload, "album", &o) ? json_object_get_string(o)
-                                                                      : NULL;
    const char *artist = json_object_object_get_ex(payload, "artist", &o) ? json_object_get_string(o)
                                                                          : NULL;
    music_album_choice_t c[WEBUI_MUSIC_ALBUM_NAME_CHOICES];
