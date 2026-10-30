@@ -21,6 +21,7 @@
 
 #include "audio/music_queue.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -35,6 +36,8 @@
 static user_music_queue_t *s_user_queues[MAX_USER_QUEUES];
 static int s_user_queue_count = 0;
 static pthread_mutex_t s_user_queues_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static _Atomic(music_queue_listener_t) s_listener = NULL;
 
 static user_music_queue_t *new_queue(int user_id) {
    user_music_queue_t *uq = calloc(1, sizeof(*uq));
@@ -59,7 +62,11 @@ int music_queue_init(const char *db_path) {
 void music_queue_shutdown(void) {
    pthread_mutex_lock(&s_user_queues_mutex);
    for (int i = 0; i < s_user_queue_count; i++) {
-      free_queue(s_user_queues[i]);
+      /* A player still holding one (a tool call on a thread nothing joins
+       * at exit) keeps it: its last release then finds it allocated */
+      if (s_user_queues[i]->ref_count == 0) {
+         free_queue(s_user_queues[i]);
+      }
       s_user_queues[i] = NULL;
    }
    s_user_queue_count = 0;
@@ -253,5 +260,16 @@ void music_queue_add(user_music_queue_t *uq,
    pthread_mutex_unlock(&uq->queue_mutex);
    if (added_out) {
       *added_out = added;
+   }
+}
+
+void music_queue_set_listener(music_queue_listener_t fn) {
+   atomic_store(&s_listener, fn);
+}
+
+void music_queue_announce(user_music_queue_t *uq, const void *origin) {
+   music_queue_listener_t fn = atomic_load(&s_listener);
+   if (fn && uq) {
+      fn(uq, origin);
    }
 }

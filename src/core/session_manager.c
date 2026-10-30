@@ -607,6 +607,9 @@ session_t *session_create_dap2(int client_fd,
          existing->client_fd = client_fd;
          existing->disconnected = false;
          existing->last_activity = time(NULL);
+         if (capabilities) {
+            existing->capabilities = *capabilities; /* an update may have changed them */
+         }
          pthread_mutex_unlock(&existing->fd_mutex);
 
          /* Increment ref count */
@@ -630,6 +633,9 @@ session_t *session_create_dap2(int client_fd,
          pthread_mutex_lock(&existing->fd_mutex);
          existing->client_fd = client_fd;
          existing->last_activity = time(NULL);
+         if (capabilities) {
+            existing->capabilities = *capabilities; /* an update may have changed them */
+         }
          pthread_mutex_unlock(&existing->fd_mutex);
 
          /* Increment ref count */
@@ -981,6 +987,13 @@ int session_manager_list_owned(session_owned_t *out, int max) {
    }
    pthread_rwlock_unlock(&session_manager_rwlock);
    return n;
+}
+
+dap2_capabilities_t session_capabilities(session_t *session) {
+   pthread_mutex_lock(&session->fd_mutex);
+   dap2_capabilities_t caps = session->capabilities;
+   pthread_mutex_unlock(&session->fd_mutex);
+   return caps;
 }
 
 session_t *session_get_local(void) {

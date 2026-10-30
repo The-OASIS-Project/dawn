@@ -22,13 +22,18 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Overwrite policy when buffer full
    - Used for smooth audio streaming between threads
 
-- **flac_playback.c/h**: Local speaker music playback
-   - Multi-format decoding (FLAC, MP3, Ogg Vorbis) via unified audio_decoder API
-   - ALSA/PulseAudio output with automatic sample rate conversion
-   - Plays music library tracks only (local or Plex), opened through music_open.c; a stop
-     cancels a Plex download in progress
-   - A track that won't open is skipped (playback stops at the 5th in a row, or at once when
-     Plex is unreachable)
+- **music_speaker.c/h**: The local speaker
+   - A music player (below) on its owner's queue: the local device's user (`[memory]
+     default_voice_user_id`, or whoever the local mic is assigned to). The owner's WebUI tabs
+     show and edit the same queue; a change of owner stops the old owner's music and plays the
+     new owner's queue on the next request
+   - Its output plays through the audio backend (ALSA or PulseAudio), converting to the
+     device's rate; the device opens when a track starts and closes on a pause, seek or stop,
+     and switching the playback device moves playing music to it
+   - Holds the speaker's volume (`setMusicVolume`/`getMusicVolume`) and ducking, applied to the
+     samples as they're written (ducking never changes the set volume)
+   - Who may play on it is the music tool's rule (`music_tool_speaker_allowed`): the owner,
+     from the local mic, a messaging channel or no session (the scheduler, MQTT)
 
 - **music_open.c/h**: Opening a library track, shared by every player
    - `music_path_is_valid()`: a local path must resolve inside `[paths] music_dir`; a `plex:`
@@ -52,8 +57,8 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
      skipping tracks that won't open; a helper prefetches the next remote track
    - Controls under its control lock (play, step, stop, remove, clear, await a track's
      outcome) and without it (pause, seek, snapshot); internals in `music_player_internal.h`
-   - Used by the WebUI stream today (`webui_music.c` is its output); the local speaker
-     (`flac_playback.c`) still plays on its own
+   - Used by the WebUI stream (`webui_music.c` is its output) and the local speaker
+     (`music_speaker.c`)
 
 - **music_db.c/h**: Unified music metadata database
    - SQLite-based cache for artist/title/album/genre tags with source tracking

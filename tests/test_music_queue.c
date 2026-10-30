@@ -305,6 +305,34 @@ static void test_two_users_save_at_once(void) {
    music_queue_release(b);
 }
 
+static user_music_queue_t *s_heard_queue;
+static const void *s_heard_origin;
+static int s_heard;
+
+static void listener(user_music_queue_t *uq, const void *origin) {
+   s_heard_queue = uq;
+   s_heard_origin = origin;
+   s_heard++;
+}
+
+/* The listener hears each announced change once, with who made it */
+static void test_listener_hears_announce(void) {
+   user_music_queue_t *uq = music_queue_acquire(9);
+   int origin;
+   s_heard = 0;
+   music_queue_announce(uq, &origin); /* no listener yet: nothing */
+   TEST_ASSERT_EQUAL_INT(0, s_heard);
+   music_queue_set_listener(listener);
+   music_queue_announce(uq, &origin);
+   TEST_ASSERT_EQUAL_INT(1, s_heard);
+   TEST_ASSERT_TRUE(s_heard_queue == uq);
+   TEST_ASSERT_TRUE(s_heard_origin == &origin);
+   music_queue_set_listener(NULL);
+   music_queue_announce(uq, &origin);
+   TEST_ASSERT_EQUAL_INT(1, s_heard);
+   music_queue_release(uq);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_shared_and_private);
@@ -316,5 +344,6 @@ int main(void) {
    RUN_TEST(test_places_follow_edits);
    RUN_TEST(test_place_on_dropped_track);
    RUN_TEST(test_replace_resets_places);
+   RUN_TEST(test_listener_hears_announce);
    return UNITY_END();
 }

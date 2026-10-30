@@ -23,7 +23,7 @@
  * Routes volume commands to the originating client:
  *   - WebUI session: updates conn->volume and syncs to browser
  *   - Satellite: forwards via DAP2 volume_set message
- *   - Daemon local: updates global_volume for local playback
+ *   - Daemon local: sets the local speaker's music volume
  */
 
 #include "tools/volume_tool.h"
@@ -33,20 +33,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "audio/flac_playback.h"
+#include "audio/music_speaker.h"
+#include "core/session_manager.h"
 #include "dawn.h"
 #include "logging.h"
+#include "tools/music_tool.h"
 #include "tools/tool_registry.h"
 #include "tts/text_to_speech.h"
 #include "word_to_number.h"
-
-/* Session routing for WebUI/satellite */
-#ifdef ENABLE_WEBUI
-#include "core/session_manager.h"
-#include "webui/webui_internal.h"
-#include "webui/webui_music_internal.h"
-#include "webui/webui_satellite.h"
-#endif
 
 /* ========== Forward Declarations ========== */
 
@@ -143,27 +137,42 @@ float parse_volume_level(const char *value) {
 
 /* ========== Callback Implementation ========== */
 
+/* No WebUI: no session has a client of its own */
+__attribute__((weak)) char *volume_tool_for_session(struct session *session,
+                                                    const char *action,
+                                                    const char *value,
+                                                    int *should_respond,
+                                                    bool *handled) {
+   (void)session;
+   (void)action;
+   (void)value;
+   (void)should_respond;
+   *handled = false;
+   return NULL;
+}
+
 static char *volume_tool_callback(const char *action, char *value, int *should_respond) {
    bool is_get = (action && strcmp(action, "get") == 0);
    bool is_set = !is_get; /* default to set for backward compat */
 
-#ifdef ENABLE_WEBUI
-   /* Route to originating client session (WebUI or satellite) */
+   /* Route to the originating client (a WebUI tab or a satellite) */
    session_t *session = session_get_command_context();
-   if (session && session->client_data) {
-      ws_connection_t *conn = (ws_connection_t *)session->client_data;
-
-      if (conn->is_satellite) {
-         char *result = satellite_volume_execute_tool(conn, action, value, should_respond);
-         return result;
-      } else {
-         char *result = webui_volume_execute_tool(conn, action, value, should_respond);
-         return result;
-      }
+   bool handled = false;
+   char *client_result = volume_tool_for_session(session, action, value, should_respond, &handled);
+   if (handled) {
+      return client_result;
    }
-#endif
 
-   /* Daemon-local fallback (no WebUI session, or ENABLE_WEBUI disabled) */
+   /* Else the local speaker, under the music tool's rule (its owner, from the
+    * local mic, a messaging channel or no session): a closed tab doesn't
+    * reach it */
+   session_t *local = session_get_local();
+   int owner = local ? session_effective_user_id(local) : 0;
+   if (!music_tool_speaker_allowed(session, tool_get_current_user_id(), owner)) {
+      *should_respond = 1;
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "The local speaker's volume isn't available from here; nothing changed");
+   }
    if (is_get) {
       float vol = getMusicVolume();
       char *result = malloc(64);

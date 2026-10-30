@@ -189,6 +189,9 @@ int webui_music_configure_encoder(session_music_state_t *state, music_quality_t 
 
 /**
  * @brief Send current music state to client
+ *
+ * Takes s_conn_registry_mutex (the caller must not hold it) and drops the
+ * frame when a newer connection owns the session.
  */
 void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state);
 
@@ -197,6 +200,8 @@ void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state)
  *
  * @param advance_auto Tag the frame advance:"auto" (a natural track change or
  *        end, which the client applies when its buffered audio has played)
+ *
+ * Takes s_conn_registry_mutex (the caller must not hold it).
  */
 void webui_music_send_state_impl(ws_connection_t *conn,
                                  session_music_state_t *state,
@@ -204,6 +209,8 @@ void webui_music_send_state_impl(ws_connection_t *conn,
 
 /**
  * @brief Send error message to client
+ *
+ * Takes s_conn_registry_mutex (the caller must not hold it).
  */
 void webui_music_send_error(ws_connection_t *conn, const char *code, const char *message);
 
@@ -211,59 +218,24 @@ void webui_music_send_error(ws_connection_t *conn, const char *code, const char 
  * @brief A connection's music state, created on first use
  *
  * Creation happens under the same lock the music server's lazy init uses, so
- * the WebSocket handlers, the LLM tool and the music server can't each make
- * one.
+ * the WebSocket handlers, music_player_for_session and the music server
+ * can't each make one.
  *
  * @return The state, or NULL if it couldn't be created
  */
 session_music_state_t *webui_music_state_get_or_init(ws_connection_t *conn);
 
-/** How long the LLM music tool waits for its track to open: past the Plex
- *  connect timeout, so "unreachable" and "won't open" are answered truthfully,
- *  without leaving a voice turn silent for a slow download */
-#define WEBUI_MUSIC_TOOL_OPEN_WAIT_MS 15000
-
 /**
- * @brief Broadcast queue state to all tabs for the same user
+ * @brief Send music_state to every tab whose player plays a queue
  *
- * Sends music_state update to all connections belonging to the same user,
- * except the excluded connection (which already got its update directly).
+ * Also the queue's listener (music_queue_set_listener()).
  *
- * @param uq Shared user queue (must NOT hold queue_mutex when calling)
- * @param exclude Connection to exclude from broadcast (may be NULL)
+ * @param uq The queue (must NOT hold queue_mutex when calling)
+ * @param exclude The player that changed it, which already sent its own
+ *        update (may be NULL)
  */
-void webui_music_broadcast_queue_state(user_music_queue_t *uq, ws_connection_t *exclude);
+void webui_music_broadcast_queue_state(user_music_queue_t *uq, const void *exclude);
 
-/**
- * @brief Execute volume tool for a WebUI session
- *
- * Called from volume_tool.c via session routing. Handles get/set actions
- * and syncs volume to the browser client via state update.
- */
-char *webui_volume_execute_tool(ws_connection_t *conn,
-                                const char *action,
-                                const char *value,
-                                int *should_respond);
-
-/**
- * @brief Append (or replace) queue tracks by path
- *
- * Resolves each path via music_db_get_by_path() BEFORE the queue lock, then
- * adds them (music_queue_add: dedups in append mode, persists).  Does NOT
- * start playback or send transport: the caller does.
- *
- * @param uq       The queue
- * @param paths    Array of file paths
- * @param n        Number of paths
- * @param replace  true: clear the queue first (play); false: append (enqueue)
- * @param outcomes Optional caller-allocated array of n entries for per-item result
- * @return SUCCESS, or FAILURE on invalid args / allocation failure
- */
-int webui_music_queue_apply_paths(user_music_queue_t *uq,
-                                  const char *const *paths,
-                                  int n,
-                                  bool replace,
-                                  music_queue_outcome_t *outcomes);
 
 #ifdef __cplusplus
 }

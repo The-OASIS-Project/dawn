@@ -411,7 +411,7 @@ static music_player_t *new_player(int user_id) {
 }
 
 static void lock_control(music_player_t *p, bool preempt) {
-   music_player_control_lock(p, preempt);
+   TEST_ASSERT_TRUE(music_player_control_lock(p, preempt));
    s_held[live_slot(p)] = true;
 }
 
@@ -428,7 +428,7 @@ static void free_player(music_player_t *p) {
    s_live[slot] = NULL;
    atomic_store(&s_release_slow, true); /* a slow open must end for the join */
    music_player_shutdown(p);
-   music_player_destroy(p);
+   music_player_release(p);
 }
 
 /* Play a queue entry as a listener's control would */
@@ -757,16 +757,29 @@ typedef struct {
    music_player_t *p;
    uint32_t ticket;
    music_open_result_t result;
+   atomic_bool requested; /**< Holds the control lock, its track requested */
 } waiter_t;
 
 /* An LLM tool's request: the control lock without preempting, play, await */
 static void *tool_request(void *arg) {
    waiter_t *w = arg;
-   music_player_control_lock(w->p, false);
+   if (!music_player_control_lock(w->p, false)) {
+      return NULL;
+   }
    music_player_play(w->p, "plex:/library/parts/slow/1.flac", 0, &w->ticket);
+   atomic_store(&w->requested, true);
    w->result = music_player_await(w->p, w->ticket, 5000);
    music_player_control_unlock(w->p);
    return NULL;
+}
+
+/* Wait (up to 5 s) until the tool holds the lock and has requested its track:
+ * an open of the path alone could be an earlier test's straggler */
+static bool wait_requested(waiter_t *w) {
+   for (int i = 0; i < 5000 && !atomic_load(&w->requested); i++) {
+      usleep(1000);
+   }
+   return atomic_load(&w->requested);
 }
 
 /* A preempting control ends a waiting request's wait; its open carries on */
@@ -778,14 +791,14 @@ static void test_preempt_ends_wait(void) {
    waiter_t w = { .p = p, .result = MUSIC_OPEN_PLAYING };
    pthread_t t;
    TEST_ASSERT_EQUAL_INT(0, pthread_create(&t, NULL, tool_request, &w));
-   bool opened = wait_opened("plex:/library/parts/slow/1.flac");
+   bool opened = wait_requested(&w) && wait_opened("plex:/library/parts/slow/1.flac");
    struct timespec t0, t1;
    clock_gettime(CLOCK_MONOTONIC, &t0);
    lock_control(p, true);
    pthread_join(t, NULL);
    clock_gettime(CLOCK_MONOTONIC, &t1);
    TEST_ASSERT_TRUE(opened);
-   TEST_ASSERT_EQUAL_INT(MUSIC_OPEN_PENDING, w.result);
+   TEST_ASSERT_EQUAL_INT(MUSIC_OPEN_PREEMPTED, w.result);
    /* Ended by the preempt, not by the await's own 5 s timeout */
    long waited_ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
    TEST_ASSERT_TRUE(waited_ms < 2000);
@@ -872,6 +885,53 @@ static void test_shutdown_during_blocked_write(void) {
    TEST_ASSERT_EQUAL_INT(0, music_player_running());
 }
 
+/* A reference outlives the player's shutdown: the player stays readable and
+ * refuses control until the last release frees it */
+static void test_reference_outlives_shutdown(void) {
+   music_player_t *p = new_player(0);
+   s_out.player = p;
+   queue_add(music_player_queue(p), s_track_a);
+   music_player_ref(p); /* as a tool call holding the player */
+
+   free_player(p); /* the output's teardown: shutdown and its release */
+   TEST_ASSERT_FALSE(music_player_control_lock(p, false));
+   music_player_status_t st;
+   music_player_snapshot(p, &st);
+   TEST_ASSERT_EQUAL_INT(1, st.queue_length);
+   music_player_release(p); /* the last one frees it (ASan checks) */
+}
+
+/* A shutdown ends a tool's wait for its track as closed, not pending */
+static void test_shutdown_cancels_waiting_request(void) {
+   music_player_t *p = new_player(0);
+   s_out.player = p;
+   queue_add(music_player_queue(p), "plex:/library/parts/slow/1.flac");
+   music_player_ref(p); /* the tool's own reference */
+
+   waiter_t w = { .p = p, .result = MUSIC_OPEN_PLAYING };
+   pthread_t t;
+   TEST_ASSERT_EQUAL_INT(0, pthread_create(&t, NULL, tool_request, &w));
+   bool opened = wait_requested(&w) && wait_opened("plex:/library/parts/slow/1.flac");
+   free_player(p); /* shutdown preempts the waiting tool */
+   pthread_join(t, NULL);
+   TEST_ASSERT_TRUE(opened);
+   TEST_ASSERT_EQUAL_INT(MUSIC_OPEN_CLOSED, w.result);
+   music_player_release(p);
+}
+
+/* A control request's own state change reaches the output */
+static void test_notify_state_reaches_output(void) {
+   music_player_t *p = new_player(0);
+   s_out.player = p;
+   lock_control(p, false);
+   music_player_notify_state(p);
+   music_player_notify_error(p, MUSIC_ERROR_PLAYBACK, "test");
+   unlock_control(p);
+   TEST_ASSERT_EQUAL_INT(1, recs_matching(REC_EVENT, MUSIC_EVENT_STATE));
+   TEST_ASSERT_EQUAL_INT(1, errors_of(MUSIC_ERROR_PLAYBACK));
+   free_player(p);
+}
+
 int main(void) {
    pthread_mutex_init(&s_out.mutex, NULL);
    pthread_cond_init(&s_out.cond, NULL);
@@ -901,6 +961,9 @@ int main(void) {
    RUN_TEST(test_stop_cancels_open);
    RUN_TEST(test_two_players_follow_edits);
    RUN_TEST(test_shutdown_during_blocked_write);
+   RUN_TEST(test_reference_outlives_shutdown);
+   RUN_TEST(test_shutdown_cancels_waiting_request);
+   RUN_TEST(test_notify_state_reaches_output);
    int rc = UNITY_END();
 
    unlink(s_track_a);

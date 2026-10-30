@@ -72,8 +72,14 @@ static void *music_stream_thread(void *arg) {
          continue;
       }
 
-      /* A requested or auto-advanced track waiting to be opened */
+      /* A requested or auto-advanced track waiting to be opened.  Once one is
+       * installed it counts as sending, so a pause or stop before its first
+       * write still halts the output (which may have opened its device for
+       * it); a natural advance was sending already, so no halt between tracks */
       if (music_player_run_pending_open(p, &failures)) {
+         pthread_mutex_lock(&p->state_mutex);
+         was_sending = was_sending || p->decoder != NULL;
+         pthread_mutex_unlock(&p->state_mutex);
          continue;
       }
 
@@ -263,6 +269,7 @@ music_player_t *music_player_create(const music_output_ops_t *ops,
    pthread_cond_init(&p->open_cond, &open_attr);
    pthread_condattr_destroy(&open_attr);
    music_history_init(&p->history);
+   atomic_store(&p->refs, 1);
    p->ops = ops;
    p->ops_ctx = ctx;
    p->shuffle_seed = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)p;
@@ -271,19 +278,25 @@ music_player_t *music_player_create(const music_output_ops_t *ops,
    return p;
 }
 
+static void control_lock_raw(music_player_t *p, bool preempt);
+
 void music_player_shutdown(music_player_t *p) {
    /* Let a control request already holding the lock (the LLM tool, waiting
     * for its track to open) finish first; the preempt ends its wait.  Then
     * stop the thread: after this, no output function runs. */
-   music_player_control_lock(p, true);
+   atomic_store(&p->closing, true);
+   control_lock_raw(p, true);
    music_player_stop_thread(p);
-   music_player_control_unlock(p);
+   p->closed = true;
+   pthread_mutex_unlock(&p->control_mutex);
 }
 
-void music_player_destroy(music_player_t *p) {
-   if (!p) {
-      return;
-   }
+void music_player_ref(music_player_t *p) {
+   atomic_fetch_add(&p->refs, 1);
+}
+
+/* Free a player nothing references any more */
+static void destroy(music_player_t *p) {
    if (p->decoder) {
       audio_decoder_close(p->decoder);
    }
@@ -299,6 +312,12 @@ void music_player_destroy(music_player_t *p) {
    free(p);
 }
 
+void music_player_release(music_player_t *p) {
+   if (p && atomic_fetch_sub(&p->refs, 1) == 1) {
+      destroy(p);
+   }
+}
+
 user_music_queue_t *music_player_queue(const music_player_t *p) {
    return p->shared_queue;
 }
@@ -307,9 +326,9 @@ int music_player_running(void) {
    return atomic_load(&s_running_players);
 }
 
-void music_player_control_lock(music_player_t *p, bool preempt) {
+static void control_lock_raw(music_player_t *p, bool preempt) {
    if (preempt) {
-      atomic_store(&p->control_cancel, true);
+      atomic_fetch_add(&p->control_cancel, 1);
       /* Wake an LLM tool call waiting for its track to open (it holds
        * control_mutex while it waits).  Under state_mutex, which the waiter
        * checks the flag under, so the wakeup can't be missed. */
@@ -319,22 +338,42 @@ void music_player_control_lock(music_player_t *p, bool preempt) {
    }
    pthread_mutex_lock(&p->control_mutex);
    if (preempt) {
-      /* Only one thread preempts, one request at a time, so this is
-       * its own request being retired.  A non-preempting caller that gets the
-       * lock first leaves it set: it doesn't wait for its track either, so the
-       * waiting request isn't held up. */
-      atomic_store(&p->control_cancel, false);
+      /* This request no longer waits; another preempting one still may */
+      atomic_fetch_sub(&p->control_cancel, 1);
    }
+}
+
+bool music_player_control_lock(music_player_t *p, bool preempt) {
+   control_lock_raw(p, preempt);
+   if (p->closed) {
+      pthread_mutex_unlock(&p->control_mutex);
+      return false;
+   }
+   return true;
 }
 
 void music_player_control_unlock(music_player_t *p) {
    pthread_mutex_unlock(&p->control_mutex);
 }
 
-void music_player_set_paused(music_player_t *p, bool paused) {
+void music_player_notify_state(music_player_t *p) {
+   music_event_t ev = { .type = MUSIC_EVENT_STATE };
+   p->ops->notify(p->ops_ctx, &ev);
+}
+
+void music_player_notify_error(music_player_t *p, music_error_t error, const char *message) {
+   music_event_t ev = { .type = MUSIC_EVENT_ERROR, .error = error, .message = message };
+   p->ops->notify(p->ops_ctx, &ev);
+}
+
+bool music_player_set_paused(music_player_t *p, bool paused) {
    pthread_mutex_lock(&p->state_mutex);
-   p->paused = paused;
+   bool changed = paused ? p->playing && !p->paused : p->paused;
+   if (changed) {
+      p->paused = paused;
+   }
    pthread_mutex_unlock(&p->state_mutex);
+   return changed;
 }
 
 bool music_player_seek(music_player_t *p, double position_sec) {

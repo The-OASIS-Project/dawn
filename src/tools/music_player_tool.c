@@ -16,20 +16,17 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * WebUI Music - LLM tool integration
- *
- * The music/volume tool entry points the daemon calls when a music command
- * originates from a WebUI session. Split from webui_music_handlers.c (which
- * keeps the browser-driven WebSocket message handlers) to stay under the file
- * size limit and to keep the LLM-tool surface cohesive.
- *
- * IMPORTANT: webui_music_execute_tool() runs on the LLM worker thread, NOT the
- * LWS service thread. All WebSocket sends here must go through thread-safe
- * paths (webui_music_send_state/send_error use queue_response() internally).
- * Never call send_json_response() or lws_write() directly from here.
+ * The music tool's actions over a music player: whichever player the caller
+ * has (a WebUI tab's, the local speaker's).  Its listener hears what changed
+ * through the player's output (music_player_notify_state/_error) and other
+ * players through the queue's listener (music_queue_announce).  Runs on the
+ * caller's thread: an LLM tool worker, or the main voice loop for a direct
+ * command, which must never wait long (tool_start_track).
  */
 
 #define _GNU_SOURCE /* strcasestr */
+
+#include "tools/music_player_tool.h"
 
 #include <json-c/json.h>
 #include <stdlib.h>
@@ -38,21 +35,25 @@
 
 #include "audio/music_db.h"
 #include "audio/music_open.h"
-#include "audio/music_source.h"
-#include "core/path_utils.h"
+#include "audio/music_player.h"
+#include "audio/music_queue.h"
 #include "core/strbuf.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/music_search.h"
-#include "tools/music_tool.h"
 #include "tools/tool_registry.h"
-#include "tools/volume_tool.h"
 #include "utils/string_utils.h"
-#include "webui/webui_music_internal.h"
-#include "webui/webui_server.h"
 
 /* "Artist - Title" display string size for resolved items. */
-#define WEBUI_MUSIC_DISPLAY_MAX (MUSIC_STRING_MAX * 2)
+#define MUSIC_TOOL_DISPLAY_MAX (MUSIC_STRING_MAX * 2)
+
+/** How long an LLM tool call waits for its track to open: past the Plex
+ *  connect timeout, so "unreachable" and "won't open" are answered truthfully,
+ *  without leaving a voice turn silent for a slow download */
+#define MUSIC_TOOL_OPEN_WAIT_MS 15000
+/** The wait anywhere else (a direct voice command runs on the main loop,
+ *  which must keep hearing the microphone): long enough for a local file */
+#define MUSIC_TOOL_SHORT_WAIT_MS 250
 
 /* =============================================================================
  * LLM-facing helpers: state footer, item resolution, batch apply + report
@@ -62,11 +63,15 @@
  * @brief Append a compact "[queue: ... | now ... | shuffle | repeat]" footer
  *
  * Gives the LLM the resulting player state after every mutating action so it
- * never has to call list to stay oriented.
+ * never has to call list to stay oriented.  Only for the model: a direct
+ * voice command would speak it.
  */
-static void append_state_footer(strbuf_t *sb, session_music_state_t *state) {
+static void append_state_footer(strbuf_t *sb, music_player_t *player, bool for_model) {
+   if (!for_model) {
+      return;
+   }
    music_player_status_t st;
-   music_player_snapshot(state->player, &st);
+   music_player_snapshot(player, &st);
    int len = st.queue_length;
    bool shuffle = st.shuffle;
    music_repeat_mode_t rep = st.repeat_mode;
@@ -97,24 +102,29 @@ static void append_state_footer(strbuf_t *sb, session_music_state_t *state) {
    }
 }
 
+/* How long a call waits for its track to open */
+static int open_wait_ms(bool for_model) {
+   return for_model ? MUSIC_TOOL_OPEN_WAIT_MS : MUSIC_TOOL_SHORT_WAIT_MS;
+}
+
 /*
- * Start a track and wait for the player's verdict, so the reply is
- * true.  The state frame goes out first (playing, and loading for a Plex
- * track) so the browser shows the change at once; the thread reports the
- * outcome to the client itself.
+ * Start a track and wait for the player's verdict, so the reply is true.
+ * The state event goes out first (playing, and loading for a remote track)
+ * so the listener shows the change at once; the player reports the outcome
+ * itself.  Only a call for the model waits for a slow open.
  */
-static music_open_result_t tool_start_track(ws_connection_t *conn,
-                                            session_music_state_t *state,
+static music_open_result_t tool_start_track(music_player_t *player,
                                             const char *path,
-                                            int hint) {
+                                            int hint,
+                                            bool for_model) {
    uint32_t ticket = 0;
-   if (music_player_play(state->player, path, hint, &ticket) != SUCCESS) {
-      webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
-      webui_music_send_state(conn, state);
+   if (music_player_play(player, path, hint, &ticket) != SUCCESS) {
+      music_player_notify_error(player, MUSIC_ERROR_PLAYBACK, "Failed to start playback");
+      music_player_notify_state(player);
       return MUSIC_OPEN_FAILED;
    }
-   webui_music_send_state(conn, state);
-   return music_player_await(state->player, ticket, WEBUI_MUSIC_TOOL_OPEN_WAIT_MS);
+   music_player_notify_state(player);
+   return music_player_await(player, ticket, open_wait_ms(for_model));
 }
 
 /* How an outcome reads after a track's name ("X is playing", "X couldn't...") */
@@ -126,8 +136,12 @@ static const char *tool_outcome_phrase(music_open_result_t result) {
          return "can't play: the Plex server isn't reachable";
       case MUSIC_OPEN_PENDING:
          return "is still loading and starts when it's ready";
+      case MUSIC_OPEN_PREEMPTED:
+         return "was still loading when another music request came in, which may change it";
       case MUSIC_OPEN_CANCELLED:
          return "was replaced before it started";
+      case MUSIC_OPEN_CLOSED:
+         return "didn't start: the player closed";
       case MUSIC_OPEN_FAILED:
       default:
          return "couldn't be played";
@@ -136,15 +150,18 @@ static const char *tool_outcome_phrase(music_open_result_t result) {
 
 /* A track that couldn't play fails the call; one still loading doesn't */
 static int tool_outcome_rc(music_open_result_t result) {
-   return result == MUSIC_OPEN_FAILED || result == MUSIC_OPEN_UNREACHABLE ? FAILURE : SUCCESS;
+   return result == MUSIC_OPEN_FAILED || result == MUSIC_OPEN_UNREACHABLE ||
+                  result == MUSIC_OPEN_CLOSED
+              ? FAILURE
+              : SUCCESS;
 }
 
 /** strdup(msg) with the state footer appended; falls back to plain msg on OOM. */
-static char *result_with_footer(session_music_state_t *state, const char *msg) {
+static char *result_with_footer(music_player_t *player, const char *msg, bool for_model) {
    strbuf_t sb;
    strbuf_init(&sb, 256);
    strbuf_appendf(&sb, "%s", msg);
-   append_state_footer(&sb, state);
+   append_state_footer(&sb, player, for_model);
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
       return strdup(msg);
@@ -224,7 +241,7 @@ static struct json_object *decode_items(const char *value) {
 /**
  * @brief Resolve a JSON array of item names/paths and apply them to the queue
  *
- * Resolves each entry, calls webui_music_queue_apply_paths(), and builds a
+ * Resolves each entry, calls music_queue_apply_paths(), and builds a
  * grouped "Added / Already in queue / No match" report naming the items so the
  * LLM can self-correct. Caller adds the state footer and handles playback start.
  *
@@ -232,7 +249,7 @@ static struct json_object *decode_items(const char *value) {
  * @param added_count_out optional: number of tracks actually added
  * @return allocated report string (caller frees), or NULL on OOM
  */
-static char *apply_items_and_report(session_music_state_t *state,
+static char *apply_items_and_report(music_player_t *player,
                                     struct json_object *arr,
                                     bool replace,
                                     int *added_count_out) {
@@ -251,7 +268,7 @@ static char *apply_items_and_report(session_music_state_t *state,
    }
 
    char(*paths)[MUSIC_PATH_MAX] = calloc((size_t)n, sizeof(*paths));
-   char(*disp)[WEBUI_MUSIC_DISPLAY_MAX] = calloc((size_t)n, sizeof(*disp));
+   char(*disp)[MUSIC_TOOL_DISPLAY_MAX] = calloc((size_t)n, sizeof(*disp));
    const char **pptr = calloc((size_t)n, sizeof(*pptr));
    music_queue_outcome_t *oc = calloc((size_t)n, sizeof(*oc));
    if (!paths || !disp || !pptr || !oc) {
@@ -283,8 +300,8 @@ static char *apply_items_and_report(session_music_state_t *state,
     * the queue untouched, and its outcomes unset: nothing was added. */
    bool applied = true;
    if (k > 0 || !replace) {
-      applied = webui_music_queue_apply_paths(music_player_queue(state->player), pptr, k, replace,
-                                              oc) == SUCCESS;
+      applied = music_queue_apply_paths(music_player_queue(player), pptr, k, replace, oc) ==
+                SUCCESS;
    }
 
    strbuf_t added, dup;
@@ -341,50 +358,103 @@ static char *apply_items_and_report(session_music_state_t *state,
 }
 
 
-static int music_tool_locked(ws_connection_t *conn,
-                             session_music_state_t *state,
+static int music_tool_locked(music_player_t *player,
                              const char *action,
                              const char *query,
+                             bool for_model,
                              char **result_out);
 
-int webui_music_execute_tool(ws_connection_t *conn,
-                             const char *action,
-                             const char *query,
-                             char **result_out) {
-   if (!conn || !action) {
+/* A bare play or a resume: resume a pause, else start the queue at the
+ * player's place when nothing is playing */
+static int tool_resume(music_player_t *player,
+                       bool resume_only,
+                       bool for_model,
+                       char **result_out) {
+   uint32_t ticket = 0;
+   music_resume_t r = music_player_resume_or_start(player, &ticket);
+   const char *msg = NULL;
+   char started[96];
+   int rc = SUCCESS;
+   switch (r) {
+      case MUSIC_RESUME_RESUMED:
+         msg = "Resumed playback";
+         break;
+      case MUSIC_RESUME_STARTED: {
+         /* The queue starts at the player's place: answer with its outcome */
+         music_player_notify_state(player);
+         music_open_result_t outcome = music_player_await(player, ticket, open_wait_ms(for_model));
+         snprintf(started, sizeof(started), "%sThe queue's track %s",
+                  tool_outcome_rc(outcome) == SUCCESS ? "" : TOOL_RESULT_ERROR_MARK,
+                  tool_outcome_phrase(outcome));
+         if (result_out) {
+            *result_out = result_with_footer(player, started, for_model);
+         }
+         return tool_outcome_rc(outcome);
+      }
+      case MUSIC_RESUME_START_FAILED:
+         music_player_notify_error(player, MUSIC_ERROR_PLAYBACK, "Failed to start playback");
+         msg = TOOL_RESULT_ERROR_MARK "Couldn't start playback";
+         rc = FAILURE;
+         break;
+      case MUSIC_RESUME_UNCHANGED:
+      default: {
+         music_player_status_t st;
+         music_player_snapshot(player, &st);
+         if (st.playing && !st.paused) {
+            msg = "Already playing";
+         } else {
+            msg = resume_only ? TOOL_RESULT_ERROR_MARK "Nothing to resume: the queue is empty"
+                              : TOOL_RESULT_ERROR_MARK "The queue is empty: say what to play, or "
+                                                       "pass items:[...] for a track list";
+            rc = FAILURE;
+         }
+         break;
+      }
+   }
+   if (rc == SUCCESS) {
+      music_player_notify_state(player);
+   }
+   if (result_out) {
+      *result_out = result_with_footer(player, msg, for_model);
+   }
+   return rc;
+}
+
+int music_player_tool_execute(music_player_t *player,
+                              const char *action,
+                              const char *query,
+                              bool for_model,
+                              char **result_out) {
+   if (!player || !action) {
       return FAILURE;
    }
 
-   /* Ensure music session is initialized */
-   session_music_state_t *state = webui_music_state_get_or_init(conn);
-   if (!state) {
+   /* A direct command (the voice loop runs it) preempts: a model call waiting
+    * for its track to open steps aside rather than hold up the voice loop.  A
+    * model call waits its turn behind other controls. */
+   if (!music_player_control_lock(player, !for_model)) {
       if (result_out) {
-         *result_out = strdup("Failed to initialize music session");
+         *result_out = strdup(TOOL_RESULT_ERROR_MARK "That player has closed; nothing changed");
       }
       return FAILURE;
    }
-
-   /* The browser's controls run on another thread against the same state;
-    * this thread waits for them rather than cancelling their work. */
-   music_player_control_lock(state->player, false);
-   int ret = music_tool_locked(conn, state, action, query, result_out);
-   music_player_control_unlock(state->player);
+   int ret = music_tool_locked(player, action, query, for_model, result_out);
+   music_player_control_unlock(player);
    return ret;
 }
 
-/* webui_music_execute_tool's body, with the player's control lock held */
-static int music_tool_locked(ws_connection_t *conn,
-                             session_music_state_t *state,
+/* music_player_tool_execute's body, with the player's control lock held */
+static int music_tool_locked(music_player_t *player,
                              const char *action,
                              const char *query,
+                             bool for_model,
                              char **result_out) {
-   OLOG_INFO("WebUI music tool: action='%s' query='%s'", action, query ? query : "(none)");
+   OLOG_INFO("Music tool: action='%s' query='%s'", action, query ? query : "(none)");
 
    /* The bridge passes the packed value string; the real search query is the
     * base segment, and list params arrive in the ::items:: field. */
    char base_query[MUSIC_PATH_MAX] = { 0 };
    tool_param_extract_base(query ? query : "", base_query, sizeof(base_query));
-   music_player_t *player = state->player;
    user_music_queue_t *uq = music_player_queue(player);
 
    if (strcmp(action, "play") == 0) {
@@ -394,7 +464,7 @@ static int music_tool_locked(ws_connection_t *conn,
          /* Resolve first: a list that matches nothing leaves the queue and
           * what's playing alone */
          int added = 0;
-         char *report = apply_items_and_report(state, items, true, &added);
+         char *report = apply_items_and_report(player, items, true, &added);
          json_object_put(items);
 
          music_open_result_t outcome = MUSIC_OPEN_PLAYING;
@@ -406,8 +476,8 @@ static int music_tool_locked(ws_connection_t *conn,
                snprintf(first_path, sizeof(first_path), "%s", uq->queue[0].path);
             }
             pthread_mutex_unlock(&uq->queue_mutex);
-            webui_music_broadcast_queue_state(uq, conn);
-            outcome = first_path[0] ? tool_start_track(conn, state, first_path, 0)
+            music_queue_announce(uq, player);
+            outcome = first_path[0] ? tool_start_track(player, first_path, 0, for_model)
                                     : MUSIC_OPEN_FAILED;
          }
 
@@ -417,14 +487,16 @@ static int music_tool_locked(ws_connection_t *conn,
             if (added > 0) {
                strbuf_appendf(&sb, "Replaced queue. %s The first track %s.", report ? report : "",
                               tool_outcome_phrase(outcome));
-               strbuf_appendf(&sb, " Use 'enqueue' to add without clearing.");
+               if (for_model) {
+                  strbuf_appendf(&sb, " Use 'enqueue' to add without clearing.");
+               }
             } else {
                /* Marked: nothing changed, as for the local speaker */
                strbuf_appendf(&sb,
                               TOOL_RESULT_ERROR_MARK "%s The queue and playback are unchanged.",
                               report ? report : "");
             }
-            append_state_footer(&sb, state);
+            append_state_footer(&sb, player, for_model);
             if (strbuf_oom(&sb)) {
                strbuf_free(&sb);
                *result_out = strdup("Replaced queue");
@@ -437,22 +509,9 @@ static int music_tool_locked(ws_connection_t *conn,
       }
 
       if (base_query[0] == '\0') {
-         /* Resume if paused */
-         music_player_status_t st;
-         music_player_snapshot(player, &st);
-         if (st.paused) {
-            music_player_set_paused(player, false);
-            webui_music_send_state(conn, state);
-            if (result_out) {
-               *result_out = result_with_footer(state, "Resumed playback");
-            }
-            return SUCCESS;
-         }
-         if (result_out) {
-            *result_out = strdup(
-                "Please specify what to play, or pass items:[...] for a track list");
-         }
-         return FAILURE;
+         /* A bare play: resume a pause, or start the queue at the player's
+          * place; with nothing to start, ask for something */
+         return tool_resume(player, false, for_model, result_out);
       }
 
       /* Search unified database and play (REPLACE).  Search first: a miss must
@@ -493,17 +552,16 @@ static int music_tool_locked(ws_connection_t *conn,
       free(results);
 
       /* Start playback of first track */
-      webui_music_broadcast_queue_state(uq, conn);
-      music_open_result_t outcome = tool_start_track(conn, state, first_path, 0);
+      music_queue_announce(uq, player);
+      music_open_result_t outcome = tool_start_track(player, first_path, 0, for_model);
 
       if (result_out) {
          char buf[MUSIC_PATH_MAX + 320];
-         snprintf(buf, sizeof(buf),
-                  "Replaced queue with %d track%s matching '%s'; #1, %s, %s. "
-                  "(Use 'enqueue' to add without clearing.)",
+         snprintf(buf, sizeof(buf), "Replaced queue with %d track%s matching '%s'; #1, %s, %s.%s",
                   total_queued, total_queued == 1 ? "" : "s", base_query,
-                  first_title[0] ? first_title : "Unknown", tool_outcome_phrase(outcome));
-         *result_out = result_with_footer(state, buf);
+                  first_title[0] ? first_title : "Unknown", tool_outcome_phrase(outcome),
+                  for_model ? " (Use 'enqueue' to add without clearing.)" : "");
+         *result_out = result_with_footer(player, buf, for_model);
       }
       return tool_outcome_rc(outcome);
 
@@ -518,16 +576,16 @@ static int music_tool_locked(ws_connection_t *conn,
 
       char *report = NULL;
       if (items) {
-         report = apply_items_and_report(state, items, false, NULL);
+         report = apply_items_and_report(player, items, false, NULL);
          json_object_put(items);
       } else {
          char path[MUSIC_PATH_MAX] = { 0 };
-         char disp[WEBUI_MUSIC_DISPLAY_MAX] = { 0 };
+         char disp[MUSIC_TOOL_DISPLAY_MAX] = { 0 };
          if (resolve_item_to_path(base_query, path, sizeof(path), disp, sizeof(disp)) == SUCCESS) {
             const char *p = path;
             music_queue_outcome_t oc = MUSIC_QUEUE_NOT_FOUND;
-            webui_music_queue_apply_paths(uq, &p, 1, false, &oc);
-            char buf[WEBUI_MUSIC_DISPLAY_MAX + 64];
+            music_queue_apply_paths(uq, &p, 1, false, &oc);
+            char buf[MUSIC_TOOL_DISPLAY_MAX + 64];
             if (oc == MUSIC_QUEUE_ADDED)
                snprintf(buf, sizeof(buf), "Added %s.", disp);
             else if (oc == MUSIC_QUEUE_DUPLICATE)
@@ -542,13 +600,13 @@ static int music_tool_locked(ws_connection_t *conn,
          }
       }
 
-      /* enqueue only adds — it never starts playback (the WebUI has its own
-       * play control). The user presses play, or calls play/next explicitly. */
-      webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      /* enqueue only adds; it never starts playback (play, next or select
+       * does) */
+      music_player_notify_state(player);
+      music_queue_announce(uq, player);
 
       if (result_out) {
-         *result_out = result_with_footer(state, report ? report : "Nothing added.");
+         *result_out = result_with_footer(player, report ? report : "Nothing added.", for_model);
       }
       free(report);
       return SUCCESS;
@@ -556,13 +614,13 @@ static int music_tool_locked(ws_connection_t *conn,
    } else if (strcmp(action, "clear") == 0) {
       int removed = 0;
       music_player_clear_queue(player, &removed);
-      webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      music_player_notify_state(player);
+      music_queue_announce(uq, player);
       if (result_out) {
          char buf[128];
          snprintf(buf, sizeof(buf), "Cleared queue (was %d track%s).", removed,
                   removed == 1 ? "" : "s");
-         *result_out = result_with_footer(state, buf);
+         *result_out = result_with_footer(player, buf, for_model);
       }
       return SUCCESS;
 
@@ -603,7 +661,7 @@ static int music_tool_locked(ws_connection_t *conn,
       bool start_failed = false;
       int removed_rc = music_player_remove(player, index0, &start_failed);
       if (start_failed) {
-         webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
+         music_player_notify_error(player, MUSIC_ERROR_PLAYBACK, "Failed to start playback");
       }
       if (removed_rc != SUCCESS) {
          int len;
@@ -617,41 +675,79 @@ static int music_tool_locked(ws_connection_t *conn,
          }
          return FAILURE;
       }
-      webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      music_player_notify_state(player);
+      music_queue_announce(uq, player);
       if (result_out) {
          char buf[64];
          snprintf(buf, sizeof(buf), "Removed track %d.", index0 + 1);
-         *result_out = result_with_footer(state, buf);
+         *result_out = result_with_footer(player, buf, for_model);
       }
       return SUCCESS;
 
    } else if (strcmp(action, "stop") == 0) {
       music_player_stop(player);
-      webui_music_send_state(conn, state);
+      music_player_notify_state(player);
 
       if (result_out) {
-         *result_out = result_with_footer(state, "Music playback stopped");
+         *result_out = result_with_footer(player, "Music playback stopped", for_model);
       }
       return SUCCESS;
 
    } else if (strcmp(action, "pause") == 0) {
-      music_player_set_paused(player, true);
-      webui_music_send_state(conn, state);
+      if (!music_player_set_paused(player, true)) {
+         music_player_status_t st;
+         music_player_snapshot(player, &st);
+         if (result_out) {
+            *result_out = result_with_footer(
+                player, st.paused ? "Already paused" : TOOL_RESULT_ERROR_MARK "Nothing is playing",
+                for_model);
+         }
+         return st.paused ? SUCCESS : FAILURE;
+      }
+      music_player_notify_state(player);
 
       if (result_out) {
-         *result_out = result_with_footer(state, "Music paused");
+         *result_out = result_with_footer(player, "Music paused", for_model);
       }
       return SUCCESS;
 
    } else if (strcmp(action, "resume") == 0) {
-      music_player_set_paused(player, false);
-      webui_music_send_state(conn, state);
+      return tool_resume(player, true, for_model, result_out);
 
-      if (result_out) {
-         *result_out = result_with_footer(state, "Music resumed");
+   } else if (strcmp(action, "select") == 0) {
+      /* Play the queue's track N (1-based) */
+      char *endp = NULL;
+      long num = strtol(base_query, &endp, 10);
+      char path[MUSIC_PATH_MAX] = { 0 };
+      char title[MUSIC_STRING_MAX] = { 0 };
+      int len = 0;
+      pthread_mutex_lock(&uq->queue_mutex);
+      len = uq->queue_length;
+      bool valid = base_query[0] && endp && *endp == '\0' && num >= 1 && num <= len;
+      if (valid) {
+         snprintf(path, sizeof(path), "%s", uq->queue[num - 1].path);
+         snprintf(title, sizeof(title), "%s", uq->queue[num - 1].title);
       }
-      return SUCCESS;
+      pthread_mutex_unlock(&uq->queue_mutex);
+      if (!valid) {
+         if (result_out) {
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     len > 0 ? TOOL_RESULT_ERROR_MARK "Invalid track number. Choose 1-%d"
+                             : TOOL_RESULT_ERROR_MARK "The queue is empty",
+                     len);
+            *result_out = strdup(buf);
+         }
+         return FAILURE;
+      }
+      music_open_result_t outcome = tool_start_track(player, path, (int)num - 1, for_model);
+      if (result_out) {
+         char buf[MUSIC_STRING_MAX + 96];
+         snprintf(buf, sizeof(buf), "Track %ld, %s, %s.", num, title[0] ? title : "Unknown",
+                  tool_outcome_phrase(outcome));
+         *result_out = result_with_footer(player, buf, for_model);
+      }
+      return tool_outcome_rc(outcome);
 
    } else if (strcmp(action, "next") == 0 || strcmp(action, "previous") == 0) {
       bool next = strcmp(action, "next") == 0;
@@ -666,13 +762,13 @@ static int music_tool_locked(ws_connection_t *conn,
          return SUCCESS;
       }
 
-      music_open_result_t outcome = tool_start_track(conn, state, path, -1);
+      music_open_result_t outcome = tool_start_track(player, path, -1, for_model);
 
       if (result_out) {
          char buf[384];
          snprintf(buf, sizeof(buf), "%s track, %s, %s.", next ? "Next" : "Previous",
                   title[0] ? title : "Unknown", tool_outcome_phrase(outcome));
-         *result_out = result_with_footer(state, buf);
+         *result_out = result_with_footer(player, buf, for_model);
       }
       return tool_outcome_rc(outcome);
 
@@ -706,11 +802,12 @@ static int music_tool_locked(ws_connection_t *conn,
       music_queue_changed(uq, false);
       pthread_mutex_unlock(&uq->queue_mutex);
 
-      webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      music_player_notify_state(player);
+      music_queue_announce(uq, player);
 
       if (result_out) {
-         *result_out = result_with_footer(state, set_on ? "Shuffle enabled" : "Shuffle disabled");
+         *result_out = result_with_footer(player, set_on ? "Shuffle enabled" : "Shuffle disabled",
+                                          for_model);
       }
       return SUCCESS;
 
@@ -748,14 +845,14 @@ static int music_tool_locked(ws_connection_t *conn,
       music_queue_changed(uq, false);
       pthread_mutex_unlock(&uq->queue_mutex);
 
-      webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      music_player_notify_state(player);
+      music_queue_announce(uq, player);
 
       const char *ms = target == MUSIC_REPEAT_ALL
                            ? "Repeat all"
                            : (target == MUSIC_REPEAT_ONE ? "Repeat one" : "Repeat off");
       if (result_out) {
-         *result_out = result_with_footer(state, ms);
+         *result_out = result_with_footer(player, ms, for_model);
       }
       return SUCCESS;
 
@@ -809,61 +906,6 @@ static int music_tool_locked(ws_connection_t *conn,
       }
       pthread_mutex_unlock(&uq->queue_mutex);
       return SUCCESS;
-
-   } else if (strcmp(action, "search") == 0 || strcmp(action, "library") == 0) {
-      /* Batch search: items[] of queries → grouped results WITH paths so the LLM
-       * can enqueue exact tracks. Single-query search/library fall through to the
-       * local handler (they don't affect streaming state). */
-      struct json_object *items = (strcmp(action, "search") == 0) ? decode_items(query) : NULL;
-      /* An empty items[] is not a batch — free it and fall through to the single/
-       * filter handler so a genre- or year-only search still runs. */
-      if (items && json_object_array_length(items) == 0) {
-         json_object_put(items);
-         items = NULL;
-      }
-      if (items) {
-         int n = (int)json_object_array_length(items);
-         if (n > MUSIC_BATCH_MAX_QUERIES) {
-            n = MUSIC_BATCH_MAX_QUERIES; /* each query is a full-library scan */
-         }
-         /* Optional fielded/genre/year filters applied to every query in the batch. */
-         music_search_filters_t filters;
-         music_search_parse_filters(query, &filters);
-
-         strbuf_t sb;
-         strbuf_init(&sb, 1024);
-         /* Heap-allocate the per-query result window (~2.5 KB/row) vs. a big stack array. */
-         music_search_result_t *r = malloc(MUSIC_BATCH_SEARCH_LIMIT *
-                                           sizeof(music_search_result_t));
-         if (!r) {
-            strbuf_appendf(&sb, "%s", TOOL_RESULT_ERROR_MARK "Failed to allocate search buffer");
-         }
-         for (int i = 0; r && i < n; i++) {
-            struct json_object *e = json_object_array_get_idx(items, i);
-            const char *q = e ? json_object_get_string(e) : NULL;
-            if (q && q[0]) {
-               music_search_append_batch_entry(&sb, q, &filters, r);
-            }
-         }
-         free(r);
-         json_object_put(items);
-         if (result_out) {
-            char *out = strbuf_oom(&sb) ? NULL : strbuf_steal(&sb);
-            *result_out = out;
-            if (!out) {
-               strbuf_free(&sb);
-            }
-         } else {
-            strbuf_free(&sb);
-         }
-         return SUCCESS;
-      }
-
-      /* Single-query search/library — let music_tool's local handler answer. */
-      if (result_out) {
-         *result_out = NULL; /* Signal to fall through to regular handler */
-      }
-      return MUSIC_NOT_HANDLED;
    }
 
    if (result_out) {
@@ -872,49 +914,4 @@ static int music_tool_locked(ws_connection_t *conn,
       *result_out = strdup(buf);
    }
    return FAILURE;
-}
-
-/* =============================================================================
- * Volume Tool Integration (called from volume_tool.c via session routing)
- * ============================================================================= */
-
-char *webui_volume_execute_tool(ws_connection_t *conn,
-                                const char *action,
-                                const char *value,
-                                int *should_respond) {
-   *should_respond = 1;
-
-   if (strcmp(action, "get") == 0) {
-      char *result = malloc(64);
-      if (result)
-         snprintf(result, 64, "Volume is at %.0f%%", conn->volume * 100.0f);
-      return result;
-   }
-
-   /* Action: set */
-   if (!value || !*value) {
-      return strdup("Error: 'level' parameter is required for 'set' action.");
-   }
-
-   float vol = parse_volume_level(value);
-   if (vol < 0.0f) {
-      char *result = malloc(128);
-      if (result)
-         snprintf(result, 128, "Invalid volume level '%s'. Use a number 0-100.", value);
-      return result;
-   }
-
-   conn->volume = vol;
-   OLOG_INFO("WebUI volume tool: set to %.0f%% for session", vol * 100.0f);
-
-   /* Send state update to client so slider syncs */
-   session_music_state_t *state = (session_music_state_t *)conn->music_state;
-   if (state) {
-      webui_music_send_state(conn, state);
-   }
-
-   char *result = malloc(64);
-   if (result)
-      snprintf(result, 64, "Volume set to %.0f%%", vol * 100.0f);
-   return result;
 }

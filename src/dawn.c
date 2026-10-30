@@ -58,10 +58,10 @@
 #include "audio/audio_backend.h"
 #include "audio/audio_capture_thread.h"
 #include "audio/audio_decoder.h"
-#include "audio/flac_playback.h"
 #include "audio/music_db.h"
 #include "audio/music_queue.h"
 #include "audio/music_scanner.h"
+#include "audio/music_speaker.h"
 #include "audio/plex_db.h"
 #include "core/attention/attention.h"
 #include "core/command_executor.h"
@@ -190,7 +190,6 @@ static void vad_metrics_callback(float probability, void *user_data) {
 // See config/dawn_config.h for the config struct definitions
 
 // Music ducking configuration (reduces music volume during speech detection)
-#define MUSIC_DUCK_FACTOR 0.3f         // Reduce volume to 30% when speech detected
 #define MUSIC_DUCK_RESTORE_DELAY 2.0f  // Seconds of silence before restoring volume
 
 // Default number of frames per audio period (used for buffer size calculations)
@@ -791,6 +790,7 @@ char *setPcmPlaybackDevice(const char *actionName, char *value, int *should_resp
       if (match) {
          OLOG_INFO("Setting audio playback device to \"%s\"", d->device);
          safe_strscpy(pcm_playback_device, d->device);
+         music_speaker_set_device(pcm_playback_device);
 
          if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
             snprintf(speech, MAX_COMMAND_LENGTH, "Switching playback device to %s.", d->name);
@@ -2316,6 +2316,7 @@ int main(int argc, char *argv[]) {
       }
    }
    OLOG_INFO("Audio backend initialized: %s", audio_backend_type_name(audio_backend_get_type()));
+   music_speaker_set_device(getPcmPlaybackDevice());
 
    if (!server_mode) {
       // Initialize audio decoder subsystem (FLAC, MP3, Ogg Vorbis)
@@ -2922,9 +2923,8 @@ mqtt_disabled:
             static dawn_state_t prev_vad_state = DAWN_STATE_INVALID;  // Track state transitions
 
             // Music ducking state (reduces volume during speech detection)
-            static int music_ducked = 0;                // Currently ducked?
-            static float music_pre_duck_volume = 0.5f;  // Volume before ducking
-            static struct timespec music_last_speech;   // Last speech detection time
+            static int music_ducked = 0;               // Currently ducked?
+            static struct timespec music_last_speech;  // Last speech detection time
             static int music_duck_initialized = 0;
 
             // Initialize timer on first run (ideally would be in main(), but keeping locality)
@@ -3085,34 +3085,25 @@ mqtt_disabled:
                speech_detected = 0;  // Assume silence if VAD unavailable
             }
 
-            // Music ducking: reduce volume when speech detected, restore after cooldown
-            if (speech_detected && getMusicPlay()) {
+            // Music ducking: lower the speaker's music while someone speaks, restore it
+            // after a cooldown or as soon as the music stops (the volume itself is untouched)
+            if (speech_detected && music_speaker_is_playing()) {
                clock_gettime(CLOCK_MONOTONIC, &music_last_speech);
                if (!music_ducked) {
-                  // Duck the music - save current volume and reduce
-                  music_pre_duck_volume = getMusicVolume();
-                  float ducked_volume = music_pre_duck_volume * MUSIC_DUCK_FACTOR;
-                  setMusicVolume(ducked_volume);
+                  music_speaker_set_ducked(true);
                   music_ducked = 1;
-                  OLOG_INFO("Music ducked: %.2f -> %.2f (speech detected)", music_pre_duck_volume,
-                            ducked_volume);
+                  OLOG_INFO("Music ducked (speech detected)");
                }
-            } else if (music_ducked && getMusicPlay()) {
-               // Check if cooldown has elapsed since last speech
+            } else if (music_ducked) {
                struct timespec now;
                clock_gettime(CLOCK_MONOTONIC, &now);
                double elapsed = (now.tv_sec - music_last_speech.tv_sec) +
                                 (now.tv_nsec - music_last_speech.tv_nsec) / 1e9;
-               if (elapsed >= MUSIC_DUCK_RESTORE_DELAY) {
-                  // Restore original volume
-                  setMusicVolume(music_pre_duck_volume);
-                  OLOG_INFO("Music restored: %.2f (%.1fs since speech)", music_pre_duck_volume,
-                            elapsed);
+               if (elapsed >= MUSIC_DUCK_RESTORE_DELAY || !music_speaker_is_playing()) {
+                  music_speaker_set_ducked(false);
+                  OLOG_INFO("Music restored (%.1fs since speech)", elapsed);
                   music_ducked = 0;
                }
-            } else if (music_ducked && !getMusicPlay()) {
-               // Music stopped - reset ducking state
-               music_ducked = 0;
             }
 
             if (speech_detected) {
@@ -4309,6 +4300,10 @@ server_shutdown:
    OLOG_INFO("Shutdown: tool_registry");
    tool_registry_shutdown();
 
+   /* Before the music library and decoders it plays from go */
+   OLOG_INFO("Shutdown: music speaker");
+   music_speaker_cleanup();
+
    // Cleanup chunking manager (if initialized)
    if (chunk_mgr) {
       OLOG_INFO("Shutdown: chunking_manager");
@@ -4366,7 +4361,8 @@ server_shutdown:
       worker_pool_shutdown();
    }
 #endif
-   /* After every player that holds a queue is gone */
+   /* After the WebUI's players and the speaker are gone (a tool call still
+    * holding one at exit keeps its queue, see music_queue_shutdown) */
    music_queue_shutdown();
 
    /* Cleanup session manager AFTER WebUI shutdown so WebSocket sessions are released */

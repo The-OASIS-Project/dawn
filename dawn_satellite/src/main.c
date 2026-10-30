@@ -293,10 +293,17 @@ static int dap2_main_loop(satellite_ctx_t *ctx,
       printf("Attempting reconnection with saved session secret...\n");
    }
 
+   /* Music needs Opus and a working audio output (as the music playback
+    * below does): text-only mode has none */
+   bool plays_music = false;
+#ifdef HAVE_OPUS
+   plays_music = ctx->audio_playback && ((audio_playback_t *)ctx->audio_playback)->initialized;
+#endif
    ws_capabilities_t caps = { .local_asr = true, /* Will have local ASR */
                               .local_tts = true, /* Will have local TTS */
                               .wake_word = true, /* Will have wake word */
-                              .ota = true /* Supports server-driven OTA */ };
+                              .ota = true,       /* Supports server-driven OTA */
+                              .music = plays_music };
 
    printf("Registering satellite '%s'...\n", identity.name);
    if (ws_client_register(ws, &identity, &caps) != 0) {
