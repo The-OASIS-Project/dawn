@@ -448,6 +448,10 @@ static void acknowledge_cancel(void) {
                          (target == CANCEL_TARGET_AUTO &&
                           (local_llm_busy() || s_pending_voice_command || speaking));
    if (!replying && music_speaker_is_playing()) {
+      if (s_pending_voice_command) { /* stop means stop: a held request too */
+         free(s_pending_voice_command);
+         s_pending_voice_command = NULL;
+      }
       if (music_speaker_pause()) {
          const size_t n = sizeof(cancelResponses) / sizeof(cancelResponses[0]);
          OLOG_INFO("Cancel phrase: music paused, confirming");
