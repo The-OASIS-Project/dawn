@@ -1944,6 +1944,12 @@ int callback_http(struct lws *wsi,
          /* Accumulate POST body */
          if (!pss)
             return LWS_CLOSE_CONNECTION;
+         if (webui_server_quiescing()) {
+            /* Shutdown began mid-upload: nothing more is handled (what was
+             * held is freed in LWS_CALLBACK_CLOSED_HTTP) */
+            lws_return_http_status(wsi, HTTP_STATUS_SERVICE_UNAVAILABLE, NULL);
+            return LWS_CLOSE_CONNECTION;
+         }
 
          /* Image upload - route to image handler */
          if (pss->image_session) {
@@ -2000,6 +2006,10 @@ int callback_http(struct lws *wsi,
          /* POST body complete - process it */
          if (!pss)
             return LWS_CLOSE_CONNECTION;
+         if (webui_server_quiescing()) {
+            lws_return_http_status(wsi, HTTP_STATUS_SERVICE_UNAVAILABLE, NULL);
+            return LWS_CLOSE_CONNECTION; /* upload sessions freed in CLOSED_HTTP */
+         }
 
          /* Image upload complete */
          if (pss->image_session) {

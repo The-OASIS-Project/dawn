@@ -734,14 +734,29 @@ bool handle_smart_home_message(ws_connection_t *conn,
 /* Forward declaration — defined after handle_text_message */
 static bool webui_conn_create_session(ws_connection_t *conn);
 
+/* Connections still in the registry: every socket is registered when it's
+ * established and unregistered when it closes, whether or not it was counted
+ * as a client */
+static int registered_connections(void) {
+   int n = 0;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      n += s_active_connections[i] != NULL;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+   return n;
+}
+
 /* Tell every connection the server is restarting (lws thread): 1012, so a
  * client connects again rather than taking it as signed out; each closes
- * once its earlier output is out (LWS_CALLBACK_SERVER_WRITEABLE) */
+ * once its earlier output is out (LWS_CALLBACK_SERVER_WRITEABLE).  One
+ * already closing with its own code (a logout's 4002, an unchecked login's
+ * 1013) keeps it. */
 static void close_all_for_restart(void) {
    pthread_mutex_lock(&s_conn_registry_mutex);
    for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
       ws_connection_t *conn = s_active_connections[i];
-      if (conn && conn->wsi) {
+      if (conn && conn->wsi && !conn->logged_out && !conn->login_unchecked) {
          // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
          lws_close_reason(conn->wsi, (enum lws_close_status)WEBUI_CLOSE_RESTART,
                           (unsigned char *)"restarting", 10);
@@ -825,7 +840,7 @@ static int callback_websocket(struct lws *wsi,
          register_connection(conn);
 
          /* Accepted just as shutdown began, after the others were told */
-         if (atomic_load(&s_quiescing)) {
+         if (atomic_load(&s_quiescing) && !conn->login_unchecked) {
             // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
             lws_close_reason(wsi, (enum lws_close_status)WEBUI_CLOSE_RESTART,
                              (unsigned char *)"restarting", 10);
@@ -1368,6 +1383,12 @@ static int callback_websocket(struct lws *wsi,
             return ret;
          }
          if (conn && (conn->logged_out || conn->login_unchecked || atomic_load(&s_quiescing))) {
+            if (!conn->logged_out && !conn->login_unchecked) {
+               /* Shutdown began before close_all_for_restart() told it */
+               // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+               lws_close_reason(wsi, (enum lws_close_status)WEBUI_CLOSE_RESTART,
+                                (unsigned char *)"restarting", 10);
+            }
             return LWS_CLOSE_CONNECTION;
          }
          /* Ready to send more data - process next queued response */
@@ -2180,13 +2201,15 @@ void webui_server_quiesce(void) {
    if (s_lws_context) {
       lws_cancel_service(s_lws_context); /* the lws thread closes them */
    }
-   for (int waited = 0; webui_server_client_count() > 0 && waited < WEBUI_QUIESCE_WAIT_MS;
+   /* Until the lws thread has closed them all: the registry, not the client
+    * count, which a cookie-authenticated browser never enters */
+   for (int waited = 0; registered_connections() > 0 && waited < WEBUI_QUIESCE_WAIT_MS;
         waited += 50) {
       usleep(50000);
    }
-   if (webui_server_client_count() > 0) {
-      OLOG_WARNING("WebUI: %d connection(s) still open after %d ms", webui_server_client_count(),
-                   WEBUI_QUIESCE_WAIT_MS);
+   int open = registered_connections();
+   if (open > 0) {
+      OLOG_WARNING("WebUI: %d connection(s) still open after %d ms", open, WEBUI_QUIESCE_WAIT_MS);
    }
 }
 
@@ -2200,14 +2223,6 @@ bool webui_server_is_running(void) {
    running = s_running != 0;
    pthread_mutex_unlock(&s_mutex);
    return running;
-}
-
-int webui_server_client_count(void) {
-   int count;
-   pthread_mutex_lock(&s_mutex);
-   count = s_client_count;
-   pthread_mutex_unlock(&s_mutex);
-   return count;
 }
 
 int webui_server_get_port(void) {

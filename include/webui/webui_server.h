@@ -197,15 +197,6 @@ void webui_server_quiesce(void);
 bool webui_server_is_running(void);
 
 /**
- * @brief Get current number of connected WebSocket clients
- *
- * @return Number of active WebSocket connections
- *
- * @note Thread-safe
- */
-int webui_server_client_count(void);
-
-/**
  * @brief Get the port the server is listening on
  *
  * @return Port number, or 0 if not running
