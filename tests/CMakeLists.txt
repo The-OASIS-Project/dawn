@@ -1614,6 +1614,29 @@ dawn_add_unit_test(test_music_nav
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_music_queue
+   SOURCES test_music_queue.c
+           ${SRC_ROOT}/src/audio/music_queue.c
+           ${SRC_ROOT}/src/audio/music_queue_db.c
+           ${SRC_ROOT}/src/core/path_utils.c
+   LIBS    dawn_common unity sqlite3 pthread
+   LABEL   ci)
+
+# Music player over a fake output; music_open_track() is the test's own
+dawn_add_unit_test(test_music_player
+   SOURCES test_music_player.c
+           ${SRC_ROOT}/src/audio/music_player.c
+           ${SRC_ROOT}/src/audio/music_player_track.c
+           ${SRC_ROOT}/src/audio/music_nav.c
+           ${SRC_ROOT}/src/audio/music_queue.c
+           ${SRC_ROOT}/src/audio/music_queue_db.c
+           ${SRC_ROOT}/src/audio/music_source.c
+           ${DECODER_TEST_SOURCES}
+   LIBS    ${DECODER_TEST_LIBS} sqlite3 pthread m
+   LABEL   ci)
+# A broken player hangs rather than fails (a join that never returns)
+set_tests_properties(test_music_player PROPERTIES TIMEOUT 30)
+
 dawn_add_unit_test(test_text_filter
    SOURCES test_text_filter.c
            ${SRC_ROOT}/src/core/text_filter.c
@@ -2282,6 +2305,14 @@ dawn_add_unit_test(test_tool_config_roundtrip
 
 dawn_add_unit_test(test_tool_registry
    SOURCES test_tool_registry.c test_tool_registry_stub.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# A tool call's JSON arguments become the callback's value the same way on
+# every path (a live call, a scheduled call stored as JSON).
+dawn_add_unit_test(test_tool_pack_args
+   SOURCES test_tool_pack_args.c test_tool_registry_stub.c
            ${SRC_ROOT}/src/tools/tool_registry.c
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)

@@ -17,9 +17,10 @@
  * the project author(s).
  *
  * A music player's play history: what it played, in order, like a browser's
- * back and forward list, so "previous" under shuffle goes back.  Pure: no
- * locks (the caller holds its own), no queue type (a caller's lookup turns a
- * path into a queue position).
+ * back and forward list, so "previous" under shuffle goes back; and the one
+ * rule for what plays next (music_nav_pick): end of queue, repeats, failure
+ * caps, shuffle.  Pure: no locks (the caller holds its own), no queue type (a
+ * caller's lookup turns a path into a queue position).
  */
 
 #ifndef MUSIC_NAV_H
@@ -69,6 +70,10 @@ const char *music_history_current(const music_history_t *h);
 /** A track starts that isn't from a history step: forward entries are cut, it becomes current */
 void music_history_push(music_history_t *h, const char *path, int hint);
 
+/** A track starts: pushed, unless it's the current entry already (a step
+ * through the history, or a replay); true when added */
+bool music_history_record(music_history_t *h, const char *path, int hint);
+
 /** A track planned to play next: replaces any forward entries, current stays */
 void music_history_plan(music_history_t *h, const char *path, int hint);
 
@@ -85,6 +90,74 @@ int music_history_step(music_history_t *h,
 
 /** The current entry wouldn't play: drop it, the one before becomes current */
 void music_history_drop_current(music_history_t *h);
+
+/* ---- What plays next ---------------------------------------------------- */
+
+/** Tracks in a row that may fail before an automatic advance gives up */
+#define MUSIC_NAV_MAX_FAILED 5
+
+typedef enum {
+   MUSIC_NAV_NEXT,
+   MUSIC_NAV_PREVIOUS,
+} music_nav_dir_t;
+
+typedef enum {
+   MUSIC_NAV_USER, /**< Next or previous asked for */
+   MUSIC_NAV_AUTO, /**< The track ended (or wouldn't play) */
+   MUSIC_NAV_PLAN, /**< What the next automatic advance will play, for a prefetch */
+} music_nav_reason_t;
+
+/** The caller's queue, read under its lock */
+typedef struct {
+   music_nav_find_fn find;
+   const char *(*path_at)(void *ctx, int index);
+   void *ctx;
+   int length;
+   uint32_t epoch; /**< The queue's replace epoch: a replaced queue clears the history */
+   bool shuffle;
+   bool repeat_all; /**< At most one of repeat_all and repeat_one */
+   bool repeat_one;
+} music_nav_queue_t;
+
+typedef struct {
+   music_nav_reason_t reason;
+   music_nav_dir_t dir; /**< USER */
+   bool commit;         /**< USER: false only asks whether a move happens; nothing is recorded */
+   int pos;             /**< The current track's position, or where the next track is when lost */
+   bool lost;           /**< The queue no longer holds the current track: next is the one at pos,
+                             previous the one before it */
+   int failures;        /**< AUTO: tracks in a row that produced no audio */
+   bool track_failed;   /**< AUTO: the track that ended did so on a decode error */
+} music_nav_request_t;
+
+typedef enum {
+   /** Play index (USER without commit: index may be -1, a shuffle pick not drawn yet) */
+   MUSIC_NAV_PLAY,
+   MUSIC_NAV_NONE,     /**< Nothing to move to */
+   MUSIC_NAV_STOP_END, /**< AUTO: the end of the queue */
+   /** AUTO: repeat-one's track failed; replaying it would fail the same way */
+   MUSIC_NAV_STOP_REPEAT_FAILED,
+   MUSIC_NAV_STOP_ALL_FAILED, /**< AUTO: none of the queued tracks would play */
+   MUSIC_NAV_STOP_TOO_MANY,   /**< AUTO: MUSIC_NAV_MAX_FAILED in a row */
+} music_nav_result_t;
+
+typedef struct {
+   music_nav_result_t result;
+   int index;
+   bool fresh; /**< AUTO: a history entry was added or moved to for it (drop it if it won't play) */
+} music_nav_pick_t;
+
+/**
+ * The one rule for what plays: end of queue, repeat-all wrap, repeat-one,
+ * failure caps, shuffle (history forward, then a random pick; in order past a
+ * failure).  Records the pick in @p h (AUTO, committed USER) or plans it
+ * (PLAN).  Pure: the caller holds its queue's lock.
+ */
+void music_nav_pick(music_history_t *h,
+                    const music_nav_queue_t *q,
+                    const music_nav_request_t *rq,
+                    unsigned int *seed,
+                    music_nav_pick_t *out);
 
 #ifdef __cplusplus
 }

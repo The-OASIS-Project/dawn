@@ -167,6 +167,8 @@ static void test_source_from_path(void) {
                             "plex: path identified as PLEX");
    TEST_ASSERT_TRUE_MESSAGE(music_source_from_path(NULL) == MUSIC_SOURCE_LOCAL,
                             "NULL path returns LOCAL");
+   TEST_ASSERT_FALSE_MESSAGE(music_source_is_remote(MUSIC_SOURCE_LOCAL), "LOCAL isn't remote");
+   TEST_ASSERT_TRUE_MESSAGE(music_source_is_remote(MUSIC_SOURCE_PLEX), "PLEX is remote");
 }
 
 /* =============================================================================

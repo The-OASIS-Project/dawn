@@ -706,6 +706,10 @@ set(DAWN_SOURCES
     src/audio/music_scanner.c
     src/audio/music_open.c
     src/audio/music_nav.c
+    src/audio/music_player.c
+    src/audio/music_player_track.c
+    src/audio/music_queue.c
+    src/audio/music_queue_db.c
     src/audio/music_source.c
     src/audio/plex_client.c
     src/audio/plex_db.c
@@ -819,10 +823,8 @@ if(ENABLE_WEBUI)
         list(APPEND DAWN_SOURCES src/webui/webui_audio.c)
         list(APPEND DAWN_SOURCES src/webui/webui_always_on.c)
         list(APPEND DAWN_SOURCES src/webui/webui_music.c)
-        list(APPEND DAWN_SOURCES src/webui/webui_music_track.c)
         list(APPEND DAWN_SOURCES src/webui/webui_music_handlers.c)
         list(APPEND DAWN_SOURCES src/webui/webui_music_tool.c)
-        list(APPEND DAWN_SOURCES src/webui/webui_music_queue_db.c)
         list(APPEND DAWN_SOURCES src/webui/webui_music_server.c)
     endif()
 endif()

@@ -3085,47 +3085,6 @@ void webui_send_metrics_update(session_t *session,
 
 
 /* =============================================================================
- * Connection Iterator (for per-user broadcasting)
- * ============================================================================= */
-
-void webui_for_each_conn_by_user(int user_id,
-                                 void (*callback)(ws_connection_t *conn, void *ctx),
-                                 void *ctx) {
-   if (user_id <= 0 || !callback) {
-      return;
-   }
-
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (conn && conn->authenticated && conn->auth_user_id == user_id && conn->music_state) {
-         callback(conn, ctx);
-      }
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-}
-
-int webui_collect_conns_by_user(int user_id, ws_connection_t **out, int max_out) {
-   if (user_id <= 0 || !out || max_out <= 0) {
-      return 0;
-   }
-
-   int count = 0;
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (conn && conn->authenticated && conn->auth_user_id == user_id && conn->music_state) {
-         if (count < max_out) {
-            out[count] = conn;
-         }
-         count++;
-      }
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-   return count;
-}
-
-/* =============================================================================
  * Satellite Connection Helpers
  * ============================================================================= */
 

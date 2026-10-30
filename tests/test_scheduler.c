@@ -757,11 +757,12 @@ static void test_next_fire_time(void) {
    strncpy(ev3.name, "Latest", SCHED_NAME_MAX - 1);
    scheduler_db_insert(&ev3, NULL);
 
-   time_t next = scheduler_db_next_fire_time();
+   time_t next = 0;
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_next_fire_time(&next));
    TEST_ASSERT_EQUAL_INT64(now + 1000, next);
 
    scheduler_db_cancel(id1);
-   next = scheduler_db_next_fire_time();
+   TEST_ASSERT_EQUAL_INT(SCHED_DB_SUCCESS, scheduler_db_next_fire_time(&next));
    TEST_ASSERT_EQUAL_INT64(now + 2000, next);
 }
 

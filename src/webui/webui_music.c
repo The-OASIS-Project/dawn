@@ -18,17 +18,16 @@
  * enhancements, or additions to the project. These contributions become
  * part of the project and are adopted by the project author(s).
  *
- * WebUI Music Streaming - Core
- *
- * Streaming engine, lifecycle, state communication, and shared utilities.
- * Message handlers are in webui_music_handlers.c.
+ * WebUI music: the music player's WebUI output (stereo 48 kHz Opus to the
+ * browser's music socket, paced on its buffer reports), each connection's
+ * music state and its lifecycle, and the state frames.  Message handlers are
+ * in webui_music_handlers.c; the player itself is in src/audio.
  */
 
 #include "webui/webui_music.h"
 
 #include <json-c/json.h>
 #include <libwebsockets.h>
-#include <limits.h>
 #include <opus/opus.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -39,15 +38,14 @@
 
 #include "audio/audio_decoder.h"
 #include "audio/music_db.h"
-#include "audio/music_source.h"
 #include "audio/plex_client.h"
 #include "audio/resampler.h"
 #include "config/dawn_config.h"
 #include "logging.h"
+#include "tools/time_utils.h"
 #include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music_internal.h"
-#include "webui/webui_music_queue_db.h"
 #include "webui/webui_music_server.h"
 #include "webui/webui_server.h"
 
@@ -79,26 +77,8 @@ const char *QUALITY_NAMES[MUSIC_QUALITY_COUNT] = {
    "hifi",
 };
 
-/** Position update interval in milliseconds */
-#define POSITION_UPDATE_INTERVAL_MS 1000
-
-/* Types (music_queue_entry_t, session_music_state_t, user_music_queue_t)
- * are in webui_music_internal.h */
-
-/**
- * @brief Pick a random queue index different from the current one.
- *
- * Uses rand_r() with the provided seed for thread-safety.
- */
-int webui_music_pick_random_index(int current_index, int queue_length, unsigned int *shuffle_seed) {
-   if (queue_length <= 1)
-      return current_index;
-   int idx;
-   do {
-      idx = rand_r(shuffle_seed) % queue_length;
-   } while (idx == current_index);
-   return idx;
-}
+/* session_music_state_t is in webui_music_internal.h; the queue types are in
+ * audio/music_queue.h */
 
 /* =============================================================================
  * Module State
@@ -111,19 +91,6 @@ static webui_music_config_t s_config = {
    .default_quality = MUSIC_QUALITY_STANDARD,
    .bitrate_mode = MUSIC_BITRATE_VBR,
 };
-static atomic_int s_active_streams = 0;
-
-/* =============================================================================
- * Shared User Queue Registry
- *
- * Authenticated users share a single queue across all their browser tabs.
- * Unauthenticated/satellite sessions get a per-connection queue (not shared).
- * ============================================================================= */
-
-#define MAX_USER_QUEUES 32
-static user_music_queue_t *s_user_queues[MAX_USER_QUEUES];
-static int s_user_queue_count = 0;
-static pthread_mutex_t s_user_queues_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Serializes the music-server thread's access to conn->music_state (report_buffer,
  * write_pending, set_stream_wsi, clear_stream_wsi) against webui_music_session_cleanup(), which
@@ -133,131 +100,9 @@ static pthread_mutex_t s_user_queues_mutex = PTHREAD_MUTEX_INITIALIZER;
  * state->write_mutex, never the reverse. */
 static pthread_mutex_t s_music_teardown_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/**
- * @brief Find or create a shared queue for an authenticated user
- *
- * @param user_id Must be > 0 (authenticated). Returns NULL for <= 0.
- * @return Shared queue with ref_count incremented, or NULL on failure.
- */
-static user_music_queue_t *find_or_create_user_queue(int user_id) {
-   if (user_id <= 0) {
-      return NULL;
-   }
-
-   pthread_mutex_lock(&s_user_queues_mutex);
-
-   /* Look for existing queue */
-   for (int i = 0; i < s_user_queue_count; i++) {
-      if (s_user_queues[i] && s_user_queues[i]->user_id == user_id) {
-         s_user_queues[i]->ref_count++;
-         pthread_mutex_unlock(&s_user_queues_mutex);
-         return s_user_queues[i];
-      }
-   }
-
-   /* Not found — try to create new, evicting zero-refcount entries if full */
-   if (s_user_queue_count >= MAX_USER_QUEUES) {
-      /* Evict first zero-refcount entry to make room */
-      bool evicted = false;
-      for (int i = 0; i < s_user_queue_count; i++) {
-         if (s_user_queues[i] && s_user_queues[i]->ref_count == 0) {
-            OLOG_INFO("WebUI music: Evicting idle queue for user %d", s_user_queues[i]->user_id);
-            pthread_mutex_destroy(&s_user_queues[i]->queue_mutex);
-            free(s_user_queues[i]);
-            /* Compact array */
-            for (int j = i; j < s_user_queue_count - 1; j++) {
-               s_user_queues[j] = s_user_queues[j + 1];
-            }
-            s_user_queues[--s_user_queue_count] = NULL;
-            evicted = true;
-            break;
-         }
-      }
-      if (!evicted) {
-         OLOG_ERROR("WebUI music: User queue registry full (%d), all in use", MAX_USER_QUEUES);
-         pthread_mutex_unlock(&s_user_queues_mutex);
-         return NULL;
-      }
-   }
-
-   user_music_queue_t *uq = calloc(1, sizeof(user_music_queue_t));
-   if (!uq) {
-      pthread_mutex_unlock(&s_user_queues_mutex);
-      return NULL;
-   }
-
-   uq->user_id = user_id;
-   pthread_mutex_init(&uq->queue_mutex, NULL);
-   uq->ref_count = 1;
-   uq->generation = 0;
-
-   /* Restore from DB */
-   music_queue_db_load(user_id, uq);
-
-   s_user_queues[s_user_queue_count++] = uq;
-   pthread_mutex_unlock(&s_user_queues_mutex);
-
-   OLOG_INFO("WebUI music: Created shared queue for user %d (%d tracks restored)", user_id,
-             uq->queue_length);
-   return uq;
-}
-
-/**
- * @brief Release a reference to a shared user queue
- */
-static void release_user_queue(user_music_queue_t *uq) {
-   if (!uq) {
-      return;
-   }
-   pthread_mutex_lock(&s_user_queues_mutex);
-   uq->ref_count--;
-   pthread_mutex_unlock(&s_user_queues_mutex);
-   /* Queue stays alive in registry for next connection */
-}
-
-/**
- * @brief Create a per-connection (non-shared) queue for unauthenticated sessions
- */
-static user_music_queue_t *create_private_queue(void) {
-   user_music_queue_t *uq = calloc(1, sizeof(user_music_queue_t));
-   if (!uq) {
-      return NULL;
-   }
-   uq->user_id = 0;
-   pthread_mutex_init(&uq->queue_mutex, NULL);
-   uq->ref_count = 1;
-   uq->generation = 0;
-   return uq;
-}
-
-/**
- * @brief Free all shared user queues (called from webui_music_cleanup)
- */
-static void cleanup_all_user_queues(void) {
-   pthread_mutex_lock(&s_user_queues_mutex);
-   for (int i = 0; i < s_user_queue_count; i++) {
-      if (s_user_queues[i]) {
-         pthread_mutex_destroy(&s_user_queues[i]->queue_mutex);
-         free(s_user_queues[i]);
-         s_user_queues[i] = NULL;
-      }
-   }
-   s_user_queue_count = 0;
-   pthread_mutex_unlock(&s_user_queues_mutex);
-}
-
 /* =============================================================================
  * Helper Functions
  * ============================================================================= */
-
-/**
- * @brief Get current time in milliseconds
- */
-static uint64_t get_time_ms(void) {
-   struct timespec ts;
-   clock_gettime(CLOCK_MONOTONIC, &ts);
-   return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
 
 /* queue_music_direct() return value when a frame is dropped because the dedicated
  * send ring was full — distinct from SUCCESS(0)/FAILURE(1) so the closed-loop pacer
@@ -266,55 +111,6 @@ static uint64_t get_time_ms(void) {
 
 /* Forward declarations */
 static int queue_music_direct(session_music_state_t *state, const uint8_t *data, size_t len);
-
-/**
- * @brief Wait for decoder to become idle using condition variable
- *
- * Uses proper synchronization to wait for the streaming thread to finish
- * using the decoder. Falls back to timeout if condition isn't signaled.
- *
- * @param state Music session state
- * @param timeout_ms Maximum time to wait in milliseconds
- * @return true if decoder is idle, false on timeout
- */
-bool wait_decoder_idle(session_music_state_t *state, int timeout_ms) {
-   /* Quick check without lock */
-   if (!atomic_load(&state->decoder_busy)) {
-      return true;
-   }
-
-   pthread_mutex_lock(&state->state_mutex);
-
-   /* Check again with lock held */
-   if (!atomic_load(&state->decoder_busy)) {
-      pthread_mutex_unlock(&state->state_mutex);
-      return true;
-   }
-
-   /* Wait with timeout */
-   struct timespec ts;
-   clock_gettime(CLOCK_REALTIME, &ts);
-   ts.tv_sec += timeout_ms / 1000;
-   ts.tv_nsec += (timeout_ms % 1000) * 1000000;
-   if (ts.tv_nsec >= 1000000000) {
-      ts.tv_sec++;
-      ts.tv_nsec -= 1000000000;
-   }
-
-   int ret = 0;
-   while (atomic_load(&state->decoder_busy) && ret == 0) {
-      ret = pthread_cond_timedwait(&state->decoder_idle_cond, &state->state_mutex, &ts);
-   }
-
-   bool idle = !atomic_load(&state->decoder_busy);
-   pthread_mutex_unlock(&state->state_mutex);
-
-   if (!idle) {
-      OLOG_WARNING("WebUI music: Timeout waiting for decoder to become idle");
-   }
-
-   return idle;
-}
 
 /**
  * @brief Parse quality string to enum
@@ -371,62 +167,26 @@ int webui_music_configure_encoder(session_music_state_t *state, music_quality_t 
 /**
  * @brief Send music state update to client
  *
- * Manages its own locking internally. Locks queue_mutex briefly to snapshot
- * shared fields, then locks state_mutex for per-session fields.
- * Callers do NOT need to hold any lock.
- * Lock hierarchy: queue_mutex → state_mutex (never reversed).
+ * Reads the player through music_player_snapshot() (queue_mutex, then the
+ * player's state_mutex), so callers must not hold either.
  */
 void webui_music_send_state_impl(ws_connection_t *conn,
                                  session_music_state_t *state,
                                  bool advance_auto) {
-   user_music_queue_t *uq = state->shared_queue;
-   if (!uq) {
-      return;
-   }
-
-   /* Snapshot shared queue fields under queue_mutex */
-   int queue_length;
-   int queue_index;
-   bool shuffle;
-   music_repeat_mode_t repeat_mode;
-   music_queue_entry_t current_track;
-   bool has_track = false;
-
-   pthread_mutex_lock(&uq->queue_mutex);
-   queue_length = uq->queue_length;
-   shuffle = uq->shuffle;
-   repeat_mode = uq->repeat_mode;
-
-   /* Snapshot per-session fields under state_mutex (nested: queue, then state) */
-   pthread_mutex_lock(&state->state_mutex);
-   const music_queue_entry_t *now = NULL;
-   queue_index = webui_music_current(state, uq, &now);
-   if (now) {
-      current_track = *now;
-      has_track = true;
-   }
-   bool playing = state->playing;
-   bool paused = state->paused;
-   bool loading = state->loading;
-   double position_sec = 0.0;
-   if (state->source_rate > 0) {
-      position_sec = (double)state->position_frames / state->source_rate;
-   }
-   audio_format_type_t source_format = state->source_format;
-   uint32_t source_rate = state->source_rate;
+   music_player_status_t st;
+   music_player_snapshot(state->player, &st);
+   bool has_track = st.track.path[0] != '\0';
    music_quality_t quality = state->quality;
    music_bitrate_mode_t bitrate_mode = state->bitrate_mode;
-   pthread_mutex_unlock(&state->state_mutex);
-   pthread_mutex_unlock(&uq->queue_mutex);
 
    /* Build JSON (no locks held) */
    struct json_object *response = json_object_new_object();
    json_object_object_add(response, "type", json_object_new_string("music_state"));
 
    struct json_object *payload = json_object_new_object();
-   json_object_object_add(payload, "playing", json_object_new_boolean(playing));
-   json_object_object_add(payload, "paused", json_object_new_boolean(paused));
-   if (loading) {
+   json_object_object_add(payload, "playing", json_object_new_boolean(st.playing));
+   json_object_object_add(payload, "paused", json_object_new_boolean(st.paused));
+   if (st.loading) {
       json_object_object_add(payload, "loading", json_object_new_boolean(true));
    }
 
@@ -440,24 +200,23 @@ void webui_music_send_state_impl(ws_connection_t *conn,
 
    if (has_track) {
       struct json_object *track_obj = json_object_new_object();
-      json_object_object_add(track_obj, "path", json_object_new_string(current_track.path));
-      json_object_object_add(track_obj, "title", json_object_new_string(current_track.title));
-      json_object_object_add(track_obj, "artist", json_object_new_string(current_track.artist));
-      json_object_object_add(track_obj, "album", json_object_new_string(current_track.album));
-      json_object_object_add(track_obj, "duration_sec",
-                             json_object_new_int(current_track.duration_sec));
+      json_object_object_add(track_obj, "path", json_object_new_string(st.track.path));
+      json_object_object_add(track_obj, "title", json_object_new_string(st.track.title));
+      json_object_object_add(track_obj, "artist", json_object_new_string(st.track.artist));
+      json_object_object_add(track_obj, "album", json_object_new_string(st.track.album));
+      json_object_object_add(track_obj, "duration_sec", json_object_new_int(st.track.duration_sec));
       json_object_object_add(payload, "track", track_obj);
    } else {
       json_object_object_add(payload, "track", NULL);
    }
 
-   json_object_object_add(payload, "position_sec", json_object_new_double(position_sec));
-   json_object_object_add(payload, "queue_length", json_object_new_int(queue_length));
-   json_object_object_add(payload, "queue_index", json_object_new_int(queue_index));
+   json_object_object_add(payload, "position_sec", json_object_new_double(st.position_sec));
+   json_object_object_add(payload, "queue_length", json_object_new_int(st.queue_length));
+   json_object_object_add(payload, "queue_index", json_object_new_int(st.queue_index));
 
    json_object_object_add(payload, "source_format",
-                          json_object_new_string(audio_decoder_format_name(source_format)));
-   json_object_object_add(payload, "source_rate", json_object_new_int(source_rate));
+                          json_object_new_string(audio_decoder_format_name(st.source_format)));
+   json_object_object_add(payload, "source_rate", json_object_new_int(st.source_rate));
 
    json_object_object_add(payload, "quality", json_object_new_string(QUALITY_NAMES[quality]));
    json_object_object_add(payload, "bitrate", json_object_new_int(QUALITY_BITRATES[quality]));
@@ -465,8 +224,8 @@ void webui_music_send_state_impl(ws_connection_t *conn,
                           json_object_new_string(bitrate_mode == MUSIC_BITRATE_VBR ? "vbr"
                                                                                    : "cbr"));
 
-   json_object_object_add(payload, "shuffle", json_object_new_boolean(shuffle));
-   json_object_object_add(payload, "repeat_mode", json_object_new_int(repeat_mode));
+   json_object_object_add(payload, "shuffle", json_object_new_boolean(st.shuffle));
+   json_object_object_add(payload, "repeat_mode", json_object_new_int(st.repeat_mode));
 
    json_object_object_add(payload, "volume", json_object_new_double(conn->volume));
 
@@ -497,20 +256,13 @@ void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state)
  * @brief Queue position update for client (thread-safe)
  *
  * Uses the response queue instead of direct lws_write() to be safe
- * for calling from the streaming thread.
+ * for calling from the player's thread.
  */
-static void send_position_update(ws_connection_t *conn, session_music_state_t *state) {
-   double position_sec = 0.0;
-   uint32_t duration_sec = state->cached_duration_sec;
-
-   if (state->source_rate > 0) {
-      position_sec = (double)state->position_frames / state->source_rate;
-   }
-
+static void send_position_update(ws_connection_t *conn, const music_event_t *ev) {
    ws_response_t resp = { .session = conn->session,
                           .type = WS_RESP_MUSIC_POSITION,
-                          .music_position = { .position_sec = position_sec,
-                                              .duration_sec = duration_sec } };
+                          .music_position = { .position_sec = ev->position_sec,
+                                              .duration_sec = ev->duration_sec } };
 
    queue_response(&resp);
 }
@@ -562,7 +314,7 @@ void webui_music_send_error(ws_connection_t *conn, const char *code, const char 
  * connection teardown and could deref a freed conn (use-after-free).
  *
  * Deadlock-safe: s_conn_registry_mutex is the OUTERMOST lock here. webui_music_
- * send_state acquires uq->queue_mutex / state->state_mutex and ultimately
+ * send_state acquires uq->queue_mutex / the player's state_mutex and ultimately
  * queue_response's s_queue_mutex, and NONE of those paths ever re-acquire the
  * registry lock (verified: webui_music.c and webui_send.c never lock it), and
  * every caller releases uq->queue_mutex before broadcasting. So registry →
@@ -587,424 +339,268 @@ void webui_music_broadcast_queue_state(user_music_queue_t *uq, ws_connection_t *
 }
 
 /* =============================================================================
- * Streaming Thread
+ * WebUI output: stereo 48 kHz Opus to the browser, paced on its buffer
+ *
+ * These run on the player's thread, NOT the lws service thread: they send
+ * only through thread-safe paths (queue_response(), queue_music_direct()),
+ * never send_json_response() or lws_write().
  * ============================================================================= */
 
-/**
- * @brief Music streaming thread
- *
- * Reads audio from decoder, resamples to 48kHz, encodes to Opus,
- * and sends to client via WebSocket.
- *
- * NOTE: This runs on its own thread, NOT the LWS service thread.
- * All WebSocket sends must use thread-safe paths: queue_response(),
- * webui_music_send_state(), webui_music_send_error(), or
- * queue_music_direct(). Never call send_json_response() or
- * lws_write() directly from here.
- */
-static void *music_stream_thread(void *arg) {
-   session_music_state_t *state = (session_music_state_t *)arg;
-   ws_connection_t *conn = state->conn;
+/* A read hands write() at most one Opus frame of source audio */
+_Static_assert(WEBUI_MUSIC_FRAME_SAMPLES <= MUSIC_PLAYER_READ_FRAMES_MAX,
+               "the player's read buffer must hold an Opus frame");
 
-   OLOG_INFO("WebUI music: Streaming thread started");
-   atomic_fetch_add(&s_active_streams, 1);
+static int webui_out_track_begin(void *ctx,
+                                 const audio_decoder_info_t *info,
+                                 bool gapless,
+                                 size_t *read_frames) {
+   session_music_state_t *state = (session_music_state_t *)ctx;
+   /* Below the minimum one Opus frame needs more source frames than a read
+    * buffer holds */
+   if (info->sample_rate < WEBUI_MUSIC_MIN_SOURCE_RATE ||
+       info->sample_rate > WEBUI_MUSIC_MAX_SOURCE_RATE) {
+      return FAILURE;
+   }
+   /* The resampler always runs stereo: mono is expanded before it */
+   if (state->resampler) {
+      resampler_destroy(state->resampler);
+      state->resampler = NULL;
+   }
+   if (info->sample_rate != OPUS_SAMPLE_RATE) {
+      state->resampler = resampler_create(info->sample_rate, OPUS_SAMPLE_RATE, 2);
+      if (!state->resampler) {
+         OLOG_ERROR("WebUI music: Failed to create resampler");
+         return FAILURE;
+      }
+   }
+   /* About one Opus frame's worth of source audio: below 48 kHz a full frame
+    * of source would resample to more than the buffers hold */
+   *read_frames = WEBUI_MUSIC_FRAME_SAMPLES;
+   if (info->sample_rate < OPUS_SAMPLE_RATE) {
+      *read_frames = (size_t)WEBUI_MUSIC_FRAME_SAMPLES * info->sample_rate / OPUS_SAMPLE_RATE;
+   }
+   state->source_rate = info->sample_rate;
+   state->source_channels = info->channels;
+   state->resample_accum_count = 0;
+   state->stream_start_time = 0;
+   state->frames_sent = 0;
+   if (!gapless) {
+      state->est_buffered_us = 0; /* a natural advance keeps the buffered lead */
+   }
+   return SUCCESS;
+}
 
-   /* Buffers for audio processing
-    * resample_buffer needs extra space for upsampling (e.g., 44.1kHz -> 48kHz = 1.088x)
-    * Using 3x to accommodate upsampling + resampler margin requirements */
-   int16_t decode_buffer[WEBUI_MUSIC_FRAME_SAMPLES * 2]; /* Stereo decode buffer */
-   int16_t
-       resample_buffer[WEBUI_MUSIC_FRAME_SAMPLES * 3]; /* Resampled output (extra for upsampling) */
-   uint8_t opus_buffer[OPUS_MAX_FRAME_SIZE + 2];       /* Opus frame + length prefix */
-   float float_buffer[WEBUI_MUSIC_FRAME_SAMPLES * 3];  /* Float conversion for Opus */
+static void webui_out_halt(void *ctx, music_halt_t kind) {
+   (void)kind; /* the browser keeps or flushes its own buffer */
+   session_music_state_t *state = (session_music_state_t *)ctx;
+   /* Restart pacing and the estimate when audio resumes.  A client resuming
+    * from a pause keeps its frozen buffer (it suspends playback rather than
+    * flushing), so the first frames over-refill until its next buffer report
+    * corrects the estimate; one resuming from a stop or seek has flushed. */
+   state->stream_start_time = 0;
+   state->frames_sent = 0;
+   state->est_buffered_us = 0;
+   state->was_closed_loop = false;
+   state->resample_accum_count = 0;
+}
 
-   /* Time-based pacing to prevent audio speedup */
-   uint64_t stream_start_time = 0;
-   uint64_t frames_sent = 0;
+/* Hold the client buffer near the target depth.  Bookkeep the estimate (+frame
+ * queued, -sleep as the client plays it back in real time) and re-anchor it to
+ * each fresh client report; fall back to the real-time pacer when reports are
+ * stale (old clients, or a client whose report sender stalled), so a
+ * TTS-induced CPU preemption can't drain a near-empty buffer into silence. */
+static void pace_after_send(session_music_state_t *state, bool queued) {
    const uint64_t frame_duration_us = (WEBUI_MUSIC_FRAME_SAMPLES * 1000000ULL) / OPUS_SAMPLE_RATE;
-   bool was_sending = false; /* Diagnostic: track state transitions for logging */
-   int failures = 0;         /* Tracks in a row that produced no audio */
+   if (queued) {
+      state->est_buffered_us += frame_duration_us;
+   }
 
-   /* Closed-loop flow control: hold the client worklet buffer near
-    * WEBUI_MUSIC_TARGET_BUFFER_MS using periodic client reports, so a TTS-induced
-    * CPU preemption can't drain a near-empty buffer into silence. Estimate is
-    * bookkept (+frame on send, -sleep as the client drains) and re-anchored to
-    * each fresh report; falls back to the real-time pacer above when reports go
-    * stale (old clients, or a client whose report sender stalled). */
-   uint64_t est_buffered_us = 0;     /* server's estimate of client buffer depth */
-   uint64_t last_seen_report_ms = 0; /* last report timestamp already consumed */
-   bool was_closed_loop = false;     /* were we closed-loop last frame? (fallback re-baseline) */
-   unsigned pace_log_counter = 0;    /* throttle for the periodic pacing log */
+   uint64_t now_ms = get_time_ms();
+   uint64_t rts = atomic_load(&state->last_buffer_report_ms);
+   bool report_fresh = (rts != 0) && ((now_ms - rts) <= WEBUI_MUSIC_REPORT_STALE_MS);
+   if (report_fresh && rts != state->last_seen_report_ms) {
+      state->est_buffered_us = (uint64_t)atomic_load(&state->client_buffered_ms) * 1000ULL;
+      state->last_seen_report_ms = rts;
+   }
 
-   while (!atomic_load(&state->stop_requested)) {
-      /* Quick check without lock first */
-      if (!atomic_load(&state->streaming)) {
-         usleep(50000);
-         continue;
-      }
-
-      /* Check for pending reconfiguration (safe between frames) */
-      if (atomic_load(&state->reconfigure_requested)) {
-         pthread_mutex_lock(&state->state_mutex);
-         music_quality_t new_quality = state->pending_quality;
-         music_bitrate_mode_t new_bitrate_mode = state->pending_bitrate_mode;
-         atomic_store(&state->reconfigure_requested, false);
-         pthread_mutex_unlock(&state->state_mutex);
-
-         /* Reconfigure encoder outside the lock */
-         state->quality = new_quality;
-         state->bitrate_mode = new_bitrate_mode;
-         if (webui_music_configure_encoder(state, new_quality) == 0) {
-            OLOG_INFO("WebUI music: Reconfigured encoder to %s %s", QUALITY_NAMES[new_quality],
-                      new_bitrate_mode == MUSIC_BITRATE_VBR ? "VBR" : "CBR");
+   if (report_fresh) {
+      state->was_closed_loop = true;
+      uint64_t target_us = (uint64_t)WEBUI_MUSIC_TARGET_BUFFER_MS * 1000ULL;
+      if (state->est_buffered_us > target_us) {
+         /* At/above target: pace so the client drains back toward it. */
+         uint64_t sleep_us = state->est_buffered_us - target_us;
+         if (sleep_us > WEBUI_MUSIC_MAX_PACE_SLEEP_US) {
+            sleep_us = WEBUI_MUSIC_MAX_PACE_SLEEP_US;
          }
-      }
-
-      /* A requested or auto-advanced track waiting to be opened */
-      if (webui_music_run_pending_open(state, conn, &failures)) {
-         /* Reset stream timing for the new track */
-         stream_start_time = 0;
-         frames_sent = 0;
-         continue;
-      }
-
-      /* Brief lock to check state and mark decoder busy */
-      pthread_mutex_lock(&state->state_mutex);
-
-      /* A seek, applied here between frames (paused too), so it never stops
-       * this thread or what it's prefetching */
-      if (state->seek_pending) {
-         state->seek_pending = false;
-         if (state->decoder && audio_decoder_seek(state->decoder, state->seek_frames) == 0) {
-            state->position_frames = state->seek_frames;
-            state->resample_accum_count = 0;
+         if (sleep_us >= 1000) {
+            usleep((useconds_t)sleep_us);
+            state->est_buffered_us -= sleep_us; /* wall time the client drained */
          }
-         pthread_mutex_unlock(&state->state_mutex);
-         /* The client flushed for the seek: restart pacing and the estimate */
-         stream_start_time = 0;
-         frames_sent = 0;
-         est_buffered_us = 0;
-         was_closed_loop = false;
-         webui_music_send_state(conn, state);
-         continue;
-      }
-
-      if (!state->decoder || !state->playing || state->paused) {
-         if (was_sending) {
-            OLOG_INFO("WebUI music: Streaming paused (decoder=%p playing=%d paused=%d)",
-                      (void *)state->decoder, state->playing, state->paused);
-            was_sending = false;
-         }
-         pthread_mutex_unlock(&state->state_mutex);
-         usleep(50000); /* 50ms idle sleep */
-         continue;
-      }
-      if (!was_sending) {
-         OLOG_INFO("WebUI music: Streaming resumed");
-         was_sending = true;
-         /* Reset pacing so we don't fast-forward after a pause */
-         stream_start_time = 0;
-         frames_sent = 0;
-         state->resample_accum_count = 0;
-         /* Reset the estimate on resume.  A client resuming from a pause keeps its
-          * frozen buffer (it suspends playback rather than flushing), so this
-          * briefly over-refills until its next buffer report corrects the
-          * estimate; one resuming from a stop or seek has flushed. (Natural auto-advance, by
-          * contrast, is gapless and must NOT reset the estimate; it stays continuous across the
-          * boundary.) */
-         est_buffered_us = 0;
-      }
-
-      /* Mark decoder busy and grab what we need */
-      atomic_store(&state->decoder_busy, true);
-      audio_decoder_t *decoder = state->decoder;
-      resampler_t *resampler = state->resampler;
-      uint32_t source_rate = state->source_rate;
-      uint8_t source_channels = state->source_channels;
-      pthread_mutex_unlock(&state->state_mutex);
-
-      /* Read about one Opus frame's worth of source audio: below 48 kHz a
-       * full frame of source would resample to more than the buffers hold. */
-      size_t want = WEBUI_MUSIC_FRAME_SAMPLES;
-      if (source_rate < OPUS_SAMPLE_RATE) {
-         want = (size_t)WEBUI_MUSIC_FRAME_SAMPLES * source_rate / OPUS_SAMPLE_RATE;
-      }
-
-      /* Read from decoder WITHOUT holding mutex */
-      ssize_t frames_read = audio_decoder_read(decoder, decode_buffer, want);
-
-      if (frames_read <= 0) {
-         /* End of track or error - clear busy flag and signal waiters */
-         atomic_store(&state->decoder_busy, false);
-         pthread_mutex_lock(&state->state_mutex);
-         pthread_cond_signal(&state->decoder_idle_cond);
-         OLOG_INFO("WebUI music: Track finished (read returned %zd)", frames_read);
-         audio_decoder_close(state->decoder);
-         state->decoder = NULL;
-         bool no_audio = state->position_frames == 0;
-         /* An auto-advance pick that produced nothing didn't play: previous
-          * mustn't go back to it (as for one that wouldn't open) */
-         const char *played = music_history_current(&state->history);
-         if (no_audio && state->history_fresh && played && strcmp(played, state->track.path) == 0) {
-            music_history_drop_current(&state->history);
-         }
-         pthread_mutex_unlock(&state->state_mutex);
-
-         /* A track that produced no audio failed, whether it errored or hit
-          * EOF at once (a truncated file): counting it is what stops a
-          * repeat queue of them from spinning. */
-         bool track_failed = frames_read < 0 || no_audio;
-         if (track_failed) {
-            OLOG_WARNING("WebUI music: Track failed (read returned %zd) %s", frames_read,
-                         no_audio ? "before any audio" : "mid-track");
-            if (no_audio) {
-               failures++;
-            }
-            /* One toast per run of failures, not one per skipped track */
-            if (!no_audio || failures == 1) {
-               webui_music_send_error(conn, "DECODE_ERROR",
-                                      no_audio ? "Couldn't play this track"
-                                               : "Couldn't play the rest of this track");
-            }
-         }
-
-         /* Picks the next track into the pending slot (opened above), or stops */
-         webui_music_advance(state, conn, track_failed, &failures);
-         continue;
-      }
-      failures = 0;
-
-      /* Expand mono to stereo in place (backwards, so nothing is overwritten
-       * before it's read); the buffer holds a full stereo frame. */
-      size_t samples = (size_t)frames_read * 2;
-      if (source_channels == 1) {
-         for (ssize_t i = frames_read - 1; i >= 0; i--) {
-            decode_buffer[i * 2] = decode_buffer[i];
-            decode_buffer[i * 2 + 1] = decode_buffer[i];
-         }
-      }
-
-      /* Resample to 48kHz if needed (using local vars, no mutex needed) */
-      int16_t *audio_data = decode_buffer;
-      if (resampler && source_rate != OPUS_SAMPLE_RATE) {
-         size_t resampled = resampler_process(resampler, decode_buffer, samples, resample_buffer,
-                                              sizeof(resample_buffer) / sizeof(resample_buffer[0]));
-         audio_data = resample_buffer;
-         samples = resampled;
-      }
-
-      /* Done with decoder and resampler, safe for control operations now */
-      atomic_store(&state->decoder_busy, false);
-
-      /* Brief lock to update state and signal waiters */
-      pthread_mutex_lock(&state->state_mutex);
-      pthread_cond_signal(&state->decoder_idle_cond);
-      state->position_frames += frames_read;
-
-      /* Append resampled samples to accumulation buffer */
-      if (state->resample_accum_count + samples <= state->resample_accum_size) {
-         memcpy(state->resample_accum + state->resample_accum_count, audio_data,
-                samples * sizeof(int16_t));
-         state->resample_accum_count += samples;
       } else {
-         /* Buffer overflow - this shouldn't happen with proper sizing */
-         OLOG_WARNING("WebUI music: Resample accumulator overflow, dropping samples");
-      }
-      pthread_mutex_unlock(&state->state_mutex);
-
-      /* Encode and send while we have enough samples (960 stereo frames = 1920 samples) */
-      while (state->resample_accum_count >= WEBUI_MUSIC_FRAME_SAMPLES * 2) {
-         /* Check pause/stop in inner loop too — the outer loop only checks at the
-          * top of each iteration, and audio_decoder_read + resampling may accumulate
-          * enough samples for many frames between checks. */
-         if (state->paused || !state->playing || atomic_load(&state->stop_requested))
-            break;
-
-         /* Initialize stream timing on first frame. NOTE: est_buffered_us is
-          * deliberately NOT reset here — a brand-new thread (fresh play / user
-          * skip) starts with est=0 as a thread local, while a natural
-          * auto-advance reaches this point on the SAME thread and must keep its
-          * estimate (the buffered lead is continuous across the gapless boundary).
-          * The in-thread flush boundaries, a seek and resume-from-pause, reset
-          * est above. */
-         if (stream_start_time == 0) {
-            struct timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            stream_start_time = (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
-            frames_sent = 0;
-         }
-
-         /* Convert first 960 stereo frames to float for Opus encoder */
-         for (size_t i = 0; i < WEBUI_MUSIC_FRAME_SAMPLES * 2; i++) {
-            float_buffer[i] = state->resample_accum[i] / 32768.0f;
-         }
-
-         /* Encode to Opus */
-         int opus_bytes = opus_encode_float(state->encoder, float_buffer, WEBUI_MUSIC_FRAME_SAMPLES,
-                                            opus_buffer + 2, sizeof(opus_buffer) - 2);
-
-         if (opus_bytes < 0) {
-            OLOG_WARNING("WebUI music: Opus encode error: %s", opus_strerror(opus_bytes));
-            break;
-         }
-
-         /* Prepend length prefix (little-endian) */
-         opus_buffer[0] = opus_bytes & 0xFF;
-         opus_buffer[1] = (opus_bytes >> 8) & 0xFF;
-
-         /* Send to client — dedicated music socket if available, else main socket.
-          * A WEBUI_MUSIC_QUEUE_DROPPED return means the send ring was full, so we
-          * must NOT credit the estimate for a frame the client never received. */
-         int qrc = queue_music_direct(state, opus_buffer, opus_bytes + 2);
-         frames_sent++;
-
-         /* ---- Closed-loop pacing (see the est_buffered_us notes above) ----------
-          * Hold the client buffer near the target depth. Bookkeep the estimate
-          * (+frame queued, -sleep as the client plays it back in real time) and
-          * re-anchor to each fresh client report; fall back to the real-time pacer
-          * when reports are stale. */
-         if (qrc == SUCCESS) {
-            est_buffered_us += frame_duration_us;
-         }
-
-         uint64_t now_ms = get_time_ms();
-         uint64_t rts = atomic_load(&state->last_buffer_report_ms);
-         bool report_fresh = (rts != 0) && ((now_ms - rts) <= WEBUI_MUSIC_REPORT_STALE_MS);
-         if (report_fresh && rts != last_seen_report_ms) {
-            est_buffered_us = (uint64_t)atomic_load(&state->client_buffered_ms) * 1000ULL;
-            last_seen_report_ms = rts;
-         }
-
-         if (report_fresh) {
-            was_closed_loop = true;
-            uint64_t target_us = (uint64_t)WEBUI_MUSIC_TARGET_BUFFER_MS * 1000ULL;
-            if (est_buffered_us > target_us) {
-               /* At/above target: pace so the client drains back toward it. */
-               uint64_t sleep_us = est_buffered_us - target_us;
-               if (sleep_us > WEBUI_MUSIC_MAX_PACE_SLEEP_US) {
-                  sleep_us = WEBUI_MUSIC_MAX_PACE_SLEEP_US;
-               }
-               if (sleep_us >= 1000) {
-                  usleep((useconds_t)sleep_us);
-                  est_buffered_us -= sleep_us; /* wall time the client drained */
-               }
-            } else {
-               /* Below target: refill faster than real time, but gate on the send
-                * ring so the burst can't overflow the 8-slot ring (dropped frames
-                * would defeat the refill). */
-               uint64_t sleep_us = (state->write_ring_count >= WEBUI_MUSIC_REFILL_RING_HIGH)
-                                       ? frame_duration_us      /* ring backing up: ~1x */
-                                       : frame_duration_us / 4; /* headroom: ~4x fill */
-               usleep((useconds_t)sleep_us);
-               est_buffered_us = (est_buffered_us > sleep_us) ? (est_buffered_us - sleep_us) : 0;
-            }
-
-            if ((++pace_log_counter % 250) == 0) {
-               OLOG_INFO("WebUI music: buffer est=%llums target=%dms ring=%d/%d",
-                         (unsigned long long)(est_buffered_us / 1000), WEBUI_MUSIC_TARGET_BUFFER_MS,
-                         state->write_ring_count, WEBUI_MUSIC_WRITE_RING);
-            }
-         } else {
-            /* No fresh report: fall back to the real-time pacer. On the transition
-             * out of closed-loop, re-baseline its clock to NOW — otherwise an
-             * accumulated lead in frames_sent makes expected_time race ahead of
-             * wall-clock and the sanity clamp skips the sleep entirely, blasting
-             * the ring unpaced (the exact stutter this feature removes). */
-            struct timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            uint64_t current_time = (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
-            if (was_closed_loop) {
-               stream_start_time = current_time - (frames_sent * frame_duration_us);
-               was_closed_loop = false;
-            }
-            uint64_t expected_time = stream_start_time + (frames_sent * frame_duration_us);
-            if (current_time < expected_time) {
-               uint64_t sleep_us = expected_time - current_time;
-               if (sleep_us > 1000 && sleep_us < 100000) { /* Sanity check: 1ms - 100ms */
-                  usleep((useconds_t)sleep_us);
-               }
-            }
-         }
-
-         /* Shift remaining samples to beginning of buffer */
-         size_t remaining = state->resample_accum_count - WEBUI_MUSIC_FRAME_SAMPLES * 2;
-         if (remaining > 0) {
-            memmove(state->resample_accum, state->resample_accum + WEBUI_MUSIC_FRAME_SAMPLES * 2,
-                    remaining * sizeof(int16_t));
-         }
-         state->resample_accum_count = remaining;
+         /* Below target: refill faster than real time, but gate on the send
+          * ring so the burst can't overflow the 8-slot ring (dropped frames
+          * would defeat the refill). */
+         uint64_t sleep_us = (state->write_ring_count >= WEBUI_MUSIC_REFILL_RING_HIGH)
+                                 ? frame_duration_us      /* ring backing up: ~1x */
+                                 : frame_duration_us / 4; /* headroom: ~4x fill */
+         usleep((useconds_t)sleep_us);
+         state->est_buffered_us = (state->est_buffered_us > sleep_us)
+                                      ? (state->est_buffered_us - sleep_us)
+                                      : 0;
       }
 
-      /* Send position update periodically (no mutex needed - queue_response is thread-safe) */
-      uint64_t now = get_time_ms();
-      if (now - state->last_position_update_ms >= POSITION_UPDATE_INTERVAL_MS) {
-         send_position_update(conn, state);
-         state->last_position_update_ms = now;
+      if ((++state->pace_log_counter % 250) == 0) {
+         OLOG_INFO("WebUI music: buffer est=%llums target=%dms ring=%d/%d",
+                   (unsigned long long)(state->est_buffered_us / 1000),
+                   WEBUI_MUSIC_TARGET_BUFFER_MS, state->write_ring_count, WEBUI_MUSIC_WRITE_RING);
+      }
+   } else {
+      /* No fresh report: fall back to the real-time pacer. On the transition
+       * out of closed-loop, re-baseline its clock to NOW — otherwise an
+       * accumulated lead in frames_sent makes expected_time race ahead of
+       * wall-clock and the sanity clamp skips the sleep entirely, blasting
+       * the ring unpaced (the exact stutter this feature removes). */
+      struct timespec ts;
+      clock_gettime(CLOCK_MONOTONIC, &ts);
+      uint64_t current_time = (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
+      if (state->was_closed_loop) {
+         state->stream_start_time = current_time - (state->frames_sent * frame_duration_us);
+         state->was_closed_loop = false;
+      }
+      uint64_t expected_time = state->stream_start_time + (state->frames_sent * frame_duration_us);
+      if (current_time < expected_time) {
+         uint64_t sleep_us = expected_time - current_time;
+         if (sleep_us > 1000 && sleep_us < 100000) { /* Sanity check: 1ms - 100ms */
+            usleep((useconds_t)sleep_us);
+         }
+      }
+   }
+}
+
+static void webui_out_write(void *ctx, int16_t *pcm, size_t frames) {
+   session_music_state_t *state = (session_music_state_t *)ctx;
+   /* resample_buffer needs extra space for upsampling (e.g., 44.1kHz -> 48kHz
+    * = 1.088x); 3x accommodates upsampling + resampler margin requirements */
+   int16_t resample_buffer[WEBUI_MUSIC_FRAME_SAMPLES * 3];
+   uint8_t opus_buffer[OPUS_MAX_FRAME_SIZE + 2];      /* Opus frame + length prefix */
+   float float_buffer[WEBUI_MUSIC_FRAME_SAMPLES * 3]; /* Float conversion for Opus */
+
+   /* A quality change, applied between frames */
+   if (atomic_exchange(&state->reconfigure_requested, false)) {
+      music_quality_t new_quality = state->pending_quality;
+      music_bitrate_mode_t new_bitrate_mode = state->pending_bitrate_mode;
+
+      state->quality = new_quality;
+      state->bitrate_mode = new_bitrate_mode;
+      if (webui_music_configure_encoder(state, new_quality) == 0) {
+         OLOG_INFO("WebUI music: Reconfigured encoder to %s %s", QUALITY_NAMES[new_quality],
+                   new_bitrate_mode == MUSIC_BITRATE_VBR ? "VBR" : "CBR");
       }
    }
 
-   /* A request still waiting resolves as cancelled, so a waiting tool never
-    * hangs; the slot itself stays for whoever stopped the thread */
-   webui_music_cancel_pending_ticket(state);
-   webui_music_prefetch_stop(state);
-   OLOG_INFO("WebUI music: Streaming thread stopped");
-   atomic_fetch_sub(&s_active_streams, 1);
-   atomic_store(&state->streaming, false);
-
-   return NULL;
-}
-
-/**
- * @brief Start streaming for a session
- *
- * Stack requirements: The streaming thread allocates ~25KB on the stack for
- * audio buffers (decode, resample, opus, float conversion). Default pthread
- * stack size (2-8MB on Linux) is sufficient; no custom stack size needed.
- */
-int webui_music_start_streaming(session_music_state_t *state) {
-   if (atomic_load(&state->streaming)) {
-      return 0; /* Already streaming */
+   /* Expand mono to stereo in place (backwards, so nothing is overwritten
+    * before it's read); the buffer holds a full stereo frame. */
+   size_t samples = frames * 2;
+   if (state->source_channels == 1) {
+      for (size_t i = frames; i-- > 0;) {
+         pcm[i * 2] = pcm[i];
+         pcm[i * 2 + 1] = pcm[i];
+      }
    }
 
-   atomic_store(&state->stop_requested, false);
-   atomic_store(&state->streaming, true);
-
-   pthread_attr_t attr;
-   pthread_attr_init(&attr);
-   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-
-   int ret = pthread_create(&state->stream_thread, &attr, music_stream_thread, state);
-   pthread_attr_destroy(&attr);
-
-   if (ret != 0) {
-      OLOG_ERROR("WebUI music: Failed to create streaming thread");
-      atomic_store(&state->streaming, false);
-      return 1;
+   /* Resample to 48kHz if needed */
+   int16_t *audio_data = pcm;
+   if (state->resampler && state->source_rate != OPUS_SAMPLE_RATE) {
+      samples = resampler_process(state->resampler, pcm, samples, resample_buffer,
+                                  sizeof(resample_buffer) / sizeof(resample_buffer[0]));
+      audio_data = resample_buffer;
    }
 
-   return 0;
-}
-
-/**
- * @brief Stop streaming for a session
- */
-void webui_music_stop_streaming(session_music_state_t *state) {
-   if (!atomic_load(&state->streaming)) {
-      return;
+   /* Append resampled samples to accumulation buffer */
+   if (state->resample_accum_count + samples <= state->resample_accum_size) {
+      memcpy(state->resample_accum + state->resample_accum_count, audio_data,
+             samples * sizeof(int16_t));
+      state->resample_accum_count += samples;
+   } else {
+      /* Buffer overflow - this shouldn't happen with proper sizing */
+      OLOG_WARNING("WebUI music: Resample accumulator overflow, dropping samples");
    }
 
-   atomic_store(&state->stop_requested, true);
-   /* The stream thread joins its prefetch helper on the way out: cancel the
-    * helper's download too, so this join stays short */
-   atomic_store(&state->prefetch_cancel, true);
+   /* Encode and send while we have enough samples (960 stereo frames = 1920 samples) */
+   while (state->resample_accum_count >= WEBUI_MUSIC_FRAME_SAMPLES * 2) {
+      /* A read and resample may hold enough for many frames: stop between
+       * them on a pause or stop */
+      if (music_player_interrupted(state->player)) {
+         break;
+      }
 
-   /* Wait for thread to finish */
-   pthread_join(state->stream_thread, NULL);
+      /* Start the real-time pacer's clock on the first frame */
+      if (state->stream_start_time == 0) {
+         struct timespec ts;
+         clock_gettime(CLOCK_MONOTONIC, &ts);
+         state->stream_start_time = (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
+         state->frames_sent = 0;
+      }
+
+      /* Convert first 960 stereo frames to float for Opus encoder */
+      for (size_t i = 0; i < WEBUI_MUSIC_FRAME_SAMPLES * 2; i++) {
+         float_buffer[i] = state->resample_accum[i] / 32768.0f;
+      }
+
+      /* Encode to Opus */
+      int opus_bytes = opus_encode_float(state->encoder, float_buffer, WEBUI_MUSIC_FRAME_SAMPLES,
+                                         opus_buffer + 2, sizeof(opus_buffer) - 2);
+      if (opus_bytes < 0) {
+         OLOG_WARNING("WebUI music: Opus encode error: %s", opus_strerror(opus_bytes));
+         break;
+      }
+
+      /* Prepend length prefix (little-endian) */
+      opus_buffer[0] = opus_bytes & 0xFF;
+      opus_buffer[1] = (opus_bytes >> 8) & 0xFF;
+
+      /* Send to client — dedicated music socket if available, else main socket.
+       * A WEBUI_MUSIC_QUEUE_DROPPED return means the send ring was full, so we
+       * must NOT credit the estimate for a frame the client never received. */
+      int qrc = queue_music_direct(state, opus_buffer, opus_bytes + 2);
+      state->frames_sent++;
+      pace_after_send(state, qrc == SUCCESS);
+
+      /* Shift remaining samples to beginning of buffer */
+      size_t remaining = state->resample_accum_count - WEBUI_MUSIC_FRAME_SAMPLES * 2;
+      if (remaining > 0) {
+         memmove(state->resample_accum, state->resample_accum + WEBUI_MUSIC_FRAME_SAMPLES * 2,
+                 remaining * sizeof(int16_t));
+      }
+      state->resample_accum_count = remaining;
+   }
 }
 
-/* =============================================================================
- * Playback Control
- * ============================================================================= */
+static void webui_out_notify(void *ctx, const music_event_t *ev) {
+   session_music_state_t *state = (session_music_state_t *)ctx;
+   switch (ev->type) {
+      case MUSIC_EVENT_STATE:
+         webui_music_send_state_impl(state->conn, state, ev->gapless);
+         break;
+      case MUSIC_EVENT_POSITION:
+         send_position_update(state->conn, ev);
+         break;
+      case MUSIC_EVENT_ERROR: {
+         const char *code = ev->error == MUSIC_ERROR_UNREACHABLE ? "PLEX_UNREACHABLE"
+                            : ev->error == MUSIC_ERROR_PLAYBACK  ? "PLAYBACK_ERROR"
+                                                                 : "DECODE_ERROR";
+         webui_music_send_error(state->conn, code, ev->message);
+         break;
+      }
+   }
+}
+
+static const music_output_ops_t s_webui_output = {
+   .track_begin = webui_out_track_begin,
+   .write = webui_out_write,
+   .halt = webui_out_halt,
+   .notify = webui_out_notify,
+};
 
 /* =============================================================================
  * Lifecycle Functions
@@ -1028,16 +624,6 @@ int webui_music_init(void) {
    /* Check if music database is available */
    if (!music_db_is_initialized()) {
       OLOG_WARNING("WebUI music: Music database not initialized - library features unavailable");
-   }
-
-   /* Initialize queue persistence DB */
-   {
-      char queue_db_path[512];
-      snprintf(queue_db_path, sizeof(queue_db_path), "%s/music.db",
-               g_config.paths.data_dir_resolved);
-      if (music_queue_db_init(queue_db_path) != 0) {
-         OLOG_WARNING("WebUI music: Queue DB init failed — queue persistence unavailable");
-      }
    }
 
    /* Initialize Plex client if configured (for download/scrobble support) */
@@ -1065,17 +651,11 @@ void webui_music_cleanup(void) {
    }
 
    /* Wait for all streams to finish */
-   while (atomic_load(&s_active_streams) > 0) {
+   while (music_player_running() > 0) {
       pthread_mutex_unlock(&s_music_mutex);
       usleep(100000); /* 100ms */
       pthread_mutex_lock(&s_music_mutex);
    }
-
-   /* Clean up shared user queues */
-   cleanup_all_user_queues();
-
-   /* Clean up queue persistence DB */
-   music_queue_db_cleanup();
 
    /* Clean up Plex client */
    plex_client_cleanup();
@@ -1097,45 +677,16 @@ int webui_music_session_init(ws_connection_t *conn) {
       return 1;
    }
 
-   pthread_mutex_init(&state->state_mutex, NULL);
    pthread_mutex_init(&state->write_mutex, NULL);
-   pthread_mutex_init(&state->control_mutex, NULL);
-   pthread_cond_init(&state->decoder_idle_cond, NULL);
-   /* Monotonic, so a wall-clock step can't stretch the LLM tool's wait */
-   pthread_condattr_t open_attr;
-   pthread_condattr_init(&open_attr);
-   pthread_condattr_setclock(&open_attr, CLOCK_MONOTONIC);
-   pthread_cond_init(&state->open_cond, &open_attr);
-   pthread_condattr_destroy(&open_attr);
-   music_history_init(&state->history);
-   atomic_store(&state->shutdown_ack, false);
    atomic_store(&state->reconfigure_requested, false);
    state->conn = conn;
    state->quality = s_config.default_quality;
    state->bitrate_mode = s_config.bitrate_mode;
-   state->shuffle_seed = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)state;
    state->music_wsi = NULL;
    state->write_ring_head = 0;
    state->write_ring_tail = 0;
    state->write_ring_count = 0;
    state->write_drop_count = 0;
-
-   /* Get or create shared queue */
-   user_music_queue_t *uq = find_or_create_user_queue(conn->auth_user_id);
-   if (!uq) {
-      /* Unauthenticated or satellite — create private queue */
-      uq = create_private_queue();
-      if (!uq) {
-         OLOG_ERROR("WebUI music: Failed to allocate private queue");
-         pthread_mutex_destroy(&state->state_mutex);
-         pthread_mutex_destroy(&state->write_mutex);
-         pthread_mutex_destroy(&state->control_mutex);
-         free(state);
-         return 1;
-      }
-   }
-   state->shared_queue = uq;
-   state->queue_index = 0;
 
    /* Allocate resampling accumulation buffer
     * Size: enough for ~100ms of stereo audio at 48kHz = 4800 * 2 = 9600 samples */
@@ -1143,10 +694,7 @@ int webui_music_session_init(ws_connection_t *conn) {
    state->resample_accum = malloc(state->resample_accum_size * sizeof(int16_t));
    if (!state->resample_accum) {
       OLOG_ERROR("WebUI music: Failed to allocate resample buffer");
-      release_user_queue(state->shared_queue);
-      pthread_mutex_destroy(&state->state_mutex);
       pthread_mutex_destroy(&state->write_mutex);
-      pthread_mutex_destroy(&state->control_mutex);
       free(state);
       return 1;
    }
@@ -1155,10 +703,23 @@ int webui_music_session_init(ws_connection_t *conn) {
    /* Create encoder */
    if (webui_music_configure_encoder(state, state->quality) != 0) {
       free(state->resample_accum);
-      release_user_queue(state->shared_queue);
-      pthread_mutex_destroy(&state->state_mutex);
       pthread_mutex_destroy(&state->write_mutex);
-      pthread_mutex_destroy(&state->control_mutex);
+      free(state);
+      return 1;
+   }
+
+   /* The user's shared queue (a private one when not signed in), played by
+    * this connection's player */
+   user_music_queue_t *uq = music_queue_acquire(conn->auth_user_id);
+   state->player = uq ? music_player_create(&s_webui_output, state, uq) : NULL;
+   if (!state->player) {
+      OLOG_ERROR("WebUI music: Failed to create the player");
+      if (uq) {
+         music_queue_release(uq);
+      }
+      opus_encoder_destroy(state->encoder);
+      free(state->resample_accum);
+      pthread_mutex_destroy(&state->write_mutex);
       free(state);
       return 1;
    }
@@ -1168,26 +729,6 @@ int webui_music_session_init(ws_connection_t *conn) {
              conn->auth_user_id > 0 ? "yes" : "no");
 
    return 0;
-}
-
-void webui_music_control_lock(session_music_state_t *state, bool preempt) {
-   if (preempt) {
-      atomic_store(&state->control_cancel, true);
-      /* Wake an LLM tool call waiting for its track to open (it holds
-       * control_mutex while it waits).  Under state_mutex, which the waiter
-       * checks the flag under, so the wakeup can't be missed. */
-      pthread_mutex_lock(&state->state_mutex);
-      pthread_cond_broadcast(&state->open_cond);
-      pthread_mutex_unlock(&state->state_mutex);
-   }
-   pthread_mutex_lock(&state->control_mutex);
-   if (preempt) {
-      /* Only the WebSocket thread preempts, one request at a time, so this is
-       * its own request being retired.  A non-preempting caller that gets the
-       * lock first leaves it set: it doesn't wait for its track either, so the
-       * waiting request isn't held up. */
-      atomic_store(&state->control_cancel, false);
-   }
 }
 
 session_music_state_t *webui_music_state_get_or_init(ws_connection_t *conn) {
@@ -1202,42 +743,27 @@ session_music_state_t *webui_music_state_get_or_init(ws_connection_t *conn) {
    return state;
 }
 
-void webui_music_control_unlock(session_music_state_t *state) {
-   pthread_mutex_unlock(&state->control_mutex);
-}
-
 void webui_music_session_cleanup(ws_connection_t *conn) {
    session_music_state_t *state = (session_music_state_t *)conn->music_state;
    if (!state) {
       return;
    }
 
-   /* Let a control request already holding control_mutex (the LLM tool,
-    * waiting for its track to open) finish first; the preempt ends its wait.
-    * This narrows, but
-    * doesn't close, the window for a tool call that read conn->music_state just
-    * before this and waits for the lock: that needs the connection's lifetime
-    * pinned for the call.  Then stop the producer thread (it holds no teardown lock; it only
-    * touches the write ring under write_mutex, which we destroy below). After this returns, the
-    * only other thread that can still reach `state` is the music-server callback. */
-   webui_music_control_lock(state, true);
-   webui_music_stop_streaming(state);
-   webui_music_control_unlock(state);
+   /* Stop the player first, without the teardown lock: it takes its control
+    * lock, which is never held with the teardown lock.  This narrows, but
+    * doesn't close, the window for a tool call that read conn->music_state
+    * just before this and waits for the control lock: that needs the
+    * connection's lifetime pinned for the call.  Once it returns no output
+    * function runs. */
+   music_player_shutdown(state->player);
 
-   /* Serialize the destroy+free against the music-server accessors. Once we hold this,
+   /* Serialize the free against the music-server accessors. Once we hold this,
     * no report_buffer/write_pending/set_stream_wsi/clear_stream_wsi can be mid-flight on this
     * state, and any that arrive after we NULL conn->music_state below will read NULL and bail. */
    pthread_mutex_lock(&s_music_teardown_mutex);
+   conn->music_state = NULL;
+   music_player_destroy(state->player);
 
-   /* Clean up resources */
-   pthread_mutex_lock(&state->state_mutex);
-
-   if (state->decoder) {
-      audio_decoder_close(state->decoder);
-   }
-   if (state->prefetched) {
-      audio_decoder_close(state->prefetched);
-   }
    if (state->resampler) {
       resampler_destroy(state->resampler);
    }
@@ -1247,30 +773,9 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
    if (state->resample_accum) {
       free(state->resample_accum);
    }
-
-   pthread_mutex_unlock(&state->state_mutex);
-
-   /* Release shared queue reference */
-   if (state->shared_queue) {
-      if (state->shared_queue->user_id <= 0) {
-         /* Private (non-shared) queue — free it */
-         pthread_mutex_destroy(&state->shared_queue->queue_mutex);
-         free(state->shared_queue);
-      } else {
-         release_user_queue(state->shared_queue);
-      }
-      state->shared_queue = NULL;
-   }
-
-   pthread_cond_destroy(&state->decoder_idle_cond);
-   pthread_cond_destroy(&state->open_cond);
-   pthread_mutex_destroy(&state->state_mutex);
    pthread_mutex_destroy(&state->write_mutex);
-   pthread_mutex_destroy(&state->control_mutex);
 
-   music_history_clear(&state->history);
    free(state);
-   conn->music_state = NULL;
 
    pthread_mutex_unlock(&s_music_teardown_mutex);
 
@@ -1278,53 +783,6 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
 }
 
 /* Message handlers are in webui_music_handlers.c */
-
-/* =============================================================================
- * State Query Functions
- * ============================================================================= */
-
-struct json_object *webui_music_get_state(ws_connection_t *conn) {
-   session_music_state_t *state = (session_music_state_t *)conn->music_state;
-   if (!state || !state->shared_queue) {
-      return NULL;
-   }
-
-   struct json_object *result = json_object_new_object();
-   user_music_queue_t *uq = state->shared_queue;
-
-   /* Lock order: queue, then state */
-   pthread_mutex_lock(&uq->queue_mutex);
-   pthread_mutex_lock(&state->state_mutex);
-   json_object_object_add(result, "playing", json_object_new_boolean(state->playing));
-   json_object_object_add(result, "paused", json_object_new_boolean(state->paused));
-   double position_sec = 0.0;
-   if (state->source_rate > 0) {
-      position_sec = (double)state->position_frames / state->source_rate;
-   }
-   const music_queue_entry_t *track = NULL;
-   (void)webui_music_current(state, uq, &track);
-   music_quality_t quality = state->quality;
-   if (track) {
-      struct json_object *track_obj = json_object_new_object();
-      json_object_object_add(track_obj, "title", json_object_new_string(track->title));
-      json_object_object_add(track_obj, "artist", json_object_new_string(track->artist));
-      json_object_object_add(track_obj, "album", json_object_new_string(track->album));
-      json_object_object_add(track_obj, "duration_sec", json_object_new_int(track->duration_sec));
-      json_object_object_add(result, "track", track_obj);
-   }
-   pthread_mutex_unlock(&state->state_mutex);
-   json_object_object_add(result, "queue_length", json_object_new_int(uq->queue_length));
-   pthread_mutex_unlock(&uq->queue_mutex);
-
-   json_object_object_add(result, "position_sec", json_object_new_double(position_sec));
-   json_object_object_add(result, "quality", json_object_new_string(QUALITY_NAMES[quality]));
-
-   return result;
-}
-
-int webui_music_get_stream_count(void) {
-   return atomic_load(&s_active_streams);
-}
 
 /* =============================================================================
  * Configuration

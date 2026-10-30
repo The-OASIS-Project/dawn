@@ -1044,38 +1044,6 @@ void webui_login_sweep_request(void);
 /** @brief The service thread's wake: a requested sweep runs. */
 void webui_login_sweep_run_pending(void);
 
-/* =============================================================================
- * Connection Iterator (defined in webui_server.c, used by webui_music.c)
- * ============================================================================= */
-
-/**
- * @brief Iterate all authenticated connections for a given user
- *
- * Calls callback for each active, authenticated connection with matching
- * auth_user_id and non-NULL music_state. Holds s_conn_registry_mutex
- * during iteration.
- *
- * @param user_id User ID to filter by (must be > 0)
- * @param callback Function to call for each matching connection
- * @param ctx Opaque context passed to callback
- */
-void webui_for_each_conn_by_user(int user_id,
-                                 void (*callback)(ws_connection_t *conn, void *ctx),
-                                 void *ctx);
-
-/**
- * @brief Collect authenticated connections for a given user into a caller-provided array
- *
- * Holds s_conn_registry_mutex only during collection, not during subsequent use.
- * Caller must use results promptly (pointers may become invalid on disconnect).
- *
- * @param user_id User ID to filter by (must be > 0)
- * @param out Array to fill with matching connection pointers
- * @param max_out Capacity of out array
- * @return Number of connections found (may exceed max_out; only max_out are stored)
- */
-int webui_collect_conns_by_user(int user_id, ws_connection_t **out, int max_out);
-
 /* Audio send wrappers (webui_send_audio, webui_send_audio_end,
  * webui_sentence_audio_callback) moved to webui/webui_send.h. */
 

@@ -198,6 +198,9 @@ Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 ├── src/audio/                  Capture, playback, decoders, the music library and Plex; every library track
 │                               a player opens goes through music_open_track() (music_open.c: the library
 │                               path check and the Plex download)
+│   └── music_player*.c         The music player: plays a user's queue to one output through
+│                               music_output_ops_t (the WebUI stream's is in webui_music.c), opens tracks,
+│                               picks what plays next; its controls in audio/music_player.h
 └── src/mosquitto_comms.c       MQTT
 
 Layer 3 (Tools and channels) — deps: Layers 0-2
@@ -241,6 +244,7 @@ them as one Layer-2 unit, not as separate modules with a direction between them.
 | `session_focus.c` | the WebUI's context panel | weak `session_focus_client_notice` |
 | `src/core/ota_rollout.c` | the satellite transport | `ota_rollout_set_push_fn` |
 | `src/audio/flac_playback.c` (a track ended, or won't open) | the music tool, which picks the next track | `audio_playback_set_next_fn` |
+| `src/audio/music_player*.c` (render a track, say what changed) | its output, e.g. the WebUI stream (`webui_music.c`) | `music_output_ops_t`, given to `music_player_create()` |
 | lower-layer broadcasts (scheduler, jobs, calendar, phone, ...) | `webui_broadcasts.c` | weak no-op default, strong WebUI override |
 | `src/tools/email_service_move.c` (a move or undo changed a mailbox) | `webui_email_changed.c` (email_changed to every tab of the user) | weak `email_changed_notify` |
 | `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |
@@ -326,7 +330,7 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    tion, started at a slot or hold     │
 │                    release (any thread); holds a slot  │
 │  Music scanner   — periodic local + Plex sync          │
-│  Scheduler       — 1-second polling loop               │
+│  Scheduler       — waits for its next event            │
 │  CalDAV sync     — background event pull               │
 │  WebUI audio     — per-connection ASR/TTS pipeline     │
 │  Messaging recv  — per-provider listener (Telegram/    │
@@ -361,11 +365,13 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    learned from a conversation made    │
 │                    private; forgets one fact, all of   │
 │                    them (waits out an extraction)      │
-│  Music stream    — one per playing WebUI music session:│
-│                    opens tracks (Plex downloads),      │
-│                    applies seeks, encodes; plus one    │
-│                    helper it owns that prefetches the  │
-│                    next Plex track (joined on exit)    │
+│  Music player    — one per playing music player (each  │
+│                    WebUI music session's): opens       │
+│                    tracks (Plex downloads), applies    │
+│                    seeks, writes to its output (the    │
+│                    WebUI's encodes); plus one helper   │
+│                    it owns that prefetches the next    │
+│                    Plex track (joined on exit)         │
 │  Music playback  — the local speaker's track: opens it │
 │                    (Plex downloads; a stop cancels),   │
 │                    plays it, starts the next at its end│
@@ -382,6 +388,15 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    the search returns                  │
 └────────────────────────────────────────────────────────┘
 ```
+
+**Startup order.** `main()` (`src/dawn.c`) brings DAWN up in a fixed order, and code may rely on it:
+storage first (`auth.db` with its migrations, auth crypto, the image and document stores), before any
+other thread exists; then the tools' `init`, the LLM type, the session manager, and the state the
+database backs (the local owner, watches, interrupted jobs, OTA releases, embeddings); then audio,
+TTS and the WebUI, whose turns have all of that. Last come the inputs that start the moment they
+connect: MQTT's loop and the tools' `start` (the Telegram, Discord and Slack listeners, which take their
+backlog at once), then the scheduler, whose first pass fires the events missed while DAWN was down. No
+thread waits a fixed time for another to be ready.
 
 **Turn serialization (background-jobs era).** All WebUI LLM turns — user text, push-to-talk
 voice, and background-job re-engagements — funnel through the per-session **turn queue**
@@ -507,30 +522,41 @@ Per-module locks (scoped to a single subsystem):
   webui_music_server::s_registry_mutex (src/webui/webui_music_server.c) — authenticated music sockets (taken after
                                                                      s_conn_registry_mutex, before s_music_teardown_mutex; other threads only mark a
                                                                      socket to close and wake the music thread, which alone releases its session reference)
-  webui_music session state (src/webui/webui_music*.c, one set per connection's music state):
+  music_player (src/audio/music_player*.c, one set per player; the WebUI's in src/webui/webui_music*.c):
     control_mutex                                              — one music control request at a time (WebUI controls, queue
-                                                                     actions, the LLM music tool), each of which may stop the stream
+                                                                     actions, the LLM music tool), each of which may stop the player's
                                                                      thread, swap the decoder and start it again.  OUTERMOST for the
-                                                                     state: taken before s_conn_registry_mutex (a queue broadcast),
+                                                                     player: taken before s_conn_registry_mutex (a queue broadcast),
                                                                      queue_mutex and state_mutex; never held with
-                                                                     s_music_teardown_mutex; the stream thread never takes it.  The
+                                                                     s_music_teardown_mutex; the player's thread never takes it.  The
                                                                      WebSocket thread takes it only for actions that stop or replace
                                                                      playback, and sets control_cancel first, which wakes an LLM tool
                                                                      call waiting for its track to open so it releases the lock; other
                                                                      WebUI actions don't take it.  Track opens (Plex downloads) run
-                                                                     only on the stream thread or its prefetch helper (which takes
-                                                                     only state_mutex), never under it
-    state_mutex + open_cond                                    — the pending-open slot and its ticket; the stream thread
+                                                                     only on the player's thread or its prefetch helper (which takes
+                                                                     only state_mutex), never under it.  Output functions run on the
+                                                                     player's thread with no player lock held
+    state_mutex + open_cond                                    — the pending-open slot and its ticket; the player's thread
                                                                      broadcasts open_cond when a ticket resolves, a preempting
                                                                      control broadcasts it (state_mutex taken, then released,
                                                                      before control_mutex), and the LLM tool waits on it holding
                                                                      control_mutex
-    queue_mutex (shared per user) → state_mutex                — queue contents, then the session's playback fields
+    queue_mutex (user_music_queue_t, shared per user) → state_mutex — queue contents and every attached player's place in
+                                                                     it (an insert or remove moves them all, under queue_mutex alone),
+                                                                     then the player's playback fields
+  webui_music output (src/webui/webui_music.c, one per connection's music state):
     s_music_teardown_mutex (webui_music.c) → write_mutex       — conn->music_state lifetime against the music server's callbacks,
                                                                      then the write ring (LEAF).  Also held across the state's lazy
                                                                      creation (webui_music_state_get_or_init, the music server), which
-                                                                     takes s_user_queues_mutex and loads the queue; nothing takes those
-                                                                     and then teardown
+                                                                     takes s_user_queues_mutex and loads the queue, then attaches the
+                                                                     state's place (queue_mutex); nothing takes those and then
+                                                                     teardown.  Cleanup stops the player (control_mutex, joining its
+                                                                     thread) before taking it, then under it unpublishes the state
+                                                                     and frees the player (detaching its place) and the state
+  music_queue::s_user_queues_mutex (src/audio/music_queue.c)    — the per-user queue registry (held across a queue's first load
+                                                                     from music.db; taken under s_music_teardown_mutex, never the reverse)
+  music_queue_db::s_db_mutex (src/audio/music_queue_db.c)      — the one music.db connection queues are saved through (LEAF: held
+                                                                     across a save, load or delete, under a queue_mutex or s_user_queues_mutex)
   tool_result_store::s_cache_mutex (src/core/tool_result_store.c) — the parsed-tree cache's slots (LEAF: may be taken under
                                                                      history_mutex; held only to find, pin, insert and release a slot, never across a render)
   tool_result_store::s_big_parse_mutex (src/core/tool_result_store.c) — one uncacheable tree parsed and used at a time (held across that

@@ -275,6 +275,14 @@ char *llm_chat_completion_streaming_tts(struct json_object *conversation_history
 int llm_set_type(llm_type_t type);
 
 /**
+ * @brief llm_set_type() without speaking or logging it
+ *
+ * For startup: sets the type before anything can run a turn, ahead of TTS;
+ * llm_set_type() with the same type announces it once TTS is up.
+ */
+int llm_set_type_quiet(llm_type_t type);
+
+/**
  * @brief Get current LLM type
  *
  * @return Current LLM type (LLM_LOCAL, LLM_CLOUD, or LLM_UNDEFINED)
