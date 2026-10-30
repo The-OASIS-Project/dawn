@@ -215,10 +215,16 @@ static void parse_persona(toml_table_t *table, persona_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "description", NULL };
+   static const char *const known_keys[] = { "description", "values", "voice", NULL };
    warn_unknown_keys(table, "persona", known_keys);
 
    PARSE_STRING(table, "description", config->description);
+   PARSE_STRING(table, "values", config->values);
+   PARSE_STRING(table, "voice", config->voice);
+   if (config->description[0] && (config->values[0] || config->voice[0])) {
+      OLOG_WARNING("[persona] description replaces values and voice; move it into them and "
+                   "remove it");
+   }
 }
 
 static void parse_localization(toml_table_t *table, localization_config_t *config) {

@@ -366,6 +366,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
    /* [persona] */
    if (json_object_object_get_ex(payload, "persona", &section)) {
       JSON_TO_CONFIG_STR(section, "description", config->persona.description);
+      JSON_TO_CONFIG_STR(section, "values", config->persona.values);
+      JSON_TO_CONFIG_STR(section, "voice", config->persona.voice);
    }
 
    /* [localization] */

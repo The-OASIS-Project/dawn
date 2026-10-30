@@ -180,6 +180,8 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
 
    /* [persona] */
    ENV_STRING("DAWN_PERSONA_DESCRIPTION", config->persona.description);
+   ENV_STRING("DAWN_PERSONA_VALUES", config->persona.values);
+   ENV_STRING("DAWN_PERSONA_VOICE", config->persona.voice);
 
    /* [localization] */
    ENV_STRING("DAWN_LOCALIZATION_LOCATION", config->localization.location);
@@ -362,6 +364,10 @@ void config_dump(const dawn_config_t *config) {
    printf("\n[persona]\n");
    printf("  description = \"%.*s%s\"\n", config->persona.description[0] ? 50 : 0,
           config->persona.description, strlen(config->persona.description) > 50 ? "..." : "");
+   printf("  values = \"%.*s%s\"\n", config->persona.values[0] ? 50 : 0, config->persona.values,
+          strlen(config->persona.values) > 50 ? "..." : "");
+   printf("  voice = \"%.*s%s\"\n", config->persona.voice[0] ? 50 : 0, config->persona.voice,
+          strlen(config->persona.voice) > 50 ? "..." : "");
 
    printf("\n[localization]\n");
    printf("  location = \"%s\"\n", config->localization.location);
@@ -627,6 +633,16 @@ void config_dump_settings(const dawn_config_t *config,
    printf("    %-38s   (%s)\n\n", "DAWN_PERSONA_DESCRIPTION",
           source_name(detect_source_str(config->persona.description, defaults.persona.description,
                                         "DAWN_PERSONA_DESCRIPTION")));
+   printf("  %-40s = \"%.*s%s\"\n", "values", config->persona.values[0] ? 50 : 0,
+          config->persona.values, strlen(config->persona.values) > 50 ? "..." : "");
+   printf("    %-38s   (%s)\n\n", "DAWN_PERSONA_VALUES",
+          source_name(detect_source_str(config->persona.values, defaults.persona.values,
+                                        "DAWN_PERSONA_VALUES")));
+   printf("  %-40s = \"%.*s%s\"\n", "voice", config->persona.voice[0] ? 50 : 0,
+          config->persona.voice, strlen(config->persona.voice) > 50 ? "..." : "");
+   printf("    %-38s   (%s)\n\n", "DAWN_PERSONA_VOICE",
+          source_name(detect_source_str(config->persona.voice, defaults.persona.voice,
+                                        "DAWN_PERSONA_VOICE")));
 
    /* [localization] */
    printf("[localization]\n");
@@ -1122,6 +1138,8 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object *persona = json_object_new_object();
    json_object_object_add(persona, "description",
                           json_object_new_string(config->persona.description));
+   json_object_object_add(persona, "values", json_object_new_string(config->persona.values));
+   json_object_object_add(persona, "voice", json_object_new_string(config->persona.voice));
    json_object_object_add(root, "persona", persona);
 
    /* [localization] */
@@ -2095,7 +2113,10 @@ static void write_toml_string_multiline(FILE *fp, const char *key, const char *v
    char safe[CONFIG_DESCRIPTION_MAX];
    size_t si = 0;
    int apos_run = 0;
+   bool raw_control = false; /* a control character a ''' literal can't hold */
    for (const char *p = value; *p != '\0' && si < sizeof(safe) - 1; p++) {
+      const unsigned char c = (unsigned char)*p;
+      raw_control |= (c < 0x20 && c != '\n' && c != '\t') || c == 0x7f;
       if (*p == '\'') {
          if (apos_run >= 2)
             continue; /* drop the 3rd+ consecutive apostrophe */
@@ -2108,10 +2129,14 @@ static void write_toml_string_multiline(FILE *fp, const char *key, const char *v
    safe[si] = '\0';
 
    /* Readable triple-quoted literal for multi-line prose; escaped basic string
-    * otherwise (write_toml_string escapes quotes/backslash/newline).  Neither can
-    * contain ''' after sanitization, so both re-parse cleanly. */
-   if (strchr(safe, '\n')) {
-      fprintf(fp, "%s = '''\n%s\n'''\n", key, safe);
+    * otherwise, and for text with a control character a literal can't hold
+    * (write_toml_string escapes quotes/backslash/newline and C0 controls).
+    * Neither can contain ''' after sanitization, so both re-parse cleanly. */
+   if (strchr(safe, '\n') && !raw_control) {
+      /* The newline before the closing ''' is part of the value: add one only
+       * when the text lacks it, so a value read back and written again stays
+       * the same. */
+      fprintf(fp, "%s = '''\n%s%s'''\n", key, safe, safe[si - 1] == '\n' ? "" : "\n");
    } else {
       write_toml_string(fp, key, safe);
    }
@@ -2157,7 +2182,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    if (config->general.room[0])
       write_toml_string(fp, "room", config->general.room);
 
-   if (config->persona.description[0]) {
+   if (config->persona.description[0] || config->persona.values[0] || config->persona.voice[0]) {
       fprintf(fp, "\n[persona]\n");
       /* Route through the multiline-aware writer, which uses the readable
        * triple-quote literal only when safe and falls back to the escaped
@@ -2165,6 +2190,8 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
        * literal-string breakout as the voice-directive fields (security
        * review 2026-07; admin-only, but fixed on merit). */
       write_toml_string_multiline(fp, "description", config->persona.description);
+      write_toml_string_multiline(fp, "values", config->persona.values);
+      write_toml_string_multiline(fp, "voice", config->persona.voice);
    }
 
    fprintf(fp, "\n[localization]\n");

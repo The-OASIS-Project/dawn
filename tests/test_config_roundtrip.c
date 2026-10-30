@@ -75,6 +75,48 @@ static void round_trip(void) {
                                  "emitted a key or section the parser does not accept");
 }
 
+/* --- [persona] ------------------------------------------------------------- */
+
+/* Both halves round-trip byte for byte (a blank line, apostrophes); an empty
+ * half is never written; description with either half set warns once that it
+ * replaces them.  Multi-line text without a final newline gains one (the
+ * WebUI trims it off again on save); with one it stays as it is. */
+static void test_persona_halves_round_trip(void) {
+   static const char values[] = "You're Friday.\n\nYou say what you think, '' and why.\n";
+   static const char voice[] = "Dry.\nBrief.\n";
+   snprintf(g_written.persona.values, sizeof(g_written.persona.values), "%s", values);
+   snprintf(g_written.persona.voice, sizeof(g_written.persona.voice), "%s", voice);
+   round_trip();
+   TEST_ASSERT_EQUAL_STRING(values, g_read.persona.values);
+   TEST_ASSERT_EQUAL_STRING(voice, g_read.persona.voice);
+   TEST_ASSERT_EQUAL_STRING("", g_read.persona.description);
+
+   g_written.persona.voice[0] = '\0';
+   TEST_ASSERT_EQUAL_INT(0, config_write_toml(&g_written, RT_PATH));
+   FILE *fp = fopen(RT_PATH, "rb");
+   TEST_ASSERT_NOT_NULL(fp);
+   static char buf[512 * 1024];
+   size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+   fclose(fp);
+   buf[n] = '\0';
+   TEST_ASSERT_NOT_NULL(strstr(buf, "\nvalues = "));
+   TEST_ASSERT_NULL(strstr(buf, "\nvoice = "));
+   TEST_ASSERT_NULL(strstr(buf, "\ndescription = "));
+
+   /* A control character a ''' literal can't hold goes as an escaped string. */
+   static const char controlled[] = "Line one.\x01\nLine two.\x7f";
+   snprintf(g_written.persona.voice, sizeof(g_written.persona.voice), "%s", controlled);
+   round_trip();
+   TEST_ASSERT_EQUAL_STRING(controlled, g_read.persona.voice);
+   g_written.persona.voice[0] = '\0';
+
+   snprintf(g_written.persona.description, sizeof(g_written.persona.description), "%s", "Old.");
+   TEST_ASSERT_EQUAL_INT(0, config_write_toml(&g_written, RT_PATH));
+   test_stub_reset_warnings();
+   TEST_ASSERT_EQUAL_INT(0, config_parse_file(RT_PATH, &g_read));
+   TEST_ASSERT_EQUAL_INT(1, test_stub_warning_count());
+}
+
 /* --- [jobs] ---------------------------------------------------------------- */
 
 static void test_jobs_roundtrip(void) {
@@ -516,7 +558,7 @@ static void test_all_writer_owned_sections_present(void) {
    };
 
    /* Two sections are legitimately CONDITIONAL — [persona] is emitted only when
-    * a description exists, [url_fetcher] only when it holds non-default content.
+    * a description, values or voice exists, [url_fetcher] only when it holds non-default content.
     * That is safe (the emit condition is derived from the parsed content, so
     * anything a user actually set round-trips); it just means the section is
     * absent at defaults.  Give both a triggering value so this test exercises
@@ -612,6 +654,7 @@ static void test_control_characters_survive_the_round_trip(void) {
 int main(void) {
    test_tmp_path(RT_PATH, sizeof(RT_PATH), "test_config_roundtrip.toml");
    UNITY_BEGIN();
+   RUN_TEST(test_persona_halves_round_trip);
    RUN_TEST(test_jobs_roundtrip);
    RUN_TEST(test_memory_extraction_effort_roundtrip);
    RUN_TEST(test_memory_extraction_effort_clamps);

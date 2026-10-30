@@ -57,6 +57,8 @@ void config_set_defaults(dawn_config_t *config) {
 
    /* Persona - empty means use compile-time default from prompts.h */
    config->persona.description[0] = '\0';
+   config->persona.values[0] = '\0';
+   config->persona.voice[0] = '\0';
 
    /* Localization */
    config->localization.location[0] = '\0'; /* No default location */
