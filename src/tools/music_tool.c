@@ -150,12 +150,25 @@ static const treg_param_t music_params[] = {
    {
        .name = "album",
        .description = "For 'search': restrict matching to the ALBUM field (e.g. album:'Whatever "
-                      "and Ever Amen' lists that album's tracks). Combine with artist: to "
-                      "disambiguate.",
+                      "and Ever Amen' lists that album's tracks). For 'play'/'enqueue': the "
+                      "whole album in track order (play replaces the queue, enqueue appends; "
+                      "with query, play starts at that title). If several albums match, nothing "
+                      "changes and the reply lists them with ids. Combine with artist: to "
+                      "narrow.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "album",
+   },
+   {
+       .name = "album_ids",
+       .description = "For 'play'/'enqueue': albums by the ids a reply listed, queued in the "
+                      "order given (e.g. both parts of an album split in two, by their track "
+                      "ranges).",
+       .type = TOOL_PARAM_TYPE_ARRAY,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "album_ids",
    },
    {
        .name = "year_min",

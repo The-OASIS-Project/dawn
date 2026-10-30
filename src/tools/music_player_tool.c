@@ -37,6 +37,7 @@
 #include "audio/music_open.h"
 #include "audio/music_player.h"
 #include "audio/music_queue.h"
+#include "audio/music_rank.h"
 #include "core/strbuf.h"
 #include "dawn_error.h"
 #include "logging.h"
@@ -46,6 +47,9 @@
 
 /* "Artist - Title" display string size for resolved items. */
 #define MUSIC_TOOL_DISPLAY_MAX (MUSIC_STRING_MAX * 2)
+
+/** Albums listed when album: matches several */
+#define MUSIC_TOOL_ALBUM_CHOICES 6
 
 /** How long an LLM tool call waits for its track to open: past the Plex
  *  connect timeout, so "unreachable" and "won't open" are answered truthfully,
@@ -217,7 +221,7 @@ static int resolve_item_to_path(const char *item,
  * Returns a json_type_array the caller must json_object_put(), or NULL if
  * absent / not an array.
  */
-static struct json_object *decode_items(const char *value) {
+static struct json_object *decode_array(const char *value, const char *field) {
    if (!value || !value[0]) {
       return NULL;
    }
@@ -226,7 +230,7 @@ static struct json_object *decode_items(const char *value) {
    if (!json) {
       return NULL;
    }
-   bool got = tool_param_extract_custom(value, "items", json, cap);
+   bool got = tool_param_extract_custom(value, field, json, cap);
    struct json_object *arr = got ? json_tokener_parse(json) : NULL;
    free(json);
    if (arr && json_object_is_type(arr, json_type_array)) {
@@ -420,6 +424,189 @@ static int tool_resume(music_player_t *player,
    return rc;
 }
 
+/* "[id N] 'Name' by Artist, M tracks (1-M)" for a choice list */
+static void append_choice(strbuf_t *sb, const music_album_choice_t *c) {
+   strbuf_appendf(sb, "\n[id %lld] '%s' by %s, %d track%s", (long long)c->id, c->name,
+                  c->artist[0] ? c->artist : "Unknown", c->track_count,
+                  c->track_count == 1 ? "" : "s");
+   if (c->first_track > 0) {
+      strbuf_appendf(sb, " (%d-%d)", c->first_track, c->last_track);
+   }
+}
+
+/*
+ * The album copy album: (artist: narrowing) names: the only album found, or the
+ * only one named exactly ("Iron Man" over "Iron Man 2").  Otherwise 0, with the
+ * reply in @p sb: none found, or the choices with their ids.
+ */
+static int64_t pick_album(const music_search_filters_t *f, strbuf_t *sb) {
+   music_album_choice_t choices[MUSIC_TOOL_ALBUM_CHOICES];
+   int n = 0;
+   int total = 0;
+   const char *artist = f->artist[0] ? f->artist : NULL;
+   if (music_db_album_find(f->album, artist, choices, MUSIC_TOOL_ALBUM_CHOICES, 0, &n, &total) !=
+       SUCCESS) {
+      strbuf_appendf(sb, TOOL_RESULT_ERROR_MARK "Couldn't search the music library.");
+      return 0;
+   }
+   if (n == 1 || (n > 1 && choices[0].exact && !choices[1].exact)) {
+      return choices[0].id;
+   }
+   if (n == 0) {
+      strbuf_appendf(sb, TOOL_RESULT_ERROR_MARK "No album matching '%s'%s%s.", f->album,
+                     artist ? " by " : "", artist ? artist : "");
+      return 0;
+   }
+   strbuf_appendf(sb, TOOL_RESULT_ERROR_MARK "album:'%s' matches %d albums:", f->album, total);
+   for (int i = 0; i < n; i++) {
+      append_choice(sb, &choices[i]);
+   }
+   if (total > n) {
+      strbuf_appendf(sb, "\n...and %d more (artist: narrows it)", total - n);
+   }
+   strbuf_appendf(sb, "\nNothing changed. Play the one meant with album_ids:[id] (several "
+                      "play in order).");
+   return 0;
+}
+
+/*
+ * The tracks to queue for an album request: the copies album_ids names, in
+ * order, else the album album: names.  On failure @p sb holds the reply.
+ */
+static int album_tracks(const music_search_filters_t *f,
+                        struct json_object *ids,
+                        music_search_result_t *out,
+                        int *count_out,
+                        strbuf_t *sb) {
+   int count = 0;
+   size_t n_ids = ids ? json_object_array_length(ids) : 0;
+   for (size_t i = 0; ids && i < n_ids && count < MUSIC_QUEUE_MAX; i++) {
+      int64_t id = json_object_get_int64(json_object_array_get_idx(ids, i));
+      int got = 0;
+      if (id <= 0 ||
+          music_db_album_tracks(id, out + count, MUSIC_QUEUE_MAX - count, &got) != SUCCESS ||
+          got == 0) {
+         strbuf_appendf(sb,
+                        TOOL_RESULT_ERROR_MARK "Album id %lld isn't in the library (ids change "
+                                               "when the library is rescanned; look it up "
+                                               "again with album:). Nothing changed.",
+                        (long long)id);
+         return FAILURE;
+      }
+      count += got;
+   }
+   if (!ids) {
+      int64_t id = pick_album(f, sb);
+      if (id == 0) {
+         return FAILURE;
+      }
+      if (music_db_album_tracks(id, out, MUSIC_QUEUE_MAX, &count) != SUCCESS) {
+         strbuf_appendf(sb, TOOL_RESULT_ERROR_MARK "Couldn't read that album. Nothing changed.");
+         return FAILURE;
+      }
+   }
+   if (count == 0) {
+      strbuf_appendf(sb, TOOL_RESULT_ERROR_MARK "That album has no tracks. Nothing changed.");
+      return FAILURE;
+   }
+   *count_out = count;
+   return SUCCESS;
+}
+
+/* play / enqueue album:'X': the whole album, replacing the queue (and
+ * playing it) or appended */
+static int album_to_queue(music_player_t *player,
+                          const music_search_filters_t *f,
+                          struct json_object *ids,
+                          const char *title,
+                          bool replace,
+                          bool for_model,
+                          char **result_out) {
+   if (!music_db_is_initialized()) {
+      if (result_out)
+         *result_out = strdup("Music database not available");
+      return FAILURE;
+   }
+   music_search_result_t *tracks = malloc(MUSIC_QUEUE_MAX * sizeof(*tracks));
+   if (!tracks) {
+      if (result_out)
+         *result_out = strdup("Memory allocation failed");
+      return FAILURE;
+   }
+   strbuf_t reply;
+   strbuf_init(&reply, 512);
+   int count = 0;
+   if (album_tracks(f, ids, tracks, &count, &reply) != SUCCESS) {
+      if (result_out) {
+         *result_out = strbuf_oom(&reply) ? strdup(TOOL_RESULT_ERROR_MARK "No album played")
+                                          : strbuf_steal(&reply);
+      }
+      strbuf_free(&reply);
+      free(tracks);
+      return FAILURE;
+   }
+   strbuf_free(&reply);
+   /* Start at the track the query names best, unless it only repeats the album */
+   int start = 0;
+   char ft[MUSIC_RANK_FOLD_MAX];
+   char fa[MUSIC_RANK_FOLD_MAX];
+   bool named = false;
+   if (title && title[0]) {
+      music_rank_album_key(title, NULL, ft, sizeof(ft));
+      music_rank_album_key(tracks[0].album, NULL, fa, sizeof(fa));
+      named = ft[0] && strcmp(ft, fa) != 0;
+   }
+   int best = MUSIC_RANK_FIELD_MIN - 1;
+   for (int i = 0; named && i < count; i++) {
+      int q = music_rank_field_quality(tracks[i].title, title);
+      if (q > best) {
+         best = q;
+         start = i;
+      }
+   }
+
+   user_music_queue_t *uq = music_player_queue(player);
+   char album[AUDIO_METADATA_STRING_MAX + 16];
+   char first_title[MUSIC_STRING_MAX];
+   char first_path[MUSIC_PATH_MAX];
+   size_t n_ids = ids ? json_object_array_length(ids) : 0;
+   if (n_ids > 1) {
+      snprintf(album, sizeof(album), "%zu albums", n_ids);
+   } else {
+      snprintf(album, sizeof(album), "the album '%s'", tracks[0].album);
+   }
+   safe_strncpy(first_title, tracks[start].title, sizeof(first_title));
+   safe_strncpy(first_path, tracks[start].path, sizeof(first_path));
+   int added = 0;
+   if (replace) {
+      music_player_stop(player);
+   }
+   music_queue_add(uq, tracks, count, replace, NULL, &added);
+   free(tracks);
+   music_queue_announce(uq, player);
+
+   if (!replace) {
+      music_player_notify_state(player);
+      if (result_out) {
+         char buf[AUDIO_METADATA_STRING_MAX + 160];
+         snprintf(buf, sizeof(buf), "%sAdded %d track%s from %s%s.",
+                  added == 0 ? TOOL_RESULT_ERROR_MARK : "", added, added == 1 ? "" : "s", album,
+                  added < count ? " (the rest were queued already, or the queue is full)" : "");
+         *result_out = result_with_footer(player, buf, for_model);
+      }
+      return added > 0 ? SUCCESS : FAILURE;
+   }
+   music_open_result_t outcome = tool_start_track(player, first_path, start, for_model);
+   if (result_out) {
+      char buf[AUDIO_METADATA_STRING_MAX + MUSIC_STRING_MAX + 200];
+      snprintf(buf, sizeof(buf), "Replaced queue with %s (%d track%s); #%d, %s, %s.", album, added,
+               added == 1 ? "" : "s", start + 1, first_title[0] ? first_title : "Unknown",
+               tool_outcome_phrase(outcome));
+      *result_out = result_with_footer(player, buf, for_model);
+   }
+   return tool_outcome_rc(outcome);
+}
+
 int music_player_tool_execute(music_player_t *player,
                               const char *action,
                               const char *query,
@@ -459,7 +646,7 @@ static int music_tool_locked(music_player_t *player,
 
    if (strcmp(action, "play") == 0) {
       /* items[] → REPLACE the queue with an explicit, resolved track list */
-      struct json_object *items = decode_items(query);
+      struct json_object *items = decode_array(query, "items");
       if (items) {
          /* Resolve first: a list that matches nothing leaves the queue and
           * what's playing alone */
@@ -506,6 +693,19 @@ static int music_tool_locked(music_player_t *player,
          }
          free(report);
          return tool_outcome_rc(outcome);
+      }
+
+      music_search_filters_t filters;
+      music_search_parse_filters(query, &filters);
+      struct json_object *ids = decode_array(query, "album_ids");
+      if (ids && json_object_array_length(ids) == 0) {
+         json_object_put(ids);
+         ids = NULL;
+      }
+      if (ids || filters.album[0]) {
+         int rc = album_to_queue(player, &filters, ids, base_query, true, for_model, result_out);
+         json_object_put(ids);
+         return rc;
       }
 
       if (base_query[0] == '\0') {
@@ -567,10 +767,23 @@ static int music_tool_locked(music_player_t *player,
 
    } else if (strcmp(action, "enqueue") == 0) {
       /* APPEND to the queue — items[] (preferred) or a single query (top match). */
-      struct json_object *items = decode_items(query);
+      struct json_object *items = decode_array(query, "items");
+      music_search_filters_t filters;
+      music_search_parse_filters(query, &filters);
+      struct json_object *ids = items ? NULL : decode_array(query, "album_ids");
+      if (ids && json_object_array_length(ids) == 0) {
+         json_object_put(ids);
+         ids = NULL;
+      }
+      if (ids || (!items && filters.album[0])) {
+         int rc = album_to_queue(player, &filters, ids, NULL, false, for_model, result_out);
+         json_object_put(ids);
+         return rc;
+      }
       if (!items && base_query[0] == '\0') {
          if (result_out)
-            *result_out = strdup("enqueue needs items:[...] or a query");
+            *result_out = strdup("enqueue needs items:[...], album:'...', album_ids:[...] or a "
+                                 "query");
          return FAILURE;
       }
 
