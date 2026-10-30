@@ -556,20 +556,33 @@ Get the current user's personal settings.
 ```json
 {"type": "get_my_settings"}
 ```
-Response: `get_my_settings_response`
+Response: `get_my_settings_response`, with `success` and (on failure) `error`, and:
+
+| Field | Meaning |
+|---|---|
+| `base_values`, `base_voice` | The server's half of the persona that the user's text builds on (`[persona] values` / `voice`, else the built-in; while `[persona] description` is set it is `base_values` and `base_voice` is empty) |
+| `persona_values`, `persona_voice` | The user's text for each half (`""` when unset) |
+| `persona_values_mode`, `persona_voice_mode` | `"append"` (added after the base) or `"replace"` (used instead of it) |
+| `persona_description`, `persona_mode` | The older single persona text and its mode: `"replace"` replaces the whole persona, `"append"` is added to the user's context. Shown only while set |
+| `location`, `timezone`, `server_timezone`, `units`, `theme` | `timezone` `""` is the server's zone (`server_timezone`) |
+| `real_name`, `preferred_address`, `identity_aliases` | `preferred_address` is comma-separated forms; `identity_aliases` one per line |
 
 #### `set_my_settings`
-Update the current user's personal settings.
+Update the current user's personal settings.  Any field above except `base_values`, `base_voice`
+and `server_timezone`; a field left out keeps its value, a mode other than `"append"` or
+`"replace"` is ignored, and a `timezone` DAWN doesn't know is refused.  `persona_description` is
+sent to clear the older text.
 ```json
 {
    "type": "set_my_settings",
    "payload": {
-      "display_name": "Alice",
+      "persona_voice": "Speak with a slight British accent.",
+      "persona_voice_mode": "append",
       "timezone": "America/New_York"
    }
 }
 ```
-Response: `set_my_settings_response`
+Response: `set_my_settings_response`, with `success`, and `message` or `error`
 
 ---
 

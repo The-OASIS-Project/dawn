@@ -12,6 +12,26 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-10-23 — The persona has two parts; Preferred address takes several
+
+**What changed.** The persona is two parts, Values (who the assistant is) and Voice (how it
+talks), in Settings → Default Persona (`[persona] values` and `voice`) and in My Settings →
+AI Persona, where each user adds to or replaces each part. Older texts keep working, each
+shown in its own box until you move its text into Values and Voice: Default Persona's shows as
+*Whole persona (older setting: replaces Values and Voice)*; a personal one shows as *Your
+persona from an earlier version*.
+Saving settings no longer copies the built-in persona into `dawn.toml`, and a stored copy that
+matches a built-in word for word is dropped at startup (logged), so the current built-in
+applies. Preferred address (now *Ways to address you*) takes several forms, comma-separated,
+and DAWN uses one now and then.
+
+**What you need to do.** If Settings → Default Persona shows a *Whole persona* you edited from
+the old prefilled text, move what you want into Values and Voice and clear it: while it is
+set, it replaces the built-in persona. A personal one in My Settings keeps working; move it the
+same way when convenient.
+
+---
+
 ## 2026-10-22 — Per-turn context injection is on by default
 
 **What changed.** `[memory.focus_injection] enabled` now defaults to true: each turn
@@ -31,13 +51,15 @@ place to get the new default.
 
 ## 2026-10-22 — The built-in persona is new
 
-**What changed.** The built-in persona is new and longer (values, then tone). A custom
-`[persona]` (Settings → Default Persona) or a replace-mode personal persona is unaffected; an
-append-mode one now adds to the new text.
+**What changed.** The built-in persona is new and longer (values, then tone). A `[persona]`
+you wrote yourself (Settings → Default Persona) or a replace-mode personal persona is
+unaffected; an append-mode one now adds to the new text. A `[persona]` that is a copy of the
+older built-in text (saving any setting in the WebUI used to store one) kept the old persona;
+see the 2026-10-23 entry, which drops such a copy.
 
 **What you need to do.** If a personal persona appends to the built-in one (My Settings → AI
-Persona, *Add to base persona*), read it again on top of the new text (*Show full* under Base
-Persona shows it) and trim anything that now repeats or contradicts it.
+Persona), read it again on top of the new text (*Show full* under each base shows it) and trim
+anything that now repeats or contradicts it.
 
 ---
 
