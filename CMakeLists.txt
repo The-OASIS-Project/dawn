@@ -686,7 +686,6 @@ set(DAWN_SOURCES
     src/audio/audio_metadata_util.c
     src/audio/music_rank.c
     src/audio/flac_decoder.c
-    src/audio/flac_playback.c
     src/audio/mic_passthrough.c
     src/audio/resampler.c
     src/audio/audio_backend.c
@@ -707,6 +706,7 @@ set(DAWN_SOURCES
     src/audio/music_nav.c
     src/audio/music_player.c
     src/audio/music_player_track.c
+    src/audio/music_speaker.c
     src/audio/music_queue.c
     src/audio/music_queue_apply.c
     src/audio/music_queue_db.c

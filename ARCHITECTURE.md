@@ -195,9 +195,12 @@ Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 ├── src/audio/                  Capture, playback, decoders, the music library and Plex; every library track
 │                               a player opens goes through music_open_track() (music_open.c: the library
 │                               path check and the Plex download)
-│   └── music_player*.c         The music player: plays a user's queue to one output through
+│   ├── music_player*.c         The music player: plays a user's queue to one output through
 │                               music_output_ops_t (the WebUI stream's is in webui_music.c), opens tracks,
 │                               picks what plays next; its controls in audio/music_player.h
+│   └── music_speaker.c         The local speaker: a player on its owner's queue (the local device's user),
+│                               played through the audio backend; the speaker's volume and ducking.  Who may
+│                               use it is the music tool's call (music_tool_speaker_allowed)
 └── src/mosquitto_comms.c       MQTT
 
 Layer 3 (Tools and channels) — deps: Layers 0-2
@@ -241,8 +244,7 @@ them as one Layer-2 unit, not as separate modules with a direction between them.
 | `session_compaction.c` | the WebUI's compaction marker | weak `session_compaction_client_notice` |
 | `session_focus.c` | the WebUI's context panel | weak `session_focus_client_notice` |
 | `src/core/ota_rollout.c` | the satellite transport | `ota_rollout_set_push_fn` |
-| `src/audio/flac_playback.c` (a track ended, or won't open) | the music tool, which picks the next track | `audio_playback_set_next_fn` |
-| `src/audio/music_player*.c` (render a track, say what changed) | its output, e.g. the WebUI stream (`webui_music.c`) | `music_output_ops_t`, given to `music_player_create()` |
+| `src/audio/music_player*.c` (render a track, say what changed) | its output: the WebUI stream (`webui_music.c`) or the local speaker (`music_speaker.c`) | `music_output_ops_t`, given to `music_player_create()` |
 | `src/audio/music_queue.c` (a player changed a queue) | the WebUI, which tells the tabs playing it | `music_queue_set_listener` |
 | `src/tools/music_tool.c` (the player a session has of its own) | `webui_music.c` (a tab's or a Tier-1 satellite's player) | weak `music_player_for_session` |
 | `src/tools/volume_tool.c` (a session's own client) | `webui_music.c` (a tab's or a satellite's volume) | weak `volume_tool_for_session` |
@@ -367,15 +369,14 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    private; forgets one fact, all of   │
 │                    them (waits out an extraction)      │
 │  Music player    — one per playing music player (each  │
-│                    WebUI music session's): opens       │
-│                    tracks (Plex downloads), applies    │
-│                    seeks, writes to its output (the    │
-│                    WebUI's encodes); plus one helper   │
-│                    it owns that prefetches the next    │
-│                    Plex track (joined on exit)         │
-│  Music playback  — the local speaker's track: opens it │
-│                    (Plex downloads; a stop cancels),   │
-│                    plays it, starts the next at its end│
+│                    WebUI music session's, and the      │
+│                    local speaker's): opens tracks      │
+│                    (Plex downloads), applies seeks,    │
+│                    writes to its output (the WebUI's   │
+│                    encodes; the speaker's plays on the │
+│                    device); plus one helper it owns    │
+│                    that prefetches the next Plex track │
+│                    (joined on exit)                    │
 │  Stocks refresh  — pushes quotes to open stocks panels │
 │                    (every 30s in market hours); idle   │
 │                    when no panel is open               │
@@ -524,11 +525,12 @@ Per-module locks (scoped to a single subsystem):
                                                                      thread, swap the decoder and start it again.  OUTERMOST for the
                                                                      player: taken before s_conn_registry_mutex (a queue broadcast),
                                                                      queue_mutex and state_mutex; never held with
-                                                                     s_music_teardown_mutex; the player's thread never takes it.  The
-                                                                     WebSocket thread takes it only for actions that stop or replace
-                                                                     playback, and sets control_cancel first, which wakes an LLM tool
-                                                                     call waiting for its track to open so it releases the lock; other
-                                                                     WebUI actions don't take it.  Track opens (Plex downloads) run
+                                                                     s_music_teardown_mutex; the player's thread never takes it.  A
+                                                                     caller that mustn't wait (the WebSocket thread, for actions that
+                                                                     stop or replace playback; a direct voice command; a speaker rebind
+                                                                     or shutdown) preempts: it counts itself in control_cancel first,
+                                                                     which wakes an LLM tool call waiting for its track to open so it
+                                                                     releases the lock; other WebUI actions don't take it.  Track opens (Plex downloads) run
                                                                      only on the player's thread or its prefetch helper (which takes
                                                                      only state_mutex), never under it.  Output functions run on the
                                                                      player's thread with no player lock held, except notify, which a
@@ -558,6 +560,13 @@ Per-module locks (scoped to a single subsystem):
                                                                      music_player_for_session and volume_tool_for_session take it while
                                                                      still holding s_conn_registry_mutex (proving the connection is
                                                                      registered), then release the registry: registry → teardown
+  music_speaker::s_speaker_mutex (src/audio/music_speaker.c)   — the speaker's player and owner.  Taken BEFORE the player's
+                                                                     control_mutex (an owner change or cleanup shuts the old player
+                                                                     down holding it) and s_user_queues_mutex (the first use loads the
+                                                                     owner's queue); never taken under a player lock.  A pause for a
+                                                                     phone call only tries it, for up to 250 ms.  The device's name has
+                                                                     its own LEAF, s_device_mutex (read by the player's thread at each
+                                                                     open, so never s_speaker_mutex there)
   music_queue::s_user_queues_mutex (src/audio/music_queue.c)    — the per-user queue registry (held across a queue's first load
                                                                      from music.db; taken under s_music_teardown_mutex, never the reverse)
   music_queue_db::s_db_mutex (src/audio/music_queue_db.c)      — the one music.db connection queues are saved through (LEAF: held

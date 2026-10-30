@@ -21,9 +21,8 @@
  * SFX Tool - Sound effect playback with concurrent slot management
  *
  * Plays short sound effects (up to SFX_MAX_CONCURRENT simultaneously).
- * Each slot has its own stop flag, completely independent from the global
- * music_play flag used by the music tool. This ensures music and effects
- * never interfere with each other.
+ * Each slot has its own stop flag, independent of music playback, so music
+ * and effects never interfere with each other.
  *
  * Sound effects are received via MQTT from MIRAGE, which forwards audio
  * commands from the SPARK/AURA hardware path.
@@ -44,7 +43,7 @@
 #include "audio/audio_converter.h"
 #include "audio/audio_decoder.h"
 #include "audio/audio_utils.h"
-#include "audio/flac_playback.h"
+#include "audio/music_speaker.h"
 #include "config/config_env.h"
 #include "dawn.h"
 #include "logging.h"
@@ -216,7 +215,7 @@ static void *sfx_playback_thread(void *arg) {
       }
    }
 
-   /* Playback loop - checks per-slot stop flag, NOT global music_play */
+   /* Playback loop - checks the per-slot stop flag only */
    while (!atomic_load(&slot->stop)) {
       ssize_t frames_read = audio_decoder_read(decoder, read_buffer, SFX_READ_BUFFER_FRAMES);
 

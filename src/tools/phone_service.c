@@ -38,6 +38,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "audio/music_speaker.h"
 #include "core/command_router.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
@@ -48,7 +49,6 @@
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
 #include "messaging/messaging_engine.h"
-#include "tools/music_tool.h"
 #include "tools/phone_audio_bridge.h"
 #include "tools/phone_contacts.h"
 #include "tools/phone_db.h"
@@ -691,7 +691,7 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          const char *port = acfg.pcm_port[0] ? acfg.pcm_port : PHONE_PCM_PORT_DEFAULT;
          /* Keep music out of the call mix (the mic would pick it up).  Paused,
           * so it keeps its place; only the user resumes it. */
-         if (music_tool_pause()) {
+         if (music_speaker_pause()) {
             OLOG_INFO("phone_service: paused music for the call");
          }
          phone_bridge_config_t bcfg = {

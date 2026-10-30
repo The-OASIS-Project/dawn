@@ -624,8 +624,9 @@ music_open_result_t music_player_await(music_player_t *p, uint32_t ticket, int t
          result = MUSIC_OPEN_CLOSED;
          break;
       }
-      if (atomic_load(&p->control_cancel)) {
-         break; /* a preempting request wants the lock; the open carries on */
+      if (atomic_load(&p->control_cancel) > 0) {
+         result = MUSIC_OPEN_PREEMPTED; /* another request wants the lock */
+         break;
       }
       if (pthread_cond_timedwait(&p->open_cond, &p->state_mutex, &deadline) == ETIMEDOUT) {
          break;

@@ -30,10 +30,6 @@
 extern "C" {
 #endif
 
-/** music_player_tool_execute(): an action that doesn't need the player
- *  (a single search, the library), for the tool's other handler */
-#define MUSIC_TOOL_NOT_HANDLED 2
-
 /**
  * @brief Run a music tool action on a player
  *
@@ -46,9 +42,8 @@ extern "C" {
  * @param for_model The model asked (it may wait up to 15 s for a slow open
  *        and reads the footer); false for a direct command, which mustn't
  *        wait long (the voice loop runs it)
- * @param result_out Receives an allocated reply (caller frees), or NULL with
- *        MUSIC_TOOL_NOT_HANDLED
- * @return SUCCESS, FAILURE, or MUSIC_TOOL_NOT_HANDLED
+ * @param result_out Receives an allocated reply (caller frees)
+ * @return SUCCESS or FAILURE (search and the library aren't player actions)
  */
 int music_player_tool_execute(music_player_t *player,
                               const char *action,

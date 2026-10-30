@@ -1637,6 +1637,29 @@ dawn_add_unit_test(test_music_player
 # A broken player hangs rather than fails (a join that never returns)
 set_tests_properties(test_music_player PROPERTIES TIMEOUT 30)
 
+# The local speaker over a fake playback device (the real player and converter)
+dawn_add_unit_test(test_music_speaker
+   SOURCES test_music_speaker.c
+           ${SRC_ROOT}/src/audio/music_speaker.c
+           ${SRC_ROOT}/src/audio/music_player.c
+           ${SRC_ROOT}/src/audio/music_player_track.c
+           ${SRC_ROOT}/src/audio/music_nav.c
+           ${SRC_ROOT}/src/audio/music_queue.c
+           ${SRC_ROOT}/src/audio/music_queue_apply.c
+           ${SRC_ROOT}/src/audio/music_queue_db.c
+           ${SRC_ROOT}/src/audio/music_source.c
+           ${SRC_ROOT}/src/audio/audio_converter.c
+           ${DECODER_TEST_SOURCES}
+   LIBS    ${DECODER_TEST_LIBS} ${SAMPLERATE_LIBRARIES} sqlite3 pthread m
+   LABEL   ci)
+set_tests_properties(test_music_speaker PROPERTIES TIMEOUT 30)
+
+# Who may play on the local speaker without a player of its own
+dawn_add_unit_test(test_music_tool_route
+   SOURCES test_music_tool_route.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_text_filter
    SOURCES test_text_filter.c
            ${SRC_ROOT}/src/core/text_filter.c

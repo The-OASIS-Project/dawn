@@ -328,7 +328,7 @@ int music_player_running(void) {
 
 static void control_lock_raw(music_player_t *p, bool preempt) {
    if (preempt) {
-      atomic_store(&p->control_cancel, true);
+      atomic_fetch_add(&p->control_cancel, 1);
       /* Wake an LLM tool call waiting for its track to open (it holds
        * control_mutex while it waits).  Under state_mutex, which the waiter
        * checks the flag under, so the wakeup can't be missed. */
@@ -338,11 +338,8 @@ static void control_lock_raw(music_player_t *p, bool preempt) {
    }
    pthread_mutex_lock(&p->control_mutex);
    if (preempt) {
-      /* Only one thread preempts, one request at a time, so this is
-       * its own request being retired.  A non-preempting caller that gets the
-       * lock first leaves it set: it doesn't wait for its track either, so the
-       * waiting request isn't held up. */
-      atomic_store(&p->control_cancel, false);
+      /* This request no longer waits; another preempting one still may */
+      atomic_fetch_sub(&p->control_cancel, 1);
    }
 }
 

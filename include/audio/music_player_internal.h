@@ -58,10 +58,11 @@ struct music_player {
     *  before queue_mutex, state_mutex and any lock the output takes; the
     *  thread never takes it.  Taken through music_player_control_lock(). */
    pthread_mutex_t control_mutex;
-   /** Set by a preempting request waiting for control_mutex: wakes an LLM
-    *  tool call waiting for its track to open, which then releases the lock,
-    *  so a thread that preempts never waits on it. */
-   atomic_bool control_cancel;
+   /** Preempting requests waiting for control_mutex (a count: a voice
+    *  command, a WebUI control, a speaker rebind and a shutdown may overlap):
+    *  wakes an LLM tool call waiting for its track to open, which then
+    *  releases the lock, so a thread that preempts never waits on it. */
+   atomic_int control_cancel;
    /** References (music_player_ref/release); the last release frees */
    atomic_int refs;
    /** Shut down for good (control_mutex): control_lock refuses */

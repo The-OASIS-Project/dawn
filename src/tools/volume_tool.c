@@ -23,7 +23,7 @@
  * Routes volume commands to the originating client:
  *   - WebUI session: updates conn->volume and syncs to browser
  *   - Satellite: forwards via DAP2 volume_set message
- *   - Daemon local: updates global_volume for local playback
+ *   - Daemon local: sets the local speaker's music volume
  */
 
 #include "tools/volume_tool.h"
@@ -33,10 +33,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "audio/flac_playback.h"
+#include "audio/music_speaker.h"
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "logging.h"
+#include "tools/music_tool.h"
 #include "tools/tool_registry.h"
 #include "tts/text_to_speech.h"
 #include "word_to_number.h"
@@ -162,7 +163,16 @@ static char *volume_tool_callback(const char *action, char *value, int *should_r
       return client_result;
    }
 
-   /* Daemon-local fallback (no WebUI session, or ENABLE_WEBUI disabled) */
+   /* Else the local speaker, under the music tool's rule (its owner, from the
+    * local mic, a messaging channel or no session): a closed tab doesn't
+    * reach it */
+   session_t *local = session_get_local();
+   int owner = local ? session_effective_user_id(local) : 0;
+   if (!music_tool_speaker_allowed(session, tool_get_current_user_id(), owner)) {
+      *should_respond = 1;
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "The local speaker's volume isn't available from here; nothing changed");
+   }
    if (is_get) {
       float vol = getMusicVolume();
       char *result = malloc(64);

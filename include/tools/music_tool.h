@@ -26,7 +26,8 @@
 
 #include <stdbool.h>
 
-struct session;
+#include "core/session_manager.h"
+
 typedef struct music_player music_player_t;
 
 /**
@@ -51,20 +52,27 @@ int music_tool_register(void);
 music_player_t *music_player_for_session(struct session *session);
 
 /**
- * @brief Pause the local speaker's music, keeping its place for a resume
+ * @brief Whether a caller without a player of its own may play on the local
+ *        speaker
  *
- * For an interruption such as a phone call: nothing resumes it but the user.
- * Without the music tool there's no local music, so nothing to pause.
+ * Only its owner (the local device's user), and only from the local mic, a
+ * messaging channel, or no session (the scheduler, a briefing, MQTT).  A
+ * WebUI tab, a satellite (which has a speaker of its own) and a background
+ * job never play at home.
  *
- * @return true if music was playing and is now paused
+ * @param session The caller's session, or NULL
+ * @param caller_user_id The user the call acts for (tool_get_current_user_id())
+ * @param owner_user_id The speaker's owner, 0 when unknown
  */
-#ifdef DAWN_ENABLE_MUSIC_TOOL
-bool music_tool_pause(void);
-#else
-static inline bool music_tool_pause(void) {
-   return false;
+static inline bool music_tool_speaker_allowed(const session_t *session,
+                                              int caller_user_id,
+                                              int owner_user_id) {
+   if (owner_user_id <= 0 || caller_user_id != owner_user_id) {
+      return false;
+   }
+   return !session || session->type == SESSION_TYPE_LOCAL ||
+          session->type == SESSION_TYPE_MESSAGING;
 }
-#endif
 
 /**
  * @brief Set custom music directory path

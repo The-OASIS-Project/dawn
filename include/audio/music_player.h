@@ -112,6 +112,7 @@ typedef enum {
    MUSIC_OPEN_UNREACHABLE, /**< Its server couldn't be reached (told) */
    MUSIC_OPEN_CANCELLED,   /**< A stop or a newer request replaced it */
    MUSIC_OPEN_PENDING,     /**< Still opening when the wait ended */
+   MUSIC_OPEN_PREEMPTED,   /**< Still opening; another control request took over */
    MUSIC_OPEN_CLOSED,      /**< The player closed (its listener went) */
 } music_open_result_t;
 
@@ -191,9 +192,10 @@ int music_player_running(void);
  * and start it again).  Outermost for the player: taken before queue_mutex
  * and any lock the output's notify takes.
  *
- * @param preempt True on the one thread that must never wait (a network service thread):
- *        a holder waiting in music_player_await() stops waiting and releases
- *        it.  False on other threads, which wait.
+ * @param preempt True for a caller that mustn't wait behind a slow open (a
+ *        network service thread, the voice loop, a rebind or shutdown): a
+ *        holder waiting in music_player_await() stops waiting and releases
+ *        it.  False for one that waits its turn (a model's tool call).
  * @return true with the lock held; false (not held) once the player is
  *         closed (music_player_shutdown())
  */
@@ -280,9 +282,10 @@ void music_player_clear_queue(music_player_t *p, int *removed_out);
 /**
  * @brief Wait for a track request's outcome
  *
- * Returns early with MUSIC_OPEN_PENDING when a preempting request wants the
- * control lock (the open carries on).  Never call it on a thread that
- * preempts.
+ * Returns early with MUSIC_OPEN_PREEMPTED when another preempting request
+ * wants the control lock (the open carries on, unless that request replaces
+ * it).  A caller that preempted may wait too, briefly: only a later
+ * preemptor ends its wait.
  */
 music_open_result_t music_player_await(music_player_t *p, uint32_t ticket, int timeout_ms);
 

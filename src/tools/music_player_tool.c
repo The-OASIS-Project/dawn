@@ -63,9 +63,13 @@
  * @brief Append a compact "[queue: ... | now ... | shuffle | repeat]" footer
  *
  * Gives the LLM the resulting player state after every mutating action so it
- * never has to call list to stay oriented.
+ * never has to call list to stay oriented.  Only for the model: a direct
+ * voice command would speak it.
  */
-static void append_state_footer(strbuf_t *sb, music_player_t *player) {
+static void append_state_footer(strbuf_t *sb, music_player_t *player, bool for_model) {
+   if (!for_model) {
+      return;
+   }
    music_player_status_t st;
    music_player_snapshot(player, &st);
    int len = st.queue_length;
@@ -132,6 +136,8 @@ static const char *tool_outcome_phrase(music_open_result_t result) {
          return "can't play: the Plex server isn't reachable";
       case MUSIC_OPEN_PENDING:
          return "is still loading and starts when it's ready";
+      case MUSIC_OPEN_PREEMPTED:
+         return "was still loading when another music request came in, which may change it";
       case MUSIC_OPEN_CANCELLED:
          return "was replaced before it started";
       case MUSIC_OPEN_CLOSED:
@@ -151,11 +157,11 @@ static int tool_outcome_rc(music_open_result_t result) {
 }
 
 /** strdup(msg) with the state footer appended; falls back to plain msg on OOM. */
-static char *result_with_footer(music_player_t *player, const char *msg) {
+static char *result_with_footer(music_player_t *player, const char *msg, bool for_model) {
    strbuf_t sb;
    strbuf_init(&sb, 256);
    strbuf_appendf(&sb, "%s", msg);
-   append_state_footer(&sb, player);
+   append_state_footer(&sb, player, for_model);
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
       return strdup(msg);
@@ -381,7 +387,7 @@ static int tool_resume(music_player_t *player,
                   tool_outcome_rc(outcome) == SUCCESS ? "" : TOOL_RESULT_ERROR_MARK,
                   tool_outcome_phrase(outcome));
          if (result_out) {
-            *result_out = result_with_footer(player, started);
+            *result_out = result_with_footer(player, started, for_model);
          }
          return tool_outcome_rc(outcome);
       }
@@ -409,7 +415,7 @@ static int tool_resume(music_player_t *player,
       music_player_notify_state(player);
    }
    if (result_out) {
-      *result_out = result_with_footer(player, msg);
+      *result_out = result_with_footer(player, msg, for_model);
    }
    return rc;
 }
@@ -423,9 +429,10 @@ int music_player_tool_execute(music_player_t *player,
       return FAILURE;
    }
 
-   /* Other controls run on other threads against the same player; this
-    * thread waits for them rather than cancelling their work */
-   if (!music_player_control_lock(player, false)) {
+   /* A direct command (the voice loop runs it) preempts: a model call waiting
+    * for its track to open steps aside rather than hold up the voice loop.  A
+    * model call waits its turn behind other controls. */
+   if (!music_player_control_lock(player, !for_model)) {
       if (result_out) {
          *result_out = strdup(TOOL_RESULT_ERROR_MARK "That player has closed; nothing changed");
       }
@@ -480,14 +487,16 @@ static int music_tool_locked(music_player_t *player,
             if (added > 0) {
                strbuf_appendf(&sb, "Replaced queue. %s The first track %s.", report ? report : "",
                               tool_outcome_phrase(outcome));
-               strbuf_appendf(&sb, " Use 'enqueue' to add without clearing.");
+               if (for_model) {
+                  strbuf_appendf(&sb, " Use 'enqueue' to add without clearing.");
+               }
             } else {
                /* Marked: nothing changed, as for the local speaker */
                strbuf_appendf(&sb,
                               TOOL_RESULT_ERROR_MARK "%s The queue and playback are unchanged.",
                               report ? report : "");
             }
-            append_state_footer(&sb, player);
+            append_state_footer(&sb, player, for_model);
             if (strbuf_oom(&sb)) {
                strbuf_free(&sb);
                *result_out = strdup("Replaced queue");
@@ -548,12 +557,11 @@ static int music_tool_locked(music_player_t *player,
 
       if (result_out) {
          char buf[MUSIC_PATH_MAX + 320];
-         snprintf(buf, sizeof(buf),
-                  "Replaced queue with %d track%s matching '%s'; #1, %s, %s. "
-                  "(Use 'enqueue' to add without clearing.)",
+         snprintf(buf, sizeof(buf), "Replaced queue with %d track%s matching '%s'; #1, %s, %s.%s",
                   total_queued, total_queued == 1 ? "" : "s", base_query,
-                  first_title[0] ? first_title : "Unknown", tool_outcome_phrase(outcome));
-         *result_out = result_with_footer(player, buf);
+                  first_title[0] ? first_title : "Unknown", tool_outcome_phrase(outcome),
+                  for_model ? " (Use 'enqueue' to add without clearing.)" : "");
+         *result_out = result_with_footer(player, buf, for_model);
       }
       return tool_outcome_rc(outcome);
 
@@ -598,7 +606,7 @@ static int music_tool_locked(music_player_t *player,
       music_queue_announce(uq, player);
 
       if (result_out) {
-         *result_out = result_with_footer(player, report ? report : "Nothing added.");
+         *result_out = result_with_footer(player, report ? report : "Nothing added.", for_model);
       }
       free(report);
       return SUCCESS;
@@ -612,7 +620,7 @@ static int music_tool_locked(music_player_t *player,
          char buf[128];
          snprintf(buf, sizeof(buf), "Cleared queue (was %d track%s).", removed,
                   removed == 1 ? "" : "s");
-         *result_out = result_with_footer(player, buf);
+         *result_out = result_with_footer(player, buf, for_model);
       }
       return SUCCESS;
 
@@ -672,7 +680,7 @@ static int music_tool_locked(music_player_t *player,
       if (result_out) {
          char buf[64];
          snprintf(buf, sizeof(buf), "Removed track %d.", index0 + 1);
-         *result_out = result_with_footer(player, buf);
+         *result_out = result_with_footer(player, buf, for_model);
       }
       return SUCCESS;
 
@@ -681,7 +689,7 @@ static int music_tool_locked(music_player_t *player,
       music_player_notify_state(player);
 
       if (result_out) {
-         *result_out = result_with_footer(player, "Music playback stopped");
+         *result_out = result_with_footer(player, "Music playback stopped", for_model);
       }
       return SUCCESS;
 
@@ -690,16 +698,16 @@ static int music_tool_locked(music_player_t *player,
          music_player_status_t st;
          music_player_snapshot(player, &st);
          if (result_out) {
-            *result_out = result_with_footer(player, st.paused ? "Already paused"
-                                                               : TOOL_RESULT_ERROR_MARK
-                                                         "Nothing is playing");
+            *result_out = result_with_footer(
+                player, st.paused ? "Already paused" : TOOL_RESULT_ERROR_MARK "Nothing is playing",
+                for_model);
          }
          return st.paused ? SUCCESS : FAILURE;
       }
       music_player_notify_state(player);
 
       if (result_out) {
-         *result_out = result_with_footer(player, "Music paused");
+         *result_out = result_with_footer(player, "Music paused", for_model);
       }
       return SUCCESS;
 
@@ -737,7 +745,7 @@ static int music_tool_locked(music_player_t *player,
          char buf[MUSIC_STRING_MAX + 96];
          snprintf(buf, sizeof(buf), "Track %ld, %s, %s.", num, title[0] ? title : "Unknown",
                   tool_outcome_phrase(outcome));
-         *result_out = result_with_footer(player, buf);
+         *result_out = result_with_footer(player, buf, for_model);
       }
       return tool_outcome_rc(outcome);
 
@@ -760,7 +768,7 @@ static int music_tool_locked(music_player_t *player,
          char buf[384];
          snprintf(buf, sizeof(buf), "%s track, %s, %s.", next ? "Next" : "Previous",
                   title[0] ? title : "Unknown", tool_outcome_phrase(outcome));
-         *result_out = result_with_footer(player, buf);
+         *result_out = result_with_footer(player, buf, for_model);
       }
       return tool_outcome_rc(outcome);
 
@@ -798,7 +806,8 @@ static int music_tool_locked(music_player_t *player,
       music_queue_announce(uq, player);
 
       if (result_out) {
-         *result_out = result_with_footer(player, set_on ? "Shuffle enabled" : "Shuffle disabled");
+         *result_out = result_with_footer(player, set_on ? "Shuffle enabled" : "Shuffle disabled",
+                                          for_model);
       }
       return SUCCESS;
 
@@ -843,7 +852,7 @@ static int music_tool_locked(music_player_t *player,
                            ? "Repeat all"
                            : (target == MUSIC_REPEAT_ONE ? "Repeat one" : "Repeat off");
       if (result_out) {
-         *result_out = result_with_footer(player, ms);
+         *result_out = result_with_footer(player, ms, for_model);
       }
       return SUCCESS;
 
@@ -897,61 +906,6 @@ static int music_tool_locked(music_player_t *player,
       }
       pthread_mutex_unlock(&uq->queue_mutex);
       return SUCCESS;
-
-   } else if (strcmp(action, "search") == 0 || strcmp(action, "library") == 0) {
-      /* Batch search: items[] of queries → grouped results WITH paths so the LLM
-       * can enqueue exact tracks. Single-query search/library fall through to the
-       * local handler (they don't affect streaming state). */
-      struct json_object *items = (strcmp(action, "search") == 0) ? decode_items(query) : NULL;
-      /* An empty items[] is not a batch — free it and fall through to the single/
-       * filter handler so a genre- or year-only search still runs. */
-      if (items && json_object_array_length(items) == 0) {
-         json_object_put(items);
-         items = NULL;
-      }
-      if (items) {
-         int n = (int)json_object_array_length(items);
-         if (n > MUSIC_BATCH_MAX_QUERIES) {
-            n = MUSIC_BATCH_MAX_QUERIES; /* each query is a full-library scan */
-         }
-         /* Optional fielded/genre/year filters applied to every query in the batch. */
-         music_search_filters_t filters;
-         music_search_parse_filters(query, &filters);
-
-         strbuf_t sb;
-         strbuf_init(&sb, 1024);
-         /* Heap-allocate the per-query result window (~2.5 KB/row) vs. a big stack array. */
-         music_search_result_t *r = malloc(MUSIC_BATCH_SEARCH_LIMIT *
-                                           sizeof(music_search_result_t));
-         if (!r) {
-            strbuf_appendf(&sb, "%s", TOOL_RESULT_ERROR_MARK "Failed to allocate search buffer");
-         }
-         for (int i = 0; r && i < n; i++) {
-            struct json_object *e = json_object_array_get_idx(items, i);
-            const char *q = e ? json_object_get_string(e) : NULL;
-            if (q && q[0]) {
-               music_search_append_batch_entry(&sb, q, &filters, r);
-            }
-         }
-         free(r);
-         json_object_put(items);
-         if (result_out) {
-            char *out = strbuf_oom(&sb) ? NULL : strbuf_steal(&sb);
-            *result_out = out;
-            if (!out) {
-               strbuf_free(&sb);
-            }
-         } else {
-            strbuf_free(&sb);
-         }
-         return SUCCESS;
-      }
-
-      /* Single-query search/library — let music_tool's local handler answer. */
-      if (result_out) {
-         *result_out = NULL; /* Signal to fall through to regular handler */
-      }
-      return MUSIC_TOOL_NOT_HANDLED;
    }
 
    if (result_out) {

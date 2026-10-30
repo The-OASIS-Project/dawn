@@ -787,7 +787,7 @@ static void test_preempt_ends_wait(void) {
    pthread_join(t, NULL);
    clock_gettime(CLOCK_MONOTONIC, &t1);
    TEST_ASSERT_TRUE(opened);
-   TEST_ASSERT_EQUAL_INT(MUSIC_OPEN_PENDING, w.result);
+   TEST_ASSERT_EQUAL_INT(MUSIC_OPEN_PREEMPTED, w.result);
    /* Ended by the preempt, not by the await's own 5 s timeout */
    long waited_ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
    TEST_ASSERT_TRUE(waited_ms < 2000);
