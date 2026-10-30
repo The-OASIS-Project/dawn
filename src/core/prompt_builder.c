@@ -37,6 +37,7 @@
 #include "config/dawn_config.h"
 #include "core/buf_printf.h"
 #include "core/build_focus_block.h"
+#include "core/component_status.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "core/text_filter.h"
@@ -390,6 +391,10 @@ static char *build_directives(session_t *dispatch) {
        dispatch->type == SESSION_TYPE_DAP) {
       set = add_directive(set, voice_directive_effective());
       set = add_directive(set, asr_disambiguation_hint_effective());
+   }
+   /* Appended or withdrawn mid-conversation as the body comes and goes. */
+   if (dispatch->type == SESSION_TYPE_LOCAL && component_status_is_reachy_online()) {
+      set = add_directive(set, EXPRESSION_DIRECTIVE);
    }
    if (dispatch->type == SESSION_TYPE_JOB) {
       set = add_directive(set, JOB_HEADLESS_DIRECTIVE);

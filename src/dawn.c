@@ -68,6 +68,7 @@
 #include "core/command_router.h"
 #include "core/component_status.h"
 #include "core/conv_stream.h"
+#include "core/dawn_events.h"
 #include "core/embedding_engine.h"
 #include "core/endpointer.h"
 #include "core/prompt_builder.h"
@@ -566,6 +567,10 @@ static bool run_direct_command(const char *treg_command, bool secret, bool began
  * This callback is called for each complete sentence from the streaming LLM.
  * It cleans the sentence and sends it directly to TTS for immediate playback.
  */
+/* An expression tag whose sentence had nothing to speak (a tag on its own
+ * line): it opens the next sentence that does.  Only the LLM worker touches it. */
+static char s_pending_expression[EMOTE_NAME_MAX];
+
 static void dawn_tts_sentence_callback(const char *sentence, void *userdata) {
    if (!sentence || strlen(sentence) == 0) {
       return;
@@ -582,10 +587,16 @@ static void dawn_tts_sentence_callback(const char *sentence, void *userdata) {
       return;
    }
 
-   // Remove command tags + <end_of_turn> (processed from the full response later),
+   // The expression tag first (its name opens this sentence on the robot;
+   // removing it can join the text around it, which the later strips must see).
+   // Then command tags + <end_of_turn> (processed from the full response later),
    // then the <cited> memory-citation tag — shared whole-string strips, the same
    // ones the response finalizer and WebUI-audio TTS use.  Both truncate on an
    // orphan opener so a sentence that breaks mid-tag can't leak a partial into TTS.
+   char expression[EMOTE_NAME_MAX];
+   if (text_filter_emote_strip(cleaned, expression, sizeof(expression))) {
+      snprintf(s_pending_expression, sizeof(s_pending_expression), "%s", expression);
+   }
    text_filter_command_strip(cleaned, true); /* per-sentence TTS: drop a mid-split tag */
    text_filter_cited_strip(cleaned);
 
@@ -602,7 +613,8 @@ static void dawn_tts_sentence_callback(const char *sentence, void *userdata) {
 
    // Only send to TTS if there's actual content
    if (len > 0) {
-      text_to_speech(cleaned);
+      text_to_speech_expr(cleaned, s_pending_expression[0] ? s_pending_expression : NULL);
+      s_pending_expression[0] = '\0';
 
       // Add natural pause between sentences (300ms)
       usleep(300000);
@@ -1206,6 +1218,12 @@ int publish_ai_state(dawn_state_t newState) {
 
    json_object_put(json);
 
+   struct json_object *fields = json_object_new_object();
+   if (fields) {
+      json_object_object_add(fields, "state", json_object_new_string(state_name));
+   }
+   dawn_events_publish("state_change", fields);
+
    // Update metrics with state transition
    metrics_update_state(newState);
 
@@ -1341,6 +1359,7 @@ void *llm_worker_thread(void *arg) {
                                                                         NULL, &resolved_config)
                         : NULL;
    session_put_history(local_session, history);
+   s_pending_expression[0] = '\0'; /* a tag the reply never got to speak */
    llm_cache_monitor_set_local_mic(false);
    session_set_turn_token(0);
    // Command context auto-cleared by scope guard
@@ -3529,6 +3548,15 @@ mqtt_disabled:
                      }
                      OLOG_INFO("After skip, check_ptr='%s' (len=%zu)", check_ptr,
                                strlen(check_ptr));
+
+                     /* The only "it heard me" signal: a bare wake word goes on to
+                      * SILENCE, and one with a command straight to PROCESS_COMMAND. */
+                     struct json_object *wake = json_object_new_object();
+                     if (wake) {
+                        json_object_object_add(wake, "with_command",
+                                               json_object_new_boolean(*check_ptr != '\0'));
+                     }
+                     dawn_events_publish("wake_word", wake);
 
                      if (*check_ptr == '\0') {
                         // No command after wake word - transition to DAWN_STATE_COMMAND_RECORDING

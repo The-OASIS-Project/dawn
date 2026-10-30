@@ -23,7 +23,10 @@
 
 #include "core/text_filter.h"
 
+#include <ctype.h>
+#include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 /* Use constants from header (CMD_TAG_OPEN, CMD_TAG_CLOSE, etc.) */
 
@@ -426,4 +429,95 @@ int text_filter_cited_flush_to_buffer(cited_tag_filter_state_t *state,
    }
    text_filter_cited_reset(state);
    return (int)ctx.len;
+}
+
+/* =============================================================================
+ * Expression tags — `[emote:<name>]`, stripped from complete text.
+ * ============================================================================= */
+
+#define EMOTE_NAME_AS_STRING(name) #name,
+static const char *const s_emote_names[] = { EMOTE_NAMES(EMOTE_NAME_AS_STRING) };
+
+static bool emote_name_known(const char *name) {
+   for (size_t i = 0; i < sizeof(s_emote_names) / sizeof(s_emote_names[0]); i++) {
+      if (strcmp(name, s_emote_names[i]) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* The next opener at or after @p s, in any case ("[Emote:" is a slip worth
+ * catching), or NULL. */
+static char *emote_find_opener(char *s) {
+   for (char *p = strchr(s, '['); p != NULL; p = strchr(p + 1, '[')) {
+      if (strncasecmp(p, EMOTE_TAG_OPEN, EMOTE_TAG_OPEN_LEN) == 0) {
+         return p;
+      }
+   }
+   return NULL;
+}
+
+/* The tag at @p s (which starts with the opener): its end, past one trailing
+ * space, with its name lower-cased into @p name ("" when what's inside isn't
+ * one name, e.g. "happy, curious": still a tag, never spoken).  NULL when no
+ * "]" closes it on the same line within EMOTE_TAG_SPAN: then it's text. */
+static char *emote_tag_end(char *s, char name[EMOTE_NAME_MAX]) {
+   char *p = s + EMOTE_TAG_OPEN_LEN;
+   while (*p == ' ') {
+      p++;
+   }
+   size_t n = 0;
+   while ((isalpha((unsigned char)*p) || *p == '_' || *p == '-') && n + 1 < EMOTE_NAME_MAX) {
+      name[n++] = (char)tolower((unsigned char)*p++);
+   }
+   name[n] = '\0';
+   while (*p == ' ') {
+      p++;
+   }
+   if (*p != ']') {
+      name[0] = '\0';
+      const size_t limit = EMOTE_TAG_OPEN_LEN +
+                           EMOTE_TAG_SPAN; /* offsets: no pointer past the end */
+      while ((size_t)(p - s) < limit && *p != '\0' && *p != ']' && *p != '\n' && *p != '[') {
+         p++;
+      }
+      if ((size_t)(p - s) >= limit || *p != ']') {
+         return NULL;
+      }
+   }
+   p++;
+   return *p == ' ' ? p + 1 : p;
+}
+
+bool text_filter_emote_strip(char *text, char *name_out, size_t name_size) {
+   if (name_out && name_size > 0) {
+      name_out[0] = '\0';
+   }
+   if (!text) {
+      return false;
+   }
+   bool found = false;
+   char *s = text;
+   while ((s = emote_find_opener(s)) != NULL) {
+      char name[EMOTE_NAME_MAX];
+      char *end = emote_tag_end(s, name);
+      if (end == NULL) {
+         s += EMOTE_TAG_OPEN_LEN; /* not a tag: leave it as text */
+         continue;
+      }
+      if (!found && emote_name_known(name)) {
+         found = true;
+         if (name_out && name_size > 0) {
+            snprintf(name_out, name_size, "%s", name);
+         }
+      }
+      /* Its trailing space goes too, unless the tag sat against a word:
+       * "Sure,[emote:happy] glad" keeps the words apart. */
+      if (end[-1] == ' ' && s > text && !isspace((unsigned char)s[-1])) {
+         end--;
+      }
+      memmove(s, end, strlen(end) + 1);
+   }
+   return found;
 }

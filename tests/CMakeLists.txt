@@ -1643,6 +1643,14 @@ dawn_add_unit_test(test_text_filter
    LIBS    unity
    LABEL   ci)
 
+# Peer presence (hud, reachy) and re-subscribing on every MQTT connect;
+# libmosquitto and the HUD side effects are stubs in the test.
+dawn_add_unit_test(test_component_status
+   SOURCES test_component_status.c
+           ${SRC_ROOT}/src/core/component_status.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_llm_response_finalize
    SOURCES test_llm_response_finalize.c
            ${SRC_ROOT}/src/core/llm_response_finalize.c
@@ -2850,6 +2858,28 @@ add_test(NAME check_swap_eligible_types_mirror
          COMMAND bash ${SRC_ROOT}/tests/check_swap_eligible_types_mirror.sh
          WORKING_DIRECTORY ${SRC_ROOT})
 set_tests_properties(check_swap_eligible_types_mirror PROPERTIES LABELS "ci")
+
+# DAWN's expression vocabulary (EMOTE_FEELINGS/EMOTE_ACTS in text_filter.h) and
+# the Reachy Mini bridge's move map (reachy-bridge.toml) must name the same
+# expressions; the bridge, being Python, can't check the C header itself.
+add_test(NAME check_reachy_vocab_mirror
+         COMMAND bash ${SRC_ROOT}/tests/check_reachy_vocab_mirror.sh
+         WORKING_DIRECTORY ${SRC_ROOT})
+set_tests_properties(check_reachy_vocab_mirror PROPERTIES LABELS "ci")
+
+# The bridge's robot-free logic (services/reachy-bridge/expression.py and
+# audio_health.py), standard library only.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+   foreach(t test_reachy_expression test_reachy_audio_health)
+      add_test(NAME ${t}
+               COMMAND ${Python3_EXECUTABLE} -I ${SRC_ROOT}/tests/${t}.py
+               WORKING_DIRECTORY ${SRC_ROOT})
+      set_tests_properties(${t} PROPERTIES LABELS "ci")
+   endforeach()
+else()
+   message(STATUS "python3 not found: the reachy-bridge tests are not registered")
+endif()
 
 # SECTION_CATEGORIES in schema.js is the settings render gate — a section absent
 # from it is invisible in the UI no matter how correctly it is wired everywhere

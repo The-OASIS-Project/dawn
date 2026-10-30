@@ -67,6 +67,14 @@ void initialize_text_to_speech(char *pcm_device);
 void text_to_speech(const char *text);
 
 /**
+ * @brief Enqueue text to speak, with the expression it opens with
+ *
+ * As text_to_speech(); @p expression (a name from the expression vocabulary,
+ * or NULL) is published on dawn/events when this text starts playing.
+ */
+void text_to_speech_expr(const char *text, const char *expression);
+
+/**
  * @brief Generate raw PCM audio data from text
  *
  * This function generates raw PCM audio samples (16-bit signed, mono, 22050Hz)

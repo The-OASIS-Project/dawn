@@ -930,6 +930,17 @@ DAWN can place and receive cellular calls and text messages on a real phone numb
 
 > **Note:** SMS is fully functional. Incoming/outgoing calls ring, announce, and can be answered/rejected/hung up by voice or from the WebUI, and everything is logged — but two-way call **audio** through the browser is still in progress. See [docs/PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md).
 
+### Reachy Mini (Robot Body)
+
+A [Reachy Mini Lite](https://www.pollen-robotics.com/reachy-mini/) on the Jetson's USB gives the local voice interface a body: it reacts to the wake word, looks toward whoever spoke, thinks, moves with the voice and plays expressions the model chooses. DAWN only publishes events on MQTT (`dawn/events`); a separate bridge service drives the robot, so there's nothing to enable in `dawn.toml`. While the bridge reports the robot online, DAWN tells the model on the local interface how to use it.
+
+1. Connect the robot over USB and give its motors their own power supply (6.8–7.6 V).
+2. Optionally use the robot's microphone array and speaker as DAWN's local audio (recommended: its echo cancellation lets you interrupt a reply). First update the robot's audio firmware to Pollen's 2.1.4 or later with their [update script](https://github.com/pollen-robotics/reachy_mini/tree/main/src/reachy_mini/assets/firmware/update.sh): echo cancellation didn't work on the stock firmware, so every reply came back as input. Then set `[audio] capture_device` and `playback_device` to the robot's PulseAudio names; see [the bridge README](services/reachy-bridge/README.md#using-the-robots-microphone-and-speaker) for the names and a PulseAudio quirk to watch.
+3. Install and start the bridge as the user DAWN runs as: [services/reachy-bridge/README.md](services/reachy-bridge/README.md#install). It needs DAWN's `[audio] backend = "pulse"` and MQTT credentials of its own.
+4. Restart DAWN.
+
+**Test it:** say *"Okay Friday, how are you?"* and watch the robot turn toward you, think, and answer with an expression.
+
 ## Troubleshooting
 
 | Issue | Solution |

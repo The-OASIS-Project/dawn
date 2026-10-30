@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "core/llm_response_finalize.h"
+#include "core/session_manager.h"
 #include "dawn_error.h"
 #include "memory/memory_citation.h"
 #include "unity.h"
@@ -45,10 +46,14 @@ void setUp(void) {
 void tearDown(void) {
 }
 
-/* Helper: finalize `in`, assert SUCCESS + exact clean text, free. */
-static void expect_clean(const char *in, const char *expected) {
+/* The local voice surface, where expression tags are stripped (a static: the
+ * struct is large, and only its type is read). */
+static session_t s_local = { .type = SESSION_TYPE_LOCAL };
+
+/* Helper: finalize `in` for @p session, assert SUCCESS + exact clean text, free. */
+static void expect_clean_for(session_t *session, const char *in, const char *expected) {
    response_final_t out;
-   int rc = llm_response_finalize(NULL, in, &out);
+   int rc = llm_response_finalize(session, in, &out);
    TEST_ASSERT_EQUAL_INT(SUCCESS, rc);
    TEST_ASSERT_NOT_NULL(out.text);
    TEST_ASSERT_EQUAL_STRING(expected, out.text);
@@ -56,6 +61,10 @@ static void expect_clean(const char *in, const char *expected) {
    response_final_free(&out);
    TEST_ASSERT_NULL(out.text);
    TEST_ASSERT_EQUAL_UINT(0, out.length);
+}
+
+static void expect_clean(const char *in, const char *expected) {
+   expect_clean_for(NULL, in, expected);
 }
 
 /* A reply that imitates DAWN's framing or writes a tag has it defused; the
@@ -128,6 +137,19 @@ static void test_orphan_cited_opener_drops_to_end(void) {
    expect_clean("The answer is 42.<cited>M1,M", "The answer is 42.");
 }
 
+static void test_emote_tags_never_stored(void) {
+   expect_clean_for(&s_local, "[emote:happy] Done. [emote:calm] All set.", "Done. All set.");
+}
+
+static void test_emote_tags_are_text_off_the_local_surface(void) {
+   expect_clean("Write [emote:happy] to smile.", "Write [emote:happy] to smile.");
+}
+
+static void test_emote_removal_cannot_rebuild_a_tag(void) {
+   expect_clean_for(&s_local, "<comm[emote:x]and>{\"a\":1}</comm[emote:x]and>ok", "ok");
+   expect_clean_for(&s_local, "Hi.<cit[emote:x]ed>M1</cit[emote:x]ed>", "Hi.");
+}
+
 static void test_cited_with_command_and_eot(void) {
    expect_clean("Done.<command>{\"a\":1}</command> <cited>M2</cited><end_of_turn>x", "Done.");
 }
@@ -168,6 +190,9 @@ int main(void) {
    RUN_TEST(test_cited_tag_midtext_preserves_surrounding);
    RUN_TEST(test_orphan_cited_opener_drops_to_end);
    RUN_TEST(test_cited_with_command_and_eot);
+   RUN_TEST(test_emote_tags_never_stored);
+   RUN_TEST(test_emote_tags_are_text_off_the_local_surface);
+   RUN_TEST(test_emote_removal_cannot_rebuild_a_tag);
    RUN_TEST(test_null_input_yields_empty);
    RUN_TEST(test_empty_input_yields_empty);
    RUN_TEST(test_null_out_returns_failure);
