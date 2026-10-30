@@ -122,6 +122,16 @@ struct lws_context *s_lws_context = NULL;
 static pthread_t s_webui_thread;
 _Atomic int s_running = 0;  // atomic: written on shutdown, read in server-thread loop
 volatile int s_client_count = 0;
+/* Shutdown has begun (webui_server_quiesce): connections are closed with 1012
+ * and refused, HTTP answers 503, until webui_server_shutdown() tears down */
+static atomic_bool s_quiescing;
+/* A connection told to close gets this long before lws closes it anyway */
+#define WEBUI_QUIESCE_CLOSE_SEC 2
+/* How long webui_server_quiesce() waits for the connections to close: past
+ * that timeout.  A client that never acknowledges the close (asleep, gone)
+ * can outlast it; the warning says so, and it handles nothing meanwhile */
+#define WEBUI_QUIESCE_WAIT_MS (WEBUI_QUIESCE_CLOSE_SEC * 1000 + 500)
+static bool s_quiesce_closed; /* lws thread only: the open connections were told */
 int s_port = 0;
 char s_www_path[256] = { 0 };
 char s_aurora_path[256] = { 0 }; /* Aurora dist root served at /aurora (empty = disabled) */
@@ -724,6 +734,24 @@ bool handle_smart_home_message(ws_connection_t *conn,
 /* Forward declaration — defined after handle_text_message */
 static bool webui_conn_create_session(ws_connection_t *conn);
 
+/* Tell every connection the server is restarting (lws thread): 1012, so a
+ * client connects again rather than taking it as signed out; each closes
+ * once its earlier output is out (LWS_CALLBACK_SERVER_WRITEABLE) */
+static void close_all_for_restart(void) {
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (conn && conn->wsi) {
+         // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+         lws_close_reason(conn->wsi, (enum lws_close_status)WEBUI_CLOSE_RESTART,
+                          (unsigned char *)"restarting", 10);
+         lws_callback_on_writable(conn->wsi);
+         lws_set_timeout(conn->wsi, PENDING_TIMEOUT_CLOSE_SEND, WEBUI_QUIESCE_CLOSE_SEC);
+      }
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+}
+
 static int callback_websocket(struct lws *wsi,
                               enum lws_callback_reasons reason,
                               void *user,
@@ -744,6 +772,9 @@ static int callback_websocket(struct lws *wsi,
          if (!webui_is_same_origin_request(wsi)) {
             OLOG_WARNING("WebUI: rejected cross-origin WebSocket upgrade");
             return -1; /* reject the handshake (lws API contract) */
+         }
+         if (atomic_load(&s_quiescing)) {
+            return -1; /* shutting down: the client tries again */
          }
          break;
 
@@ -767,7 +798,19 @@ static int callback_websocket(struct lws *wsi,
 
          /* Populate auth state from HTTP cookie (if present) */
          auth_session_t auth_session;
-         if (is_request_authenticated(wsi, &auth_session)) {
+         webui_login_t login = request_login(wsi, &auth_session);
+         if (login == WEBUI_LOGIN_UNAVAILABLE) {
+            /* Not "signed out": tell it to connect again (1013, try again
+             * later) and handle nothing it sends meanwhile, rather than
+             * answer its init as unauthenticated */
+            OLOG_WARNING("WebUI: couldn't check a connection's login; asking it to reconnect");
+            conn->login_unchecked = true;
+            // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+            lws_close_reason(wsi, (enum lws_close_status)WEBUI_CLOSE_TRY_AGAIN,
+                             (unsigned char *)"try again", 9);
+            lws_callback_on_writable(wsi);
+            lws_set_timeout(wsi, PENDING_TIMEOUT_CLOSE_SEND, 3);
+         } else if (login == WEBUI_LOGIN_VALID) {
             conn->authenticated = true;
             conn->auth_user_id = auth_session.user_id;
             safe_strscpy(conn->auth_session_token, auth_session.token);
@@ -780,6 +823,15 @@ static int callback_websocket(struct lws *wsi,
 
          /* Register in connection registry for proactive notifications */
          register_connection(conn);
+
+         /* Accepted just as shutdown began, after the others were told */
+         if (atomic_load(&s_quiescing)) {
+            // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+            lws_close_reason(wsi, (enum lws_close_status)WEBUI_CLOSE_RESTART,
+                             (unsigned char *)"restarting", 10);
+            lws_callback_on_writable(wsi);
+            lws_set_timeout(wsi, PENDING_TIMEOUT_CLOSE_SEND, WEBUI_QUIESCE_CLOSE_SEC);
+         }
 
          OLOG_INFO("WebUI: WebSocket connection established, awaiting init message");
          break;
@@ -897,8 +949,9 @@ static int callback_websocket(struct lws *wsi,
       }
 
       case LWS_CALLBACK_RECEIVE: {
-         /* Its login ended: it is closing, and nothing it sends is handled. */
-         if (conn->logged_out) {
+         /* Its login ended, or couldn't be checked: it is closing, and
+          * nothing it sends is handled. */
+         if (conn->logged_out || conn->login_unchecked || atomic_load(&s_quiescing)) {
             break;
          }
          /* Message received from client.
@@ -1306,14 +1359,15 @@ static int callback_websocket(struct lws *wsi,
 
       case LWS_CALLBACK_SERVER_WRITEABLE:
          /* Frames held while earlier output was going out go first, one per
-          * callback; a connection whose login ended closes once they're out
-          * (lws_close_reason carries WEBUI_CLOSE_LOGGED_OUT). */
+          * callback; then a connection whose login ended (WEBUI_CLOSE_LOGGED_OUT),
+          * whose login couldn't be checked (WEBUI_CLOSE_TRY_AGAIN) or that a
+          * shutdown is closing (WEBUI_CLOSE_RESTART) closes. */
          if (conn && conn->held_head) {
             int ret = webui_send_held_frame(conn);
             lws_callback_on_writable(wsi);
             return ret;
          }
-         if (conn && conn->logged_out) {
+         if (conn && (conn->logged_out || conn->login_unchecked || atomic_load(&s_quiescing))) {
             return LWS_CLOSE_CONNECTION;
          }
          /* Ready to send more data - process next queued response */
@@ -1324,6 +1378,10 @@ static int callback_websocket(struct lws *wsi,
          /* lws_cancel_service() was called - process response queue */
          process_response_queue();
          webui_login_sweep_run_pending();
+         if (atomic_load(&s_quiescing) && !s_quiesce_closed) {
+            s_quiesce_closed = true;
+            close_all_for_restart();
+         }
          break;
 
       default:
@@ -2112,6 +2170,28 @@ void webui_server_shutdown(void) {
    s_client_count = 0;
 
    OLOG_INFO("WebUI: Server shutdown complete");
+}
+
+void webui_server_quiesce(void) {
+   if (!webui_server_is_running() || atomic_exchange(&s_quiescing, true)) {
+      return;
+   }
+   OLOG_INFO("WebUI: Closing connections for shutdown...");
+   if (s_lws_context) {
+      lws_cancel_service(s_lws_context); /* the lws thread closes them */
+   }
+   for (int waited = 0; webui_server_client_count() > 0 && waited < WEBUI_QUIESCE_WAIT_MS;
+        waited += 50) {
+      usleep(50000);
+   }
+   if (webui_server_client_count() > 0) {
+      OLOG_WARNING("WebUI: %d connection(s) still open after %d ms", webui_server_client_count(),
+                   WEBUI_QUIESCE_WAIT_MS);
+   }
+}
+
+bool webui_server_quiescing(void) {
+   return atomic_load(&s_quiescing);
 }
 
 bool webui_server_is_running(void) {

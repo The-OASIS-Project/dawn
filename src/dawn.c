@@ -4150,6 +4150,13 @@ mqtt_disabled:
 server_shutdown:
    OLOG_INFO("Quit.\n");
 
+#ifdef ENABLE_WEBUI
+   /* First, while the logins it checks are still readable: close the
+    * connections as a restart, not a revoke */
+   OLOG_INFO("Shutdown: webui_server_quiesce");
+   webui_server_quiesce();
+#endif
+
    // Stop heartbeat immediately — no dependencies on other subsystems
    OLOG_INFO("Shutdown: stopping heartbeat");
    component_status_publish_offline(mosq);

@@ -41,6 +41,18 @@ WebUI browser clients, and DAP2 satellite devices. All connections use the
   login gets `force_logout` and is closed with **`4002`**, its music socket is closed
   by the server, and its sessions are destroyed, connected or not. A login over an
   existing one of the same app in the same browser ends the old one the same way.
+- **When the login can't be checked** (the daemon's database is down or busy, as
+  in a restart): it isn't reported as ended. An authenticated request draws the
+  error `SERVICE_UNAVAILABLE` ("Couldn't check the login; try again") and the
+  connection stays logged in; `GET /api/auth/status` and the other cookie-checked
+  HTTP routes answer **`503`** (a JSON `{"error":"unavailable"}` from the JSON
+  endpoints, the server's own 503 page otherwise: key on the status, not the body);
+  a socket that connects then is closed with **`1013`** (try again later). At the
+  start of a shutdown every socket is closed with **`1012`** (service restart), new
+  ones are refused, and every HTTP request, `/api/auth/status` included, gets the
+  503 page.
+  Reconnect on all of these; `UNAUTHORIZED`, `"authenticated":false` and `4002`
+  mean the login really ended (with the `login_unavailable` flag).
 
 ## Binary Message Types
 
@@ -91,6 +103,7 @@ When to add what:
 | `image_only_turns` | 2026-10-01 | A `text` turn with no words (empty, absent or whitespace `text`) but at least one `image_ids` entry runs with just the images; one with neither is refused with `EMPTY_MESSAGE` instead of being dropped silently. Without it, require text with an image: older daemons drop a turn with no text without a reply. |
 | `image_turns_by_id` | 2026-10-01 | A `text` turn takes images only through `image_ids`; `images[]` is ignored. A malformed, missing or foreign id, or too many, refuses the whole turn with `IMAGE_UNAVAILABLE` / `IMAGE_LIMIT` / `IMAGE_ERROR` and saves nothing (see `text`). Without it, send `images[]` with `image_ids` as before: older daemons send the model only `images[]`. |
 | `app_logins` | 2026-09-30 | One login per app: `"app"` on login, `?app=` on every other request, a cookie per app (see Connection Lifecycle). Without it, all front-ends in a browser share one login. |
+| `login_unavailable` | 2026-10-30 | A login the daemon couldn't check is never reported as ended: `SERVICE_UNAVAILABLE` on the socket (still logged in), `503` over HTTP, `1013` for a socket connecting then, and `1012` for every socket when a shutdown begins (see Transport, When the login can't be checked). So `UNAUTHORIZED`, `"authenticated":false` and `4002` mean the login ended. Without it, a daemon restart can look like a revoke: re-check `/api/auth/status` before signing out. |
 | `logout_closes_sockets` | 2026-09-30 | `POST /api/auth/logout` with the socket open is safe: the login's connections get `force_logout` and close with `4002`, the server closes the music socket, and the reply comes at once with the cookie cleared (see Connection Lifecycle, Logging out). Without it, close the socket before logging out. |
 
 A client says who it is in its `init` / `reconnect` payload:
@@ -1632,7 +1645,8 @@ authenticated counterpart to `satellite_ping`. Sent on an idle-gated heartbeat
 Response: `pong` — but **only** for a valid, authenticated session
 (`conn_require_auth`). A revoked/expired/unauthenticated connection receives an
 `UNAUTHORIZED` `error` and no `pong`; that absence is the client's staleness
-signal. The reply carries `{seq?, server_time_ms}` (same payload shape as
+signal. When the login can't be checked (the database is down), it receives
+`SERVICE_UNAVAILABLE` and no `pong`, and stays logged in. The reply carries `{seq?, server_time_ms}` (same payload shape as
 [`satellite_pong`](#satellite_pong)).
 
 #### OTA (over-the-air updates)

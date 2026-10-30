@@ -176,6 +176,18 @@ int webui_server_init(int port, const char *www_path);
 void webui_server_shutdown(void);
 
 /**
+ * @brief Stop serving before shutdown takes away what the server needs
+ *
+ * Closes every connection with 1012 ("service restart"), so clients connect
+ * again rather than reading the database's absence as a revoked login, refuses
+ * new ones, and answers HTTP with 503.  Waits briefly for the connections to
+ * close.  webui_server_shutdown() still tears the server down later.
+ *
+ * @note Main thread, at the start of shutdown; safe if not running
+ */
+void webui_server_quiesce(void);
+
+/**
  * @brief Check if WebUI server is currently running
  *
  * @return true if server is running, false otherwise

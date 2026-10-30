@@ -272,10 +272,14 @@
                   setTimeout(() => {
                      window.location.href = '/login.html';
                   }, 1500);
-               } else if (['FORBIDDEN', 'RATE_LIMITED'].includes(msg.payload.code)) {
+               } else if (
+                  ['FORBIDDEN', 'RATE_LIMITED', 'SERVICE_UNAVAILABLE'].includes(msg.payload.code)
+               ) {
                   // Refusals of a settings-panel action (permission, too many
-                  // link codes): a toast, where the user is looking, not the
-                  // transcript behind the overlay.
+                  // link codes), or a login the server couldn't check just now
+                  // (its database is down or busy; still logged in): a toast,
+                  // where the user is looking, not the transcript behind the
+                  // overlay.
                   DawnToast.show(msg.payload.message, 'error');
                } else if (msg.payload.code && msg.payload.code.startsWith('LLM_')) {
                   // LLM errors - show toast and add to transcript
