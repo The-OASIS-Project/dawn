@@ -122,6 +122,13 @@ DAWN routes cellular calls and text messages through the **[ECHO](https://github
 - **Fuzzy Name Matching** — "Turn on the living room light" works even if the entity is named slightly differently. When two devices match equally, DAWN asks which one instead of picking.
 - **MQTT Device Control** — Extensible device callback architecture for integration with other OASIS components or external systems.
 
+### Robot Body (Reachy Mini)
+
+- **A Body for the Local Voice Interface** — Plug a [Reachy Mini Lite](https://www.pollen-robotics.com/reachy-mini/) into the Jetson's USB and DAWN's local microphone gets a face: the robot perks up at the wake word, turns toward whoever spoke, takes a thinking pose while a reply is generated, and moves its head with the voice while it speaks.
+- **Expressions the Model Chooses** — While the robot is connected, the model opens its spoken sentences with a feeling or an act (happy, curious, concerned, nod, oops, laugh and more), and the robot plays a matching move from Pollen's emotions library. Tags never reach the speech or the history.
+- **Moments of Its Own** — A thinking look while a search runs, a wave when it wakes, and a yawn before it sleeps after 15 quiet minutes.
+- **Separate, Optional Bridge** — A small Python service drives the robot from DAWN's MQTT events, so DAWN itself never talks to the hardware. It recovers after the robot is switched off and on, and keeps the robot's microphone array healthy when DAWN uses it as its mic and speaker.
+
 ### LLM Tools
 
 DAWN's LLM automatically invokes tools and incorporates results into responses. Multiple tool calls execute concurrently for faster answers. A result too big to send whole (a long web page, a large MCP response) is kept whole with its conversation; the model gets a bounded view and reads the rest on demand, instead of the result being cut short or flooding the context.
@@ -275,6 +282,7 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **Messaging Channels** | Chat with DAWN from Telegram, Slack, Discord, or SMS | [docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md) |
 | **Phone Calls & SMS** | Place/receive calls and texts on a real number via the ECHO modem daemon | [docs/PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md) |
 | **Google OAuth** | Connect Google Calendar and Gmail via OAuth 2.0 (no app password needed) | [docs/GOOGLE_OAUTH_SETUP.md](docs/GOOGLE_OAUTH_SETUP.md) |
+| **Reachy Mini** | A robot body for the local voice interface: gaze, poses, expressions | [services/reachy-bridge/README.md](services/reachy-bridge/README.md) |
 | **Home Assistant** | Control smart home devices by voice | [docs/HOMEASSISTANT_SETUP.md](docs/HOMEASSISTANT_SETUP.md) |
 | **Stocks (Charles Schwab)** | Live quotes and your read-only Schwab portfolio | [docs/SCHWAB_SETUP.md](docs/SCHWAB_SETUP.md) |
 | **MCP Servers** | Add tools from external MCP servers you run, per-user grants | [dawn.toml.example](dawn.toml.example) (`[mcp]`); example: [services/cbm-mcp/README.md](services/cbm-mcp/README.md) |
@@ -301,6 +309,7 @@ These features are not required but extend what DAWN can do. Each links to its s
 | **[docs/TESTING.md](docs/TESTING.md)** | How DAWN is tested: unit tests, sanitizers, static analysis, fuzzing, coverage |
 | **[docs/LLM_INTEGRATION_GUIDE.md](docs/LLM_INTEGRATION_GUIDE.md)** | LLM setup for cloud and local providers |
 | **[docs/HOMEASSISTANT_SETUP.md](docs/HOMEASSISTANT_SETUP.md)** | Home Assistant integration setup |
+| **[services/reachy-bridge/README.md](services/reachy-bridge/README.md)** | Reachy Mini robot body: hardware, audio, install and tuning |
 | **[docs/MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md)** | Link Telegram / Slack / Discord / SMS to DAWN |
 | **[docs/WEBSOCKET_PROTOCOL.md](docs/WEBSOCKET_PROTOCOL.md)** | WebSocket protocol reference (all message types) |
 | **[docs/DAP2_SATELLITE.md](docs/DAP2_SATELLITE.md)** | Tier 1 satellite (RPi) install, build, config, deployment, troubleshooting |
