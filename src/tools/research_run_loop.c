@@ -511,7 +511,7 @@ static char *research_commentary_context(const research_run_t *run0) {
  * conversation so the take ties back to what the user was doing.  Returns the take
  * (caller frees) or NULL on failure — caller falls back to the mechanical excerpt. */
 static char *research_commentary(struct session *s, const research_run_t *run0, const char *prose) {
-   char persona[CONFIG_DESCRIPTION_MAX];
+   char persona[LLM_PERSONA_MAX];
    llm_persona_effective(persona, sizeof(persona));
    size_t plen = strlen(persona);
    while (plen > 0 && (persona[plen - 1] == '\n' || persona[plen - 1] == ' ')) {

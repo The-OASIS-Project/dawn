@@ -95,6 +95,60 @@ char *prompt_sections_join(const composed_prompt_t *cp) {
    return out;
 }
 
+/* @p text's length without its trailing whitespace. */
+static size_t trimmed_len(const char *text) {
+   size_t len = strlen(text);
+   while (len > 0 && is_blank(text[len - 1])) {
+      len--;
+   }
+   return len;
+}
+
+const char *prompt_persona_base(persona_half_t half,
+                                const char *description,
+                                const char *configured,
+                                const char *builtin) {
+   if (description && trimmed_len(description) > 0) {
+      return half == PERSONA_VALUES ? description : "";
+   }
+   if (configured && trimmed_len(configured) > 0) {
+      return configured;
+   }
+   return builtin ? builtin : "";
+}
+
+/* Two texts a blank line apart, @p first's trailing whitespace trimmed at the
+ * seam (@p second's length given).  An empty @p second leaves @p first as it
+ * is; a blank @p first gives @p second alone. */
+static char *join_blank_line(const char *first, const char *second, size_t second_len) {
+   strbuf_t sb;
+   strbuf_init(&sb, 0);
+   const size_t first_len = trimmed_len(first);
+   if (second_len == 0) {
+      strbuf_append(&sb, first);
+   } else if (first_len == 0) {
+      strbuf_append_n(&sb, second, second_len);
+   } else {
+      strbuf_append_n(&sb, first, first_len);
+      strbuf_append(&sb, "\n\n");
+      strbuf_append_n(&sb, second, second_len);
+   }
+   return strbuf_steal(&sb);
+}
+
+char *prompt_persona_half(const char *base, const char *mine, const char *mode) {
+   base = base ? base : "";
+   mine = mine ? mine : "";
+   while (is_blank(*mine)) {
+      mine++;
+   }
+   const size_t mine_len = trimmed_len(mine);
+   if (mine_len > 0 && mode && strcmp(mode, "replace") == 0) {
+      return strndup(mine, mine_len);
+   }
+   return join_blank_line(base, mine, mine_len);
+}
+
 char *prompt_turn_head(const struct tm *tm_info, const char *zone) {
    char human[64];
    char iso_local[32];

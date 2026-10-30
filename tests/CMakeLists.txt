@@ -1414,6 +1414,17 @@ dawn_add_unit_test(test_prompt_builder
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# The server's persona from g_config (llm_command_parser.c): its halves, the
+# built-in bytes, and dropping a stored copy of a built-in.  The rest of the
+# command parser's dependencies are stubbed.
+dawn_add_unit_test(test_llm_persona
+   SOURCES test_llm_persona.c test_llm_persona_stub.c
+           ${SRC_ROOT}/src/llm/llm_command_parser.c
+           ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 # Incremental focus: which items a history already shows, which a turn sends,
 # and how it says so.  Pure (json-c and the LLM text helpers).
 dawn_add_unit_test(test_focus_incremental

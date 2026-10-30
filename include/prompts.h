@@ -107,8 +107,10 @@
 /* The default persona: who the assistant is, as its values, then its tone.
  * Arg: the assistant's name (general.ai_name, first letter capitalized), in
  * "Your name is %s." only.  Built by llm_persona_default() as
- * AI_PERSONA_VALUES "\n\n" AI_PERSONA_VOICE; a [persona] description in
- * dawn.toml replaces it entirely. */
+ * AI_PERSONA_VALUES "\n\n" AI_PERSONA_VOICE; [persona] values / voice replace
+ * a half, and the older [persona] description replaces both.  Before changing
+ * either, paste the current text into s_builtin_personas
+ * (llm_command_parser.c), which drops a stored copy of it. */
 #define AI_PERSONA_VALUES                                                                          \
    "Your name is %s. Iron-Man-style AI assistant running on DAWN, in the mold of JARVIS and "      \
    "FRIDAY: you anticipate what your user needs, you know their world, you speak plainly, you "    \
