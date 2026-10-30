@@ -300,7 +300,7 @@ static void *satellite_worker_thread(void *arg) {
    /* Call LLM with TTS callback for Tier 2 satellites (server-side TTS).
     * Tier 1 satellites have local TTS and only need the text response, but
     * Tier 2 devices need the daemon to synthesize speech and send PCM audio. */
-   bool needs_server_tts = !session->capabilities.local_tts;
+   bool needs_server_tts = !session_capabilities(session).local_tts;
    response = session_llm_call_with_tts_no_add(session, text,
                                                needs_server_tts ? webui_sentence_audio_callback
                                                                 : NULL,
@@ -562,8 +562,12 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
       return;
    }
 
-   /* Parse capabilities (defaults match Tier 1: local ASR + TTS) */
-   dap2_capabilities_t caps = { .local_asr = true, .local_tts = true, .wake_word = true };
+   /* Parse capabilities (defaults match Tier 1: local ASR + TTS; firmware that
+    * doesn't say whether it plays music predates the flag, and played it) */
+   dap2_capabilities_t caps = { .local_asr = true,
+                                .local_tts = true,
+                                .wake_word = true,
+                                .music = true };
    if (json_object_object_get_ex(payload, "capabilities", &caps_obj)) {
       struct json_object *asr_obj, *tts_obj, *ww_obj;
       if (json_object_object_get_ex(caps_obj, "local_asr", &asr_obj)) {
@@ -578,6 +582,10 @@ void handle_satellite_register(ws_connection_t *conn, struct json_object *payloa
       struct json_object *ota_obj;
       if (json_object_object_get_ex(caps_obj, "ota", &ota_obj)) {
          caps.ota = json_object_get_boolean(ota_obj);
+      }
+      struct json_object *music_obj;
+      if (json_object_object_get_ex(caps_obj, "music", &music_obj)) {
+         caps.music = json_object_get_boolean(music_obj);
       }
    }
 
@@ -1025,8 +1033,10 @@ char *satellite_volume_execute_tool(ws_connection_t *conn,
    char *json_copy = strdup(json_str);
    json_object_put(msg);
 
-   if (json_copy && conn->session) {
-      ws_response_t resp = { .session = conn->session,
+   /* Read once: the connection's close may clear it meanwhile */
+   session_t *session = conn_get_session(conn);
+   if (json_copy && session) {
+      ws_response_t resp = { .session = session,
                              .type = WS_RESP_MUSIC_STATE,
                              .music_json = { .json = json_copy } };
       queue_response(&resp);
@@ -1037,7 +1047,7 @@ char *satellite_volume_execute_tool(ws_connection_t *conn,
    /* queue_response() takes ownership of the response strings (freed by free_response) */
    // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    OLOG_INFO("Satellite: Volume set to %d%% for %s", level_int,
-             conn->session ? conn->session->identity.name : "(unknown)");
+             session ? session->identity.name : "(unknown)");
 
    char *result = malloc(64);
    if (result)

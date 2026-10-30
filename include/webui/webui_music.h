@@ -38,6 +38,7 @@
 #include <stdint.h>
 
 /* Include webui_internal.h for ws_connection_t definition */
+#include "audio/music_queue.h"
 #include "webui/webui_internal.h"
 
 #ifdef __cplusplus
@@ -54,18 +55,6 @@ struct json_object;
 /** Audio buffer size for streaming (20ms at 48kHz stereo) */
 #define WEBUI_MUSIC_FRAME_SAMPLES 960
 #define WEBUI_MUSIC_FRAME_MS 20
-
-/** Maximum playlist size per session */
-#define WEBUI_MUSIC_MAX_QUEUE 250
-
-/**
- * Maximum path length for music files (matches MUSIC_DB_PATH_MAX for consistency).
- * Queue memory: 250 entries × ~1.4KB each ≈ 342KB per session — negligible vs model memory.
- */
-#define WEBUI_MUSIC_PATH_MAX 1024
-
-/** Maximum string length for title/artist/album (truncation acceptable for display) */
-#define WEBUI_MUSIC_STRING_MAX 128
 
 /* =============================================================================
  * Quality Tiers
@@ -100,10 +89,10 @@ typedef enum {
  * @brief Music track metadata
  */
 typedef struct {
-   char path[WEBUI_MUSIC_PATH_MAX];
-   char title[WEBUI_MUSIC_STRING_MAX];
-   char artist[WEBUI_MUSIC_STRING_MAX];
-   char album[WEBUI_MUSIC_STRING_MAX];
+   char path[MUSIC_PATH_MAX];
+   char title[MUSIC_STRING_MAX];
+   char artist[MUSIC_STRING_MAX];
+   char album[MUSIC_STRING_MAX];
    uint32_t duration_sec;
    uint32_t sample_rate;
    uint8_t channels;
@@ -229,34 +218,6 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload);
 void handle_music_queue(ws_connection_t *conn, struct json_object *payload);
 
 /* =============================================================================
- * State Query Functions
- * ============================================================================= */
-
-/**
- * @brief Get current playback state for a connection
- *
- * Returns JSON object with:
- * - playing: bool
- * - paused: bool
- * - track: current track info or null
- * - position_sec: float
- * - duration_sec: int
- * - queue_length: int
- * - quality: string
- *
- * @param conn WebSocket connection
- * @return JSON object (caller must free), or NULL on error
- */
-struct json_object *webui_music_get_state(ws_connection_t *conn);
-
-/**
- * @brief Get number of active music streams
- *
- * @return Number of connections currently streaming music
- */
-int webui_music_get_stream_count(void);
-
-/* =============================================================================
  * Configuration
  * ============================================================================= */
 
@@ -358,38 +319,6 @@ void webui_music_report_buffer(session_t *session, uint32_t buffered_ms);
  *  webui_music_report_buffer() (which also clamps defensively), so a garbage/hostile
  *  report can't drive the pacer into a multi-second sleep. */
 #define WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS 10000
-
-/* =============================================================================
- * LLM Tool Integration
- * ============================================================================= */
-
-/**
- * @brief Execute music action from LLM tool callback
- *
- * Called by music_tool when the request originated from a WebUI session.
- * Routes music commands to the WebUI's per-session streaming instead of
- * local speaker playback.
- *
- * @param conn WebSocket connection (from session->client_data)
- * @param action Music action (play, stop, pause, resume, next, previous)
- * @param query Search query for play/search actions, or NULL
- * @param result_out Output: allocated result string (caller must free)
- * @return 0 on success, >0 on error, MUSIC_NOT_HANDLED if action should
- *         fall through to the default (local) handler
- */
-
-/**
- * @brief Return value from webui_music_execute_tool() meaning "not handled,
- *        fall through to the default handler".
- *
- * Distinct from SUCCESS (0 = handled OK) and positive error codes (>0 = error).
- */
-#define MUSIC_NOT_HANDLED (-1)
-
-int webui_music_execute_tool(ws_connection_t *conn,
-                             const char *action,
-                             const char *query,
-                             char **result_out);
 
 #ifdef __cplusplus
 }

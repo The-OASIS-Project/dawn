@@ -60,6 +60,11 @@ static const char *const s_features[] = {
     * visual; no confirm counts in that turn.  A client sends a visual's prompt
     * only to a daemon advertising this, never as an ordinary turn. */
    "visual_prompt_guard",
+   /* A login the daemon couldn't check (its database down or busy) is never
+    * reported as ended: SERVICE_UNAVAILABLE on the socket, 503 over HTTP, a
+    * connecting socket closed with 1013; a shutdown closes sockets with 1012
+    * first.  So UNAUTHORIZED, authenticated:false and 4002 mean it ended. */
+   "login_unavailable",
 };
 
 /* The email panel's check (webui_email_panel.c); a build without the panel has

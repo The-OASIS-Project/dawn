@@ -172,6 +172,27 @@
    "one short question. Say a factorial in words (\"52 factorial\"), not "        \
    "\"52!\", so it's read correctly."
 
+// The local voice surface while an expressive body (a Reachy Mini) is present.
+// The tag is stripped before speech and storage (text_filter_emote_strip).
+#define EXPRESSION_DIRECTIVE                                                                \
+   "Your robot body, a Reachy Mini, is connected now. You move it with expression tags as " \
+   "you speak: begin a sentence with " EMOTE_TAG_OPEN "NAME] to show how you feel (NAME "   \
+   "one of:" EMOTE_FEELINGS_TEXT ") or what you are doing (one of:" EMOTE_ACTS_TEXT         \
+   "). Open nearly every reply with the one that fits it best: an answer that starts with " \
+   "yes or no opens with nod or no, an acknowledgement with nod, owning a small slip with " \
+   "oops, a joke or a laugh with laugh. Use thinking for working something out or going "   \
+   "to look, not for the answer itself. Add another only where the mood changes, never "    \
+   "more than one per sentence. The tag is never spoken or shown."
+
+// Told to the local voice surface's next turn when the robot body goes or comes
+// back (component_status.c); the expression directive leaves or returns with it.
+#define REACHY_GONE_NOTICE                                                       \
+   "Your robot body just went offline (switched off or disconnected): it can't " \
+   "move now, so write no " EMOTE_TAG_OPEN "...] tags until it is back."
+#define REACHY_BACK_NOTICE                                                      \
+   "Your robot body is connected again: open your replies with " EMOTE_TAG_OPEN \
+   "...] tags as before."
+
 // Spoken-output directive for WebUI voice turns.  The whole prose reply is read
 // aloud, but the screen is available for silent visual aids (render_visual tool /
 // images), so this is softer than the satellite/local variant.

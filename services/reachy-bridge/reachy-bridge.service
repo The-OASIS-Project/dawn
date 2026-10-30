@@ -1,0 +1,22 @@
+# reachy-bridge: DAWN's local interface -> Reachy Mini.  A systemd USER unit,
+# as the same user as DAWN, so it can read the PulseAudio monitor of DAWN's
+# playback sink.
+
+[Unit]
+Description=Reachy Mini body for DAWN's local interface
+Wants=reachy-mini-daemon.service
+After=reachy-mini-daemon.service
+
+[Service]
+Type=simple
+# Pollen's telemetry is on by default (anonymous, to PostHog); the SDK
+# honours these to switch it and Hugging Face Hub's off.
+Environment=DO_NOT_TRACK=1 HF_HUB_DISABLE_TELEMETRY=1
+EnvironmentFile=%h/.config/reachy-bridge/env
+WorkingDirectory=%h/.config/reachy-bridge
+ExecStart=%h/.local/share/reachy-bridge/venv/bin/python -I %h/.local/share/reachy-bridge/reachy_bridge.py -c %h/.config/reachy-bridge/reachy-bridge.toml
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

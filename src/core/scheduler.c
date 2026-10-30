@@ -26,6 +26,7 @@
 
 #include "core/scheduler.h"
 
+#include <ctype.h>
 #include <json-c/json.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -137,7 +138,8 @@ int scheduler_send_to_messaging_channel(int user_id, const char *channel_name, c
 static pthread_t scheduler_thread_id;
 static pthread_mutex_t scheduler_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t scheduler_cond;
-static atomic_bool scheduler_running = false;
+static atomic_bool scheduler_initialized = false;
+static atomic_bool scheduler_running = false; /* the thread is started */
 static atomic_bool scheduler_shutdown_flag = false;
 
 /* Ringing state */
@@ -159,6 +161,8 @@ static dawn_chime_buf_t chime_buf;
 static dawn_chime_buf_t alarm_tone_buf;
 
 #define ALARM_GAP_MS 200
+/* How often the loop tries an unreadable database again. */
+#define SCHEDULER_DB_RETRY_SEC 30
 
 /* Forward declarations */
 static void schedule_next_occurrence(const sched_event_t *fired_event);
@@ -412,6 +416,40 @@ int scheduler_emit_alert(int user_id,
  * Scheduled Task Execution
  * ============================================================================= */
 
+/* A scheduled call's stored value, as its tool's callback takes it.  A value
+ * stored as a JSON object is the call's arguments, as the model writes them in a
+ * live call, and is turned into the value the same way, so a tool's named
+ * fields (a history's range) reach it.  The stored action, not one in the JSON,
+ * is what runs: it is the one the schedulability check passed. */
+static int scheduled_call_value(const tool_metadata_t *meta,
+                                const char *stored,
+                                char *value,
+                                size_t value_len,
+                                char *err,
+                                size_t err_len) {
+   /* Only a value that is a JSON object as a whole: plain text that starts with
+    * one ("{...} more words", "{...}::field::v") keeps its tail. */
+   const size_t len = strlen(stored);
+   struct json_tokener *tok = json_tokener_new();
+   struct json_object *args = tok ? json_tokener_parse_ex(tok, stored, (int)len) : NULL;
+   size_t end = 0;
+   if (tok) {
+      end = json_tokener_get_parse_end(tok);
+      json_tokener_free(tok);
+   }
+   while (end < len && isspace((unsigned char)stored[end])) {
+      end++;
+   }
+   int rc = SUCCESS;
+   if (args && end == len && json_object_is_type(args, json_type_object)) {
+      rc = tool_pack_args(meta, args, NULL, 0, value, value_len, NULL, 0, err, err_len);
+   } else {
+      snprintf(value, value_len, "%s", stored);
+   }
+   json_object_put(args);
+   return rc;
+}
+
 /**
  * @brief Execute a scheduled task by calling its tool callback
  *
@@ -461,7 +499,12 @@ static int scheduler_execute_task(sched_event_t *event) {
              event->tool_action, event->tool_value);
 
    char value_buf[SCHED_TOOL_VALUE_MAX];
-   snprintf(value_buf, sizeof(value_buf), "%s", event->tool_value);
+   if (scheduled_call_value(meta, event->tool_value, value_buf, sizeof(value_buf), sched_err,
+                            sizeof(sched_err)) != SUCCESS) {
+      OLOG_WARNING("scheduler: task %lld (%s): %s", (long long)event->id, event->tool_name,
+                   sched_err);
+      return FAILURE;
+   }
 
    /* Publish the scheduled-origin context so the callback resolves the real
     * event owner (not the user-1 fallback) and so action-level schedulability
@@ -832,7 +875,14 @@ static void *briefing_thread_func(void *arg) {
             continue;
          }
          char value_buf[SCHED_TOOL_VALUE_MAX];
-         snprintf(value_buf, sizeof(value_buf), "%s", steps[i].tool_value);
+         if (scheduled_call_value(step_meta, steps[i].tool_value, value_buf, sizeof(value_buf),
+                                  err_buf, sizeof(err_buf)) != SUCCESS) {
+            OLOG_WARNING("scheduler: briefing %lld step %d (%s): %s", (long long)event->id, i + 1,
+                         steps[i].tool_name, err_buf);
+            strbuf_appendf(&combined, "## Step %d (%s): [unavailable: %s]\n\n", i + 1,
+                           steps[i].tool_name, err_buf);
+            continue;
+         }
          int should_respond = 0;
          /* Called directly, not through llm_tools_execute: its result is
           * neutralized here the same way (text from anywhere, headed for an
@@ -929,7 +979,12 @@ static void *briefing_thread_func(void *arg) {
       }
 
       char value_buf[SCHED_TOOL_VALUE_MAX];
-      snprintf(value_buf, sizeof(value_buf), "%s", event->tool_value);
+      char value_err[160];
+      if (scheduled_call_value(meta, event->tool_value, value_buf, sizeof(value_buf), value_err,
+                               sizeof(value_err)) != SUCCESS) {
+         OLOG_ERROR("scheduler: briefing %lld: %s", (long long)event->id, value_err);
+         goto fail;
+      }
       int should_respond = 0;
       /* Called directly, as a briefing step is (see above). */
       tool_result = llm_context_neutralize_owned(
@@ -1795,8 +1850,9 @@ static void end_interrupted_rings(void) {
          const char *what = status == SCHED_STATUS_TIMED_OUT   ? "Alarm timed out"
                             : status == SCHED_STATUS_DISMISSED ? "Auto-dismissed"
                                                                : NULL;
-         /* A browser that reconnected during the startup wait is still playing
-          * the ring: this tells it the ring is over. */
+         /* A browser already back is still playing the ring: this tells it the
+          * ring is over.  One that reconnects later sounds until its banner is
+          * closed. */
          sched_event_t updated;
          if (what && scheduler_db_get(e->id, &updated) == 0)
             scheduler_broadcast_notification(&updated, what);
@@ -1878,14 +1934,9 @@ void scheduler_rezone_all(void) {
 static void *scheduler_thread_func(void *arg) {
    (void)arg;
 
+   /* scheduler_start() runs this once the daemon is up, so the pass below (which
+    * fires missed events through TTS, the WebUI and MQTT) has all it needs. */
    OLOG_INFO("scheduler: thread started");
-
-   /* Wait 30s for subsystem init before recovery */
-   for (int i = 0; i < 30 && !scheduler_shutdown_flag; i++)
-      sleep(1);
-
-   if (scheduler_shutdown_flag)
-      return NULL;
 
    /* Clean up old events */
    int deleted = 0;
@@ -1900,6 +1951,7 @@ static void *scheduler_thread_func(void *arg) {
        missed_expired > 0)
       OLOG_INFO("scheduler: expired %d stale missed notifications", missed_expired);
    time_t last_missed_expire = time(NULL);
+   bool db_error_logged = false;
 
    end_interrupted_rings();
 
@@ -1915,7 +1967,20 @@ static void *scheduler_thread_func(void *arg) {
    while (!scheduler_shutdown_flag) {
       pthread_mutex_lock(&scheduler_mutex);
 
-      time_t next_fire = scheduler_db_next_fire_time();
+      time_t next_fire = 0;
+      if (scheduler_db_next_fire_time(&next_fire) != SCHED_DB_SUCCESS) {
+         /* Not "no events": an unreadable database is tried again, or nothing
+          * would fire until an event is next created or changed. */
+         if (!db_error_logged) {
+            OLOG_ERROR("scheduler: couldn't read the next event; retrying every %d s",
+                       SCHEDULER_DB_RETRY_SEC);
+            db_error_logged = true;
+         }
+         next_fire = time(NULL) + SCHEDULER_DB_RETRY_SEC;
+      } else if (db_error_logged) {
+         OLOG_INFO("scheduler: reading events again");
+         db_error_logged = false;
+      }
 
       if (next_fire == 0) {
          /* No pending events - sleep indefinitely until notified */
@@ -1981,37 +2046,45 @@ int scheduler_init(void) {
    dawn_chime_generate(&chime_buf);
    dawn_alarm_tone_generate(&alarm_tone_buf);
 
-   /* Start scheduler thread */
    scheduler_shutdown_flag = false;
-   scheduler_running = true;
-
-   if (pthread_create(&scheduler_thread_id, NULL, scheduler_thread_func, NULL) != 0) {
-      OLOG_ERROR("scheduler: failed to create thread");
-      scheduler_running = false;
-      return 1;
-   }
-
+   scheduler_initialized = true;
    OLOG_INFO("scheduler: initialized");
    return 0;
 }
 
+int scheduler_start(void) {
+   if (!scheduler_initialized || scheduler_running)
+      return SUCCESS;
+
+   scheduler_running = true;
+   if (pthread_create(&scheduler_thread_id, NULL, scheduler_thread_func, NULL) != 0) {
+      OLOG_ERROR("scheduler: failed to create thread");
+      scheduler_running = false;
+      return FAILURE;
+   }
+   return SUCCESS;
+}
+
 void scheduler_shutdown(void) {
-   if (!scheduler_running)
+   if (!scheduler_initialized)
       return;
 
    OLOG_INFO("scheduler: shutting down");
 
    scheduler_shutdown_flag = true;
-   stop_any_sound();
+   if (scheduler_running) {
+      stop_any_sound();
 
-   /* Wake the scheduler thread */
-   pthread_mutex_lock(&scheduler_mutex);
-   pthread_cond_signal(&scheduler_cond);
-   pthread_mutex_unlock(&scheduler_mutex);
+      /* Wake the scheduler thread */
+      pthread_mutex_lock(&scheduler_mutex);
+      pthread_cond_signal(&scheduler_cond);
+      pthread_mutex_unlock(&scheduler_mutex);
 
-   /* Wait for thread to finish */
-   pthread_join(scheduler_thread_id, NULL);
-   scheduler_running = false;
+      /* Wait for thread to finish */
+      pthread_join(scheduler_thread_id, NULL);
+      scheduler_running = false;
+   }
+   scheduler_initialized = false;
 
    /* Wait for alarm sound thread to finish before freeing PCM buffers */
    for (int i = 0; i < 160 && atomic_load(&sound_threads) > 0; i++)

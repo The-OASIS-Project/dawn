@@ -291,6 +291,19 @@ typedef void (*tool_config_writer_fn)(void *fp, const void *config);
 typedef int (*tool_init_fn)(void);
 
 /**
+ * @brief Tool start function type
+ *
+ * Called once the daemon has finished starting (storage, LLM, TTS and the
+ * WebUI are up).  Start here what can start a turn or deliver to the user,
+ * such as a listener that answers messages: it needs the whole daemon.  Work
+ * that needs only storage and the tool's own state may start in init.  Called
+ * without the registry lock, so a start may look tools up.
+ *
+ * @return 0 on success, non-zero on error
+ */
+typedef int (*tool_start_fn)(void);
+
+/**
  * @brief Tool cleanup function type
  *
  * Called at shutdown. Tool should free resources.
@@ -546,11 +559,38 @@ typedef struct {
 
    /* Lifecycle (optional - NULL if not needed) */
    tool_init_fn init;       /**< Called after config parse */
+   tool_start_fn start;     /**< Called once the daemon has finished starting */
    tool_cleanup_fn cleanup; /**< Called at shutdown */
 
    /* Callback (required) */
    tool_callback_fn callback; /**< Execute tool functionality */
 } tool_metadata_t;
+
+/**
+ * @brief Turn a tool call's JSON arguments into the (action, value, device) its
+ *        callback takes: the one way, for a live LLM call and a scheduled one.
+ *
+ * Custom params are packed into the value as base::field::value (escaped); a
+ * flat object with no key for the tool's value param becomes the value, as
+ * JSON.  The outputs are cleared first.
+ *
+ * @param meta         The tool
+ * @param args         The arguments object (NULL for none)
+ * @param action_name  The action out, or NULL when not wanted
+ * @param device_name  The device out, or NULL when not wanted
+ * @return SUCCESS, or FAILURE with @p err set when a named field, or the value
+ *         rebuilt from flat args, doesn't fit
+ */
+int tool_pack_args(const tool_metadata_t *meta,
+                   struct json_object *args,
+                   char *action_name,
+                   size_t action_len,
+                   char *value_buf,
+                   size_t value_len,
+                   char *device_name,
+                   size_t device_len,
+                   char *err,
+                   size_t err_len);
 
 /* =============================================================================
  * Lifecycle Functions
@@ -576,6 +616,16 @@ int tool_registry_init(void);
  * @return 0 on success, non-zero if any tool init fails
  */
 int tool_registry_init_tools(void);
+
+/**
+ * @brief Start every initialized tool that has a start function
+ *
+ * Calls start() in registration order.  Call it once, after the daemon has
+ * finished starting.  A tool whose init failed isn't started.
+ *
+ * @return 0 on success, non-zero if any tool start fails
+ */
+int tool_registry_start_tools(void);
 
 /**
  * @brief Lock the registry to prevent further registrations
@@ -1048,7 +1098,7 @@ int tool_registry_count_tool_variations(const char *name);
 /* =============================================================================
  * Custom Parameter Extraction Helpers
  *
- * TOOL_MAPS_TO_CUSTOM parameters are encoded by llm_tools.c as:
+ * TOOL_MAPS_TO_CUSTOM parameters are encoded by tool_pack_args() as:
  *   "base_value::field_name::field_value[::field_name::field_value...]"
  *
  * A value can hold any text, "::" included: the encoder escapes each colon a
@@ -1060,8 +1110,10 @@ int tool_registry_count_tool_variations(const char *name);
  *
  * Only a tool that declares CUSTOM params gets an escaped value; a callback of
  * one reads it through these helpers (or tool_value_decode_copy), never raw.
- * Direct commands, MQTT and scheduled steps pack without escaping: their text
- * is written with its separators in it, so a "::" inside a value there still
+ * Direct commands, MQTT and scheduled calls stored as plain text pack without
+ * escaping (a scheduled call stored as a JSON object goes through
+ * tool_pack_args, as a live call does): their text is written with its
+ * separators in it, so a "::" inside a value there still
  * ends it (and could set a field).  No authorization check may trust a packed
  * field unless the call is known to come from the LLM tool loop.
  * Co-located here so the encode/decode contract lives in one place.

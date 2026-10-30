@@ -131,6 +131,9 @@ typedef struct {
    bool is_satellite;    /* True if this is a DAP2 satellite connection */
    bool logged_out;      /* Its login ended (webui_conn_end_login): closing, and
                           * nothing it sends is handled */
+   bool login_unchecked; /* Its login couldn't be checked when it connected (the
+                          * database was down): closing with 1013 so it connects
+                          * again, and nothing it sends is handled */
    bool client_noted;    /* Its `client` self-description was logged */
 
    /* Text message fragmentation support (for large JSON payloads) */
@@ -219,6 +222,14 @@ typedef struct {
    uint64_t tts_pace_start_us;  /* CLOCK_MONOTONIC when first audio sent (0 = not started) */
    uint64_t tts_audio_sent_us;  /* Cumulative audio duration sent (microseconds) */
    uint32_t tts_pace_stream_id; /* Stream ID for reset detection */
+
+   /* Frames sent while earlier output was still going out, held until the
+    * connection is writable (webui_send.c).  libwebsockets (seen on 4.0.20) sends
+    * a second frame written behind buffered output with no WebSocket header.  LWS
+    * thread only; freed on close. */
+   struct ws_held_frame *held_head;
+   struct ws_held_frame *held_tail;
+   int held_count;
 } ws_connection_t;
 
 /**
@@ -560,6 +571,18 @@ void queue_init_messages(ws_connection_t *conn, const char *token);
  * www/js client. */
 #define WEBUI_CLOSE_LOGGED_OUT 4002
 
+/** WS close code: the server couldn't check the login just now (its database
+ *  is down or busy); connect again shortly.  The standard 1013 "try again
+ *  later" */
+#define WEBUI_CLOSE_TRY_AGAIN 1013
+
+/** WS close code: the server is shutting down or restarting; connect again
+ *  (the standard 1012 "service restart") */
+#define WEBUI_CLOSE_RESTART 1012
+
+/** Shutdown has begun (webui_server_quiesce()): refuse new work */
+bool webui_server_quiescing(void);
+
 /**
  * @brief Evict the connection currently owning @p existing so a newer reconnect
  *        can take over, closing it with WS code 4001 "superseded".
@@ -685,12 +708,28 @@ void webui_security_headers_init(void);
  * ============================================================================= */
 
 #ifdef ENABLE_AUTH
+/** What a request's login cookie turned out to be */
+typedef enum {
+   WEBUI_LOGIN_VALID,       /**< A live login */
+   WEBUI_LOGIN_NONE,        /**< No cookie, or its login has ended */
+   WEBUI_LOGIN_UNAVAILABLE, /**< Couldn't be checked (the database is down or busy) */
+} webui_login_t;
+
+/**
+ * @brief Check a request's login cookie
+ *
+ * @param wsi HTTP connection
+ * @param session_out If not NULL, filled with session info when valid
+ */
+webui_login_t request_login(struct lws *wsi, auth_session_t *session_out);
+
 /**
  * @brief Check if HTTP request has valid session cookie
  *
  * @param wsi HTTP connection
  * @param session_out If not NULL, filled with session info on success
- * @return true if authenticated, false otherwise
+ * @return true if authenticated, false otherwise (also when the login couldn't
+ *         be checked: use request_login() where that must not read as signed out)
  */
 bool is_request_authenticated(struct lws *wsi, auth_session_t *session_out);
 #endif
@@ -1035,38 +1074,6 @@ void webui_login_sweep_request(void);
 
 /** @brief The service thread's wake: a requested sweep runs. */
 void webui_login_sweep_run_pending(void);
-
-/* =============================================================================
- * Connection Iterator (defined in webui_server.c, used by webui_music.c)
- * ============================================================================= */
-
-/**
- * @brief Iterate all authenticated connections for a given user
- *
- * Calls callback for each active, authenticated connection with matching
- * auth_user_id and non-NULL music_state. Holds s_conn_registry_mutex
- * during iteration.
- *
- * @param user_id User ID to filter by (must be > 0)
- * @param callback Function to call for each matching connection
- * @param ctx Opaque context passed to callback
- */
-void webui_for_each_conn_by_user(int user_id,
-                                 void (*callback)(ws_connection_t *conn, void *ctx),
-                                 void *ctx);
-
-/**
- * @brief Collect authenticated connections for a given user into a caller-provided array
- *
- * Holds s_conn_registry_mutex only during collection, not during subsequent use.
- * Caller must use results promptly (pointers may become invalid on disconnect).
- *
- * @param user_id User ID to filter by (must be > 0)
- * @param out Array to fill with matching connection pointers
- * @param max_out Capacity of out array
- * @return Number of connections found (may exceed max_out; only max_out are stored)
- */
-int webui_collect_conns_by_user(int user_id, ws_connection_t **out, int max_out);
 
 /* Audio send wrappers (webui_send_audio, webui_send_audio_end,
  * webui_sentence_audio_callback) moved to webui/webui_send.h. */

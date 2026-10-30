@@ -675,6 +675,7 @@ static void parse_music_state(struct json_object *payload, music_state_update_t 
             json_get_string(payload, "bitrate_mode"));
    state->queue_length = json_get_int(payload, "queue_length");
    state->queue_index = json_get_int(payload, "queue_index");
+   state->queue_rev = json_get_int(payload, "queue_rev");
    state->shuffle = json_get_bool(payload, "shuffle");
    state->repeat_mode = json_get_int(payload, "repeat_mode");
 }
@@ -1114,6 +1115,7 @@ int ws_client_register(ws_client_t *client,
    json_object_object_add(caps_obj, "local_tts", json_object_new_boolean(caps->local_tts));
    json_object_object_add(caps_obj, "wake_word", json_object_new_boolean(caps->wake_word));
    json_object_object_add(caps_obj, "ota", json_object_new_boolean(caps->ota));
+   json_object_object_add(caps_obj, "music", json_object_new_boolean(caps->music));
    json_object_object_add(payload, "capabilities", caps_obj);
 
    json_object_object_add(msg, "payload", payload);

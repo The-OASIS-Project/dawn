@@ -38,6 +38,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "audio/music_speaker.h"
 #include "core/command_router.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
@@ -48,7 +49,6 @@
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
 #include "messaging/messaging_engine.h"
-#include "tools/music_tool.h"
 #include "tools/phone_audio_bridge.h"
 #include "tools/phone_contacts.h"
 #include "tools/phone_db.h"
@@ -691,7 +691,7 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          const char *port = acfg.pcm_port[0] ? acfg.pcm_port : PHONE_PCM_PORT_DEFAULT;
          /* Keep music out of the call mix (the mic would pick it up).  Paused,
           * so it keeps its place; only the user resumes it. */
-         if (music_tool_pause()) {
+         if (music_speaker_pause()) {
             OLOG_INFO("phone_service: paused music for the call");
          }
          phone_bridge_config_t bcfg = {
@@ -822,8 +822,9 @@ void phone_service_handle_event(const char *payload, int payload_len) {
                          : body);
 
       int64_t sms_id = 0;
-      phone_db_sms_log_insert(s_config.user_id, PHONE_DIR_INCOMING, sender, contact_name, safe_body,
-                              time(NULL), &sms_id);
+      const bool sms_saved = phone_db_sms_log_insert(s_config.user_id, PHONE_DIR_INCOMING, sender,
+                                                     contact_name, safe_body, time(NULL),
+                                                     &sms_id) == PHONE_DB_SUCCESS;
 
       /* Cached body length — used by both the HUD preview construction
        * (conditional, below) and the redacted log line (unconditional,
@@ -922,9 +923,12 @@ void phone_service_handle_event(const char *payload, int payload_len) {
                    contact_name[0] ? contact_name : "unknown", body_len);
       }
 
-      /* Delete from SIM after all processing (fire-and-forget — SMS is already in DB) */
-      if (sms_id >= 0 && sms_index >= 0) {
-         char idx_str[8];
+      /* Delete from SIM after all processing (fire-and-forget), and only once the
+       * SMS is saved: the SIM holds the only copy until then. */
+      if (!sms_saved) {
+         OLOG_ERROR("phone_service: SMS not saved; left on the SIM at index %d", sms_index);
+      } else if (sms_index >= 0) {
+         char idx_str[12]; /* any int */
          snprintf(idx_str, sizeof(idx_str), "%d", sms_index);
          if (publish_echo_cmd("delete_sms", idx_str, "fire_and_forget", NULL) != 0) {
             OLOG_WARNING("phone_service: failed to send delete_sms for index %d", sms_index);

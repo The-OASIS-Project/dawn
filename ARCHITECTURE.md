@@ -142,6 +142,7 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 | **Messaging Channels** (`src/messaging/`) | Bidirectional text chat over Telegram, Discord, Slack, and SMS. Each provider is a `messaging_driver_t` with its own background listener thread; a channel answers only the person who linked it (the provider's sender id; several DAWN users can each link one group chat, each with their own session), an SMS link completes with a code texted to the number, and inbound messages bind to a per-channel "forever conversation" (`SESSION_TYPE_MESSAGING`, exempt from idle cleanup) with per-conversation LLM settings, and scheduler briefings can deliver to a channel via `deliver_to`. Discord additionally supports read-only channel read/summarize (`list_readable_channels`/`read_history`, `messaging_engine_read.c`). Engine split into core + `_session`/`_channels`/`_link`/`_inbound`/`_codes`/`_read` behind `messaging_engine_internal.h`. WebUI channel-management panel + `dawn-admin messaging` CLI. | [MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md) |
 | **Phone & SMS** (`src/tools/phone_*.c`) | Cellular calls and SMS via the external **ECHO** modem daemon (SIM7600G-H) over MQTT. `phone_tool.c` is the LLM interface; `phone_service.c` runs the call state machine (RINGING/ANSWERING/ACTIVE, atomic first-wins answer claim) + TTS announcements + HUD/WebUI banner; `phone_db.c` logs calls/SMS. Incoming-call context is posted to every interactive session via `session_broadcast_notice()` (rendered into each turn's volatile prompt block for 10 minutes, never written into a conversation history); a WebUI incoming-call banner + persistent in-call panel let any surface answer/reject/hang up. Two-way call **audio** bridge (Phase 5) is not yet shipped. | [PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md) |
 | **OAuth 2.0 & Crypto** | Shared OAuth client with PKCE S256 and `crypto_store.c` (libsodium `crypto_secretbox`) for encrypted token and password storage. Used by email and calendar. | [oauth-crypto.md](docs/arch/subsystems/oauth-crypto.md) |
+| **Robot body (Reachy Mini)** (`src/core/dawn_events.c`, `src/core/component_status.c`, `services/reachy-bridge/`) | Gives the local voice surface a body. DAWN publishes what the voice loop is doing on MQTT `dawn/events` (state, wake word, speaking start/end, and the expression the model chose with an inline `[emote:name]` tag, stripped before speech and storage). It never drives the robot: a separate Python bridge does, through Pollen's SDK. While the bridge reports `reachy/status` online, the local session's standing directions add the expression directive, and the session is told in a notice when the body goes or comes back. | [OASIS_COMMUNICATIONS_PROTOCOL.md](docs/OASIS_COMMUNICATIONS_PROTOCOL.md), [services/reachy-bridge/README.md](services/reachy-bridge/README.md) |
 | **Scheduler** | Timers, alarms, reminders, and scheduled tool execution. Background thread polls every second, fires with chime audio + WebUI banner notifications, supports recurrence and snooze/dismiss. | [scheduler.md](docs/arch/subsystems/scheduler.md) |
 | **Home Assistant** | REST API client with entity cache, fuzzy name matching, and satellite area-awareness (a satellite's Home Assistant area sent with its standing directions). 16 tool actions spanning lights, climate, locks, covers, media, scenes, scripts, automations. | [homeassistant.md](docs/arch/subsystems/homeassistant.md) |
 | **Per-User Settings** | Persona, location, timezone, units, theme — stored in `user_settings` and injected into the LLM system prompt at session start so every session is personalized to the authenticated user. | [user-settings.md](docs/arch/subsystems/user-settings.md) |
@@ -165,6 +166,8 @@ Layer 1 (Core infrastructure) — deps: Layer 0
 │                               else's text, checked at registration and at build time
 ├── src/core/ primitives        Command routing/execution, worker pool, wake word, time parsing, utterance
 │                               dedup, reply codes, text-input dispatch, prompt sections, input queue
+├── src/core/dawn_events.c      The local voice surface's events on MQTT dawn/events, published from the voice
+│                               loop and the TTS thread (no DAWN lock is held across a publish)
 ├── src/core/tz.c               Clock times in a named zone (libical), never the process's TZ.  tz_lookup only
 │                               returns zones libical lists (it never makes libical load a name, which appends to
 │                               a list other threads read); only tz_daemon_init, at startup, loads other names
@@ -195,12 +198,19 @@ Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 ├── src/audio/                  Capture, playback, decoders, the music library and Plex; every library track
 │                               a player opens goes through music_open_track() (music_open.c: the library
 │                               path check and the Plex download)
+│   ├── music_player*.c         The music player: plays a user's queue to one output through
+│                               music_output_ops_t (the WebUI stream's is in webui_music.c), opens tracks,
+│                               picks what plays next; its controls in audio/music_player.h
+│   └── music_speaker.c         The local speaker: a player on its owner's queue (the local device's user),
+│                               played through the audio backend; the speaker's volume and ducking.  Who may
+│                               use it is the music tool's call (music_tool_speaker_allowed)
 └── src/mosquitto_comms.c       MQTT
 
 Layer 3 (Tools and channels) — deps: Layers 0-2
 ├── src/tools/                  Every tool and its service (email, calendar, Home Assistant, music, stocks,
 │                               documents, research, MCP bridge, ...); email_mime.c is the only file that uses
-│                               GMime
+│                               GMime; music_player_tool.c is the music tool's one body over a music player,
+│                               whichever player the caller has
 └── src/messaging/              Channel engine and provider drivers (Telegram, Slack, Discord, SMS)
 
 Layer 4 (Application) — deps: everything below
@@ -237,7 +247,10 @@ them as one Layer-2 unit, not as separate modules with a direction between them.
 | `session_compaction.c` | the WebUI's compaction marker | weak `session_compaction_client_notice` |
 | `session_focus.c` | the WebUI's context panel | weak `session_focus_client_notice` |
 | `src/core/ota_rollout.c` | the satellite transport | `ota_rollout_set_push_fn` |
-| `src/audio/flac_playback.c` (a track ended, or won't open) | the music tool, which picks the next track | `audio_playback_set_next_fn` |
+| `src/audio/music_player*.c` (render a track, say what changed) | its output: the WebUI stream (`webui_music.c`) or the local speaker (`music_speaker.c`) | `music_output_ops_t`, given to `music_player_create()` |
+| `src/audio/music_queue.c` (a player changed a queue) | the WebUI, which tells the tabs playing it | `music_queue_set_listener` |
+| `src/tools/music_tool.c` (the player a session has of its own) | `webui_music.c` (a tab's or a Tier-1 satellite's player) | weak `music_player_for_session` |
+| `src/tools/volume_tool.c` (a session's own client) | `webui_music.c` (a tab's or a satellite's volume) | weak `volume_tool_for_session` |
 | lower-layer broadcasts (scheduler, jobs, calendar, phone, ...) | `webui_broadcasts.c` | weak no-op default, strong WebUI override |
 | `src/tools/email_service_move.c` (a move or undo changed a mailbox) | `webui_email_changed.c` (email_changed to every tab of the user) | weak `email_changed_notify` |
 | `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |
@@ -288,7 +301,7 @@ depends on, so every build runs them, and they fail the build when broken:
 
 | Target | Script | Rule |
 |---|---|---|
-| `no_ws_direct_write_check` | `check_no_ws_direct_write.sh` | Every WebSocket data frame goes through the WebUI's response queue, never a direct `lws_write()` |
+| `no_ws_direct_write_check` | `check_no_ws_direct_write.sh` | Every WebSocket data frame goes through `webui_send.c`'s `write_frame()`, which holds it while earlier output is still going out; never a direct `lws_write()` |
 | `messaging_send_funnel_check` | `check_messaging_send_funnel.sh` | Every messaging driver send goes through `messaging_deliver` (per-provider formatting and escaping) |
 | `tool_action_kinds_check` | `check_tool_action_kinds.sh` | Every tool's action-kinds table names its own actions, and each prepare names a listed confirm |
 | `llm_blocks_confined_check` | `check_llm_blocks_confined.sh` | Stored turn blocks (`messages.llm_blocks`) are read only to rebuild an LLM request |
@@ -323,7 +336,7 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    tion, started at a slot or hold     │
 │                    release (any thread); holds a slot  │
 │  Music scanner   — periodic local + Plex sync          │
-│  Scheduler       — 1-second polling loop               │
+│  Scheduler       — waits for its next event            │
 │  CalDAV sync     — background event pull               │
 │  WebUI audio     — per-connection ASR/TTS pipeline     │
 │  Messaging recv  — per-provider listener (Telegram/    │
@@ -358,14 +371,15 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    learned from a conversation made    │
 │                    private; forgets one fact, all of   │
 │                    them (waits out an extraction)      │
-│  Music stream    — one per playing WebUI music session:│
-│                    opens tracks (Plex downloads),      │
-│                    applies seeks, encodes; plus one    │
-│                    helper it owns that prefetches the  │
-│                    next Plex track (joined on exit)    │
-│  Music playback  — the local speaker's track: opens it │
-│                    (Plex downloads; a stop cancels),   │
-│                    plays it, starts the next at its end│
+│  Music player    — one per playing music player (each  │
+│                    WebUI music session's, and the      │
+│                    local speaker's): opens tracks      │
+│                    (Plex downloads), applies seeks,    │
+│                    writes to its output (the WebUI's   │
+│                    encodes; the speaker's plays on the │
+│                    device); plus one helper it owns    │
+│                    that prefetches the next Plex track │
+│                    (joined on exit)                    │
 │  Stocks refresh  — pushes quotes to open stocks panels │
 │                    (every 30s in market hours); idle   │
 │                    when no panel is open               │
@@ -380,6 +394,15 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 └────────────────────────────────────────────────────────┘
 ```
 
+**Startup order.** `main()` (`src/dawn.c`) brings DAWN up in a fixed order, and code may rely on it:
+storage first (`auth.db` with its migrations, auth crypto, the image and document stores), before any
+other thread exists; then the tools' `init`, the LLM type, the session manager, and the state the
+database backs (the local owner, watches, interrupted jobs, OTA releases, embeddings); then audio,
+TTS and the WebUI, whose turns have all of that. Last come the inputs that start the moment they
+connect: MQTT's loop and the tools' `start` (the Telegram, Discord and Slack listeners, which take their
+backlog at once), then the scheduler, whose first pass fires the events missed while DAWN was down. No
+thread waits a fixed time for another to be ready.
+
 **Turn serialization (background-jobs era).** All WebUI LLM turns — user text, push-to-talk
 voice, and background-job re-engagements — funnel through the per-session **turn queue**
 (`src/core/turn_queue.c`), which guarantees at most one turn runs on a given `session_t` at a
@@ -393,6 +416,11 @@ thread count — each enabled provider runs a persistent listener thread plus a 
 **OTA fleet rollout deliberately adds no thread**: it advances on the main loop's existing
 1-second heartbeat (`ota_rollout_tick`), so a canary/fan-out is in flight without a dedicated
 thread to reason about.
+
+**Robot body events and notices.** The TTS thread publishes `speaking_start`/`speaking_end` and
+`expression` on MQTT (`dawn_events_publish`) from Piper's per-phrase callback, before it takes
+`tts_mutex`. `component_status` posts the robot's gone/back notice to the local session from the MQTT
+callback or its heartbeat thread, after releasing its own lock. Neither holds a DAWN lock across the call.
 
 **Synchronization primitives**:
 
@@ -461,7 +489,7 @@ Global daemon locks (src/dawn.c):
 Per-session locks (src/core/session_manager.c):
   session->history_mutex    — session conversation history
   session->metrics_mutex    — session-scoped metrics (tokens, timings)
-  session->fd_mutex         — WebSocket file-descriptor state
+  session->fd_mutex         — WebSocket file-descriptor state, and a satellite's capabilities
   session->ref_mutex        — session reference counting
   session->llm_config_mutex — per-session LLM config overrides
   session->tools_mutex      — the tools running now, and a render_visual result waiting for the reply to save
@@ -499,30 +527,58 @@ Per-module locks (scoped to a single subsystem):
   webui_music_server::s_registry_mutex (src/webui/webui_music_server.c) — authenticated music sockets (taken after
                                                                      s_conn_registry_mutex, before s_music_teardown_mutex; other threads only mark a
                                                                      socket to close and wake the music thread, which alone releases its session reference)
-  webui_music session state (src/webui/webui_music*.c, one set per connection's music state):
+  music_player (src/audio/music_player*.c, one set per player; the WebUI's in src/webui/webui_music*.c):
     control_mutex                                              — one music control request at a time (WebUI controls, queue
-                                                                     actions, the LLM music tool), each of which may stop the stream
+                                                                     actions, the LLM music tool), each of which may stop the player's
                                                                      thread, swap the decoder and start it again.  OUTERMOST for the
-                                                                     state: taken before s_conn_registry_mutex (a queue broadcast),
+                                                                     player: taken before s_conn_registry_mutex (a queue broadcast),
                                                                      queue_mutex and state_mutex; never held with
-                                                                     s_music_teardown_mutex; the stream thread never takes it.  The
-                                                                     WebSocket thread takes it only for actions that stop or replace
-                                                                     playback, and sets control_cancel first, which wakes an LLM tool
-                                                                     call waiting for its track to open so it releases the lock; other
-                                                                     WebUI actions don't take it.  Track opens (Plex downloads) run
-                                                                     only on the stream thread or its prefetch helper (which takes
-                                                                     only state_mutex), never under it
-    state_mutex + open_cond                                    — the pending-open slot and its ticket; the stream thread
+                                                                     s_music_teardown_mutex; the player's thread never takes it.  A
+                                                                     caller that mustn't wait (the WebSocket thread, for actions that
+                                                                     stop or replace playback; a direct voice command; a speaker rebind
+                                                                     or shutdown) preempts: it counts itself in control_cancel first,
+                                                                     which wakes an LLM tool call waiting for its track to open so it
+                                                                     releases the lock; other WebUI actions don't take it.  Track opens (Plex downloads) run
+                                                                     only on the player's thread or its prefetch helper (which takes
+                                                                     only state_mutex), never under it.  Output functions run on the
+                                                                     player's thread with no player lock held, except notify, which a
+                                                                     control request may also call holding it.  Once
+                                                                     music_player_shutdown() has run, control_lock refuses; a reference
+                                                                     (music_player_ref/release) keeps the player allocated after its
+                                                                     output has gone, and the last release frees it with no player lock
+                                                                     held.  music_queue_announce() tells the queue's listener with no
+                                                                     queue lock held
+    state_mutex + open_cond                                    — the pending-open slot and its ticket; the player's thread
                                                                      broadcasts open_cond when a ticket resolves, a preempting
                                                                      control broadcasts it (state_mutex taken, then released,
                                                                      before control_mutex), and the LLM tool waits on it holding
                                                                      control_mutex
-    queue_mutex (shared per user) → state_mutex                — queue contents, then the session's playback fields
+    queue_mutex (user_music_queue_t, shared per user) → state_mutex — queue contents and every attached player's place in
+                                                                     it (an insert or remove moves them all, under queue_mutex alone),
+                                                                     then the player's playback fields
+  webui_music output (src/webui/webui_music.c, one per connection's music state):
     s_music_teardown_mutex (webui_music.c) → write_mutex       — conn->music_state lifetime against the music server's callbacks,
                                                                      then the write ring (LEAF).  Also held across the state's lazy
                                                                      creation (webui_music_state_get_or_init, the music server), which
-                                                                     takes s_user_queues_mutex and loads the queue; nothing takes those
-                                                                     and then teardown
+                                                                     takes s_user_queues_mutex and loads the queue, then attaches the
+                                                                     state's place (queue_mutex); nothing takes those and then
+                                                                     teardown.  Cleanup takes it first, always, and unpublishes the
+                                                                     state; then, without it, closes the player (control_mutex,
+                                                                     joining its thread), drops its reference and frees the output.
+                                                                     music_player_for_session and volume_tool_for_session take it while
+                                                                     still holding s_conn_registry_mutex (proving the connection is
+                                                                     registered), then release the registry: registry → teardown
+  music_speaker::s_speaker_mutex (src/audio/music_speaker.c)   — the speaker's player and owner.  Taken BEFORE the player's
+                                                                     control_mutex (an owner change or cleanup shuts the old player
+                                                                     down holding it) and s_user_queues_mutex (the first use loads the
+                                                                     owner's queue); never taken under a player lock.  A pause for a
+                                                                     phone call only tries it, for up to 250 ms.  The device's name has
+                                                                     its own LEAF, s_device_mutex (read by the player's thread at each
+                                                                     open, so never s_speaker_mutex there)
+  music_queue::s_user_queues_mutex (src/audio/music_queue.c)    — the per-user queue registry (held across a queue's first load
+                                                                     from music.db; taken under s_music_teardown_mutex, never the reverse)
+  music_queue_db::s_db_mutex (src/audio/music_queue_db.c)      — the one music.db connection queues are saved through (LEAF: held
+                                                                     across a save, load or delete, under a queue_mutex or s_user_queues_mutex)
   tool_result_store::s_cache_mutex (src/core/tool_result_store.c) — the parsed-tree cache's slots (LEAF: may be taken under
                                                                      history_mutex; held only to find, pin, insert and release a slot, never across a render)
   tool_result_store::s_big_parse_mutex (src/core/tool_result_store.c) — one uncacheable tree parsed and used at a time (held across that

@@ -34,9 +34,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "audio/audio_decoder.h"
 #include "audio/music_db.h"
-#include "audio/music_nav.h"
+#include "audio/music_player.h"
+#include "audio/music_queue.h"
 #include "audio/resampler.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music.h"
@@ -72,12 +72,7 @@ extern "C" {
  *  can declare any rate, and the resampler takes an int rate and ratio. */
 #define WEBUI_MUSIC_MAX_SOURCE_RATE 768000
 
-/** Auto-advance stops after this many tracks in a row produced no audio, even
- *  when the queue holds more, so a run of failures (each a timeout, perhaps)
- *  isn't walked silently. */
-#define WEBUI_MUSIC_MAX_FAILED_TRACKS 5
-
-/* Closed-loop music buffer flow control (see music_stream_thread pacing in
+/* Closed-loop music buffer flow control (see pace_after_send() in
  * webui_music.c). The server holds the client's worklet ring near a target depth
  * using periodic client buffer reports, bursting to refill after a drain. */
 
@@ -103,134 +98,14 @@ extern const char *QUALITY_NAMES[MUSIC_QUALITY_COUNT];
  * ============================================================================= */
 
 /**
- * @brief Repeat mode for music playback
- */
-typedef enum {
-   MUSIC_REPEAT_NONE = 0,
-   MUSIC_REPEAT_ALL = 1,
-   MUSIC_REPEAT_ONE = 2,
-} music_repeat_mode_t;
-
-/**
- * @brief Queue entry for a music track
+ * @brief Per-connection music state: the WebUI output of the connection's
+ *        player
+ *
+ * Stereo 48 kHz Opus to the browser's dedicated music socket, paced on the
+ * client's buffer reports.
  */
 typedef struct {
-   char path[WEBUI_MUSIC_PATH_MAX];
-   char title[WEBUI_MUSIC_STRING_MAX];
-   char artist[WEBUI_MUSIC_STRING_MAX];
-   char album[WEBUI_MUSIC_STRING_MAX];
-   uint32_t duration_sec;
-} music_queue_entry_t;
-
-/**
- * @brief Shared per-user music queue
- *
- * Contains the queue entries and playback modes (shuffle/repeat) that
- * are shared across all browser tabs for the same authenticated user.
- * Protected by queue_mutex. For unauthenticated/satellite sessions,
- * each connection gets its own instance (not shared).
- */
-typedef struct user_music_queue user_music_queue_t;
-struct user_music_queue {
-   int user_id;
-   pthread_mutex_t queue_mutex;
-   int ref_count;
-   uint32_t generation;    /**< Monotonic counter, incremented on every queue mutation */
-   uint32_t replace_epoch; /**< Bumped when the queue is replaced or cleared (play history) */
-   music_queue_entry_t queue[WEBUI_MUSIC_MAX_QUEUE];
-   int queue_length;
-   bool shuffle;
-   music_repeat_mode_t repeat_mode;
-};
-
-/**
- * @brief Per-connection music streaming state
- *
- * Each WebSocket connection has its own playback state (position, decoder,
- * encoder, streaming thread). The queue itself is shared per-user via
- * shared_queue, allowing multiple tabs to see the same queue while
- * playing independently.
- */
-typedef struct {
-   /* Streaming state */
-   atomic_bool streaming;       /**< True if streaming thread is active */
-   atomic_bool stop_requested;  /**< Request streaming thread to stop */
-   pthread_t stream_thread;     /**< Streaming thread handle */
-   pthread_mutex_t state_mutex; /**< Protects non-atomic state */
-
-   /** Serializes control requests (WebUI controls, queue actions, the LLM music
-    *  tool), each of which may stop the stream thread, swap the decoder and
-    *  start it again.  Two at once could free a decoder the other's new thread
-    *  is reading, or join one thread twice.  Outermost: taken before
-    *  s_conn_registry_mutex (queue broadcasts), queue_mutex and state_mutex;
-    *  never held with s_music_teardown_mutex; the stream thread never takes
-    *  it.  Taken through webui_music_control_lock(). */
-   pthread_mutex_t control_mutex;
-   /** Set by a WebSocket-thread request waiting for control_mutex (one that
-    *  stops or replaces playback): wakes an LLM tool call waiting for its
-    *  track to open, which then releases the lock, so the WebSocket thread
-    *  never waits on it.  Other requests don't take the lock. */
-   atomic_bool control_cancel;
-
-   /** A seek for the stream thread to apply between frames (state_mutex),
-    *  so a seek never stops the thread.  Dropped when a track is installed
-    *  or unloaded. */
-   bool seek_pending;
-   uint64_t seek_frames;
-
-   /** A Plex track is being downloaded before it can play (state_mutex):
-    *  music_state carries loading:true, so a client doesn't expect audio */
-   bool loading;
-
-   /** A track waiting for the stream thread to open it (state_mutex), set
-    *  by a start request or by auto-advance; empty when none.  Cleared once
-    *  resolved or by webui_music_clear_track().  A stop that interrupts the
-    *  open leaves it to whoever stopped the thread: a new request overwrites
-    *  it, clear_track drops it. */
-   char pending_path[WEBUI_MUSIC_PATH_MAX];
-   bool pending_auto;      /**< Report the outcome as a natural advance */
-   uint32_t pending_seq;   /**< Ticket of the request the slot belongs to */
-   uint32_t open_seq;      /**< Last ticket issued (state_mutex) */
-   uint32_t open_done_seq; /**< Last ticket resolved (state_mutex) */
-   /** The last ticket webui_music_request_track() issued, and its outcome
-    *  once resolved (state_mutex): kept apart from auto-advance tickets, so
-    *  a track that follows can't hide what the request did */
-   uint32_t request_seq;
-   uint32_t request_done_seq;
-   int request_result; /**< music_open_result_t for request_done_seq */
-   /** Broadcast when a ticket resolves, and when a WebSocket request wants
-    *  control_mutex (control_cancel), so a waiting LLM tool steps aside */
-   pthread_cond_t open_cond;
-
-   /** Plex prefetch (state_mutex): the track after the current one, already
-    *  downloaded and opened by a helper thread the stream thread owns (started
-    *  when a track starts, joined before the stream thread exits).  Used when
-    *  that path is opened next; closed otherwise. */
-   audio_decoder_t *prefetched;
-   char prefetch_path[WEBUI_MUSIC_PATH_MAX]; /**< What's prefetched or prefetching */
-   /** What this session played: previous under shuffle walks back through
-    *  it.  A shuffle pick planned for next is its forward entry, so
-    *  auto-advance and next play what was prefetched.  Written under
-    *  state_mutex; whatever syncs it with the queue or resolves its entries
-    *  also holds queue_mutex, taken first. */
-   music_history_t history;
-   /** The auto-advance pick in the pending slot added a history entry (a new
-    *  track, or a step onto one), so a failed open drops it (state_mutex) */
-   bool history_fresh;
-   /** The track this session picked, as queued then (what it reports as
-    *  playing, see webui_music_current), and the queue's replace_epoch at the
-    *  time (state_mutex; set with queue_mutex held too).  After another tab
-    *  replaces the queue the session plays on, then moves on from the new
-    *  queue's top.  Empty path when nothing is picked. */
-   music_queue_entry_t track;
-   uint32_t track_epoch;
-   pthread_t prefetch_thread;
-   bool prefetch_running;       /**< Stream thread only */
-   atomic_bool prefetch_cancel; /**< Aborts the helper's download */
-
-   /* Thread synchronization for safe shutdown */
-   pthread_cond_t decoder_idle_cond; /**< Signaled when decoder is not busy */
-   atomic_bool shutdown_ack;         /**< Thread acknowledged shutdown request */
+   music_player_t *player;
 
    /* Encoder */
    OpusEncoder *encoder;   /**< Opus encoder (quality-specific) */
@@ -241,38 +116,31 @@ typedef struct {
    size_t resample_accum_size;  /**< Size of accumulation buffer in samples */
    size_t resample_accum_count; /**< Current sample count in buffer */
 
-   /* Decoder */
-   audio_decoder_t *decoder; /**< Current file decoder */
-   atomic_bool decoder_busy; /**< True while decoder is being read */
+   /* The playing track's format, as track_begin gave it (player's thread) */
+   uint32_t source_rate;
+   uint8_t source_channels;
 
-   /* Playback state */
-   bool playing;                      /**< True if playback in progress */
-   bool paused;                       /**< True if paused */
-   uint64_t position_frames;          /**< Current position in frames */
-   uint32_t source_rate;              /**< Source file sample rate */
-   uint8_t source_channels;           /**< Source file channels */
-   audio_format_type_t source_format; /**< Source file format (FLAC, MP3, etc.) */
-   uint32_t cached_duration_sec;      /**< Cached duration of current track (avoids queue_mutex) */
+   /* Settings: read by any thread, applied to the encoder by the player's */
+   _Atomic music_quality_t quality;
+   _Atomic music_bitrate_mode_t bitrate_mode;
 
-   /* Shared queue (per-user, or per-connection for unauthenticated) */
-   user_music_queue_t *shared_queue; /**< Shared queue reference */
-   int queue_index;                  /**< Current track in queue (per-session) */
-   unsigned int shuffle_seed;        /**< Per-session PRNG seed for rand_r() */
-
-   /* Settings */
-   music_quality_t quality;
-   music_bitrate_mode_t bitrate_mode;
-
-   /* Pending reconfiguration (set by main thread, applied by streaming thread) */
+   /* Pending reconfiguration: the values first, then the flag (set by the
+    * WebSocket thread, applied by the player's thread) */
    atomic_bool reconfigure_requested;
-   music_quality_t pending_quality;
-   music_bitrate_mode_t pending_bitrate_mode;
+   _Atomic music_quality_t pending_quality;
+   _Atomic music_bitrate_mode_t pending_bitrate_mode;
 
    /* Connection reference */
    ws_connection_t *conn;
 
-   /* Position update tracking */
-   uint64_t last_position_update_ms;
+   /* Pacing (player's thread only).  Kept across runs of the thread: a
+    * natural advance carries the buffer estimate on, a halt resets it. */
+   uint64_t stream_start_time;   /**< Real-time pacer's start, 0 to restart it */
+   uint64_t frames_sent;         /**< Frames sent since stream_start_time */
+   uint64_t est_buffered_us;     /**< Estimate of the client's buffered audio */
+   uint64_t last_seen_report_ms; /**< Last client buffer report already used */
+   bool was_closed_loop;         /**< The last frame was paced on a fresh report */
+   unsigned pace_log_counter;    /**< Throttles the periodic pacing log */
 
    /* Dedicated music WebSocket (direct streaming).
     *
@@ -306,7 +174,7 @@ typedef struct {
 } session_music_state_t;
 
 /* =============================================================================
- * Internal Functions (shared between modules)
+ * WebUI music (shared between the webui_music*.c files)
  * ============================================================================= */
 
 /**
@@ -321,311 +189,53 @@ int webui_music_configure_encoder(session_music_state_t *state, music_quality_t 
 
 /**
  * @brief Send current music state to client
+ *
+ * Takes s_conn_registry_mutex (the caller must not hold it) and drops the
+ * frame when a newer connection owns the session.
  */
 void webui_music_send_state(ws_connection_t *conn, session_music_state_t *state);
-
-/**
- * @brief Send error message to client
- */
-void webui_music_send_error(ws_connection_t *conn, const char *code, const char *message);
-
-/**
- * @brief Take a session's control_mutex
- *
- * @param state Session music state
- * @param preempt True on the WebSocket service thread: an LLM tool call
- *        holding the lock while it waits for its track to open stops waiting
- *        and releases it.  False on other threads, which wait.
- */
-void webui_music_control_lock(session_music_state_t *state, bool preempt);
-
-/** @brief Release a session's control_mutex */
-void webui_music_control_unlock(session_music_state_t *state);
-
-/**
- * @brief A connection's music state, created on first use
- *
- * Creation happens under the same lock the music server's lazy init uses, so
- * the WebSocket handlers, the LLM tool and the music server can't each make
- * one.
- *
- * @return The state, or NULL if it couldn't be created
- */
-session_music_state_t *webui_music_state_get_or_init(ws_connection_t *conn);
-
-/** What the stream thread does after moving on from a finished track */
-typedef enum {
-   MUSIC_ADVANCE_PENDING, /**< The next track is in the pending slot */
-   MUSIC_ADVANCE_STOPPED, /**< Playback ended; the client has been told */
-   MUSIC_ADVANCE_EXIT,    /**< The thread was asked to stop */
-} music_advance_t;
-
-/**
- * @brief Pick the next track after the current one ended (stream thread)
- *
- * Puts it in the pending slot (the stream thread opens it next), or stops
- * playback at the end of the queue or after too many failures.
- *
- * Defined in webui_music_track.c.
- *
- * @param state Session music state (decoder already closed and NULL)
- * @param conn Connection to report to
- * @param track_failed The track that just ended did so on a decode error
- * @param failures In/out: tracks in a row that produced no audio
- * @return What happened
- */
-music_advance_t webui_music_advance(session_music_state_t *state,
-                                    ws_connection_t *conn,
-                                    bool track_failed,
-                                    int *failures);
 
 /**
  * @brief Send music_state, optionally tagged as a natural advance
  *
  * @param advance_auto Tag the frame advance:"auto" (a natural track change or
  *        end, which the client applies when its buffered audio has played)
+ *
+ * Takes s_conn_registry_mutex (the caller must not hold it).
  */
 void webui_music_send_state_impl(ws_connection_t *conn,
                                  session_music_state_t *state,
                                  bool advance_auto);
 
-/** Outcome of a track request, as webui_music_await_track() reports it */
-typedef enum {
-   MUSIC_OPEN_PLAYING,     /**< Opened and installed */
-   MUSIC_OPEN_FAILED,      /**< Couldn't be opened (the client was told) */
-   MUSIC_OPEN_UNREACHABLE, /**< The Plex server couldn't be reached (told) */
-   MUSIC_OPEN_CANCELLED,   /**< A stop or a newer request replaced it */
-   MUSIC_OPEN_PENDING,     /**< Still opening when the wait ended */
-} music_open_result_t;
-
-/** How long the LLM music tool waits for its track to open: past the Plex
- *  connect timeout, so "unreachable" and "won't open" are answered truthfully,
- *  without leaving a voice turn silent for a slow download */
-#define WEBUI_MUSIC_TOOL_OPEN_WAIT_MS 15000
+/**
+ * @brief Send error message to client
+ *
+ * Takes s_conn_registry_mutex (the caller must not hold it).
+ */
+void webui_music_send_error(ws_connection_t *conn, const char *code, const char *message);
 
 /**
- * @brief Ask the stream thread to open and play a track
+ * @brief A connection's music state, created on first use
  *
- * Stops the current track, records the request in the pending slot and
- * starts the stream thread, which opens it (downloading a Plex track) and
- * reports the outcome itself: music_state when it plays, music_error plus
- * music_state when it can't.  Never blocks on the open.  Before returning it
- * sets what the caller's own state frame reports: playing, position 0, the
- * queue entry's duration and loading for a Plex track.
+ * Creation happens under the same lock the music server's lazy init uses, so
+ * the WebSocket handlers, music_player_for_session and the music server
+ * can't each make one.
  *
- * @pre control_mutex held
- * @param ticket_out Optional: the request's ticket, for webui_music_await_track()
- * @return SUCCESS, or FAILURE if the stream thread couldn't start
+ * @return The state, or NULL if it couldn't be created
  */
-int webui_music_request_track(session_music_state_t *state, const char *path, uint32_t *ticket_out);
+session_music_state_t *webui_music_state_get_or_init(ws_connection_t *conn);
 
 /**
- * @brief Wait for a track request's outcome (LLM tool thread only)
+ * @brief Send music_state to every tab whose player plays a queue
  *
- * Returns early with MUSIC_OPEN_PENDING when a WebSocket request wants
- * control_mutex (the open carries on).  Never call it on the WebSocket
- * thread.
+ * Also the queue's listener (music_queue_set_listener()).
  *
- * @pre control_mutex held (it keeps the state alive while waiting)
+ * @param uq The queue (must NOT hold queue_mutex when calling)
+ * @param exclude The player that changed it, which already sent its own
+ *        update (may be NULL)
  */
-music_open_result_t webui_music_await_track(session_music_state_t *state,
-                                            uint32_t ticket,
-                                            int timeout_ms);
+void webui_music_broadcast_queue_state(user_music_queue_t *uq, const void *exclude);
 
-/**
- * @brief Open the pending track, if any (stream thread)
- *
- * @param failures In/out: tracks in a row that produced no audio
- * @return true if a pending request was handled (the caller resets pacing)
- */
-bool webui_music_run_pending_open(session_music_state_t *state,
-                                  ws_connection_t *conn,
-                                  int *failures);
-
-/**
- * @brief Cancel and join the Plex prefetch helper, if running (stream thread)
- */
-void webui_music_prefetch_stop(session_music_state_t *state);
-
-/**
- * @brief Report an unresolved pending request as cancelled (thread exit)
- */
-void webui_music_cancel_pending_ticket(session_music_state_t *state);
-
-/** Direction for webui_music_nav_step() */
-typedef enum {
-   MUSIC_NAV_NEXT,
-   MUSIC_NAV_PREVIOUS,
-} music_nav_dir_t;
-
-/**
- * @brief Move the session's queue index one step, as next/previous do
- *
- * Under shuffle, next walks forward through the play history and then picks a
- * random other track; previous walks back through it, and there is nothing
- * earlier once it runs out.  Otherwise the index moves by one, and wraps only
- * under repeat-all.  Stops the stream thread before moving, but only when a
- * move happens.  Takes queue_mutex then state_mutex.
- *
- * @param path_out Receives the new track's path (path_size > 0)
- * @param title_out Optional: receives its title (NULL or title_size 0 to skip)
- * @return true if the index moved, false at the end (or start) of the queue,
- *         or with nothing earlier in the history
- */
-bool webui_music_nav_step(session_music_state_t *state,
-                          music_nav_dir_t dir,
-                          char *path_out,
-                          size_t path_size,
-                          char *title_out,
-                          size_t title_size);
-
-/**
- * @brief What the session reports as playing, and where the queue holds it
- *
- * While a track plays or is paused: the track the session picked (another tab
- * may have replaced or edited the shared queue since), at the queue position
- * holding it, or -1 when the queue no longer does.  Otherwise the entry at the
- * session's position.  queue_mutex then state_mutex held.
- *
- * @param track_out Receives the track to report, or NULL when there is none
- * @return Its queue position, or -1
- */
-int webui_music_current(const session_music_state_t *state,
-                        const user_music_queue_t *uq,
-                        const music_queue_entry_t **track_out);
-
-/**
- * @brief Stop and unload the current track
- *
- * Stops the stream thread, closes the decoder and leaves the session stopped
- * at position 0 (not paused).  The queue and queue index are untouched.
- *
- * @pre control_mutex held
- */
-void webui_music_clear_track(session_music_state_t *state);
-
-/**
- * @brief Start playback of a file: webui_music_request_track() without a ticket
- *
- * @pre control_mutex held
- * @return SUCCESS, or FAILURE if the stream thread couldn't start
- */
-int webui_music_start_playback(session_music_state_t *state, const char *path);
-
-/**
- * @brief Stop streaming thread safely
- *
- * @pre control_mutex held (or the session is being torn down)
- */
-void webui_music_stop_streaming(session_music_state_t *state);
-
-/* =============================================================================
- * Shared State and Helpers (defined in webui_music.c, used by handlers)
- * ============================================================================= */
-
-/**
- * @brief Start the streaming thread for a session.
- *
- * @pre control_mutex held
- */
-int webui_music_start_streaming(session_music_state_t *state);
-
-/**
- * @brief Wait for the decoder to become idle.
- */
-bool wait_decoder_idle(session_music_state_t *state, int timeout_ms);
-
-/**
- * @brief Pick a random queue index different from the current one.
- *
- * Returns current_index if queue_length <= 1.
- */
-int webui_music_pick_random_index(int current_index, int queue_length, unsigned int *shuffle_seed);
-
-/**
- * @brief Broadcast queue state to all tabs for the same user
- *
- * Sends music_state update to all connections belonging to the same user,
- * except the excluded connection (which already got its update directly).
- *
- * @param uq Shared user queue (must NOT hold queue_mutex when calling)
- * @param exclude Connection to exclude from broadcast (may be NULL)
- */
-void webui_music_broadcast_queue_state(user_music_queue_t *uq, ws_connection_t *exclude);
-
-/**
- * @brief Execute volume tool for a WebUI session
- *
- * Called from volume_tool.c via session routing. Handles get/set actions
- * and syncs volume to the browser client via state update.
- */
-char *webui_volume_execute_tool(ws_connection_t *conn,
-                                const char *action,
-                                const char *value,
-                                int *should_respond);
-
-/* =============================================================================
- * Shared queue-mutation helpers (transport-free)
- *
- * Mutate + persist + bump generation; the CALLER is responsible for transport
- * (send_json_response on the LWS thread, or webui_music_send_state +
- * webui_music_broadcast_queue_state on the LLM worker thread). This lets the
- * browser WebSocket handlers and the LLM tool path share one mutation body.
- * All honor the queue_mutex -> state_mutex lock order.
- * ============================================================================= */
-
-/** Per-item outcome from webui_music_queue_apply_paths(). */
-typedef enum {
-   QUEUE_APPLY_ADDED = 0, /**< Resolved and appended */
-   QUEUE_APPLY_DUPLICATE, /**< Already present in queue (append mode) */
-   QUEUE_APPLY_NOT_FOUND, /**< Invalid path or not in the music DB */
-   QUEUE_APPLY_FULL,      /**< Queue at WEBUI_MUSIC_MAX_QUEUE */
-} queue_apply_outcome_t;
-
-/**
- * @brief Append (or replace) queue tracks by path
- *
- * Resolves each path via music_db_get_by_path(), dedups against existing queue
- * contents (append mode), then mutates the shared queue + persists + bumps
- * generation under queue_mutex. DB lookups happen BEFORE the lock. Does NOT
- * start playback or send transport — the caller does.
- *
- * @param state    Session music state (uses state->shared_queue)
- * @param paths    Array of file paths
- * @param n        Number of paths
- * @param replace  true: clear the queue first (play); false: append (enqueue)
- * @param outcomes Optional caller-allocated array of n entries for per-item result
- * @return SUCCESS, or FAILURE on invalid args / allocation failure
- */
-int webui_music_queue_apply_paths(session_music_state_t *state,
-                                  const char *const *paths,
-                                  int n,
-                                  bool replace,
-                                  queue_apply_outcome_t *outcomes);
-
-/**
- * @brief Remove the queue entry at a 0-based index
- *
- * Shifts remaining entries, adjusts this session's and sibling sessions'
- * queue_index, persists.  Removing the current track unloads it, and if it
- * was playing, starts the track that took its place.
- *
- * @pre control_mutex held
- * @return SUCCESS, or FAILURE if index is out of range
- */
-int webui_music_queue_remove_index(ws_connection_t *conn, session_music_state_t *state, int index0);
-
-/**
- * @brief Clear the queue and reset playback for this session
- *
- * Stops streaming, zeroes the queue, resets queue_index/playing, persists.
- * Transport-free.
- *
- * @pre control_mutex held
- * @param removed_out Optional out: queue length before clearing
- * @return SUCCESS
- */
-int webui_music_queue_clear(session_music_state_t *state, int *removed_out);
 
 #ifdef __cplusplus
 }

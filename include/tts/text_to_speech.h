@@ -67,6 +67,14 @@ void initialize_text_to_speech(char *pcm_device);
 void text_to_speech(const char *text);
 
 /**
+ * @brief Enqueue text to speak, with the expression it opens with
+ *
+ * As text_to_speech(); @p expression (a name from the expression vocabulary,
+ * or NULL) is published on dawn/events when this text starts playing.
+ */
+void text_to_speech_expr(const char *text, const char *expression);
+
+/**
  * @brief Generate raw PCM audio data from text
  *
  * This function generates raw PCM audio samples (16-bit signed, mono, 22050Hz)
@@ -127,6 +135,14 @@ void tts_speak_greeting_with_calibration(const char *greeting);
  * @return SUCCESS if TTS completed, FAILURE if timeout or not initialized
  */
 int tts_wait_for_completion(int timeout_ms);
+
+/**
+ * @brief Whether local speech is under way: queued, being synthesized or
+ *        playing (the playback state alone reads idle between phrases)
+ *
+ * @locks tts_queue_mutex (callers may hold tts_mutex: that order)
+ */
+bool tts_is_speaking(void);
 
 /**
  * @brief Cleans up the text-to-speech system.

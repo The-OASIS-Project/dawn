@@ -409,8 +409,8 @@ int tools_register_all(void) {
    }
 
    /* Messaging channels (Telegram / future Discord, Slack, SMS).
-    * Tool's .init hook spawns the engine + driver; .cleanup tears
-    * them down.  Skips driver registration when no token is set.
+    * Tool's .init hook starts the engine, .start the drivers (skipping one
+    * with no token); .cleanup tears them down.
     * The messaging engine is part of the WebUI build (sessions + drivers), so
     * the tool is only available there. */
 #ifdef ENABLE_WEBUI

@@ -1626,10 +1626,72 @@ dawn_add_unit_test(test_music_nav
    LIBS    unity
    LABEL   ci)
 
+dawn_add_unit_test(test_music_queue
+   SOURCES test_music_queue.c
+           ${SRC_ROOT}/src/audio/music_queue.c
+           ${SRC_ROOT}/src/audio/music_queue_db.c
+           ${SRC_ROOT}/src/core/path_utils.c
+   LIBS    dawn_common unity sqlite3 pthread
+   LABEL   ci)
+
+# Music player over a fake output; music_open_track() is the test's own
+dawn_add_unit_test(test_music_player
+   SOURCES test_music_player.c
+           ${SRC_ROOT}/src/audio/music_player.c
+           ${SRC_ROOT}/src/audio/music_player_track.c
+           ${SRC_ROOT}/src/audio/music_nav.c
+           ${SRC_ROOT}/src/audio/music_queue.c
+           ${SRC_ROOT}/src/audio/music_queue_db.c
+           ${SRC_ROOT}/src/audio/music_source.c
+           ${DECODER_TEST_SOURCES}
+   LIBS    ${DECODER_TEST_LIBS} sqlite3 pthread m
+   LABEL   ci)
+# A broken player hangs rather than fails (a join that never returns)
+set_tests_properties(test_music_player PROPERTIES TIMEOUT 30)
+
+# The local speaker over a fake playback device (the real player and converter)
+dawn_add_unit_test(test_music_speaker
+   SOURCES test_music_speaker.c
+           ${SRC_ROOT}/src/audio/music_speaker.c
+           ${SRC_ROOT}/src/audio/music_player.c
+           ${SRC_ROOT}/src/audio/music_player_track.c
+           ${SRC_ROOT}/src/audio/music_nav.c
+           ${SRC_ROOT}/src/audio/music_queue.c
+           ${SRC_ROOT}/src/audio/music_queue_apply.c
+           ${SRC_ROOT}/src/audio/music_queue_db.c
+           ${SRC_ROOT}/src/audio/music_source.c
+           ${SRC_ROOT}/src/audio/audio_converter.c
+           ${DECODER_TEST_SOURCES}
+   LIBS    ${DECODER_TEST_LIBS} ${SAMPLERATE_LIBRARIES} sqlite3 pthread m
+   LABEL   ci)
+set_tests_properties(test_music_speaker PROPERTIES TIMEOUT 30)
+
+# The audio converter's channel and rate combinations
+dawn_add_unit_test(test_audio_converter
+   SOURCES test_audio_converter.c
+           ${SRC_ROOT}/src/audio/audio_converter.c
+           ${SRC_ROOT}/common/src/logging.c
+   LIBS    unity ${SAMPLERATE_LIBRARIES} m
+   LABEL   ci)
+
+# Who may play on the local speaker without a player of its own
+dawn_add_unit_test(test_music_tool_route
+   SOURCES test_music_tool_route.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_text_filter
    SOURCES test_text_filter.c
            ${SRC_ROOT}/src/core/text_filter.c
    LIBS    unity
+   LABEL   ci)
+
+# Peer presence (hud, reachy) and re-subscribing on every MQTT connect;
+# libmosquitto and the HUD side effects are stubs in the test.
+dawn_add_unit_test(test_component_status
+   SOURCES test_component_status.c
+           ${SRC_ROOT}/src/core/component_status.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_llm_response_finalize
@@ -2290,6 +2352,14 @@ dawn_add_unit_test(test_tool_registry
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# A tool call's JSON arguments become the callback's value the same way on
+# every path (a live call, a scheduled call stored as JSON).
+dawn_add_unit_test(test_tool_pack_args
+   SOURCES test_tool_pack_args.c test_tool_registry_stub.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Shutdown tool: the passphrase check.  system() is wrapped, so an accepted
 # request never runs the real shutdown; the wrap reaches only objects linked
 # here, so shutdown_tool.c must stay a direct source, not a shared library.
@@ -2831,6 +2901,28 @@ add_test(NAME check_swap_eligible_types_mirror
          COMMAND bash ${SRC_ROOT}/tests/check_swap_eligible_types_mirror.sh
          WORKING_DIRECTORY ${SRC_ROOT})
 set_tests_properties(check_swap_eligible_types_mirror PROPERTIES LABELS "ci")
+
+# DAWN's expression vocabulary (EMOTE_FEELINGS/EMOTE_ACTS in text_filter.h) and
+# the Reachy Mini bridge's move map (reachy-bridge.toml) must name the same
+# expressions; the bridge, being Python, can't check the C header itself.
+add_test(NAME check_reachy_vocab_mirror
+         COMMAND bash ${SRC_ROOT}/tests/check_reachy_vocab_mirror.sh
+         WORKING_DIRECTORY ${SRC_ROOT})
+set_tests_properties(check_reachy_vocab_mirror PROPERTIES LABELS "ci")
+
+# The bridge's robot-free logic (services/reachy-bridge/expression.py and
+# audio_health.py), standard library only.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+   foreach(t test_reachy_expression test_reachy_audio_health)
+      add_test(NAME ${t}
+               COMMAND ${Python3_EXECUTABLE} -I ${SRC_ROOT}/tests/${t}.py
+               WORKING_DIRECTORY ${SRC_ROOT})
+      set_tests_properties(${t} PROPERTIES LABELS "ci")
+   endforeach()
+else()
+   message(STATUS "python3 not found: the reachy-bridge tests are not registered")
+endif()
 
 # SECTION_CATEGORIES in schema.js is the settings render gate — a section absent
 # from it is invisible in the UI no matter how correctly it is wired everywhere

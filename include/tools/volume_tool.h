@@ -24,6 +24,8 @@
 #ifndef VOLUME_TOOL_H
 #define VOLUME_TOOL_H
 
+#include <stdbool.h>
+
 /**
  * @brief Register the volume tool with the tool registry
  *
@@ -43,5 +45,23 @@ int volume_tool_register(void);
  * @return float 0.0-1.0 on success, -1.0f on failure
  */
 float parse_volume_level(const char *value);
+
+struct session;
+
+/**
+ * @brief Run a volume action on a session's own client (a WebUI tab or a
+ *        satellite), keeping its connection alive while it does
+ *
+ * Weak default (no WebUI): not handled.
+ *
+ * @param handled Out: false when the session has no live client, so the
+ *        caller sets the local speaker's volume instead
+ * @return The reply (allocated), when handled
+ */
+char *volume_tool_for_session(struct session *session,
+                              const char *action,
+                              const char *value,
+                              int *should_respond,
+                              bool *handled);
 
 #endif /* VOLUME_TOOL_H */

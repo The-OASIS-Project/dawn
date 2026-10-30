@@ -70,6 +70,9 @@ const char *music_source_path_prefix(music_source_t source);
 /** Identify source from a track path (returns MUSIC_SOURCE_LOCAL if no prefix) */
 music_source_t music_source_from_path(const char *path);
 
+/** A source whose tracks come over the network (downloaded before they play) */
+bool music_source_is_remote(music_source_t source);
+
 /* =============================================================================
  * Sync Provider Interface
  * ============================================================================= */

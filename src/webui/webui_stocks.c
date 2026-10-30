@@ -180,11 +180,7 @@ static struct json_object *wrap_frame(struct json_object *payload) {
  * teardown, so each conn stays valid while we touch it. send_json_response only
  * enqueues (queue_response); calling it under the registry lock is the documented
  * visitor pattern (webui_internal.h §"Visitor invoked under s_conn_registry_mutex")
- * — it must not re-acquire the registry lock or block, and it does neither.
- *
- * (webui_collect_conns_by_user is unusable here twice over: it filters on
- * music_state — dropping non-music stock viewers — AND it hands back pointers
- * used off-lock, the very UAF this avoids.) */
+ * — it must not re-acquire the registry lock or block, and it does neither. */
 static void stocks_fan(int user_id, struct json_object *frame) {
    pthread_mutex_lock(&s_conn_registry_mutex);
    for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {

@@ -12,6 +12,23 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-10-29 — The local speaker plays its owner's queue
+
+**What changed.** Music on the daemon's own speaker now plays the music queue of the local
+device's user (`[memory] default_voice_user_id`, or whoever the local mic is assigned to), the
+same queue that user's WebUI tabs show. A queue you built in the WebUI appears on the speaker,
+and voice edits to the queue ("add this", "remove the third one") change it. Only that user can
+play music or set the volume on the speaker: from the local mic, a messaging channel, a
+scheduled briefing, or MQTT (which acts for the default voice user). Other users' requests, a
+closed WebUI tab and background jobs get "Music can't play from here" instead of playing at
+home. Ducking while someone speaks no longer leaves the volume low after the music stops.
+
+**What you need to do.** Nothing, unless several people use the speaker: if someone else's
+music request is refused, that's this rule. Assign the local mic to the user who should own the
+speaker (or set `default_voice_user_id`).
+
+---
+
 ## 2026-10-23 — The persona has two parts; Preferred address takes several
 
 **What changed.** The persona is two parts, Values (who the assistant is) and Voice (how it

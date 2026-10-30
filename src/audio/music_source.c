@@ -73,3 +73,7 @@ music_source_t music_source_from_path(const char *path) {
    }
    return MUSIC_SOURCE_LOCAL;
 }
+
+bool music_source_is_remote(music_source_t source) {
+   return source != MUSIC_SOURCE_LOCAL;
+}
