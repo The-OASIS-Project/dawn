@@ -137,6 +137,14 @@ void tts_speak_greeting_with_calibration(const char *greeting);
 int tts_wait_for_completion(int timeout_ms);
 
 /**
+ * @brief Whether local speech is under way: queued, being synthesized or
+ *        playing (the playback state alone reads idle between phrases)
+ *
+ * @locks tts_queue_mutex (callers may hold tts_mutex: that order)
+ */
+bool tts_is_speaking(void);
+
+/**
  * @brief Cleans up the text-to-speech system.
  *
  * This function signals the worker thread to terminate, waits for it to finish,
