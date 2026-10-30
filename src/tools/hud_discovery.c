@@ -300,6 +300,17 @@ static void process_modes_discovery(struct json_object *root) {
  * Lifecycle Functions
  * ============================================================================= */
 
+static int subscribe_discovery(struct mosquitto *mosq) {
+   int rc = mosquitto_subscribe(mosq, NULL, HUD_DISCOVERY_TOPIC_WILDCARD, 0);
+   if (rc != MOSQ_ERR_SUCCESS) {
+      OLOG_ERROR("HUD discovery: Failed to subscribe to %s: %s", HUD_DISCOVERY_TOPIC_WILDCARD,
+                 mosquitto_strerror(rc));
+      return 1;
+   }
+   OLOG_INFO("HUD discovery: Subscribed to %s", HUD_DISCOVERY_TOPIC_WILDCARD);
+   return 0;
+}
+
 int hud_discovery_init(struct mosquitto *mosq) {
    if (!mosq) {
       return 1;
@@ -309,7 +320,9 @@ int hud_discovery_init(struct mosquitto *mosq) {
 
    if (s_initialized) {
       pthread_mutex_unlock(&s_discovery_mutex);
-      return 0;
+      /* A reconnect: the client's session is clean, so the broker forgot the
+       * subscription.  What was discovered stays until the HUD republishes. */
+      return subscribe_discovery(mosq);
    }
 
    /* Clear state */
@@ -339,18 +352,9 @@ int hud_discovery_init(struct mosquitto *mosq) {
 
    pthread_mutex_unlock(&s_discovery_mutex);
 
-   /* Subscribe to discovery topics */
-   int rc = mosquitto_subscribe(mosq, NULL, HUD_DISCOVERY_TOPIC_WILDCARD, 0);
-   if (rc != MOSQ_ERR_SUCCESS) {
-      OLOG_ERROR("HUD discovery: Failed to subscribe to %s: %s", HUD_DISCOVERY_TOPIC_WILDCARD,
-                 mosquitto_strerror(rc));
-      return 1;
-   }
-   OLOG_INFO("HUD discovery: Subscribed to %s", HUD_DISCOVERY_TOPIC_WILDCARD);
-
-   /* Discovery request is triggered by component_status when HUD comes online */
-
-   return 0;
+   /* The request comes later: from component_status when the HUD comes online,
+    * and from on_connect after a reconnect. */
+   return subscribe_discovery(mosq);
 }
 
 void hud_discovery_shutdown(void) {

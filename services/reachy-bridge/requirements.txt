@@ -1,0 +1,8 @@
+# Python 3.11+ (reachy-mini needs it; install.sh makes a uv-managed 3.12 venv).
+reachy-mini==1.12.0
+paho-mqtt==2.1.0
+# Imported by the bridge directly (reachy-mini 1.12 no longer brings scipy;
+# websockets for its connection errors).
+numpy==2.5.4
+scipy==1.18.1
+websockets==15.0.1

@@ -21,6 +21,7 @@
  * Unit tests for text_filter command tag stripping.
  */
 
+#include <stdio.h>
 #include <string.h>
 
 #include "core/text_filter.h"
@@ -416,6 +417,83 @@ static void test_command_strip_null_safe(void) {
    text_filter_command_strip(NULL, true); /* must not crash */
 }
 
+/* ── text_filter_emote_strip ────────────────────────────────────────────── */
+
+static void expect_emote(const char *in, const char *want_text, const char *want_name) {
+   char buf[256];
+   char name[EMOTE_NAME_MAX];
+   snprintf(buf, sizeof(buf), "%s", in);
+   bool found = text_filter_emote_strip(buf, name, sizeof(name));
+   TEST_ASSERT_EQUAL_STRING(want_text, buf);
+   TEST_ASSERT_EQUAL_STRING(want_name, name);
+   TEST_ASSERT_EQUAL(want_name[0] != '\0', found);
+}
+
+static void test_emote_strip_leading_tag(void) {
+   expect_emote("[emote:curious] What's that?", "What's that?", "curious");
+}
+
+static void test_emote_strip_spaced_and_cased(void) {
+   expect_emote("[emote: Happy ] Great.", "Great.", "happy");
+}
+
+static void test_emote_strip_first_known_name_wins(void) {
+   expect_emote("[emote:sad] Oh. [emote:calm] Fine.", "Oh. Fine.", "sad");
+}
+
+static void test_emote_strip_unknown_name_removed_not_reported(void) {
+   expect_emote("[emote:smug] Sure.", "Sure.", "");
+   expect_emote("[emote:smug] Sure. [emote:nod] Right.", "Sure. Right.", "nod");
+   /* A name from before the vocabulary changed is removed, not reported. */
+   expect_emote("[emote:apologetic] Sorry.", "Sorry.", "");
+}
+
+static void test_emote_strip_acts(void) {
+   expect_emote("[emote:no] I can't do that.", "I can't do that.", "no");
+   expect_emote("[emote:done] All set.", "All set.", "done");
+   expect_emote("[emote:Unsure] Hard to say.", "Hard to say.", "unsure");
+}
+
+static void test_emote_strip_tag_only(void) {
+   expect_emote("[emote:excited]", "", "excited");
+}
+
+static void test_emote_strip_malformed_removed_unnamed(void) {
+   expect_emote("Type [emote:] to see.", "Type to see.", "");
+   expect_emote("[emote:two words] x", "x", "");
+   expect_emote("[emote: happy, curious] Hi.", "Hi.", "");
+   expect_emote("[emote:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa] x", "x", "");
+}
+
+static void test_emote_strip_opener_any_case(void) {
+   expect_emote("[Emote:Happy] Hi.", "Hi.", "happy");
+   expect_emote("[EMOTE:calm] Ok.", "Ok.", "calm");
+}
+
+static void test_emote_strip_unclosed_left_as_text(void) {
+   expect_emote("[emote:curious", "[emote:curious", "");
+   expect_emote("[emote: happy\nmore] x", "[emote: happy\nmore] x", "");
+   expect_emote("[emote:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa] x",
+                "[emote:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa] x", "");
+}
+
+static void test_emote_strip_utf8_neighbours_untouched(void) {
+   expect_emote("[emote:surprised] Café — naïve.", "Café — naïve.", "surprised");
+}
+
+static void test_emote_strip_mid_text_keeps_words_apart(void) {
+   expect_emote("Sure,[emote:happy] glad to.", "Sure, glad to.", "happy");
+   expect_emote("Sure, [emote:happy] glad to.", "Sure, glad to.", "happy");
+   expect_emote("Done.\n[emote:done] Next.", "Done.\nNext.", "done");
+}
+
+static void test_emote_strip_null_and_no_name_out(void) {
+   TEST_ASSERT_FALSE(text_filter_emote_strip(NULL, NULL, 0));
+   char buf[] = "[emote:calm] Ok.";
+   TEST_ASSERT_TRUE(text_filter_emote_strip(buf, NULL, 0));
+   TEST_ASSERT_EQUAL_STRING("Ok.", buf);
+}
+
 /* ── main ───────────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -464,5 +542,17 @@ int main(void) {
    RUN_TEST(test_command_strip_orphan_truncates_when_true);
    RUN_TEST(test_command_strip_orphan_left_when_false);
    RUN_TEST(test_command_strip_null_safe);
+   RUN_TEST(test_emote_strip_leading_tag);
+   RUN_TEST(test_emote_strip_spaced_and_cased);
+   RUN_TEST(test_emote_strip_first_known_name_wins);
+   RUN_TEST(test_emote_strip_unknown_name_removed_not_reported);
+   RUN_TEST(test_emote_strip_acts);
+   RUN_TEST(test_emote_strip_tag_only);
+   RUN_TEST(test_emote_strip_malformed_removed_unnamed);
+   RUN_TEST(test_emote_strip_opener_any_case);
+   RUN_TEST(test_emote_strip_unclosed_left_as_text);
+   RUN_TEST(test_emote_strip_utf8_neighbours_untouched);
+   RUN_TEST(test_emote_strip_mid_text_keeps_words_apart);
+   RUN_TEST(test_emote_strip_null_and_no_name_out);
    return UNITY_END();
 }

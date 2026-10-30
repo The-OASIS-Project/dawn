@@ -603,6 +603,7 @@ set(DAWN_SOURCES
     src/core/command_executor.c
     src/core/llm_response_finalize.c  # subsystem-neutral (libc + session_t type only); needed by voice
     src/core/component_status.c
+    src/core/dawn_events.c
     src/core/device_types.c
     src/core/hash_util.c
     src/core/ocp_helpers.c
