@@ -31,6 +31,7 @@
 
 #include "audio/audio_decoder.h"
 #include "audio/music_db.h"
+#include "audio/music_db_internal.h"
 #include "audio/music_rank.h"
 #include "audio/music_source.h"
 #include "dawn_error.h"
@@ -203,6 +204,95 @@ static void test_schema_migration_idempotent(void) {
    int rc = music_db_init(g_db_path);
    TEST_ASSERT_TRUE_MESSAGE(rc == 0, "Second init on same DB succeeds");
    TEST_ASSERT_TRUE_MESSAGE(music_db_is_initialized() == true, "DB initialized after second init");
+}
+
+/* A track's album copy is its folder; a disc folder is its album's */
+static void check_folder(const char *path, const char *want, uint32_t want_disc) {
+   char out[512];
+   uint32_t disc = 99;
+   music_db_album_folder(path, out, sizeof(out), &disc);
+   TEST_ASSERT_EQUAL_STRING_MESSAGE(want, out, path);
+   TEST_ASSERT_EQUAL_UINT32_MESSAGE(want_disc, disc, path);
+}
+
+static void test_album_folder(void) {
+   check_folder("/m/Artist/Album/01 One.flac", "/m/Artist/Album", 0);
+   check_folder("/m/Artist/Album/Disc 2/01 One.flac", "/m/Artist/Album", 2);
+   check_folder("/m/Artist/Album/CD1/01 One.flac", "/m/Artist/Album", 1);
+   check_folder("/m/Artist/Album/disk_3/01 One.flac", "/m/Artist/Album", 3);
+   check_folder("/m/BTTF (Complete Score) - Disc 1/01 Main.mp3", "/m/BTTF (Complete Score)", 1);
+   check_folder("/m/MHA 2nd OST [Disk 2]/01 A.flac", "/m/MHA 2nd OST", 2);
+   check_folder("/m/Abbey Road (CD 1)/01 A.flac", "/m/Abbey Road", 1);
+   /* Numbers that aren't discs */
+   check_folder("/m/Blink-182/Enema/01 A.flac", "/m/Blink-182/Enema", 0);
+   check_folder("/m/Album (Remastered 2003)/01 A.flac", "/m/Album (Remastered 2003)", 0);
+   check_folder("/m/Iron Man 2/01 A.flac", "/m/Iron Man 2", 0);
+   check_folder("/m/NCD 3/01 A.flac", "/m/NCD 3", 0);
+   check_folder("nofolder.flac", "", 0);
+}
+
+/* The scan's write stores the album copy, album artist and numbers; a disc the
+ * folder names wins over the tag, and unknown numbers are NULL */
+static void test_insert_stores_album_identity(void) {
+   clear_tracks();
+   audio_metadata_t meta;
+   memset(&meta, 0, sizeof(meta));
+   strcpy(meta.title, "Three");
+   strcpy(meta.album, "Album");
+   strcpy(meta.album_artist, "Band");
+   meta.track_no = 3;
+   meta.disc_no = 1;
+   pthread_mutex_lock(&g_music_db_mutex);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_insert_track("/m/Band/Album/Disc 2/03.flac", 1, &meta));
+   meta.track_no = 0;
+   meta.disc_no = 0;
+   meta.album_artist[0] = '\0';
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_insert_track("/m/Band/Other/01.flac", 1, &meta));
+   pthread_mutex_unlock(&g_music_db_mutex);
+
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(g_test_db,
+                      "SELECT album_id, album_artist, track_no, disc_no FROM music_metadata "
+                      "ORDER BY path",
+                      -1, &st, NULL);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_STRING("/m/Band/Album", (const char *)sqlite3_column_text(st, 0));
+   TEST_ASSERT_EQUAL_STRING("Band", (const char *)sqlite3_column_text(st, 1));
+   TEST_ASSERT_EQUAL_INT(3, sqlite3_column_int(st, 2));
+   TEST_ASSERT_EQUAL_INT(2, sqlite3_column_int(st, 3));
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_STRING("/m/Band/Other", (const char *)sqlite3_column_text(st, 0));
+   TEST_ASSERT_EQUAL_INT(SQLITE_NULL, sqlite3_column_type(st, 1));
+   TEST_ASSERT_EQUAL_INT(SQLITE_NULL, sqlite3_column_type(st, 2));
+   TEST_ASSERT_EQUAL_INT(SQLITE_NULL, sqlite3_column_type(st, 3));
+   sqlite3_finalize(st);
+   clear_tracks();
+}
+
+/* An older database gets its local rows' album copies at once */
+static void test_migration_fills_album_folders(void) {
+   clear_tracks();
+   insert_track("/music/A/Album/Disc 1/01.flac", "One", "A", "Album", NULL, MUSIC_SOURCE_LOCAL,
+                100);
+   insert_track("plex:/library/parts/1/x.flac", "One", "A", "Album", NULL, MUSIC_SOURCE_PLEX, 100);
+   sqlite3_exec(g_test_db, "UPDATE music_metadata SET album_id = NULL; PRAGMA user_version = 1",
+                NULL, NULL, NULL);
+   music_db_cleanup();
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_init(g_db_path));
+
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(g_test_db, "SELECT album_id FROM music_metadata ORDER BY source", -1, &st,
+                      NULL);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_STRING("/music/A/Album", (const char *)sqlite3_column_text(st, 0));
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_NULL(sqlite3_column_text(st, 0)); /* Plex fills on its sync */
+   sqlite3_finalize(st);
+   sqlite3_prepare_v2(g_test_db, "PRAGMA user_version", -1, &st, NULL);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_INT(2, sqlite3_column_int(st, 0));
+   sqlite3_finalize(st);
+   clear_tracks();
 }
 
 /* =============================================================================
@@ -1149,6 +1239,9 @@ int main(void) {
    RUN_TEST(test_source_from_path);
    RUN_TEST(test_init_cleanup);
    RUN_TEST(test_schema_migration_idempotent);
+   RUN_TEST(test_album_folder);
+   RUN_TEST(test_insert_stores_album_identity);
+   RUN_TEST(test_migration_fills_album_folders);
    RUN_TEST(test_search_basic);
    RUN_TEST(test_search_by_title);
    RUN_TEST(test_search_by_album);

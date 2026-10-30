@@ -12,6 +12,18 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-10-30 — The music library is read again once
+
+**What changed.** DAWN now stores each track's album artist, track number and disc number, so
+it can play a whole album in order. The first library scan after the upgrade reads every local
+music file again, and the first Plex sync rewrites every Plex track.
+
+**What you need to do.** Nothing. On a large library the first scan takes longer than usual,
+with more disk activity; music plays meanwhile, and albums play in track order once the scan
+has finished.
+
+---
+
 ## 2026-10-29 — The local speaker plays its owner's queue
 
 **What changed.** Music on the daemon's own speaker now plays the music queue of the local
