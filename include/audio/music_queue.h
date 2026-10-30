@@ -99,7 +99,8 @@ typedef enum {
  */
 int music_queue_init(const char *db_path);
 
-/** Free every queue and close the store; nothing may hold a queue */
+/** Free every queue no player holds and close the store (one still held at
+ *  exit is left allocated for its last release) */
 void music_queue_shutdown(void);
 
 /**
@@ -167,6 +168,33 @@ void music_queue_add(user_music_queue_t *uq,
                      bool replace,
                      music_queue_outcome_t *outcomes,
                      int *added_out);
+
+/**
+ * Append (or replace) library tracks by path: each is checked
+ * (music_path_is_valid) and looked up in the music library before the queue
+ * lock; one it can't find is no track.  Then music_queue_add().  Defined in
+ * music_queue_apply.c.
+ * @param outcomes Optional caller-allocated array of n entries
+ * @return SUCCESS, or FAILURE on invalid args / allocation failure
+ */
+int music_queue_apply_paths(user_music_queue_t *uq,
+                            const char *const *paths,
+                            int n,
+                            bool replace,
+                            music_queue_outcome_t *outcomes);
+
+/**
+ * Told when a player changed a queue's tracks or modes, so other players'
+ * listeners see it.  @p origin identifies the player that changed it (its
+ * own listener already knows); runs with no queue lock held.
+ */
+typedef void (*music_queue_listener_t)(user_music_queue_t *uq, const void *origin);
+
+/** Set the one listener (NULL to clear); the WebUI's tells its tabs */
+void music_queue_set_listener(music_queue_listener_t fn);
+
+/** Tell the listener that @p origin changed @p uq; call with queue_mutex released */
+void music_queue_announce(user_music_queue_t *uq, const void *origin);
 
 #ifdef __cplusplus
 }

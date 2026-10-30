@@ -20,7 +20,7 @@
  *
  * WebUI Music Streaming - Message Handlers
  *
- * WebSocket message handlers and LLM tool integration for music streaming.
+ * WebSocket message handlers for music streaming.
  * Split from webui_music.c for maintainability.
  */
 
@@ -124,10 +124,12 @@ void handle_music_unsubscribe(ws_connection_t *conn) {
       return;
    }
 
-   /* Stop playback and streaming */
-   music_player_control_lock(state->player, true);
-   music_player_stop(state->player);
-   music_player_control_unlock(state->player);
+   /* Stop playback and streaming (refused only for a closed player: this
+    * thread closes it, in cleanup) */
+   if (music_player_control_lock(state->player, true)) {
+      music_player_stop(state->player);
+      music_player_control_unlock(state->player);
+   }
 
    OLOG_INFO("WebUI music: Client unsubscribed");
 }
@@ -186,8 +188,8 @@ void handle_music_control(ws_connection_t *conn, struct json_object *payload) {
     * queue and state under their own mutexes, so the WebSocket thread never
     * waits. */
    bool replaces = replaces_playback(payload);
-   if (replaces) {
-      music_player_control_lock(state->player, true);
+   if (replaces && !music_player_control_lock(state->player, true)) {
+      return; /* closed: only this thread closes it, in cleanup */
    }
    music_control_locked(conn, state, payload);
    if (replaces) {
@@ -253,7 +255,7 @@ static void music_control_locked(ws_connection_t *conn,
 
          /* Send state to this tab, broadcast to others */
          webui_music_send_state(conn, state);
-         webui_music_broadcast_queue_state(uq, conn);
+         webui_music_broadcast_queue_state(uq, state->player);
 
       } else if (json_object_object_get_ex(payload, "query", &query_obj)) {
          const char *query = json_object_get_string(query_obj);
@@ -289,13 +291,13 @@ static void music_control_locked(ws_connection_t *conn,
 
          /* Send state to this tab, broadcast to others */
          webui_music_send_state(conn, state);
-         webui_music_broadcast_queue_state(uq, conn);
+         webui_music_broadcast_queue_state(uq, state->player);
 
       } else {
          /* A bare "play": resume a pause, or start the queue's current track
           * when stopped or nothing is loaded (it was removed or failed),
           * rather than silently echo state */
-         if (music_player_resume_or_start(player) == MUSIC_RESUME_START_FAILED) {
+         if (music_player_resume_or_start(player, NULL) == MUSIC_RESUME_START_FAILED) {
             webui_music_send_error(conn, "PLAYBACK_ERROR", "Failed to start playback");
          }
          webui_music_send_state(conn, state);
@@ -328,7 +330,7 @@ static void music_control_locked(ws_connection_t *conn,
       music_queue_changed(uq, false);
       pthread_mutex_unlock(&uq->queue_mutex);
       webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      webui_music_broadcast_queue_state(uq, state->player);
 
    } else if (strcmp(action, "cycle_repeat") == 0) {
       pthread_mutex_lock(&uq->queue_mutex);
@@ -336,7 +338,7 @@ static void music_control_locked(ws_connection_t *conn,
       music_queue_changed(uq, false);
       pthread_mutex_unlock(&uq->queue_mutex);
       webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      webui_music_broadcast_queue_state(uq, state->player);
 
    } else if (strcmp(action, "seek") == 0) {
       struct json_object *position_obj;
@@ -401,7 +403,7 @@ static void music_control_locked(ws_connection_t *conn,
       music_queue_changed(uq, true);
       pthread_mutex_unlock(&uq->queue_mutex);
       webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      webui_music_broadcast_queue_state(uq, state->player);
 
    } else if (strcmp(action, "remove_from_queue") == 0) {
       /* Remove track from queue by index */
@@ -415,13 +417,13 @@ static void music_control_locked(ws_connection_t *conn,
          return;
       }
       webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      webui_music_broadcast_queue_state(uq, state->player);
 
    } else if (strcmp(action, "clear_queue") == 0) {
       /* Clear entire queue and stop playback */
       music_player_clear_queue(player, NULL);
       webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      webui_music_broadcast_queue_state(uq, state->player);
 
    } else if (strcmp(action, "add_artist") == 0) {
       /* Add all tracks by an artist to queue */
@@ -453,7 +455,7 @@ static void music_control_locked(ws_connection_t *conn,
       pthread_mutex_unlock(&uq->queue_mutex);
 
       webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      webui_music_broadcast_queue_state(uq, state->player);
 
       free(tracks);
       OLOG_INFO("WebUI music: Added %d tracks by '%s' to queue", added, artist_name);
@@ -484,7 +486,7 @@ static void music_control_locked(ws_connection_t *conn,
       pthread_mutex_unlock(&uq->queue_mutex);
 
       webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      webui_music_broadcast_queue_state(uq, state->player);
 
       free(tracks);
       OLOG_INFO("WebUI music: Added %d tracks from album '%s' to queue", added, album_name);
@@ -809,43 +811,6 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
    json_object_put(response);
 }
 
-/* =============================================================================
- * Shared queue-mutation helpers (transport-free) — see webui_music_internal.h.
- * Called by both handle_music_queue() (LWS thread) and webui_music_execute_tool()
- * (LLM worker thread). They mutate + persist + bump generation only; the caller
- * does transport.
- * ============================================================================= */
-
-int webui_music_queue_apply_paths(user_music_queue_t *uq,
-                                  const char *const *paths,
-                                  int n,
-                                  bool replace,
-                                  music_queue_outcome_t *outcomes) {
-   if (!uq || !paths || n < 0) {
-      return FAILURE;
-   }
-
-   /* Resolve before the queue lock (DB lookups are slow, and the stream
-    * thread takes queue_mutex); a path left empty is no track */
-   music_search_result_t *resolved = NULL;
-   if (n > 0) {
-      resolved = calloc((size_t)n, sizeof(*resolved));
-      if (!resolved) {
-         return FAILURE;
-      }
-   }
-   for (int i = 0; i < n; i++) {
-      bool found = false;
-      if (!paths[i] || !music_path_is_valid(paths[i]) ||
-          music_db_get_by_path(paths[i], &resolved[i], &found) != SUCCESS || !found) {
-         resolved[i].path[0] = '\0';
-      }
-   }
-   music_queue_add(uq, resolved, n, replace, outcomes, NULL);
-   free(resolved);
-   return SUCCESS;
-}
-
 static void music_queue_locked(ws_connection_t *conn,
                                session_music_state_t *state,
                                struct json_object *payload);
@@ -862,8 +827,8 @@ void handle_music_queue(ws_connection_t *conn, struct json_object *payload) {
    }
 
    bool replaces = replaces_playback(payload);
-   if (replaces) {
-      music_player_control_lock(state->player, true);
+   if (replaces && !music_player_control_lock(state->player, true)) {
+      return; /* closed: only this thread closes it, in cleanup */
    }
    music_queue_locked(conn, state, payload);
    if (replaces) {
@@ -921,7 +886,7 @@ static void music_queue_locked(ws_connection_t *conn,
    } else if (strcmp(action, "clear") == 0) {
       music_player_clear_queue(player, NULL);
       webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      webui_music_broadcast_queue_state(uq, state->player);
 
    } else if (strcmp(action, "add") == 0) {
       struct json_object *path_obj;
@@ -932,14 +897,14 @@ static void music_queue_locked(ws_connection_t *conn,
 
       const char *path = json_object_get_string(path_obj);
       music_queue_outcome_t oc = MUSIC_QUEUE_NOT_FOUND;
-      webui_music_queue_apply_paths(uq, &path, 1, false, &oc);
+      music_queue_apply_paths(uq, &path, 1, false, &oc);
       if (oc == MUSIC_QUEUE_NOT_FOUND) {
          webui_music_send_error(conn, "NOT_FOUND", "Track not found in music library");
          return;
       }
 
       webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      webui_music_broadcast_queue_state(uq, state->player);
 
    } else if (strcmp(action, "remove") == 0) {
       struct json_object *index_obj;
@@ -955,7 +920,7 @@ static void music_queue_locked(ws_connection_t *conn,
       }
 
       webui_music_send_state(conn, state);
-      webui_music_broadcast_queue_state(uq, conn);
+      webui_music_broadcast_queue_state(uq, state->player);
 
    } else {
       webui_music_send_error(conn, "UNKNOWN_ACTION", "Unknown queue action");

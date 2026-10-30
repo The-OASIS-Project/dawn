@@ -4338,7 +4338,8 @@ server_shutdown:
       worker_pool_shutdown();
    }
 #endif
-   /* After every player that holds a queue is gone */
+   /* After the WebUI's players are gone (a tool call still holding one at
+    * exit keeps its queue, see music_queue_shutdown) */
    music_queue_shutdown();
 
    /* Cleanup session manager AFTER WebUI shutdown so WebSocket sessions are released */

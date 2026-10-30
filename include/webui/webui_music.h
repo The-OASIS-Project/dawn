@@ -320,38 +320,6 @@ void webui_music_report_buffer(session_t *session, uint32_t buffered_ms);
  *  report can't drive the pacer into a multi-second sleep. */
 #define WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS 10000
 
-/* =============================================================================
- * LLM Tool Integration
- * ============================================================================= */
-
-/**
- * @brief Execute music action from LLM tool callback
- *
- * Called by music_tool when the request originated from a WebUI session.
- * Routes music commands to the WebUI's per-session streaming instead of
- * local speaker playback.
- *
- * @param conn WebSocket connection (from session->client_data)
- * @param action Music action (play, stop, pause, resume, next, previous)
- * @param query Search query for play/search actions, or NULL
- * @param result_out Output: allocated result string (caller must free)
- * @return 0 on success, >0 on error, MUSIC_NOT_HANDLED if action should
- *         fall through to the default (local) handler
- */
-
-/**
- * @brief Return value from webui_music_execute_tool() meaning "not handled,
- *        fall through to the default handler".
- *
- * Distinct from SUCCESS (0 = handled OK) and positive error codes (>0 = error).
- */
-#define MUSIC_NOT_HANDLED (-1)
-
-int webui_music_execute_tool(ws_connection_t *conn,
-                             const char *action,
-                             const char *query,
-                             char **result_out);
-
 #ifdef __cplusplus
 }
 #endif

@@ -1025,8 +1025,10 @@ char *satellite_volume_execute_tool(ws_connection_t *conn,
    char *json_copy = strdup(json_str);
    json_object_put(msg);
 
-   if (json_copy && conn->session) {
-      ws_response_t resp = { .session = conn->session,
+   /* Read once: the connection's close may clear it meanwhile */
+   session_t *session = conn_get_session(conn);
+   if (json_copy && session) {
+      ws_response_t resp = { .session = session,
                              .type = WS_RESP_MUSIC_STATE,
                              .music_json = { .json = json_copy } };
       queue_response(&resp);
@@ -1037,7 +1039,7 @@ char *satellite_volume_execute_tool(ws_connection_t *conn,
    /* queue_response() takes ownership of the response strings (freed by free_response) */
    // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
    OLOG_INFO("Satellite: Volume set to %d%% for %s", level_int,
-             conn->session ? conn->session->identity.name : "(unknown)");
+             session ? session->identity.name : "(unknown)");
 
    char *result = malloc(64);
    if (result)

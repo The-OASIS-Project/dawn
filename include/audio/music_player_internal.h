@@ -62,6 +62,12 @@ struct music_player {
     *  tool call waiting for its track to open, which then releases the lock,
     *  so a thread that preempts never waits on it. */
    atomic_bool control_cancel;
+   /** References (music_player_ref/release); the last release frees */
+   atomic_int refs;
+   /** Shut down for good (control_mutex): control_lock refuses */
+   bool closed;
+   /** A shutdown has begun: a preempted await reports cancelled */
+   atomic_bool closing;
 
    /** A seek for the thread to apply between reads (state_mutex), so a seek
     *  never stops the thread.  Dropped when a track is installed or

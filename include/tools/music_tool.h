@@ -26,6 +26,9 @@
 
 #include <stdbool.h>
 
+struct session;
+typedef struct music_player music_player_t;
+
 /**
  * @brief Register the music tool with the tool registry
  *
@@ -35,6 +38,17 @@
  * @return 0 on success, non-zero on failure
  */
 int music_tool_register(void);
+
+/**
+ * @brief The player a session has of its own (a WebUI tab, a Tier-1
+ *        satellite), referenced: release it with music_player_release()
+ *
+ * Weak default (no WebUI) returns NULL; the WebUI overrides it, keeping the
+ * session's connection alive while it takes the reference.
+ *
+ * @return The player, or NULL when the session has none
+ */
+music_player_t *music_player_for_session(struct session *session);
 
 /**
  * @brief Pause the local speaker's music, keeping its place for a resume

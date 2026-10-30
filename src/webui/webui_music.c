@@ -42,11 +42,14 @@
 #include "audio/resampler.h"
 #include "config/dawn_config.h"
 #include "logging.h"
+#include "tools/music_tool.h"
 #include "tools/time_utils.h"
+#include "tools/volume_tool.h"
 #include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_music_internal.h"
 #include "webui/webui_music_server.h"
+#include "webui/webui_satellite.h"
 #include "webui/webui_server.h"
 
 /* =============================================================================
@@ -304,13 +307,14 @@ void webui_music_send_error(ws_connection_t *conn, const char *code, const char 
  * ============================================================================= */
 
 /**
- * @brief Broadcast queue state to all tabs for the same user
+ * @brief Send music_state to every tab whose player plays @p uq, except the
+ *        player that changed it (also the queue's listener)
  *
  * Sends to each matching connection WHILE HOLDING s_conn_registry_mutex, so a
  * conn cannot be freed by the lws thread mid-iteration (the lws CLOSED handler's
  * unregister_connection takes this same lock). This is what makes the broadcast
- * safe when called from a NON-lws thread — the LLM tool-execution worker
- * (webui_music_tool.c) among them; the previous collect-then-send-off-lock raced
+ * safe when called from a NON-lws thread — the music tool's caller, through the
+ * queue's listener, among them; the previous collect-then-send-off-lock raced
  * connection teardown and could deref a freed conn (use-after-free).
  *
  * Deadlock-safe: s_conn_registry_mutex is the OUTERMOST lock here. webui_music_
@@ -320,19 +324,19 @@ void webui_music_send_error(ws_connection_t *conn, const char *code, const char 
  * every caller releases uq->queue_mutex before broadcasting. So registry →
  * {queue_mutex, state_mutex, s_queue_mutex} never inverts.
  */
-void webui_music_broadcast_queue_state(user_music_queue_t *uq, ws_connection_t *exclude) {
-   if (!uq || uq->user_id <= 0) {
-      return; /* Private queues don't broadcast */
+void webui_music_broadcast_queue_state(user_music_queue_t *uq, const void *exclude) {
+   if (!uq) {
+      return;
    }
 
    pthread_mutex_lock(&s_conn_registry_mutex);
    for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
       ws_connection_t *conn = s_active_connections[i];
-      if (conn && conn != exclude && conn->authenticated && conn->auth_user_id == uq->user_id) {
-         session_music_state_t *s = (session_music_state_t *)conn->music_state;
-         if (s) {
-            webui_music_send_state(conn, s);
-         }
+      session_music_state_t *s = conn ? (session_music_state_t *)__atomic_load_n(&conn->music_state,
+                                                                                 __ATOMIC_ACQUIRE)
+                                      : NULL;
+      if (s && (const void *)s->player != exclude && music_player_queue(s->player) == uq) {
+         webui_music_send_state(conn, s);
       }
    }
    pthread_mutex_unlock(&s_conn_registry_mutex);
@@ -633,6 +637,8 @@ int webui_music_init(void) {
       }
    }
 
+   /* Tabs hear about queue edits by any player, the speaker's included */
+   music_queue_set_listener(webui_music_broadcast_queue_state);
    s_initialized = true;
    OLOG_INFO("WebUI music streaming initialized (default quality: %s, bitrate: %s)",
              QUALITY_NAMES[s_config.default_quality],
@@ -657,7 +663,8 @@ void webui_music_cleanup(void) {
       pthread_mutex_lock(&s_music_mutex);
    }
 
-   /* Clean up Plex client */
+   /* The tabs stop hearing queue edits; then the Plex client goes */
+   music_queue_set_listener(NULL);
    plex_client_cleanup();
 
    s_initialized = false;
@@ -724,7 +731,9 @@ int webui_music_session_init(ws_connection_t *conn) {
       return 1;
    }
 
-   conn->music_state = state;
+   /* Release: a reader that finds the pointer under the registry lock alone
+    * (the queue broadcast) sees the state it points to */
+   __atomic_store_n(&conn->music_state, state, __ATOMIC_RELEASE);
    OLOG_INFO("WebUI music: Session initialized (user_id=%d, shared=%s)", conn->auth_user_id,
              conn->auth_user_id > 0 ? "yes" : "no");
 
@@ -743,26 +752,162 @@ session_music_state_t *webui_music_state_get_or_init(ws_connection_t *conn) {
    return state;
 }
 
-void webui_music_session_cleanup(ws_connection_t *conn) {
+/* A session's live WebUI or satellite connection, with s_music_teardown_mutex
+ * held so it can't be freed meanwhile (its cleanup takes that lock first);
+ * NULL, nothing held, when it has none.  The registry lock proves the
+ * connection is still registered (its CLOSED handler unregisters it before
+ * anything else); the teardown lock is taken before the registry lock is
+ * released. */
+static ws_connection_t *pin_connection(session_t *session) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2)) {
+      return NULL;
+   }
+   for (;;) {
+      pthread_mutex_lock(&s_conn_registry_mutex);
+      /* Registered first (a destroyed session's client_data may point at a
+       * freed connection), then still this session's */
+      ws_connection_t *conn = (ws_connection_t *)session->client_data;
+      bool live = false;
+      for (int i = 0; conn && i < MAX_ACTIVE_CONNECTIONS && !live; i++) {
+         live = s_active_connections[i] == conn;
+      }
+      live = live && conn_get_session(conn) == session;
+      if (!live) {
+         pthread_mutex_unlock(&s_conn_registry_mutex);
+         return NULL;
+      }
+      /* Never wait for the teardown lock holding the registry (every lws
+       * callback takes it): on contention, wait it out and look again */
+      if (pthread_mutex_trylock(&s_music_teardown_mutex) == 0) {
+         pthread_mutex_unlock(&s_conn_registry_mutex);
+         return conn;
+      }
+      pthread_mutex_unlock(&s_conn_registry_mutex);
+      pthread_mutex_lock(&s_music_teardown_mutex);
+      pthread_mutex_unlock(&s_music_teardown_mutex);
+   }
+}
+
+/* The connection's player, created on first use, for a session with a live
+ * WebUI or Tier-1 connection (overrides music_tool.c's weak default) */
+music_player_t *music_player_for_session(session_t *session) {
+   if (session && session->type == SESSION_TYPE_DAP2 && session->tier == DAP2_TIER_2) {
+      return NULL; /* a Tier-2 satellite has no music socket */
+   }
+   ws_connection_t *conn = pin_connection(session);
+   if (!conn) {
+      return NULL;
+   }
+   if (!conn->music_state && webui_music_session_init(conn) != 0) {
+      OLOG_ERROR("WebUI music: Failed to initialize session state");
+   }
    session_music_state_t *state = (session_music_state_t *)conn->music_state;
+   music_player_t *player = state ? state->player : NULL;
+   if (player) {
+      music_player_ref(player);
+   }
+   pthread_mutex_unlock(&s_music_teardown_mutex);
+   return player;
+}
+
+/* =============================================================================
+ * Volume Tool Integration (called from volume_tool.c via session routing)
+ * ============================================================================= */
+
+/* The volume tool on a WebUI tab (teardown lock held).  The tab's state
+ * frame isn't built here (it waits on the queue lock, which a save can hold
+ * for seconds): *notify_out gets a referenced player to tell once the lock is
+ * released. */
+static char *webui_volume_execute_tool(ws_connection_t *conn,
+                                       const char *action,
+                                       const char *value,
+                                       int *should_respond,
+                                       music_player_t **notify_out) {
+   *should_respond = 1;
+
+   if (strcmp(action, "get") == 0) {
+      char *result = malloc(64);
+      if (result)
+         snprintf(result, 64, "Volume is at %.0f%%", conn->volume * 100.0f);
+      return result;
+   }
+
+   /* Action: set */
+   if (!value || !*value) {
+      return strdup("Error: 'level' parameter is required for 'set' action.");
+   }
+
+   float vol = parse_volume_level(value);
+   if (vol < 0.0f) {
+      char *result = malloc(128);
+      if (result)
+         snprintf(result, 128, "Invalid volume level '%s'. Use a number 0-100.", value);
+      return result;
+   }
+
+   conn->volume = vol;
+   OLOG_INFO("WebUI volume tool: set to %.0f%% for session", vol * 100.0f);
+
+   /* The tab's state frame carries the volume, so the slider syncs */
+   session_music_state_t *state = (session_music_state_t *)conn->music_state;
+   if (state) {
+      music_player_ref(state->player);
+      *notify_out = state->player;
+   }
+
+   char *result = malloc(64);
+   if (result)
+      snprintf(result, 64, "Volume set to %.0f%%", vol * 100.0f);
+   return result;
+}
+
+/* The volume tool on a session's own client (overrides volume_tool.c's weak
+ * default) */
+char *volume_tool_for_session(session_t *session,
+                              const char *action,
+                              const char *value,
+                              int *should_respond,
+                              bool *handled) {
+   ws_connection_t *conn = pin_connection(session);
+   *handled = conn != NULL;
+   if (!conn) {
+      return NULL;
+   }
+   music_player_t *notify = NULL;
+   char *result = conn->is_satellite
+                      ? satellite_volume_execute_tool(conn, action, value, should_respond)
+                      : webui_volume_execute_tool(conn, action, value, should_respond, &notify);
+   pthread_mutex_unlock(&s_music_teardown_mutex);
+   if (notify) {
+      /* Through the player: its output goes only after it's closed */
+      if (music_player_control_lock(notify, false)) {
+         music_player_notify_state(notify);
+         music_player_control_unlock(notify);
+      }
+      music_player_release(notify);
+   }
+   return result;
+}
+
+void webui_music_session_cleanup(ws_connection_t *conn) {
+   /* Unpublish the state under the teardown lock, always (a lazy init on
+    * another thread may be creating it right now): once we've held it, no
+    * music-server accessor or lazy init is mid-flight on this connection, and
+    * any that come later read NULL and bail. */
+   pthread_mutex_lock(&s_music_teardown_mutex);
+   session_music_state_t *state = (session_music_state_t *)conn->music_state;
+   conn->music_state = NULL;
+   pthread_mutex_unlock(&s_music_teardown_mutex);
    if (!state) {
       return;
    }
 
-   /* Stop the player first, without the teardown lock: it takes its control
-    * lock, which is never held with the teardown lock.  This narrows, but
-    * doesn't close, the window for a tool call that read conn->music_state
-    * just before this and waits for the control lock: that needs the
-    * connection's lifetime pinned for the call.  Once it returns no output
-    * function runs. */
+   /* Close the player without the teardown lock: it takes its control lock,
+    * which is never held with the teardown lock.  Once it returns no output
+    * function runs, so the output below can go; a tool call still holding a
+    * reference finds the player closed. */
    music_player_shutdown(state->player);
-
-   /* Serialize the free against the music-server accessors. Once we hold this,
-    * no report_buffer/write_pending/set_stream_wsi/clear_stream_wsi can be mid-flight on this
-    * state, and any that arrive after we NULL conn->music_state below will read NULL and bail. */
-   pthread_mutex_lock(&s_music_teardown_mutex);
-   conn->music_state = NULL;
-   music_player_destroy(state->player);
+   music_player_release(state->player);
 
    if (state->resampler) {
       resampler_destroy(state->resampler);
@@ -776,8 +921,6 @@ void webui_music_session_cleanup(ws_connection_t *conn) {
    pthread_mutex_destroy(&state->write_mutex);
 
    free(state);
-
-   pthread_mutex_unlock(&s_music_teardown_mutex);
 
    OLOG_INFO("WebUI music: Session cleaned up");
 }

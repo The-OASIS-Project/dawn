@@ -73,9 +73,10 @@ typedef struct {
 
 /**
  * What a player calls on its output: each on the player's thread with no
- * player lock held.  An output may release its device on any halt and reopen
- * it on the next write: a seek halts and writes on, and every run of the
- * thread ends with halt(FLUSH).
+ * player lock held, except notify (below).  An output may release its device
+ * on any halt and reopen it on the next write: a seek halts and writes on,
+ * and every run of the thread ends with halt(FLUSH).  None runs once
+ * music_player_shutdown() has returned.
  */
 typedef struct {
    /** A track starts; may block (a device open).  The player has checked it
@@ -95,7 +96,10 @@ typedef struct {
    void (*write)(void *ctx, int16_t *pcm, size_t frames);
    /** The audio stops being written */
    void (*halt)(void *ctx, music_halt_t kind);
-   /** Tell the listener; never takes the player's control lock */
+   /** Tell the listener; never takes the player's control lock.  Also called
+    *  by a control request (music_player_notify_state/_error) on its own
+    *  thread holding the control lock, possibly at the same time as the
+    *  player's thread: it must be thread-safe. */
    void (*notify)(void *ctx, const music_event_t *ev);
 } music_output_ops_t;
 
@@ -108,6 +112,7 @@ typedef enum {
    MUSIC_OPEN_UNREACHABLE, /**< Its server couldn't be reached (told) */
    MUSIC_OPEN_CANCELLED,   /**< A stop or a newer request replaced it */
    MUSIC_OPEN_PENDING,     /**< Still opening when the wait ended */
+   MUSIC_OPEN_CLOSED,      /**< The player closed (its listener went) */
 } music_open_result_t;
 
 /** What music_player_resume_or_start() did */
@@ -150,22 +155,28 @@ music_player_t *music_player_create(const music_output_ops_t *ops,
                                     user_music_queue_t *uq);
 
 /**
- * @brief Stop the player's thread, before music_player_destroy()
+ * @brief Close the player for good: stop its thread
  *
- * Takes the control lock (ending an LLM tool's wait) and stops the thread.
- * Frees nothing.  The caller must make sure no control request starts it
- * again before the destroy.  Never call it holding a lock the output's
- * functions take.
+ * Takes the control lock (ending an LLM tool's wait), stops the thread and
+ * marks the player closed, so music_player_control_lock() refuses from then
+ * on and no output function runs again: the output can go once this
+ * returns.  Frees nothing; safe to call twice.  Never call it holding a lock
+ * the output's functions take.
  */
 void music_player_shutdown(music_player_t *p);
 
+/** @brief Take another reference: the player stays allocated until released */
+void music_player_ref(music_player_t *p);
+
 /**
- * @brief Free a player: closes its decoders, detaches from and releases the
- *        queue (takes its locks)
+ * @brief Drop a reference; the last one frees the player (closes its
+ *        decoders, detaches from and releases the queue)
  *
- * @pre music_player_shutdown() called, and nothing else can reach the player
+ * The last release must come after music_player_shutdown().  Release after
+ * music_player_control_unlock(), never while holding a player lock.  NULL is
+ * ignored.
  */
-void music_player_destroy(music_player_t *p);
+void music_player_release(music_player_t *p);
 
 /** The player's queue */
 user_music_queue_t *music_player_queue(const music_player_t *p);
@@ -183,8 +194,10 @@ int music_player_running(void);
  * @param preempt True on the one thread that must never wait (a network service thread):
  *        a holder waiting in music_player_await() stops waiting and releases
  *        it.  False on other threads, which wait.
+ * @return true with the lock held; false (not held) once the player is
+ *         closed (music_player_shutdown())
  */
-void music_player_control_lock(music_player_t *p, bool preempt);
+__attribute__((warn_unused_result)) bool music_player_control_lock(music_player_t *p, bool preempt);
 
 /** @brief Release a player's control lock */
 void music_player_control_unlock(music_player_t *p);
@@ -211,8 +224,11 @@ int music_player_play(music_player_t *p, const char *path, int hint, uint32_t *t
 /**
  * @brief A bare play: resume a pause, else start the track at the player's
  *        place when nothing is playing
+ *
+ * @param ticket_out Optional: when it STARTED, the request's ticket for
+ *        music_player_await()
  */
-music_resume_t music_player_resume_or_start(music_player_t *p);
+music_resume_t music_player_resume_or_start(music_player_t *p, uint32_t *ticket_out);
 
 /**
  * @brief Move the player's place one step, as next/previous do
@@ -270,10 +286,26 @@ void music_player_clear_queue(music_player_t *p, int *removed_out);
  */
 music_open_result_t music_player_await(music_player_t *p, uint32_t ticket, int timeout_ms);
 
+/**
+ * @brief Tell the output's listener the player's state changed (a control
+ *        request's own change)
+ */
+void music_player_notify_state(music_player_t *p);
+
+/** @brief Tell the output's listener a control request failed */
+void music_player_notify_error(music_player_t *p, music_error_t error, const char *message);
+
 /* ---- Without the control lock ------------------------------------------ */
 
-/** @brief Pause or resume (the thread stops writing, the track stays loaded) */
-void music_player_set_paused(music_player_t *p, bool paused);
+/**
+ * @brief Pause or resume (the thread stops writing, the track stays loaded)
+ *
+ * A pause with nothing playing changes nothing.
+ *
+ * @return true if it changed anything: pausing a playing track, or resuming
+ *         a paused one (state_mutex only, never the queue lock)
+ */
+bool music_player_set_paused(music_player_t *p, bool paused);
 
 /**
  * @brief Seek the playing track; the thread applies it between reads

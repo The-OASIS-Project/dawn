@@ -46,16 +46,12 @@
 #include "core/strbuf.h"
 #include "dawn.h"
 #include "dawn_error.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
+#include "tools/music_player_tool.h"
 #include "tools/music_search.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
-
-/* WebUI music integration - route commands to browser when originating from WebUI */
-#ifdef ENABLE_WEBUI
-#include "webui/webui_internal.h"
-#include "webui/webui_music.h"
-#endif
 
 /* ========== Constants ========== */
 
@@ -574,55 +570,63 @@ static bool local_pause(void) {
 
 static char *music_tool_callback_inner(const char *action, char *value, int *should_respond);
 
-#ifdef ENABLE_WEBUI
+/* No WebUI: no session has a player of its own */
+__attribute__((weak)) music_player_t *music_player_for_session(struct session *session) {
+   (void)session;
+   return NULL;
+}
+
 /*
- * A request from a WebUI session plays in that browser.  Runs without
- * s_music_mutex (the local player's lock): the session's own control lock
- * serializes it, and it may wait for a Plex track to open, which mustn't hold
- * up other users or the local speaker.  Returns true when handled.
+ * Run an action on a player (referenced; released here) and shape the reply:
+ * silent in direct-only mode, as the local path is.  Runs without
+ * s_music_mutex (the local player's lock): the player's control lock
+ * serializes it, and it may wait for a remote track to open, which mustn't
+ * hold up other users.  Returns false when the action doesn't need a player
+ * (a single search, the library), for the local handler.
  */
-static bool music_tool_webui(const char *action, char *value, int *should_respond, char **out) {
+static bool run_on_player(music_player_t *player,
+                          const char *action,
+                          char *value,
+                          int *should_respond,
+                          char **out) {
    bool direct_mode = (command_processing_mode == CMD_MODE_DIRECT_ONLY);
-   session_t *session = session_get_command_context();
-   if (!session || !session->client_data) {
+   char *result = NULL;
+   int ret = music_player_tool_execute(player, action, value, llm_tools_executing(), &result);
+   music_player_release(player);
+   if (ret == MUSIC_TOOL_NOT_HANDLED) {
+      free(result);
       return false;
    }
-   ws_connection_t *conn = (ws_connection_t *)session->client_data;
-
-   char *webui_result = NULL;
-   int ret = webui_music_execute_tool(conn, action, value, &webui_result);
-   if (ret == SUCCESS || ret > 0) {
-      if (ret == SUCCESS) {
-         OLOG_INFO("Music: Routed '%s' to WebUI session", action);
-      } else {
-         OLOG_WARNING("Music: WebUI handler failed for '%s'", action);
-      }
-      if (direct_mode) {
-         *should_respond = 0;
-         free(webui_result);
-         *out = NULL;
-      } else if (webui_result) {
-         *out = webui_result;
-      } else {
-         *out = strdup(ret == SUCCESS ? "OK" : "Music playback failed");
-      }
-      return true;
+   if (ret != SUCCESS) {
+      OLOG_WARNING("Music: '%s' failed on the player", action);
    }
-   /* ret == MUSIC_NOT_HANDLED: the local handler takes it */
-   free(webui_result);
-   OLOG_INFO("Music: WebUI deferred '%s' to local handler", action);
-   return false;
+   if (direct_mode) {
+      *should_respond = 0;
+      free(result);
+      *out = NULL;
+   } else {
+      *out = result ? result : strdup(ret == SUCCESS ? "OK" : "Music playback failed");
+   }
+   return true;
 }
-#endif
 
 static char *music_tool_callback(const char *action, char *value, int *should_respond) {
    *should_respond = 1;
-#ifdef ENABLE_WEBUI
-   char *webui_out = NULL;
-   if (music_tool_webui(action, value, should_respond, &webui_out)) {
-      return webui_out;
+   /* A session with a player of its own (a WebUI tab, a Tier-1 satellite) */
+   session_t *session = session_get_command_context();
+   music_player_t *player = music_player_for_session(session);
+   char *player_out = NULL;
+   if (player && run_on_player(player, action, value, should_respond, &player_out)) {
+      return player_out;
    }
-#endif
+   /* A WebUI or satellite session without one (a closed tab, a Tier-2
+    * satellite) never plays on the house speaker; a search or the library
+    * needs no player */
+   bool needs_player = strcmp(action, "search") != 0 && strcmp(action, "library") != 0;
+   if (!player && needs_player && session &&
+       (session->type == SESSION_TYPE_WEBUI || session->type == SESSION_TYPE_DAP2)) {
+      return strdup(TOOL_RESULT_ERROR_MARK "Music can't play from here; nothing changed");
+   }
    pthread_mutex_lock(&s_music_mutex);
    char *result = music_tool_callback_inner(action, value, should_respond);
    pthread_mutex_unlock(&s_music_mutex);

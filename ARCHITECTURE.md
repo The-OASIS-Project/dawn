@@ -203,7 +203,8 @@ Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 Layer 3 (Tools and channels) — deps: Layers 0-2
 ├── src/tools/                  Every tool and its service (email, calendar, Home Assistant, music, stocks,
 │                               documents, research, MCP bridge, ...); email_mime.c is the only file that uses
-│                               GMime
+│                               GMime; music_player_tool.c is the music tool's one body over a music player,
+│                               whichever player the caller has
 └── src/messaging/              Channel engine and provider drivers (Telegram, Slack, Discord, SMS)
 
 Layer 4 (Application) — deps: everything below
@@ -242,6 +243,9 @@ them as one Layer-2 unit, not as separate modules with a direction between them.
 | `src/core/ota_rollout.c` | the satellite transport | `ota_rollout_set_push_fn` |
 | `src/audio/flac_playback.c` (a track ended, or won't open) | the music tool, which picks the next track | `audio_playback_set_next_fn` |
 | `src/audio/music_player*.c` (render a track, say what changed) | its output, e.g. the WebUI stream (`webui_music.c`) | `music_output_ops_t`, given to `music_player_create()` |
+| `src/audio/music_queue.c` (a player changed a queue) | the WebUI, which tells the tabs playing it | `music_queue_set_listener` |
+| `src/tools/music_tool.c` (the player a session has of its own) | `webui_music.c` (a tab's or a Tier-1 satellite's player) | weak `music_player_for_session` |
+| `src/tools/volume_tool.c` (a session's own client) | `webui_music.c` (a tab's or a satellite's volume) | weak `volume_tool_for_session` |
 | lower-layer broadcasts (scheduler, jobs, calendar, phone, ...) | `webui_broadcasts.c` | weak no-op default, strong WebUI override |
 | `src/tools/email_service_move.c` (a move or undo changed a mailbox) | `webui_email_changed.c` (email_changed to every tab of the user) | weak `email_changed_notify` |
 | `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |
@@ -527,7 +531,13 @@ Per-module locks (scoped to a single subsystem):
                                                                      WebUI actions don't take it.  Track opens (Plex downloads) run
                                                                      only on the player's thread or its prefetch helper (which takes
                                                                      only state_mutex), never under it.  Output functions run on the
-                                                                     player's thread with no player lock held
+                                                                     player's thread with no player lock held, except notify, which a
+                                                                     control request may also call holding it.  Once
+                                                                     music_player_shutdown() has run, control_lock refuses; a reference
+                                                                     (music_player_ref/release) keeps the player allocated after its
+                                                                     output has gone, and the last release frees it with no player lock
+                                                                     held.  music_queue_announce() tells the queue's listener with no
+                                                                     queue lock held
     state_mutex + open_cond                                    — the pending-open slot and its ticket; the player's thread
                                                                      broadcasts open_cond when a ticket resolves, a preempting
                                                                      control broadcasts it (state_mutex taken, then released,
@@ -542,9 +552,12 @@ Per-module locks (scoped to a single subsystem):
                                                                      creation (webui_music_state_get_or_init, the music server), which
                                                                      takes s_user_queues_mutex and loads the queue, then attaches the
                                                                      state's place (queue_mutex); nothing takes those and then
-                                                                     teardown.  Cleanup stops the player (control_mutex, joining its
-                                                                     thread) before taking it, then under it unpublishes the state
-                                                                     and frees the player (detaching its place) and the state
+                                                                     teardown.  Cleanup takes it first, always, and unpublishes the
+                                                                     state; then, without it, closes the player (control_mutex,
+                                                                     joining its thread), drops its reference and frees the output.
+                                                                     music_player_for_session and volume_tool_for_session take it while
+                                                                     still holding s_conn_registry_mutex (proving the connection is
+                                                                     registered), then release the registry: registry → teardown
   music_queue::s_user_queues_mutex (src/audio/music_queue.c)    — the per-user queue registry (held across a queue's first load
                                                                      from music.db; taken under s_music_teardown_mutex, never the reverse)
   music_queue_db::s_db_mutex (src/audio/music_queue_db.c)      — the one music.db connection queues are saved through (LEAF: held

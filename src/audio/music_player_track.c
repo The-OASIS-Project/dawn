@@ -620,6 +620,10 @@ music_open_result_t music_player_await(music_player_t *p, uint32_t ticket, int t
          result = MUSIC_OPEN_CANCELLED; /* a newer request replaced it */
          break;
       }
+      if (atomic_load(&p->closing)) {
+         result = MUSIC_OPEN_CLOSED;
+         break;
+      }
       if (atomic_load(&p->control_cancel)) {
          break; /* a preempting request wants the lock; the open carries on */
       }
@@ -782,7 +786,7 @@ int music_player_play(music_player_t *p, const char *path, int hint, uint32_t *t
    return SUCCESS;
 }
 
-music_resume_t music_player_resume_or_start(music_player_t *p) {
+music_resume_t music_player_resume_or_start(music_player_t *p, uint32_t *ticket_out) {
    pthread_mutex_lock(&p->state_mutex);
    bool loaded = p->decoder != NULL || p->pending_path[0] != '\0';
    if (p->paused && loaded) {
@@ -817,8 +821,8 @@ music_resume_t music_player_resume_or_start(music_player_t *p) {
    if (!play_path[0]) {
       return MUSIC_RESUME_UNCHANGED; /* empty queue: nothing to start */
    }
-   return music_player_play(p, play_path, -1, NULL) == SUCCESS ? MUSIC_RESUME_STARTED
-                                                               : MUSIC_RESUME_START_FAILED;
+   return music_player_play(p, play_path, -1, ticket_out) == SUCCESS ? MUSIC_RESUME_STARTED
+                                                                     : MUSIC_RESUME_START_FAILED;
 }
 
 int music_player_remove(music_player_t *p, int index0, bool *start_failed) {

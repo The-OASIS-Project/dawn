@@ -708,6 +708,7 @@ set(DAWN_SOURCES
     src/audio/music_player.c
     src/audio/music_player_track.c
     src/audio/music_queue.c
+    src/audio/music_queue_apply.c
     src/audio/music_queue_db.c
     src/audio/music_source.c
     src/audio/plex_client.c
@@ -823,7 +824,6 @@ if(ENABLE_WEBUI)
         list(APPEND DAWN_SOURCES src/webui/webui_always_on.c)
         list(APPEND DAWN_SOURCES src/webui/webui_music.c)
         list(APPEND DAWN_SOURCES src/webui/webui_music_handlers.c)
-        list(APPEND DAWN_SOURCES src/webui/webui_music_tool.c)
         list(APPEND DAWN_SOURCES src/webui/webui_music_server.c)
     endif()
 endif()
