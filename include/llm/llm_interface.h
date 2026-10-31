@@ -292,9 +292,13 @@ llm_type_t llm_get_type(void);
 /**
  * @brief Get current cloud provider name (for display/logging)
  *
- * @return String name of provider ("OpenAI", "Claude", "Gemini", "None")
+ * @return String name of provider ("OpenAI", "Claude", "Gemini", "OpenRouter", "None")
  */
 const char *llm_get_cloud_provider_name(void);
+
+/* cloud_provider_to_string, cloud_provider_from_string and the llm_get_default_*_model
+ * getters below are defined in llm_selection.c, which needs only g_config, so code
+ * that names providers or models links without the provider stack. */
 
 /**
  * @brief Convert cloud provider enum to lowercase string
@@ -302,7 +306,7 @@ const char *llm_get_cloud_provider_name(void);
  * Use this instead of inline ternary chains for provider-to-string conversion.
  *
  * @param provider Cloud provider enum value
- * @return Lowercase string ("openai", "claude", "gemini", "none")
+ * @return Lowercase string ("openai", "claude", "gemini", "openrouter", "none")
  */
 const char *cloud_provider_to_string(cloud_provider_t provider);
 

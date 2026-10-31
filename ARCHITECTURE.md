@@ -478,6 +478,11 @@ Per-session locks (src/core/session_manager.c):
    copy under the lock; the order is session_manager_rwlock, ref_mutex, fd_mutex, then one of these)
 
 Per-module locks (scoped to a single subsystem):
+  g_config_rwlock (src/config/)                   — the live dawn.toml settings.  Readers copy what they need and
+                                                    release (llm_default_selection's snapshot).  A settings save holds
+                                                    it for write across config_write_toml(), which takes
+                                                    tool_registry::s_registry_mutex, so it comes BEFORE that mutex;
+                                                    never take it while holding the registry mutex
   auth_db mutex (src/auth/auth_db_core.c)         — SQLite serialization
   tool_registry::s_registry_mutex                 — tool lookup table
   embedding_engine::s_embed_mutex                 — embed provider serialization

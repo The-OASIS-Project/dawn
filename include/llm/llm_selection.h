@@ -1,0 +1,101 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * Which LLM a chat runs on, and whether it can.  A cloud API key is used only for
+ * the provider the user selected: DAWN never substitutes another vendor or guesses
+ * one, and when a selection can't run, the user is told why.
+ */
+
+#ifndef LLM_SELECTION_H
+#define LLM_SELECTION_H
+
+#include <stdbool.h>
+#include <stddef.h>
+
+#include "llm/llm_interface.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** The LLM a chat runs on. */
+typedef struct {
+   llm_type_t type;           /**< LLM_LOCAL or LLM_CLOUD */
+   cloud_provider_t provider; /**< The cloud provider; NONE when local */
+   /** The provider's default model, or for local the configured `[llm.local] model`
+    *  ("" = whatever the local server loaded) */
+   char model[LLM_MODEL_NAME_MAX];
+} llm_selection_t;
+
+/**
+ * @brief The default selection, from dawn.toml.
+ *
+ * `[llm] type = "local"` → local.  `"cloud"` with a provider named in
+ * `[llm.cloud] provider` → that provider and its default model.  `"cloud"` with no
+ * provider selected (empty) → local: no key is used until the user picks a
+ * provider.  Never looks at keys.  Reads type, provider and model as one snapshot
+ * under the config read lock, so a settings save can't be seen half applied; must
+ * not be called with g_config_rwlock held.
+ *
+ * @param[out] out The default selection
+ */
+void llm_default_selection(llm_selection_t *out);
+
+/**
+ * @brief Put a selection into a session config.
+ *
+ * Sets type, provider and model; leaves reasoning, endpoint and the rest as they are.
+ */
+void llm_selection_apply(const llm_selection_t *sel, session_llm_config_t *cfg);
+
+/**
+ * @brief Whether a config can run, and if not, why.
+ *
+ * Local runs (whether the local server answers is found out when it's called).
+ * LLM_UNDEFINED is the default selection, read at the time of the call: a caller
+ * that will act on the answer should pass the config it resolved, so the check and
+ * the request see the same selection.  A cloud provider needs its own API key; cloud
+ * with no provider, or a provider value DAWN doesn't know, is refused.  Must not be
+ * called with g_config_rwlock held.
+ *
+ * @param cfg        The config to check
+ * @param[out] reason A sentence for the user (names the provider, never a key);
+ *                    may be NULL
+ * @param reason_len Size of @p reason
+ * @return 0 when it can run, 1 when it can't
+ */
+int llm_selection_problem(const session_llm_config_t *cfg, char *reason, size_t reason_len);
+
+/**
+ * @brief Whether @p provider has an API key in secrets.toml (or the environment).
+ *
+ * For showing which providers can be picked; never for choosing one.
+ */
+bool llm_provider_has_key(cloud_provider_t provider);
+
+/**
+ * @brief The provider's name for the user ("OpenAI", "Claude", "Gemini",
+ *        "OpenRouter"; "None" otherwise).
+ */
+const char *cloud_provider_display_name(cloud_provider_t provider);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LLM_SELECTION_H */

@@ -44,6 +44,7 @@
 #include "dawn_error.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_context.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_tool_loop.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
@@ -682,67 +683,7 @@ const char *llm_get_cloud_provider_name(void) {
       provider = config.cloud_provider;
    }
 
-   switch (provider) {
-      case CLOUD_PROVIDER_OPENAI:
-         return "OpenAI";
-      case CLOUD_PROVIDER_CLAUDE:
-         return "Claude";
-      case CLOUD_PROVIDER_GEMINI:
-         return "Gemini";
-      case CLOUD_PROVIDER_OPENROUTER:
-         return "OpenRouter";
-      case CLOUD_PROVIDER_NONE:
-         return "None";
-      default:
-         return "Unknown";
-   }
-}
-
-const char *cloud_provider_to_string(cloud_provider_t provider) {
-   switch (provider) {
-      case CLOUD_PROVIDER_OPENAI:
-         return "openai";
-      case CLOUD_PROVIDER_CLAUDE:
-         return "claude";
-      case CLOUD_PROVIDER_GEMINI:
-         return "gemini";
-      case CLOUD_PROVIDER_OPENROUTER:
-         return "openrouter";
-      case CLOUD_PROVIDER_NONE:
-      default:
-         return "none";
-   }
-}
-
-int cloud_provider_from_string(const char *str,
-                               llm_type_t *type_out,
-                               cloud_provider_t *provider_out) {
-   if (str == NULL || type_out == NULL || provider_out == NULL) {
-      return FAILURE;
-   }
-
-   /* "local"/"ollama" -> local server; the rest are cloud providers.  Accepts the
-    * "anthropic" alias for Claude (kept for parity with resolve_silent_observe_config). */
-   if (strcmp(str, "local") == 0 || strcmp(str, "ollama") == 0) {
-      *type_out = LLM_LOCAL;
-      *provider_out = CLOUD_PROVIDER_NONE;
-   } else if (strcmp(str, "openai") == 0) {
-      *type_out = LLM_CLOUD;
-      *provider_out = CLOUD_PROVIDER_OPENAI;
-   } else if (strcmp(str, "claude") == 0 || strcmp(str, "anthropic") == 0) {
-      *type_out = LLM_CLOUD;
-      *provider_out = CLOUD_PROVIDER_CLAUDE;
-   } else if (strcmp(str, "gemini") == 0) {
-      *type_out = LLM_CLOUD;
-      *provider_out = CLOUD_PROVIDER_GEMINI;
-   } else if (strcmp(str, "openrouter") == 0) {
-      *type_out = LLM_CLOUD;
-      *provider_out = CLOUD_PROVIDER_OPENROUTER;
-   } else {
-      return FAILURE; /* unknown -> leave outputs untouched */
-   }
-
-   return SUCCESS;
+   return cloud_provider_display_name(provider);
 }
 
 int llm_set_cloud_provider(cloud_provider_t provider) {
@@ -862,62 +803,6 @@ const char *llm_get_model_name(void) {
       return llm_get_default_openrouter_model();
    }
    return "None";
-}
-
-const char *llm_get_default_openai_model(void) {
-   int idx = g_config.llm.cloud.openai_default_model_idx;
-   int count = g_config.llm.cloud.openai_models_count;
-
-   /* Fallback to first model if index out of bounds or no models */
-   if (count <= 0) {
-      return LLM_DEFAULT_OPENAI_MODEL;
-   }
-   if (idx < 0 || idx >= count) {
-      idx = 0;
-   }
-   return g_config.llm.cloud.openai_models[idx];
-}
-
-const char *llm_get_default_claude_model(void) {
-   int idx = g_config.llm.cloud.claude_default_model_idx;
-   int count = g_config.llm.cloud.claude_models_count;
-
-   /* Fallback to first model if index out of bounds or no models */
-   if (count <= 0) {
-      return LLM_DEFAULT_CLAUDE_MODEL;
-   }
-   if (idx < 0 || idx >= count) {
-      idx = 0;
-   }
-   return g_config.llm.cloud.claude_models[idx];
-}
-
-const char *llm_get_default_gemini_model(void) {
-   int idx = g_config.llm.cloud.gemini_default_model_idx;
-   int count = g_config.llm.cloud.gemini_models_count;
-
-   /* Fallback to first model if index out of bounds or no models */
-   if (count <= 0) {
-      return LLM_DEFAULT_GEMINI_MODEL;
-   }
-   if (idx < 0 || idx >= count) {
-      idx = 0;
-   }
-   return g_config.llm.cloud.gemini_models[idx];
-}
-
-const char *llm_get_default_openrouter_model(void) {
-   int idx = g_config.llm.cloud.openrouter_default_model_idx;
-   int count = g_config.llm.cloud.openrouter_models_count;
-
-   /* Fallback to first model if index out of bounds or no models */
-   if (count <= 0) {
-      return LLM_DEFAULT_OPENROUTER_MODEL;
-   }
-   if (idx < 0 || idx >= count) {
-      idx = 0;
-   }
-   return g_config.llm.cloud.openrouter_models[idx];
 }
 
 bool llm_openrouter_slug_for(cloud_provider_t provider,

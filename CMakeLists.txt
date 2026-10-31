@@ -621,6 +621,7 @@ set(DAWN_SOURCES
 
     # LLM subsystem
     src/llm/llm_interface.c
+    src/llm/llm_selection.c
     src/llm/llm_turn_result.c
     src/llm/llm_model_version.c
     src/llm/llm_silent_observe.c

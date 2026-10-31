@@ -2216,6 +2216,14 @@ dawn_add_unit_test(test_config_validate
    LIBS    unity
    LABEL   ci)
 
+# Which LLM a chat runs on, and whether it can: a key only for the selected provider.
+dawn_add_unit_test(test_llm_selection
+   SOURCES test_llm_selection.c
+           ${SRC_ROOT}/src/llm/llm_selection.c
+           ${SRC_ROOT}/src/config/config_defaults.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 dawn_add_unit_test(test_config_roundtrip
    SOURCES test_config_roundtrip.c test_config_roundtrip_stub.c
            ${SRC_ROOT}/src/config/config_parser.c
@@ -2464,6 +2472,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/llm/llm_interface.c
+           ${SRC_ROOT}/src/llm/llm_selection.c
            ${SRC_ROOT}/src/llm/llm_turn_result.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
@@ -2590,6 +2599,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/llm/llm_interface.c
+           ${SRC_ROOT}/src/llm/llm_selection.c
            ${SRC_ROOT}/src/llm/llm_turn_result.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
@@ -2711,6 +2721,7 @@ dawn_add_unit_test(test_memory_supersede_kinds
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/llm/llm_interface.c
+           ${SRC_ROOT}/src/llm/llm_selection.c
            ${SRC_ROOT}/src/llm/llm_turn_result.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
