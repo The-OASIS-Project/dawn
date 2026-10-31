@@ -308,7 +308,7 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_STRING("DAWN_MQTT_TLS_CERT_PATH", config->mqtt.tls_cert_path);
    ENV_STRING("DAWN_MQTT_TLS_KEY_PATH", config->mqtt.tls_key_path);
    ENV_STRING("MQTT_USERNAME", secrets->mqtt_username);
-   ENV_STRING("MQTT_PASSWORD", secrets->mqtt_password);
+   ENV_SECRET("MQTT_PASSWORD", secrets->mqtt_password);
 
    /* Home Assistant */
    ENV_SECRET("HOME_ASSISTANT_TOKEN", secrets->home_assistant_token);
