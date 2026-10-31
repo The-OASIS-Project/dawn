@@ -46,13 +46,14 @@ static char s_loaded_secrets_path[CONFIG_PATH_MAX] = { 0 };
 /* =============================================================================
  * Helper Macros for Safe String Copying
  * ============================================================================= */
-#define PARSE_STRING(table, key, dest)             \
-   do {                                            \
-      toml_datum_t d = toml_string_in(table, key); \
-      if (d.ok) {                                  \
-         safe_strscpy(dest, d.u.s);                \
-         free(d.u.s);                              \
-      }                                            \
+#define PARSE_STRING(table, key, dest)                  \
+   do {                                                 \
+      toml_datum_t d = toml_string_in(table, key);      \
+      if (d.ok) {                                       \
+         if (safe_strscpy(dest, d.u.s) >= sizeof(dest)) \
+            utf8_trim_incomplete(dest);                 \
+         free(d.u.s);                                   \
+      }                                                 \
    } while (0)
 
 #define PARSE_INT(table, key, dest)             \

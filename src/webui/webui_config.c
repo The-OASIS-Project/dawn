@@ -291,8 +291,8 @@ void handle_get_config(ws_connection_t *conn) {
       if (json_object_object_get_ex(obj, key, &_val)) {   \
          const char *_str = json_object_get_string(_val); \
          if (_str) {                                      \
-            safe_strscpy(dest, _str);                     \
-            (dest)[sizeof(dest) - 1] = '\0';              \
+            if (safe_strscpy(dest, _str) >= sizeof(dest)) \
+               utf8_trim_incomplete(dest);                \
          }                                                \
       }                                                   \
    } while (0)

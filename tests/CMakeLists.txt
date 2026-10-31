@@ -2287,6 +2287,7 @@ dawn_add_unit_test(test_config_roundtrip
            ${SRC_ROOT}/src/config/config_parser.c
            ${SRC_ROOT}/src/config/config_env.c
            ${SRC_ROOT}/src/config/config_defaults.c
+           ${SRC_ROOT}/common/src/utils/string_utils.c
            ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    unity json-c m pthread
    LABEL   ci)

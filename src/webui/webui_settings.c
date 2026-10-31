@@ -105,14 +105,30 @@ void handle_get_my_settings(ws_connection_t *conn) {
    json_object_put(response);
 }
 
-/* A text field of @p payload into @p dest, when present and a string; a
- * character the size cut in half is dropped (the text goes into prompts). */
-static void take_text(json_object *payload, const char *key, char *dest, size_t size) {
+/* A set_my_settings payload, and why it can't be saved (empty while it can). */
+typedef struct {
+   json_object *payload;
+   char err[128];
+} settings_form_t;
+
+/* A text field of the form into @p dest, when present and a string.  Text that
+ * doesn't fit leaves @p dest as it was and, for the first such field, names
+ * @p label in form->err: the save then fails rather than cut the user's text. */
+static void take_text(settings_form_t *form,
+                      const char *key,
+                      const char *label,
+                      char *dest,
+                      size_t size) {
    json_object *field = NULL;
-   if (json_object_object_get_ex(payload, key, &field) &&
-       json_object_is_type(field, json_type_string)) {
-      safe_strncpy(dest, json_object_get_string(field), size);
-      utf8_trim_incomplete(dest);
+   if (!json_object_object_get_ex(form->payload, key, &field) ||
+       !json_object_is_type(field, json_type_string)) {
+      return;
+   }
+   const char *text = json_object_get_string(field);
+   if (strlen(text) < size) {
+      safe_strncpy(dest, text, size);
+   } else if (!form->err[0]) {
+      snprintf(form->err, sizeof(form->err), "%s is too long (at most %zu bytes)", label, size - 1);
    }
 }
 
@@ -141,10 +157,14 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
    json_object_object_add(response, "type", json_object_new_string("set_my_settings_response"));
    json_object *resp_payload = json_object_new_object();
 
-   /* The stored settings are the base: a field the payload leaves out keeps
-    * its value.  Without them nothing is saved (a save would blank them). */
+   /* The stored settings and identity are the base: a field the payload leaves
+    * out keeps its value.  Without them nothing is saved (a save would blank
+    * them). */
    auth_user_settings_t settings;
-   if (auth_db_get_user_settings(conn->auth_user_id, &settings) != AUTH_DB_SUCCESS) {
+   auth_user_identity_t identity;
+   memset(&identity, 0, sizeof(identity));
+   if (auth_db_get_user_settings(conn->auth_user_id, &settings) != AUTH_DB_SUCCESS ||
+       auth_db_get_user_identity(conn->auth_user_id, &identity) != AUTH_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Failed to load settings"));
@@ -156,20 +176,23 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
 
    /* Update with any provided fields */
    json_object *field_obj;
+   settings_form_t form = { .payload = payload };
 
-   take_text(payload, "persona_values", settings.persona_values, sizeof(settings.persona_values));
+   take_text(&form, "persona_values", "Your values", settings.persona_values,
+             sizeof(settings.persona_values));
    take_mode(payload, "persona_values_mode", settings.persona_values_mode,
              sizeof(settings.persona_values_mode));
-   take_text(payload, "persona_voice", settings.persona_voice, sizeof(settings.persona_voice));
+   take_text(&form, "persona_voice", "Your voice", settings.persona_voice,
+             sizeof(settings.persona_voice));
    take_mode(payload, "persona_voice_mode", settings.persona_voice_mode,
              sizeof(settings.persona_voice_mode));
    /* The older single text (clearing it, from this page) and its mode (an
     * older page still sends it). */
-   take_text(payload, "persona_description", settings.persona_description,
-             sizeof(settings.persona_description));
+   take_text(&form, "persona_description", "Your persona from an earlier version",
+             settings.persona_description, sizeof(settings.persona_description));
    take_mode(payload, "persona_mode", settings.persona_mode, sizeof(settings.persona_mode));
 
-   take_text(payload, "location", settings.location, sizeof(settings.location));
+   take_text(&form, "location", "Location", settings.location, sizeof(settings.location));
 
    if (json_object_object_get_ex(payload, "timezone", &field_obj)) {
       /* "" is the server's zone; anything else must be a zone (stored by its
@@ -211,20 +234,33 @@ void handle_set_my_settings(ws_connection_t *conn, struct json_object *payload) 
       }
    }
 
-   /* v44 identity fields — read existing values, overlay any provided
-    * fields, write back.  Persisted on the users table (not user_settings)
-    * via auth_db_set_user_identity which NULLIFs empty strings. */
-   /* Not written when the stored ones can't be read (a write would blank
-    * them). */
-   auth_user_identity_t identity;
-   memset(&identity, 0, sizeof(identity));
-   if (auth_db_get_user_identity(conn->auth_user_id, &identity) == AUTH_DB_SUCCESS) {
-      take_text(payload, "real_name", identity.real_name, sizeof(identity.real_name));
-      take_text(payload, "preferred_address", identity.preferred_address,
-                sizeof(identity.preferred_address));
-      take_text(payload, "identity_aliases", identity.identity_aliases,
-                sizeof(identity.identity_aliases));
-      auth_db_set_user_identity(conn->auth_user_id, &identity);
+   /* v44 identity fields — overlay any provided fields on the stored ones,
+    * write back.  Persisted on the users table (not user_settings) via
+    * auth_db_set_user_identity which NULLIFs empty strings. */
+   take_text(&form, "real_name", "Real name", identity.real_name, sizeof(identity.real_name));
+   take_text(&form, "preferred_address", "Ways to address you", identity.preferred_address,
+             sizeof(identity.preferred_address));
+   take_text(&form, "identity_aliases", "Other names / aliases", identity.identity_aliases,
+             sizeof(identity.identity_aliases));
+
+   /* Nothing is saved: the user hears which field, and keeps the edit. */
+   if (form.err[0]) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error", json_object_new_string(form.err));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn, response);
+      json_object_put(response);
+      return;
+   }
+
+   if (auth_db_set_user_identity(conn->auth_user_id, &identity) != AUTH_DB_SUCCESS) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Failed to save settings"));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn, response);
+      json_object_put(response);
+      return;
    }
 
    /* Phase 2 entity-merge: if real_name is now set and no user-self

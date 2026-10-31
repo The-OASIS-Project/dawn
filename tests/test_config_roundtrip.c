@@ -117,6 +117,21 @@ static void test_persona_halves_round_trip(void) {
    TEST_ASSERT_EQUAL_INT(1, test_stub_warning_count());
 }
 
+/* Text longer than the field is cut at a whole character: 683 three-byte
+ * characters (2049 bytes) keep 682 of them, not 682 and a third. */
+static void test_persona_cut_keeps_whole_characters(void) {
+   FILE *fp = fopen(RT_PATH, "w");
+   TEST_ASSERT_NOT_NULL(fp);
+   fputs("[persona]\nvalues = \"", fp);
+   for (int i = 0; i < 683; i++) {
+      fputs("\xe8\xaa\x9e", fp); /* U+8A9E */
+   }
+   fputs("\"\n", fp);
+   fclose(fp);
+   TEST_ASSERT_EQUAL_INT(0, config_parse_file(RT_PATH, &g_read));
+   TEST_ASSERT_EQUAL_size_t(682 * 3, strlen(g_read.persona.values));
+}
+
 /* --- [jobs] ---------------------------------------------------------------- */
 
 static void test_jobs_roundtrip(void) {
@@ -655,6 +670,7 @@ int main(void) {
    test_tmp_path(RT_PATH, sizeof(RT_PATH), "test_config_roundtrip.toml");
    UNITY_BEGIN();
    RUN_TEST(test_persona_halves_round_trip);
+   RUN_TEST(test_persona_cut_keeps_whole_characters);
    RUN_TEST(test_jobs_roundtrip);
    RUN_TEST(test_memory_extraction_effort_roundtrip);
    RUN_TEST(test_memory_extraction_effort_clamps);

@@ -47,7 +47,8 @@
    do {                                                      \
       const char *val = getenv(env_name);                    \
       if (val) {                                             \
-         safe_strscpy(dest, val);                            \
+         if (safe_strscpy(dest, val) >= sizeof(dest))        \
+            utf8_trim_incomplete(dest);                      \
          OLOG_INFO("Config override: %s=%s", env_name, val); \
       }                                                      \
    } while (0)
