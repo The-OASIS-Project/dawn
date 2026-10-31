@@ -60,6 +60,8 @@ llm_testing/scripts/archive/
 # Local docs never committed: planning (TODO/DONE), unshipped designs, private notes
 docs/private/
 .cleanup-state.md
+# Per-machine assistant instructions (Claude Code reads CLAUDE.local.md as a local overlay)
+CLAUDE.local.md
 
 # Local-only git hook extensions.  Chained from pre-commit.hook /
 # pre-push.hook if present and executable.  For per-developer policies that
