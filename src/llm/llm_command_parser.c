@@ -276,11 +276,11 @@ void llm_persona_effective(char *out, size_t size) {
    free(joined);
 }
 
-/* Every built-in persona DAWN has shipped, as the settings panel showed it
- * (the name in the %s).  Each one may sit in a dawn.toml as [persona]
- * description, saved there with an unrelated setting.  Before changing
- * AI_PERSONA_VALUES / AI_PERSONA_VOICE (prompts.h), paste the current text
- * here; delete this table once no supported upgrade predates this release. */
+/* The built-in personas the settings panel used to prefill (the name in the
+ * %s), so a dawn.toml may hold a copy as [persona] description, saved there
+ * with an unrelated setting.  The panel no longer prefills, so the table is
+ * closed: a new built-in needs no entry, and these texts are frozen history.
+ * Delete the table once no supported upgrade predates this release. */
 static const char *const s_builtin_personas[] = {
    /* February to April 2026 */
    "Your name is %s. Iron-Man-style AI assistant. Female voice; witty, playful, and kind. Address "
