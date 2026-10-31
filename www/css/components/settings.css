@@ -482,6 +482,29 @@
    margin-bottom: 0.5rem;
 }
 
+/* DAWN has no global .hidden: the warning, Clear buttons and the older-text
+ * block toggle it here. */
+.persona-config .hidden {
+   display: none;
+}
+
+.persona-half + .persona-half {
+   border-top: 1px solid rgba(255, 255, 255, 0.1);
+   padding-top: 1.25rem;
+}
+
+.persona-half + .persona-half,
+.persona-legacy {
+   margin-top: 1.25rem;
+}
+
+.persona-half-heading {
+   font-size: 0.9375rem;
+   font-weight: 600;
+   color: var(--text-primary);
+   margin: 0 0 0.25rem 0;
+}
+
 .persona-heading {
    font-size: 0.9375rem;
    font-weight: 600;
@@ -505,8 +528,10 @@
    margin-bottom: 0.5rem;
 }
 
-.base-persona-header label {
-   margin-bottom: 0;
+.base-persona-label {
+   font-size: 0.8125rem;
+   color: var(--text-secondary);
+   font-weight: 500;
 }
 
 .btn-link {
@@ -535,7 +560,7 @@
    overflow: hidden;
 }
 
-#base-persona-text {
+.base-persona-text {
    white-space: pre-wrap;
 }
 
@@ -555,7 +580,8 @@
 }
 
 .base-persona.expanded {
-   max-height: 500px;
+   max-height: 60vh;
+   overflow-y: auto;
 }
 
 /* Persona mode selection */
@@ -571,6 +597,7 @@
 }
 
 .persona-mode-option {
+   position: relative;
    display: flex;
    flex-direction: column;
    gap: 0.25rem;
@@ -590,8 +617,23 @@
    border-left-color: var(--accent);
 }
 
+/* Visually hidden, still focusable and announced (the option is the control). */
 .persona-mode-option input[type='radio'] {
-   display: none;
+   position: absolute;
+   opacity: 0;
+   width: 1px;
+   height: 1px;
+   pointer-events: none;
+}
+
+.persona-mode-option:has(input:focus-visible) {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+.persona-mode-label {
+   font-size: 0.8125rem;
+   color: var(--text-secondary);
 }
 
 .mode-label {
@@ -639,49 +681,6 @@
 
 .char-count.limit {
    color: var(--error);
-}
-
-/* Persona preview */
-.persona-preview {
-   margin-top: 1rem;
-}
-
-.persona-preview label {
-   display: block;
-   margin-bottom: 0.5rem;
-   font-size: 0.8125rem;
-   color: var(--text-secondary);
-   font-style: italic;
-}
-
-.preview-content {
-   background: var(--accent-subtle);
-   border: 1px dashed var(--accent-dim);
-   border-radius: 8px;
-   padding: 0.75rem 1rem;
-   font-size: 0.875rem;
-   color: rgba(255, 255, 255, 0.8);
-   line-height: 1.5;
-   max-height: 200px;
-   overflow-y: auto;
-}
-
-#preview-base,
-#preview-custom {
-   white-space: pre-wrap;
-}
-
-#preview-base {
-   color: rgba(255, 255, 255, 0.7);
-}
-
-.preview-separator {
-   border-top: 1px dashed rgba(255, 255, 255, 0.2);
-   margin: 0.75rem 0;
-}
-
-#preview-custom {
-   color: var(--accent);
 }
 
 @media (max-width: 480px) {

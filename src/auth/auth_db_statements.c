@@ -153,16 +153,20 @@ static const auth_db_stmt_def_t s_stmts[] = {
    /* User settings statements */
    { "get_user_settings",
      "SELECT persona_description, persona_mode, location, timezone, units, "
-     "theme FROM user_settings WHERE user_id = ?",
+     "theme, persona_values, persona_values_mode, persona_voice, persona_voice_mode "
+     "FROM user_settings WHERE user_id = ?",
      &s_db.stmt_get_user_settings },
    { "set_user_settings",
      "INSERT INTO user_settings (user_id, persona_description, persona_mode, location, timezone, "
-     "units, theme, updated_at) "
-     "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+     "units, theme, persona_values, persona_values_mode, persona_voice, persona_voice_mode, "
+     "updated_at) "
+     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
      "ON CONFLICT(user_id) DO UPDATE SET "
      "persona_description=excluded.persona_description, persona_mode=excluded.persona_mode, "
      "location=excluded.location, timezone=excluded.timezone, units=excluded.units, "
-     "theme=excluded.theme, updated_at=excluded.updated_at",
+     "theme=excluded.theme, persona_values=excluded.persona_values, "
+     "persona_values_mode=excluded.persona_values_mode, persona_voice=excluded.persona_voice, "
+     "persona_voice_mode=excluded.persona_voice_mode, updated_at=excluded.updated_at",
      &s_db.stmt_set_user_settings },
 
    /* Conversation statements.  anchor_date (v42) carries the conversation's

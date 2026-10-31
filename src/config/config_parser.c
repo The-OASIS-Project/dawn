@@ -46,13 +46,14 @@ static char s_loaded_secrets_path[CONFIG_PATH_MAX] = { 0 };
 /* =============================================================================
  * Helper Macros for Safe String Copying
  * ============================================================================= */
-#define PARSE_STRING(table, key, dest)             \
-   do {                                            \
-      toml_datum_t d = toml_string_in(table, key); \
-      if (d.ok) {                                  \
-         safe_strscpy(dest, d.u.s);                \
-         free(d.u.s);                              \
-      }                                            \
+#define PARSE_STRING(table, key, dest)                  \
+   do {                                                 \
+      toml_datum_t d = toml_string_in(table, key);      \
+      if (d.ok) {                                       \
+         if (safe_strscpy(dest, d.u.s) >= sizeof(dest)) \
+            utf8_trim_incomplete(dest);                 \
+         free(d.u.s);                                   \
+      }                                                 \
    } while (0)
 
 #define PARSE_INT(table, key, dest)             \
@@ -215,10 +216,16 @@ static void parse_persona(toml_table_t *table, persona_config_t *config) {
    if (!table)
       return;
 
-   static const char *const known_keys[] = { "description", NULL };
+   static const char *const known_keys[] = { "description", "values", "voice", NULL };
    warn_unknown_keys(table, "persona", known_keys);
 
    PARSE_STRING(table, "description", config->description);
+   PARSE_STRING(table, "values", config->values);
+   PARSE_STRING(table, "voice", config->voice);
+   if (config->description[0] && (config->values[0] || config->voice[0])) {
+      OLOG_WARNING("[persona] description replaces values and voice; move it into them and "
+                   "remove it");
+   }
 }
 
 static void parse_localization(toml_table_t *table, localization_config_t *config) {

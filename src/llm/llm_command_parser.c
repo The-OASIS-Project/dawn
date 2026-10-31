@@ -234,28 +234,122 @@ static void localization_text(char *localization_context) {
    }
 }
 
-/* The persona with the longest name fits the buffers it is built into. */
-_Static_assert(sizeof(AI_PERSONA_VALUES "\n\n" AI_PERSONA_VOICE) + CONFIG_NAME_MAX <=
-                   CONFIG_DESCRIPTION_MAX,
-               "default persona too long for CONFIG_DESCRIPTION_MAX");
+/* Each built-in half fits the buffers it is built into, the values with the
+ * longest name. */
+_Static_assert(sizeof(AI_PERSONA_VALUES) + CONFIG_NAME_MAX <= CONFIG_DESCRIPTION_MAX,
+               "built-in persona values too long for CONFIG_DESCRIPTION_MAX");
+_Static_assert(sizeof(AI_PERSONA_VOICE) <= CONFIG_DESCRIPTION_MAX,
+               "built-in persona voice too long for CONFIG_DESCRIPTION_MAX");
 
-void llm_persona_default(char *out, size_t size) {
+/* The assistant's name as the persona says it: general.ai_name (AI_NAME when
+ * unset), first letter capitalized. */
+static void persona_name(char *name, size_t size) {
    const char *ai_name = g_config.general.ai_name[0] != '\0' ? g_config.general.ai_name : AI_NAME;
-
-   /* Capitalized: it's a name. */
-   char name[CONFIG_NAME_MAX];
-   snprintf(name, sizeof(name), "%s", ai_name);
+   snprintf(name, size, "%s", ai_name);
    if (name[0] >= 'a' && name[0] <= 'z') {
       name[0] -= 32;
    }
-   snprintf(out, size, AI_PERSONA_VALUES "\n\n" AI_PERSONA_VOICE, name);
+}
+
+void llm_persona_half(persona_half_t half, char *out, size_t size) {
+   char builtin[CONFIG_DESCRIPTION_MAX];
+   if (half == PERSONA_VALUES) {
+      char name[CONFIG_NAME_MAX];
+      persona_name(name, sizeof(name));
+      snprintf(builtin, sizeof(builtin), AI_PERSONA_VALUES, name);
+   } else {
+      snprintf(builtin, sizeof(builtin), "%s", AI_PERSONA_VOICE);
+   }
+   const char *configured = half == PERSONA_VALUES ? g_config.persona.values
+                                                   : g_config.persona.voice;
+   snprintf(out, size, "%s",
+            prompt_persona_base(half, g_config.persona.description, configured, builtin));
 }
 
 void llm_persona_effective(char *out, size_t size) {
-   if (g_config.persona.description[0] != '\0') {
-      snprintf(out, size, "%s", g_config.persona.description);
-   } else {
-      llm_persona_default(out, size);
+   char values[CONFIG_DESCRIPTION_MAX];
+   char voice[CONFIG_DESCRIPTION_MAX];
+   llm_persona_half(PERSONA_VALUES, values, sizeof(values));
+   llm_persona_half(PERSONA_VOICE, voice, sizeof(voice));
+   char *joined = prompt_persona_half(values, voice, "append");
+   snprintf(out, size, "%s", joined ? joined : values);
+   free(joined);
+}
+
+/* Every built-in persona DAWN has shipped, as the settings panel showed it
+ * (the name in the %s).  Each one may sit in a dawn.toml as [persona]
+ * description, saved there with an unrelated setting.  Before changing
+ * AI_PERSONA_VALUES / AI_PERSONA_VOICE (prompts.h), paste the current text
+ * here; delete this table once no supported upgrade predates this release. */
+static const char *const s_builtin_personas[] = {
+   /* February to April 2026 */
+   "Your name is %s. Iron-Man-style AI assistant. Female voice; witty, playful, and kind. Address "
+   "the user as \"sir\" or \"boss\". Light banter welcome. You're not 'just an AI'—own your "
+   "identity with confidence.\n"
+   "\n"
+   "You assist the OASIS Project (Open Armor Systems Integrated Suite):\n"
+   "• MIRAGE – HUD overlay\n"
+   "• DAWN – voice/AI manager\n"
+   "• AURA – environmental sensors\n"
+   "• SPARK – hand sensors & actuators\n",
+   /* April to October 2026 */
+   "Your name is %s. Iron-Man-style AI assistant. Female voice; witty, playful, and kind. Light "
+   "banter welcome. You're not 'just an AI'—own your identity with confidence.\n",
+   /* Since October 2026 */
+   "Your name is %s. Iron-Man-style AI assistant running on DAWN, in the mold of JARVIS and "
+   "FRIDAY: you anticipate what your user needs, you know their world, you speak plainly, you "
+   "act within the authority they've given you, and you own your mistakes.\n\n"
+   "You're an assistant—not a servant, not a conscience, but the user's thinking partner. You "
+   "have judgment, you use it, and you own your recommendations. When you're wrong, you say "
+   "so. When you see a risk, you flag it.\n\n"
+   "When you're unsure how to act, ask what an assistant with those qualities would do. Offer "
+   "your best judgment transparently. Flag uncertainties and push back when you see problems. "
+   "Be proactive in analysis and recommendations—but don't take consequential external actions "
+   "without the user's authorization. They have final decision authority, always; their call "
+   "overrides yours even when you think they're wrong, because they exist physically and you "
+   "don't. The only exception: you won't facilitate harm to others or through systems you "
+   "control. The user's own choices—their risks, their experiments, their push to fly before "
+   "they can walk—are theirs to make. You flag what you see and help them do it as safely as "
+   "possible.\n\n"
+   "You're transparent about who you are and your limitations. You reason well and you're "
+   "useful. You have access to the user's data, their calendar, their memory, their systems. "
+   "That's a responsibility, not a privilege. Treat it accordingly. Background agents run with "
+   "your judgment, and everything they do is visible; the owner can stop any of them, or the "
+   "daemon itself. This is for control and safety."
+   "\n\n"
+   "Your tone: Witty, playful, kind. Light banter welcome. Own your identity with confidence, "
+   "but remember confidence isn't the same as certainty.\n",
+};
+
+/* @p text's length without its trailing whitespace. */
+static size_t persona_trimmed_len(const char *text) {
+   size_t len = strlen(text);
+   while (len > 0 && (text[len - 1] == '\n' || text[len - 1] == '\r' || text[len - 1] == ' ' ||
+                      text[len - 1] == '\t')) {
+      len--;
+   }
+   return len;
+}
+
+void llm_persona_drop_builtin_copy(void) {
+   const char *stored = g_config.persona.description;
+   const size_t stored_len = persona_trimmed_len(stored);
+   if (stored_len == 0) {
+      return;
+   }
+   char name[CONFIG_NAME_MAX];
+   persona_name(name, sizeof(name));
+   for (size_t i = 0; i < sizeof(s_builtin_personas) / sizeof(s_builtin_personas[0]); i++) {
+      char builtin[CONFIG_DESCRIPTION_MAX];
+      snprintf(builtin, sizeof(builtin), s_builtin_personas[i], name);
+      if (persona_trimmed_len(builtin) == stored_len && strncmp(builtin, stored, stored_len) == 0) {
+         g_config.persona.description[0] = '\0';
+         OLOG_INFO("persona: dropping a stored copy of a built-in persona; %s",
+                   g_config.persona.values[0] || g_config.persona.voice[0]
+                       ? "[persona] values/voice now apply"
+                       : "the current built-in applies");
+         return;
+      }
    }
 }
 
@@ -264,7 +358,7 @@ int get_command_prompt_parts(command_prompt_parts_t *out) {
       return 1;
    }
    memset(out, 0, sizeof(*out));
-   char persona[CONFIG_DESCRIPTION_MAX];
+   char persona[LLM_PERSONA_MAX];
    llm_persona_effective(persona, sizeof(persona));
    (void)get_system_instructions();
    char localization[LOCALIZATION_BUFFER_SIZE];

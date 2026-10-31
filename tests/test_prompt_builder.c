@@ -51,6 +51,7 @@
 #include "core/session_focus.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
+#include "prompts.h"
 #include "unity.h"
 
 /* The session a turn runs on: the prompt builder's argument (build_focus_block
@@ -551,15 +552,16 @@ static void test_panel_not_told_when_disabled(void) {
  * who gave neither gets no block. */
 static void test_identity_address_without_a_real_name(void) {
    char *t = prompt_identity_text("", "sir", "");
-   TEST_ASSERT_EQUAL_STRING("\n\n## User Identity\nThe user prefers to be addressed as sir.\n", t);
+   TEST_ASSERT_EQUAL_STRING("\n\n## User Identity\nWhen you address the user directly, use: sir; "
+                            "most replies don't need one.\n",
+                            t);
    free(t);
    TEST_ASSERT_NULL(prompt_identity_text("", "", "Ace"));
    t = prompt_identity_text("Pat Doe", "boss", "Pat\n pat \nPD");
    TEST_ASSERT_EQUAL_STRING(
-       "\n\n## User Identity\nYou are speaking with Pat Doe. They prefer to be "
-       "addressed as boss. They may also be referred to as: Pat, PD. Use "
-       "this information to recognize when memory facts or extracted "
-       "entities refer to them.\n",
+       "\n\n## User Identity\nYou are speaking with Pat Doe. When you address them directly, "
+       "use: boss; most replies don't need one. They may also be referred to as: Pat, PD. Use "
+       "this information to recognize when memory facts or extracted entities refer to them.\n",
        t);
    free(t);
    t = prompt_identity_text("Pat Doe", "", " \n");
@@ -570,8 +572,180 @@ static void test_identity_address_without_a_real_name(void) {
    free(t);
 }
 
+/* Preferred address is a comma-separated choice: trimmed, empties dropped,
+ * repeats (case aside) kept once; one form reads "use:", several "use any
+ * of:"; nothing left means no address sentence, and with no real name, no
+ * block. */
+static void test_identity_address_list(void) {
+   static const struct {
+      const char *address, *forms; /* forms: NULL for no address sentence */
+   } cases[] = {
+      { "Jon", "use: Jon" },
+      { " sir ,boss, Sir,  chief ", "use any of: sir, boss, chief" },
+      { " , ,", NULL },
+      { "Jon,", "use: Jon" },
+   };
+   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      char want[512];
+      char *t = prompt_identity_text("", cases[i].address, "");
+      if (cases[i].forms) {
+         snprintf(want, sizeof(want),
+                  "\n\n## User Identity\nWhen you address the user directly, %s; most replies "
+                  "don't need one.\n",
+                  cases[i].forms);
+         TEST_ASSERT_EQUAL_STRING(want, t);
+      } else {
+         TEST_ASSERT_NULL(t);
+      }
+      free(t);
+
+      t = prompt_identity_text("Pat Doe", cases[i].address, "");
+      if (cases[i].forms) {
+         snprintf(want, sizeof(want),
+                  "\n\n## User Identity\nYou are speaking with Pat Doe. When you address them "
+                  "directly, %s; most replies don't need one. Use this information to recognize "
+                  "when memory facts or extracted entities refer to them.\n",
+                  cases[i].forms);
+      } else {
+         snprintf(want, sizeof(want),
+                  "\n\n## User Identity\nYou are speaking with Pat Doe. Use this information to "
+                  "recognize when memory facts or extracted entities refer to them.\n");
+      }
+      TEST_ASSERT_EQUAL_STRING(want, t);
+      free(t);
+   }
+}
+
+/* The persona's composition, both levels, through the pure helpers in the
+ * order llm_persona_half() and the prompt builder apply them (this test
+ * doesn't link llm_command_parser.c or prompt_builder.c; test_llm_persona
+ * checks the server half from g_config).  NULL: unset. */
+typedef struct {
+   const char *description, *values, *voice;                          /* [persona] */
+   const char *my_values, *my_values_mode, *my_voice, *my_voice_mode; /* the user's */
+} persona_case_t;
+
+static char *compose_persona(const persona_case_t *c) {
+   char builtin_values[CONFIG_DESCRIPTION_MAX];
+   snprintf(builtin_values, sizeof(builtin_values), AI_PERSONA_VALUES, "Friday");
+   const char *values_base = prompt_persona_base(PERSONA_VALUES, c->description, c->values,
+                                                 builtin_values);
+   const char *voice_base = prompt_persona_base(PERSONA_VOICE, c->description, c->voice,
+                                                AI_PERSONA_VOICE);
+   char *values = prompt_persona_half(values_base, c->my_values, c->my_values_mode);
+   char *voice = prompt_persona_half(voice_base, c->my_voice, c->my_voice_mode);
+   TEST_ASSERT_NOT_NULL(values);
+   TEST_ASSERT_NOT_NULL(voice);
+   char *persona = prompt_persona_half(values, voice, "append");
+   free(values);
+   free(voice);
+   TEST_ASSERT_NOT_NULL(persona);
+   return persona;
+}
+
+static void assert_persona(const char *want, const persona_case_t *c) {
+   char *got = compose_persona(c);
+   TEST_ASSERT_EQUAL_STRING(want, got);
+   free(got);
+}
+
+/* The built-in persona as the prompt section holds it: the compiled halves
+ * joined, its trailing newline trimmed (the section trims it anyway). */
+static void builtin_persona(char *out, size_t size) {
+   snprintf(out, size, AI_PERSONA_VALUES "\n\n" AI_PERSONA_VOICE, "Friday");
+   out[strlen(out) - 1] = '\0';
+}
+
+/* (a) Nothing set: the compiled built-in, byte for byte. */
+static void test_persona_default_bytes(void) {
+   char want[2 * CONFIG_DESCRIPTION_MAX];
+   builtin_persona(want, sizeof(want));
+   const persona_case_t c = { 0 };
+   assert_persona(want, &c);
+}
+
+/* (b) A configured values half replaces the built-in values only. */
+static void test_persona_global_values(void) {
+   const persona_case_t c = { .values = "You are Jarvis." };
+   char want[CONFIG_DESCRIPTION_MAX];
+   snprintf(want, sizeof(want), "You are Jarvis.\n\n%s", AI_PERSONA_VOICE);
+   want[strlen(want) - 1] = '\0';
+   assert_persona(want, &c);
+}
+
+/* A server half that is only whitespace is unset: the built-in stays. */
+static void test_persona_blank_server_half_is_unset(void) {
+   char want[2 * CONFIG_DESCRIPTION_MAX];
+   builtin_persona(want, sizeof(want));
+   const persona_case_t c = { .description = " \n", .values = " ", .voice = "\t" };
+   assert_persona(want, &c);
+}
+
+/* (c) A user who replaces only the voice keeps the values base. */
+static void test_persona_user_replaces_voice(void) {
+   char want[2 * CONFIG_DESCRIPTION_MAX];
+   snprintf(want, sizeof(want), AI_PERSONA_VALUES "\n\nTalk like a pirate.", "Friday");
+   const persona_case_t c = { .my_voice = "Talk like a pirate.", .my_voice_mode = "replace" };
+   assert_persona(want, &c);
+}
+
+/* (d) A user who adds to both: each after a blank line, the user's text
+ * trimmed, the voice base's trailing newline trimmed at the seam. */
+static void test_persona_user_appends_both(void) {
+   char voice_base[CONFIG_DESCRIPTION_MAX];
+   snprintf(voice_base, sizeof(voice_base), "%s", AI_PERSONA_VOICE);
+   voice_base[strlen(voice_base) - 1] = '\0'; /* the voice's own trailing newline */
+   char want[3 * CONFIG_DESCRIPTION_MAX];
+   snprintf(want, sizeof(want), AI_PERSONA_VALUES "\n\nBe brief.\n\n%s\n\nSwear a little.",
+            "Friday", voice_base);
+   const persona_case_t c = { .my_values = "  Be brief.\n",
+                              .my_values_mode = "append",
+                              .my_voice = "Swear a little.",
+                              .my_voice_mode = "append" };
+   assert_persona(want, &c);
+}
+
+/* (e) The older description is the whole persona; a user's half composes
+ * with it without dropping either (a values replace is theirs to make). */
+static void test_persona_global_description(void) {
+   const persona_case_t alone = { .description = "You are a butler.\n",
+                                  .values = "ignored",
+                                  .voice = "ignored" };
+   assert_persona("You are a butler.\n", &alone);
+   const persona_case_t voice_append = { .description = "You are a butler.\n",
+                                         .my_voice = "Very dry.",
+                                         .my_voice_mode = "append" };
+   assert_persona("You are a butler.\n\nVery dry.", &voice_append);
+   const persona_case_t voice_replace = { .description = "You are a butler.\n",
+                                          .my_voice = "Very dry.",
+                                          .my_voice_mode = "replace" };
+   assert_persona("You are a butler.\n\nVery dry.", &voice_replace);
+   const persona_case_t values_replace = { .description = "You are a butler.\n",
+                                           .my_values = "You are a pirate.",
+                                           .my_values_mode = "replace" };
+   assert_persona("You are a pirate.", &values_replace);
+}
+
+/* (f) Whitespace-only user text is unset, in either mode. */
+static void test_persona_blank_user_text_is_unset(void) {
+   char want[2 * CONFIG_DESCRIPTION_MAX];
+   builtin_persona(want, sizeof(want));
+   const persona_case_t c = { .my_values = " \n\t",
+                              .my_values_mode = "replace",
+                              .my_voice = "\n",
+                              .my_voice_mode = "append" };
+   assert_persona(want, &c);
+}
+
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_persona_default_bytes);
+   RUN_TEST(test_persona_global_values);
+   RUN_TEST(test_persona_blank_server_half_is_unset);
+   RUN_TEST(test_persona_user_replaces_voice);
+   RUN_TEST(test_persona_user_appends_both);
+   RUN_TEST(test_persona_global_description);
+   RUN_TEST(test_persona_blank_user_text_is_unset);
    RUN_TEST(test_focus_disabled_short_circuits);
    RUN_TEST(test_focus_unauthenticated_short_circuits);
    RUN_TEST(test_focus_empty_turn_text_short_circuits);
@@ -587,6 +761,7 @@ int main(void) {
    RUN_TEST(test_focus_filter_rejection_no_items);
    RUN_TEST(test_cross_turn_no_content_leak);
    RUN_TEST(test_identity_address_without_a_real_name);
+   RUN_TEST(test_identity_address_list);
    RUN_TEST(test_failed_then_successful_refresh_no_carry);
    RUN_TEST(test_disabled_after_enabled_returns_nothing);
    RUN_TEST(test_memory_cycle_1000x_reusing_the_prompt);

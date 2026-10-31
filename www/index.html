@@ -2595,88 +2595,253 @@ Format rules:
                            Changes here are saved with the &ldquo;Save Settings&rdquo; button at the
                            bottom of this panel.
                         </p>
-                        <!-- AI Persona Configuration -->
+                        <!-- AI Persona: two halves, each the server's base plus the
+                             user's own text (added to it, or in its place) -->
                         <div class="persona-config">
                            <h4 class="persona-heading">AI Persona</h4>
 
-                           <!-- Base Persona (read-only, collapsible) -->
-                           <div class="settings-group">
-                              <div class="base-persona-header">
-                                 <label>Base Persona</label>
-                                 <button type="button" id="toggle-base-persona" class="btn-link">
-                                    Show full
-                                 </button>
-                              </div>
-                              <div id="base-persona-display" class="base-persona collapsed">
-                                 <span id="base-persona-text">Loading...</span>
-                              </div>
-                           </div>
-
-                           <!-- Mode Selection -->
-                           <div class="settings-group persona-mode-group">
-                              <label>How should your customization be applied?</label>
-                              <div class="persona-mode-options">
-                                 <label class="persona-mode-option selected" data-mode="append">
-                                    <input
-                                       type="radio"
-                                       name="persona_mode"
-                                       value="append"
-                                       checked
-                                    />
-                                    <span class="mode-label">Add to base persona</span>
-                                    <span class="mode-desc"
-                                       >Your text will be appended as additional context.</span
-                                    >
-                                 </label>
-                                 <label class="persona-mode-option" data-mode="replace">
-                                    <input type="radio" name="persona_mode" value="replace" />
-                                    <span class="mode-label">Replace base persona</span>
-                                    <span class="mode-desc"
-                                       >Your text will be used instead of the base.</span
-                                    >
-                                 </label>
-                              </div>
-                              <p class="setting-hint replace-warning hidden">
-                                 ⚠ The base persona contains important behavior guidelines. Only
-                                 replace if you want to start from scratch.
+                           <!-- Values: the server's half, then the user's text for it -->
+                           <div class="persona-half" data-half="values">
+                              <h5 class="persona-half-heading">Values</h5>
+                              <p class="setting-hint">
+                                 Who the assistant is: its role, its judgment and its limits.
                               </p>
+
+                              <div class="settings-group">
+                                 <div class="base-persona-header">
+                                    <span class="base-persona-label" id="base-values-label"
+                                       >Base values</span
+                                    >
+                                    <button
+                                       type="button"
+                                       class="btn-link persona-base-toggle"
+                                       aria-expanded="false"
+                                       aria-controls="base-values-display"
+                                    >
+                                       Show full
+                                    </button>
+                                 </div>
+                                 <div
+                                    id="base-values-display"
+                                    class="base-persona collapsed"
+                                    role="region"
+                                    aria-labelledby="base-values-label"
+                                 >
+                                    <span id="base-values-text" class="base-persona-text"
+                                       >Loading...</span
+                                    >
+                                 </div>
+                              </div>
+
+                              <div class="settings-group persona-mode-group">
+                                 <span class="persona-mode-label" id="persona-values-mode-label"
+                                    >How should your text be applied?</span
+                                 >
+                                 <div
+                                    class="persona-mode-options"
+                                    role="radiogroup"
+                                    aria-labelledby="persona-values-mode-label"
+                                 >
+                                    <label
+                                       class="persona-mode-option selected"
+                                       data-mode="append"
+                                       for="persona-values-append"
+                                    >
+                                       <input
+                                          type="radio"
+                                          id="persona-values-append"
+                                          name="persona_values_mode"
+                                          value="append"
+                                          checked
+                                       />
+                                       <span class="mode-label">Add to base</span>
+                                       <span class="mode-desc"
+                                          >Your text is added after the base.</span
+                                       >
+                                    </label>
+                                    <label
+                                       class="persona-mode-option"
+                                       data-mode="replace"
+                                       for="persona-values-replace"
+                                    >
+                                       <input
+                                          type="radio"
+                                          id="persona-values-replace"
+                                          name="persona_values_mode"
+                                          value="replace"
+                                       />
+                                       <span class="mode-label">Replace base</span>
+                                       <span class="mode-desc"
+                                          >Your text is used instead of the base.</span
+                                       >
+                                    </label>
+                                 </div>
+                                 <p
+                                    class="setting-hint replace-warning hidden"
+                                    id="persona-values-warning"
+                                 >
+                                    ⚠ The base values hold important behavior guidelines. Only
+                                    replace them if you want to start from scratch.
+                                 </p>
+                              </div>
+
+                              <div class="settings-group">
+                                 <div class="persona-input-header">
+                                    <label for="my-persona-values">Your values</label>
+                                    <div class="persona-input-controls">
+                                       <button
+                                          type="button"
+                                          class="btn-link persona-clear hidden"
+                                          aria-label="Clear your values"
+                                          aria-controls="my-persona-values"
+                                       >
+                                          Clear
+                                       </button>
+                                       <span class="char-count">0 / 2047</span>
+                                    </div>
+                                 </div>
+                                 <textarea
+                                    id="my-persona-values"
+                                    class="persona-text"
+                                    name="persona_values"
+                                    rows="4"
+                                    maxlength="2047"
+                                    placeholder="Examples:&#10;• You know I run a woodworking shop&#10;• Ask before ordering anything"
+                                 ></textarea>
+                              </div>
                            </div>
 
-                           <!-- Custom Persona Input -->
-                           <div class="settings-group">
+                           <!-- Voice: the server's half, then the user's text for it -->
+                           <div class="persona-half" data-half="voice">
+                              <h5 class="persona-half-heading">Voice</h5>
+                              <p class="setting-hint">
+                                 How the assistant talks: tone, humor, formality.
+                              </p>
+
+                              <div class="settings-group">
+                                 <div class="base-persona-header">
+                                    <span class="base-persona-label" id="base-voice-label"
+                                       >Base voice</span
+                                    >
+                                    <button
+                                       type="button"
+                                       class="btn-link persona-base-toggle"
+                                       aria-expanded="false"
+                                       aria-controls="base-voice-display"
+                                    >
+                                       Show full
+                                    </button>
+                                 </div>
+                                 <div
+                                    id="base-voice-display"
+                                    class="base-persona collapsed"
+                                    role="region"
+                                    aria-labelledby="base-voice-label"
+                                 >
+                                    <span id="base-voice-text" class="base-persona-text"
+                                       >Loading...</span
+                                    >
+                                 </div>
+                              </div>
+
+                              <div class="settings-group persona-mode-group">
+                                 <span class="persona-mode-label" id="persona-voice-mode-label"
+                                    >How should your text be applied?</span
+                                 >
+                                 <div
+                                    class="persona-mode-options"
+                                    role="radiogroup"
+                                    aria-labelledby="persona-voice-mode-label"
+                                 >
+                                    <label
+                                       class="persona-mode-option selected"
+                                       data-mode="append"
+                                       for="persona-voice-append"
+                                    >
+                                       <input
+                                          type="radio"
+                                          id="persona-voice-append"
+                                          name="persona_voice_mode"
+                                          value="append"
+                                          checked
+                                       />
+                                       <span class="mode-label">Add to base</span>
+                                       <span class="mode-desc"
+                                          >Your text is added after the base.</span
+                                       >
+                                    </label>
+                                    <label
+                                       class="persona-mode-option"
+                                       data-mode="replace"
+                                       for="persona-voice-replace"
+                                    >
+                                       <input
+                                          type="radio"
+                                          id="persona-voice-replace"
+                                          name="persona_voice_mode"
+                                          value="replace"
+                                       />
+                                       <span class="mode-label">Replace base</span>
+                                       <span class="mode-desc"
+                                          >Your text is used instead of the base.</span
+                                       >
+                                    </label>
+                                 </div>
+                              </div>
+
+                              <div class="settings-group">
+                                 <div class="persona-input-header">
+                                    <label for="my-persona-voice">Your voice</label>
+                                    <div class="persona-input-controls">
+                                       <button
+                                          type="button"
+                                          class="btn-link persona-clear hidden"
+                                          aria-label="Clear your voice"
+                                          aria-controls="my-persona-voice"
+                                       >
+                                          Clear
+                                       </button>
+                                       <span class="char-count">0 / 2047</span>
+                                    </div>
+                                 </div>
+                                 <textarea
+                                    id="my-persona-voice"
+                                    class="persona-text"
+                                    name="persona_voice"
+                                    rows="4"
+                                    maxlength="2047"
+                                    placeholder="Examples:&#10;• Speak with a slight British accent&#10;• Be more formal and call me Dr. Smith"
+                                 ></textarea>
+                              </div>
+                           </div>
+
+                           <!-- The older single persona text, shown only while it's set -->
+                           <div class="settings-group persona-legacy hidden" id="persona-legacy">
                               <div class="persona-input-header">
-                                 <label for="my-persona">Your Customization</label>
+                                 <label for="my-persona"
+                                    >Your persona from an earlier version</label
+                                 >
                                  <div class="persona-input-controls">
                                     <button
                                        type="button"
-                                       id="clear-persona-btn"
-                                       class="btn-link hidden"
+                                       class="btn-link persona-clear hidden"
+                                       aria-label="Clear your earlier persona"
+                                       aria-controls="my-persona"
                                     >
                                        Clear
                                     </button>
-                                    <span id="persona-char-count" class="char-count">0 / 2047</span>
+                                    <span class="char-count">0 / 2047</span>
                                  </div>
                               </div>
+                              <p class="setting-hint" id="persona-legacy-note"></p>
                               <textarea
                                  id="my-persona"
+                                 class="persona-text"
                                  name="persona_description"
                                  rows="5"
                                  maxlength="2047"
-                                 placeholder="Examples:&#10;• Speak with a slight British accent&#10;• Be more formal and address me as Dr. Smith&#10;• You're an expert in woodworking"
+                                 aria-describedby="persona-legacy-note"
                               ></textarea>
-                           </div>
-
-                           <!-- Effective Persona Preview -->
-                           <div id="persona-preview" class="persona-preview">
-                              <label
-                                 >Effective Persona
-                                 <span id="preview-label-suffix">(what the AI sees)</span></label
-                              >
-                              <div class="preview-content">
-                                 <div id="preview-base"></div>
-                                 <div id="preview-separator" class="preview-separator hidden"></div>
-                                 <div id="preview-custom" class="hidden"></div>
-                              </div>
                            </div>
                         </div>
 
@@ -2718,17 +2883,18 @@ Format rules:
                         </div>
 
                         <div class="settings-group">
-                           <label for="my-preferred-address">Preferred form of address</label>
+                           <label for="my-preferred-address">Ways to address you</label>
                            <input
                               type="text"
                               id="my-preferred-address"
                               name="preferred_address"
-                              maxlength="64"
-                              placeholder="e.g., Jon"
+                              maxlength="63"
+                              placeholder="sir, boss, Jon"
+                              aria-describedby="my-preferred-address-hint"
                            />
-                           <p class="setting-hint">
-                              What you'd like DAWN to call you. E.g. "Jon" if your real name is
-                              "Jonathan Smith".
+                           <p class="setting-hint" id="my-preferred-address-hint">
+                              Comma-separated, e.g. sir, boss, Jon. DAWN uses one now and then, not
+                              in every reply.
                            </p>
                         </div>
 

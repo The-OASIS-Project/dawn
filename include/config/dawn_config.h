@@ -111,7 +111,9 @@ typedef struct {
  * Persona Configuration
  * ============================================================================= */
 typedef struct {
-   char description[CONFIG_DESCRIPTION_MAX]; /* System prompt (can be large) */
+   char description[CONFIG_DESCRIPTION_MAX]; /* Older whole persona: replaces values and voice */
+   char values[CONFIG_DESCRIPTION_MAX];      /* Who the assistant is ("" = built-in) */
+   char voice[CONFIG_DESCRIPTION_MAX];       /* How it talks ("" = built-in) */
 } persona_config_t;
 
 /* =============================================================================

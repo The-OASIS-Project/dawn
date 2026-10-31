@@ -19,11 +19,22 @@
  * part of the project and are adopted by the project author(s).
  */
 
+#ifndef LLM_COMMAND_PARSER_H
+#define LLM_COMMAND_PARSER_H
+
 #include <stdbool.h>
 #include <stddef.h>
 
-#ifndef LLM_COMMAND_PARSER_H
-#define LLM_COMMAND_PARSER_H
+#include "config/dawn_config.h"
+#include "core/prompt_parts.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** Room for a whole persona: both halves, each up to CONFIG_DESCRIPTION_MAX,
+ *  and the blank line between them. */
+#define LLM_PERSONA_MAX (2 * CONFIG_DESCRIPTION_MAX + 2)
 
 /* Header text for the TOOL DEFAULTS line (llm_command_parser.c):
  * the configured location / units / timezone, for a caller with no user
@@ -96,28 +107,40 @@ int is_vision_enabled_for_current_llm(void);
 void invalidate_system_instructions(void);
 
 /**
- * @brief Write the default persona (AI_PERSONA_VALUES then AI_PERSONA_VOICE,
- *        prompts.h) into @p out
+ * @brief Write the server's half @p half of the persona into @p out
  *
- * Uses general.ai_name (AI_NAME when unset), first letter capitalized.  Not the
- * effective persona: a [persona] description, when set, replaces this.  Shown by
- * the settings panels; the prompt build uses the same text.
+ * The configured [persona] half when set, else the built-in one; while the
+ * older [persona] description is set it is the values half and the voice half
+ * is empty (prompt_persona_base).  A user's own half builds on this.
  *
- * @param out  Buffer to write into (always NUL-terminated)
- * @param size Size of @p out
- */
-void llm_persona_default(char *out, size_t size);
-
-/**
- * @brief Write the persona every prompt opens with into @p out
- *
- * The [persona] description when set, else llm_persona_default().  Built on
- * each call, never cached, so a new description reaches the next prompt.
- *
+ * @param half PERSONA_VALUES or PERSONA_VOICE
  * @param out  Buffer to write into, CONFIG_DESCRIPTION_MAX for no truncation
  * @param size Size of @p out
  */
+void llm_persona_half(persona_half_t half, char *out, size_t size);
+
+/**
+ * @brief Write the server's persona, both halves joined, into @p out
+ *
+ * Built on each call, never cached, so a config change reaches the next
+ * prompt.  A user's own halves are applied by the prompt builder, not here.
+ *
+ * @param out  Buffer to write into, LLM_PERSONA_MAX for no truncation
+ * @param size Size of @p out
+ */
 void llm_persona_effective(char *out, size_t size);
+
+/**
+ * @brief Clear a [persona] description that is a copy of a built-in persona
+ *
+ * The settings panel used to fill the description box with the built-in text,
+ * so saving any setting stored that day's built-in as the description, where
+ * it hid every later one.  A description equal to one of the built-ins DAWN
+ * has shipped (with general.ai_name in it, trailing whitespace ignored) is
+ * cleared, once, with a log line; the next settings save drops it from
+ * dawn.toml.  Call once, after the config is loaded.
+ */
+void llm_persona_drop_builtin_copy(void);
 
 /* =============================================================================
  * Voice-session prompt directives (effective-value accessors)
@@ -133,5 +156,9 @@ void llm_persona_effective(char *out, size_t size);
 const char *voice_directive_effective(void);
 const char *voice_directive_webui_effective(void);
 const char *asr_disambiguation_hint_effective(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif  // LLM_COMMAND_PARSER_H

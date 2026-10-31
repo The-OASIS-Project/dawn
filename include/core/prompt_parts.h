@@ -187,17 +187,52 @@ char *prompt_turn_head(const struct tm *tm_info, const char *zone);
 
 /**
  * @brief The "## User Identity" block appended after the persona: who the
- *        user is, how to address them, other names they go by.
+ *        user is, the ways to address them, other names they go by.
  *
- * Aliases are newline-separated (whitespace stripped, empties dropped,
- * deduped case-insensitively, emitted comma-joined).  Without a real name the
- * block is the address alone: aliases name the user for memory matching,
- * which needs the name.  Each argument may be NULL or empty (unset).
+ * @p address is comma-separated (the forms to choose from, used now and
+ * then), @p aliases newline-separated; in both each entry is trimmed,
+ * empties dropped and repeats (case aside) kept once, and the list is
+ * emitted comma-joined.  Without a real name the block is the address alone:
+ * aliases name the user for memory matching, which needs the name.  Each
+ * argument may be NULL or empty (unset).
  *
- * @return Heap text (caller frees), or NULL when neither a real name nor an
- *         address is set (or on allocation failure)
+ * @return Heap text (caller frees), or NULL when there is no real name and
+ *         no address form (or on allocation failure)
  */
 char *prompt_identity_text(const char *real_name, const char *address, const char *aliases);
+
+/** The persona's two halves: who the assistant is, and how it talks. */
+typedef enum {
+   PERSONA_VALUES,
+   PERSONA_VOICE
+} persona_half_t;
+
+/**
+ * @brief The server's half @p half of the persona
+ *
+ * With @p description set (the older single text, a whole persona) it is the
+ * values half and the voice half is empty; otherwise @p configured when set,
+ * else @p builtin.  Whitespace-only counts as unset; any argument may be NULL.
+ *
+ * @return One of the arguments, or "" (never NULL)
+ */
+const char *prompt_persona_base(persona_half_t half,
+                                const char *description,
+                                const char *configured,
+                                const char *builtin);
+
+/**
+ * @brief One half of a user's persona: @p base with the user's text @p mine
+ *        added after a blank line, or in its place when @p mode is "replace"
+ *
+ * @p mine is trimmed; NULL or whitespace-only leaves @p base exactly as it
+ * is.  The base's trailing whitespace is trimmed only where the user's text
+ * joins it.  @p base and @p mode may be NULL.  Also joins the two halves
+ * (values as @p base, voice as @p mine, "append").
+ *
+ * @return Heap text (caller frees), or NULL on allocation failure
+ */
+char *prompt_persona_half(const char *base, const char *mine, const char *mode);
 
 /** The pieces of a block DAWN frames, at most. */
 #define PROMPT_FRAMED_PIECES 5

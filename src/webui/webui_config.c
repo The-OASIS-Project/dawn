@@ -188,13 +188,6 @@ void handle_get_config(ws_connection_t *conn) {
       json_object_object_add(payload, "config", config_json);
    }
 
-   /* Add effective default persona (built-in fallback when config field is empty) */
-   {
-      char default_persona[CONFIG_DESCRIPTION_MAX];
-      llm_persona_default(default_persona, sizeof(default_persona));
-      json_object_object_add(payload, "default_persona", json_object_new_string(default_persona));
-   }
-
    /* Add secrets status (only is_set flags, never actual values) */
    json_object *secrets_status = secrets_to_json_status(config_get_secrets());
    if (secrets_status) {
@@ -291,14 +284,18 @@ void handle_get_config(ws_connection_t *conn) {
    OLOG_INFO("WebUI: Sent configuration to client");
 }
 
-/* Helper to safely copy string from JSON to config field */
+/* Helper to safely copy string from JSON to config field.  safe_strscpy
+ * already ends the text; the final store stays so the static analyzer sees
+ * dest written on every path (it follows safe_strncpy's NULL check into the
+ * caller otherwise). */
 #define JSON_TO_CONFIG_STR(obj, key, dest)                \
    do {                                                   \
       struct json_object *_val;                           \
       if (json_object_object_get_ex(obj, key, &_val)) {   \
          const char *_str = json_object_get_string(_val); \
          if (_str) {                                      \
-            safe_strscpy(dest, _str);                     \
+            if (safe_strscpy(dest, _str) >= sizeof(dest)) \
+               utf8_trim_incomplete(dest);                \
             (dest)[sizeof(dest) - 1] = '\0';              \
          }                                                \
       }                                                   \
@@ -366,6 +363,8 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
    /* [persona] */
    if (json_object_object_get_ex(payload, "persona", &section)) {
       JSON_TO_CONFIG_STR(section, "description", config->persona.description);
+      JSON_TO_CONFIG_STR(section, "values", config->persona.values);
+      JSON_TO_CONFIG_STR(section, "voice", config->persona.voice);
    }
 
    /* [localization] */

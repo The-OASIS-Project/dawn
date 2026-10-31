@@ -400,8 +400,12 @@ int auth_db_unlock_user(const char *username);
  * Empty strings indicate "use global default".
  */
 typedef struct {
-   char persona_description[AUTH_PERSONA_DESC_MAX]; /**< Custom AI persona */
+   char persona_description[AUTH_PERSONA_DESC_MAX]; /**< Older whole persona (before v112) */
    char persona_mode[AUTH_PERSONA_MODE_MAX];        /**< "append" (default) or "replace" */
+   char persona_values[AUTH_PERSONA_DESC_MAX];      /**< The persona's values half */
+   char persona_values_mode[AUTH_PERSONA_MODE_MAX]; /**< "append" (default) or "replace" */
+   char persona_voice[AUTH_PERSONA_DESC_MAX];       /**< The persona's voice half */
+   char persona_voice_mode[AUTH_PERSONA_MODE_MAX];  /**< "append" (default) or "replace" */
    char location[AUTH_LOCATION_MAX];                /**< User's location */
    char timezone[AUTH_TIMEZONE_MAX];                /**< IANA zone, or "" for the server's */
    char units[AUTH_UNITS_MAX];                      /**< "metric" or "imperial" */

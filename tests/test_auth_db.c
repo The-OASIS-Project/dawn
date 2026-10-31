@@ -1083,6 +1083,93 @@ static void test_user_settings_set_and_get(void) {
    TEST_ASSERT_EQUAL_STRING("imperial", loaded.units);
 }
 
+/* The persona's two halves round-trip with their modes; a user with no row
+ * gets both modes "append". */
+static void test_user_settings_persona_halves(void) {
+   const int user_id = create_and_get_id("persona_halves", "hash", false);
+
+   auth_user_settings_t loaded;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user_settings(user_id, &loaded));
+   TEST_ASSERT_EQUAL_STRING("", loaded.persona_values);
+   TEST_ASSERT_EQUAL_STRING("append", loaded.persona_values_mode);
+   TEST_ASSERT_EQUAL_STRING("", loaded.persona_voice);
+   TEST_ASSERT_EQUAL_STRING("append", loaded.persona_voice_mode);
+
+   auth_user_settings_t settings = loaded;
+   safe_strscpy(settings.persona_values, "Tell me the truth.\n\nEven when it stings.");
+   safe_strscpy(settings.persona_values_mode, "replace");
+   safe_strscpy(settings.persona_voice, "Talk like a pirate.");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_settings(user_id, &settings));
+
+   memset(&loaded, 0, sizeof(loaded));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user_settings(user_id, &loaded));
+   TEST_ASSERT_EQUAL_STRING("Tell me the truth.\n\nEven when it stings.", loaded.persona_values);
+   TEST_ASSERT_EQUAL_STRING("replace", loaded.persona_values_mode);
+   TEST_ASSERT_EQUAL_STRING("Talk like a pirate.", loaded.persona_voice);
+   TEST_ASSERT_EQUAL_STRING("append", loaded.persona_voice_mode);
+   TEST_ASSERT_EQUAL_STRING("", loaded.persona_description);
+   TEST_ASSERT_EQUAL_STRING("append", loaded.persona_mode);
+}
+
+/* v112 on a v111 user_settings table (built here in that shape): the four
+ * columns appear, both modes read "append", the older single text and mode
+ * are untouched, and a rerun changes nothing. */
+static void test_v112_persona_halves(void) {
+   const int replacer = create_and_get_id("legacy_replace", "hash", false);
+   const int appender = create_and_get_id("legacy_append", "hash", false);
+   char sql[1024];
+   snprintf(sql, sizeof(sql),
+            "DROP TABLE user_settings;"
+            "CREATE TABLE user_settings (user_id INTEGER PRIMARY KEY, persona_description TEXT, "
+            "persona_mode TEXT DEFAULT 'append', location TEXT, timezone TEXT DEFAULT '', "
+            "units TEXT DEFAULT 'metric', tts_voice_model TEXT, tts_length_scale REAL DEFAULT "
+            "1.0, theme TEXT DEFAULT 'cyan', updated_at INTEGER NOT NULL, FOREIGN KEY (user_id) "
+            "REFERENCES users(id) ON DELETE CASCADE);"
+            "INSERT INTO user_settings (user_id, persona_description, persona_mode, updated_at) "
+            "VALUES (%d, 'You are a butler.\n\nVery formal.', 'replace', 1), "
+            "(%d, 'You''re a pirate', 'append', 1);",
+            replacer, appender);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+   TEST_ASSERT_FALSE(auth_db_column_exists(s_db.db, "user_settings", "persona_values"));
+
+   for (int run = 0; run < 2; run++) {
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v112(s_db.db));
+      static const char *const cols[] = { "persona_values", "persona_values_mode", "persona_voice",
+                                          "persona_voice_mode" };
+      for (int i = 0; i < 4; i++) {
+         TEST_ASSERT_TRUE(auth_db_column_exists(s_db.db, "user_settings", cols[i]));
+      }
+
+      auth_user_settings_t loaded;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user_settings(replacer, &loaded));
+      TEST_ASSERT_EQUAL_STRING("You are a butler.\n\nVery formal.", loaded.persona_description);
+      TEST_ASSERT_EQUAL_STRING("replace", loaded.persona_mode);
+      TEST_ASSERT_EQUAL_STRING("", loaded.persona_values);
+      TEST_ASSERT_EQUAL_STRING("append", loaded.persona_values_mode);
+      TEST_ASSERT_EQUAL_STRING("", loaded.persona_voice);
+      TEST_ASSERT_EQUAL_STRING("append", loaded.persona_voice_mode);
+
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user_settings(appender, &loaded));
+      TEST_ASSERT_EQUAL_STRING("You're a pirate", loaded.persona_description);
+      TEST_ASSERT_EQUAL_STRING("append", loaded.persona_mode);
+      TEST_ASSERT_EQUAL_STRING("append", loaded.persona_values_mode);
+      TEST_ASSERT_EQUAL_STRING("append", loaded.persona_voice_mode);
+   }
+
+   /* The added defaults are stored values, not just the reader's fallback. */
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_prepare_v2(s_db.db,
+                                            "SELECT persona_values_mode, persona_voice_mode "
+                                            "FROM user_settings WHERE user_id = ?",
+                                            -1, &st, NULL));
+   sqlite3_bind_int(st, 1, replacer);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_STRING("append", (const char *)sqlite3_column_text(st, 0));
+   TEST_ASSERT_EQUAL_STRING("append", (const char *)sqlite3_column_text(st, 1));
+   sqlite3_finalize(st);
+}
+
 /* ============================================================================
  * v43 schema tests — entity-merge / user-identity-dedup workstream
  *
@@ -1546,6 +1633,8 @@ int main(void) {
    RUN_TEST(test_v108_scheduled_times);
    RUN_TEST(test_v111_scheduled_zones);
    RUN_TEST(test_user_settings_set_and_get);
+   RUN_TEST(test_user_settings_persona_halves);
+   RUN_TEST(test_v112_persona_halves);
 
    /* v43 schema (entity-merge / user-identity-dedup) */
    RUN_TEST(test_v43_schema_fresh_install);

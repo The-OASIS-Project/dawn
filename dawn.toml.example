@@ -25,8 +25,18 @@
                                   # Env: DAWN_GENERAL_LOG_FILE
 
 [persona]
-# description = ""                # Custom AI personality description
-                                  # Leave empty to use built-in persona
+# Two halves; leave either empty for the built-in one.
+# values = ""                     # Who the assistant is: name, role, judgment
+                                  # Env: DAWN_PERSONA_VALUES
+# voice = ""                      # How it talks: tone, humor, formality
+                                  # Env: DAWN_PERSONA_VOICE
+# Several lines go between triple quotes:
+# voice = '''
+# Your tone: dry and brief.
+# No exclamation marks.
+# '''
+# description = ""                # Older single text: the whole persona.  While set it
+                                  # replaces both halves, and values/voice are ignored.
                                   # Env: DAWN_PERSONA_DESCRIPTION
 
 [localization]

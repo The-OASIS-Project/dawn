@@ -148,6 +148,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v107.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v108.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v111.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v112.c
     ${SRC_ROOT}/src/core/tz.c
     ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
@@ -1413,6 +1414,17 @@ dawn_add_unit_test(test_prompt_builder
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# The server's persona from g_config (llm_command_parser.c): its halves, the
+# built-in bytes, and dropping a stored copy of a built-in.  The rest of the
+# command parser's dependencies are stubbed.
+dawn_add_unit_test(test_llm_persona
+   SOURCES test_llm_persona.c test_llm_persona_stub.c
+           ${SRC_ROOT}/src/llm/llm_command_parser.c
+           ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 # Incremental focus: which items a history already shows, which a turn sends,
 # and how it says so.  Pure (json-c and the LLM text helpers).
 dawn_add_unit_test(test_focus_incremental
@@ -2275,6 +2287,7 @@ dawn_add_unit_test(test_config_roundtrip
            ${SRC_ROOT}/src/config/config_parser.c
            ${SRC_ROOT}/src/config/config_env.c
            ${SRC_ROOT}/src/config/config_defaults.c
+           ${SRC_ROOT}/common/src/utils/string_utils.c
            ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    unity json-c m pthread
    LABEL   ci)

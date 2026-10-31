@@ -2033,6 +2033,9 @@ int main(int argc, char *argv[]) {
       return 1;
    }
 
+   // Step 6a: A stored copy of a built-in persona would hide the current one
+   llm_persona_drop_builtin_copy();
+
    // Step 6b: Check cloud LLM API key availability (graceful fallback to local)
    if (strcmp(g_config.llm.type, "cloud") == 0) {
       int has_api_key = 0;

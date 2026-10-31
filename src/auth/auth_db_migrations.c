@@ -1424,8 +1424,9 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
     *   real_name         — required by the link-user-self synthetic-seed path
     *                       (gate enforced in memory_alias_link_user_self_run).
     *                       Surfaced in WebUI Settings → User → Real name.
-    *   preferred_address — optional; injected into the LLM system prompt as
-    *                       "They prefer to be addressed as ..." for personas.
+    *   preferred_address — optional comma-separated forms; injected into the
+    *                       LLM system prompt as "When you address them
+    *                       directly, use any of: ..." (prompt_identity_text).
     *   identity_aliases  — optional newline-separated list of alternate names
     *                       (nicknames, formal names, email handles).  Parsed
     *                       at use-site (split on \n, strip whitespace, drop
@@ -3517,6 +3518,12 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
    if (current_version < 111)
       v111_ok = auth_db_migrations_v111(s_db.db) == AUTH_DB_SUCCESS;
 
+   /* v112: a user's persona in two halves (values, voice). */
+   bool v112_ok = (current_version >= 112);
+   if (current_version < 112) {
+      v112_ok = auth_db_migrations_v112(s_db.db) == AUTH_DB_SUCCESS;
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -3544,7 +3551,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v90_ok && v91_ok && v92_ok && v93_ok && v94_ok && v95_ok && v96_ok &&
                               v97_ok && v98_ok && v99_ok && v100_ok && v101_ok && v102_ok &&
                               v103_ok && v104_ok && v106_ok && v107_ok && v108_ok && v109_ok &&
-                              v110_ok && v111_ok;
+                              v110_ok && v111_ok && v112_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {
