@@ -117,6 +117,18 @@ static void test_persona_halves_round_trip(void) {
    TEST_ASSERT_EQUAL_INT(1, test_stub_warning_count());
 }
 
+/* Three or more apostrophes in a row survive, on one line and across lines
+ * (neither a ''' literal nor a raw basic string can hold them). */
+static void test_persona_apostrophe_runs_round_trip(void) {
+   static const char values[] = "Use ''' for Python docstrings.";
+   static const char voice[] = "'''Quoted''' and '''' four.\nJon's second line.";
+   snprintf(g_written.persona.values, sizeof(g_written.persona.values), "%s", values);
+   snprintf(g_written.persona.voice, sizeof(g_written.persona.voice), "%s", voice);
+   round_trip();
+   TEST_ASSERT_EQUAL_STRING(values, g_read.persona.values);
+   TEST_ASSERT_EQUAL_STRING(voice, g_read.persona.voice);
+}
+
 /* Text longer than the field is cut at a whole character: 683 three-byte
  * characters (2049 bytes) keep 682 of them, not 682 and a third. */
 static void test_persona_cut_keeps_whole_characters(void) {
@@ -670,6 +682,7 @@ int main(void) {
    test_tmp_path(RT_PATH, sizeof(RT_PATH), "test_config_roundtrip.toml");
    UNITY_BEGIN();
    RUN_TEST(test_persona_halves_round_trip);
+   RUN_TEST(test_persona_apostrophe_runs_round_trip);
    RUN_TEST(test_persona_cut_keeps_whole_characters);
    RUN_TEST(test_jobs_roundtrip);
    RUN_TEST(test_memory_extraction_effort_roundtrip);

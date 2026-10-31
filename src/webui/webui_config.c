@@ -284,7 +284,10 @@ void handle_get_config(ws_connection_t *conn) {
    OLOG_INFO("WebUI: Sent configuration to client");
 }
 
-/* Helper to safely copy string from JSON to config field */
+/* Helper to safely copy string from JSON to config field.  safe_strscpy
+ * already ends the text; the final store stays so the static analyzer sees
+ * dest written on every path (it follows safe_strncpy's NULL check into the
+ * caller otherwise). */
 #define JSON_TO_CONFIG_STR(obj, key, dest)                \
    do {                                                   \
       struct json_object *_val;                           \
@@ -293,6 +296,7 @@ void handle_get_config(ws_connection_t *conn) {
          if (_str) {                                      \
             if (safe_strscpy(dest, _str) >= sizeof(dest)) \
                utf8_trim_incomplete(dest);                \
+            (dest)[sizeof(dest) - 1] = '\0';              \
          }                                                \
       }                                                   \
    } while (0)
