@@ -259,6 +259,20 @@ size_t memory_extraction_get_template_size_chars(void);
 void memory_extraction_set_template_pieces(
     const char *const pieces[MEMORY_EXTRACTION_TEMPLATE_PIECES]);
 
+/** A benchmark's view of each batch's extraction reply (see below). */
+typedef void (*memory_extraction_reply_hook_t)(int64_t conversation_id, const char *reply);
+
+/**
+ * @brief Benchmarks only: be handed each batch's extraction reply as the model
+ *        returned it, when it is about to be stored (after the forgotten and
+ *        privacy checks) and before anything in it is, so what extraction
+ *        proposed can be measured apart from what was kept.  Runs on the
+ *        extraction thread.  NULL removes it.  The daemon never calls this.
+ *
+ * @param hook Called with the conversation id and the reply, or NULL
+ */
+void memory_extraction_set_reply_hook(memory_extraction_reply_hook_t hook);
+
 /**
  * @brief The prompt an extraction sends: the compiled template (or a
  *        benchmark's pieces) with the four values in place.

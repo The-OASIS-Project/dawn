@@ -86,6 +86,13 @@ typedef struct {
    memory_extraction_fallback_t fallback; /* Session's active LLM for retry */
 } extraction_context_t;
 
+/* Set only by the benchmark harness (bench_retrieval --dump-candidates). */
+static memory_extraction_reply_hook_t s_reply_hook;
+
+void memory_extraction_set_reply_hook(memory_extraction_reply_hook_t hook) {
+   s_reply_hook = hook;
+}
+
 /* =============================================================================
  * Helper: Build existing profile string
  * ============================================================================= */
@@ -1415,6 +1422,9 @@ static void *extraction_thread(void *arg) {
    if (revoked) {
       /* nothing written; see above */
    } else if (response) {
+      if (s_reply_hook) {
+         s_reply_hook(ctx->conversation_id, response);
+      }
       process_extraction_response(ctx->user_id, ctx->conversation_id, ctx->session_id, response,
                                   ctx->new_message_count, ctx->duration_seconds, &prov, forgotten);
       free(response);

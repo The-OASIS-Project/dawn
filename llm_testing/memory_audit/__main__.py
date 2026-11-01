@@ -12,6 +12,7 @@
 #   examples   print facts of one kind (shows fact text: for the user, not for logs)
 #   reextract  run DAWN's extraction on chosen stored conversations into a scratch
 #              database, so a prompt variant can be measured on the same input
+#              (--dump-candidates: also what extraction proposed, before storing)
 #   candidates counts and conversation ids where memory may have gone wrong,
 #              for the owner to write memory eval cases from (prints no text)
 #   coverage   how many of run A's facts (by tier) run B also stored, judged by a
@@ -460,6 +461,9 @@ def main(argv=None):
     s.add_argument("--label", default="", help="output name (default: prompt hash, model, effort)")
     s.add_argument("--config", default="",
                    help="dawn.toml for the bench (default: the run dir's); a variant's settings")
+    s.add_argument("--dump-candidates", action="store_true",
+                   help="also save each batch's raw extraction facts, before the store "
+                        "(reextract_<label>_candidates.jsonl, a B set for coverage)")
 
     s = sub.add_parser("candidates",
                        help="counts and conversation ids per memory failure signal (no text)")
