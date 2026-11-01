@@ -322,6 +322,21 @@ static char *search(const char *value) {
    return memoryCallback("search", buf, &respond);
 }
 
+/* A preference outside text taught says so in a search, as facts do. */
+void test_search_marks_an_outside_preference(void) {
+   const memory_provenance_t web = { .outside = OUTSIDE_WEB };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_pref_upsert(s_user, "airline", "Acme Air",
+                                                                  0.8f, "inferred", &web));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_pref_upsert(s_user, "tea", "green", 0.8f, "explicit", NULL));
+   char *r = search("airline");
+   TEST_ASSERT_NOT_NULL(strstr(r, "- airline: Acme Air" MEMORY_OUTSIDE_MARK "\n"));
+   free(r);
+   r = search("tea");
+   TEST_ASSERT_NOT_NULL(strstr(r, "- tea: green\n"));
+   free(r);
+}
+
 /* Search shows relations only when asked about a time or for closed ones, and
  * then filters them as asked. */
 void test_search_shows_relations_only_when_asked(void) {
@@ -475,6 +490,7 @@ int main(void) {
    RUN_TEST(test_list_merged_and_restore);
    RUN_TEST(test_forget_reports_already_merged);
    RUN_TEST(test_search_shows_relations_only_when_asked);
+   RUN_TEST(test_search_marks_an_outside_preference);
    RUN_TEST(test_unprompted_skip_leaves_a_later_reply_unread);
    RUN_TEST(test_prompt_file_pieces_give_the_compiled_prompt);
    RUN_TEST(test_prompt_file_split);

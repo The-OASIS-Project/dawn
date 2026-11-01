@@ -1105,6 +1105,45 @@ int conv_db_messages_unprompted(int user_id,
    return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
+int conv_db_rows_outside(int64_t conv_id,
+                         int user_id,
+                         int64_t after_id,
+                         int64_t upto_id,
+                         int *kind_out) {
+   if (!kind_out) {
+      return AUTH_DB_FAILURE;
+   }
+   *kind_out = OUTSIDE_NONE;
+   AUTH_DB_LOCK_OR_FAIL();
+   /* kind-rows: request context is read for the outside text it put in front
+    * of the model, and only its kind is returned (extraction-time only). */
+   /* clang-format off */
+   static const char sql[] =
+       "SELECT k FROM (SELECT m.id, " CONV_ROW_OUTSIDE_KIND_SQL("m") " AS k FROM messages m "
+       "JOIN conversations c ON c.id = m.conversation_id WHERE m.conversation_id = ?1 AND "
+       "c.user_id = ?2 AND m.id > ?3 AND (?4 <= 0 OR m.id <= ?4)) WHERE k IS NOT NULL "
+       "ORDER BY id LIMIT 1";
+   /* clang-format on */
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_WARNING("conv_db: prepare rows_outside failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(stmt, 1, conv_id);
+   sqlite3_bind_int(stmt, 2, user_id);
+   sqlite3_bind_int64(stmt, 3, after_id);
+   sqlite3_bind_int64(stmt, 4, upto_id);
+   int rc = sqlite3_step(stmt);
+   if (rc == SQLITE_ROW) {
+      *kind_out = sqlite3_column_int(stmt, 0);
+      rc = SQLITE_DONE;
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
 int conv_db_get_anchor_date(int64_t conv_id, int64_t *anchor_out) {
    if (conv_id <= 0 || !anchor_out) {
       return AUTH_DB_FAILURE;

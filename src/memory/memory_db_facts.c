@@ -1142,6 +1142,7 @@ int memory_db_fact_find_similar(int user_id,
          safe_strscpy(out_facts[count].fact_text, text);
       }
       out_facts[count].confidence = (float)sqlite3_column_double(stmt, 2);
+      out_facts[count].outside = sqlite3_column_int(stmt, 3);
       count++;
    }
 
@@ -1224,6 +1225,7 @@ int memory_db_fact_find_by_hash(int user_id,
          safe_strscpy(out_facts[count].fact_text, text);
       }
       out_facts[count].confidence = (float)sqlite3_column_double(stmt, 2);
+      out_facts[count].outside = sqlite3_column_int(stmt, 3);
       count++;
    }
 

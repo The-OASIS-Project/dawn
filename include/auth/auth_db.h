@@ -2108,6 +2108,28 @@ int conv_db_messages_unprompted(int user_id,
                                 int *count_out);
 
 /**
+ * @brief The first outside text a conversation's stored rows carry in DAWN's
+ *        own writing past a cursor
+ *
+ * By CONV_ROW_OUTSIDE_KIND_SQL: DAWN's posts, a turn context's outside items,
+ * a job's result, an attached document, a device's data, request-context
+ * rows included (the history loaders leave those out).  Tool results aren't
+ * judged here (the live scan judges them).
+ *
+ * @param conv_id  Conversation (owned by @p user_id)
+ * @param user_id  Owner
+ * @param after_id Rows with a larger id are read
+ * @param upto_id  ... up to this id (0 = no bound)
+ * @param kind_out Receives the outside kind, OUTSIDE_NONE when none
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int conv_db_rows_outside(int64_t conv_id,
+                         int user_id,
+                         int64_t after_id,
+                         int64_t upto_id,
+                         int *kind_out);
+
+/**
  * Sentinel value for "no anchor recorded" on conversations.anchor_date.
  * Legacy rows pre-v42, non-conversation extraction paths, and any code path
  * that hasn't recorded an anchor all surface as this value.  Extraction code

@@ -111,7 +111,11 @@ static void downgrade_to_v112(void) {
  *   80 begun at 8000, continuing 20: nothing from outside itself.
  *   90 begun at 900, continued by 95 at 9500: neither can be judged.
  *   85 begun at 850 (not judged), with an unframed search result.
- *   99 an SMS conversation begun at 9900. */
+ *   75 begun at 7500: a turn context naming an outside document's chunk.
+ *   76 begun at 7600: a device's relayed data.
+ *   77 begun at 7700: one of DAWN's posts, then the user's reply.
+ *   99 an SMS conversation begun at 9900.
+ * 30 also holds a turn context whose items aren't from outside. */
 static void seed_v112(void) {
    exec_ok(
        "PRAGMA foreign_keys=OFF;"
@@ -120,7 +124,8 @@ static void seed_v112(void) {
        "(10, 1, 1000, 1000, NULL), (20, 1, 2000, 2000, NULL), (30, 1, 3000, 3000, NULL), "
        "(40, 1, 4000, 4000, NULL), (50, 1, 5000, 5000, NULL), (60, 1, 6000, 6000, NULL), "
        "(70, 1, 7000, 7000, NULL), (80, 1, 8000, 8000, 20), (90, 1, 900, 900, NULL), "
-       "(95, 1, 9500, 9500, 90), (85, 1, 850, 850, NULL), (99, 1, 9900, 9900, NULL);"
+       "(95, 1, 9500, 9500, 90), (85, 1, 850, 850, NULL), (99, 1, 9900, 9900, NULL), "
+       "(75, 1, 7500, 7500, NULL), (76, 1, 7600, 7600, NULL), (77, 1, 7700, 7700, NULL);"
        "UPDATE conversations SET origin = 'messaging:sms' WHERE id = 99;"
        "INSERT INTO messages (id, conversation_id, role, content, tool_calls, tool_call_id, "
        "kind, created_at) VALUES "
@@ -137,6 +142,15 @@ static void seed_v112(void) {
        "(206, 20, 'assistant', 'Dawn wrote.', NULL, NULL, NULL, 2005),"
        "(301, 30, 'user', 'my dog is Ash', NULL, NULL, NULL, 3000),"
        "(302, 30, 'assistant', 'Noted.', NULL, NULL, NULL, 3001),"
+       "(303, 30, 'user', '[M2 memory_fact told 2026-01-02] Jon sits outside often', NULL, "
+       "NULL, 'turn_context', 3002),"
+       "(751, 75, 'user', '[M1 document_chunk outside 2026-01-02] The plan', NULL, NULL, "
+       "'turn_context', 7500),"
+       "(752, 75, 'user', 'what does it say', NULL, NULL, NULL, 7501),"
+       "(761, 76, 'user', '[DEVICE DATA] Speak this information naturally to the user: x', "
+       "NULL, NULL, NULL, 7600),"
+       "(771, 77, 'assistant', 'Your briefing: the news', NULL, NULL, NULL, 7700),"
+       "(772, 77, 'user', 'thanks', NULL, NULL, NULL, 7701),"
        "(401, 40, 'user', 'see this [ATTACHED DOCUMENT: plan.pdf]\nText', NULL, NULL, NULL, "
        "4000),"
        "(402, 40, 'assistant', 'Read it.', NULL, NULL, NULL, 4001),"
@@ -178,7 +192,13 @@ static void seed_v112(void) {
        "(1, 'job said', 'inferred', 70, 701, 702, 0, NULL),"
        "(1, 'unjudged', 'inferred', 90, 901, 901, 0, NULL),"
        "(1, 'after the search', 'inferred', 85, 854, 854, 0, NULL),"
-       "(1, 'by text', 'inferred', 99, 991, 991, 0, NULL);"
+       "(1, 'by text', 'inferred', 99, 991, 991, 0, NULL),"
+       "(1, 'from context', 'inferred', 75, 751, 752, 0, NULL),"
+       "(1, 'device said', 'inferred', 76, 761, 761, 0, NULL),"
+       "(1, 'after the post', 'inferred', 77, 771, 772, 0, NULL),"
+       "(1, 'continued mail', 'inferred', 80, 801, 801, 0, NULL),"
+       "(1, 'continued old', 'inferred', 95, 951, 951, 0, NULL);"
+       "INSERT INTO message_unprompted (message_id) VALUES (771);"
        "INSERT INTO memory_fact_sources (fact_id, conversation_id) SELECT id, 10 FROM "
        "memory_facts WHERE fact_text = 'email and old';"
        "INSERT INTO memory_fact_sources (fact_id, conversation_id) SELECT id, 90 FROM "
@@ -199,7 +219,8 @@ static void seed_v112(void) {
        "source_msg_id_start, source_msg_id_end) VALUES "
        "(1, 1, 's20', 'mail', 20, 201, 206),"
        "(2, 1, 's30', 'dog', 30, 301, 302),"
-       "(3, 1, 'voice', 'unsaved', NULL, NULL, NULL);"
+       "(3, 1, 'voice', 'unsaved', NULL, NULL, NULL),"
+       "(4, 1, 's80', 'went on', 80, 801, 801);"
        "INSERT INTO memory_preferences (user_id, category, value) VALUES (1, 'tea', 'green');"
        "PRAGMA foreign_keys=ON;");
    /* Conversation 50 deleted the way the daemon does it (its facts' sources
@@ -298,6 +319,14 @@ static void test_facts_outside_kind(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_UNKNOWN, fact_outside("also from 90"));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, fact_outside("also from 20"));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, fact_outside("email and old"));
+   /* DAWN's own input read like the live scan reads it. */
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, fact_outside("from context"));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, fact_outside("device said"));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, fact_outside("after the post"));
+   /* A continuation: what the conversations it continues read, or UNKNOWN
+    * when one of them can't be judged. */
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, fact_outside("continued mail"));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_UNKNOWN, fact_outside("continued old"));
 }
 
 static void test_relations_summaries_preferences_outside_kind(void) {
@@ -314,6 +343,8 @@ static void test_relations_summaries_preferences_outside_kind(void) {
                            q_int("SELECT outside FROM memory_summaries WHERE id = 2"));
    TEST_ASSERT_EQUAL_INT64(OUTSIDE_UNKNOWN,
                            q_int("SELECT outside FROM memory_summaries WHERE id = 3"));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_EMAIL,
+                           q_int("SELECT outside FROM memory_summaries WHERE id = 4"));
    TEST_ASSERT_EQUAL_INT64(OUTSIDE_UNKNOWN, q_int("SELECT outside FROM memory_preferences"));
 }
 
@@ -331,6 +362,10 @@ static void test_conversation_floors(void) {
    TEST_ASSERT_EQUAL_INT64(OUTSIDE_EMAIL, q_int("SELECT outside FROM conversations WHERE id = 80"));
    TEST_ASSERT_EQUAL_INT64(OUTSIDE_UNKNOWN,
                            q_int("SELECT outside FROM conversations WHERE id = 95"));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_DOCUMENT,
+                           q_int("SELECT outside FROM conversations WHERE id = 75"));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_OTHER, q_int("SELECT outside FROM conversations WHERE id = 76"));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_OTHER, q_int("SELECT outside FROM conversations WHERE id = 77"));
 }
 
 /* The category index goes, and the next start doesn't make it again. */

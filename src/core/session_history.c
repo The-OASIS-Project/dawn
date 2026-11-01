@@ -859,13 +859,13 @@ struct json_object *session_snapshot_history(session_t *session,
    pthread_mutex_lock(&session->history_mutex);
    struct json_object *copy = NULL;
    if (session->conversation_history) {
-      copy = llm_history_strip_internal(session->conversation_history);
+      copy = llm_history_copy_marked(session->conversation_history);
    }
    if (conv_out) {
       *conv_out = atomic_load(&session->history_conversation_id);
    }
-   if (count_out && copy) {
-      *count_out = (int)json_object_array_length(copy);
+   for (size_t i = 0; count_out && copy && i < json_object_array_length(copy); i++) {
+      *count_out += !llm_history_is_context(json_object_array_get_idx(copy, i));
    }
    pthread_mutex_unlock(&session->history_mutex);
    return copy;

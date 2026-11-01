@@ -133,13 +133,16 @@ void session_bind_history_conversation(session_t *session, int64_t conv_id);
 /**
  * @brief Snapshot the session's live history for memory extraction
  *
- * Returns a deep copy (provider state stripped) taken under history_mutex, with
- * the conversation it holds read in the same critical section, so a turn
- * appending concurrently can neither corrupt the copy nor change its attribution.
+ * Returns a deep copy taken under history_mutex, with the conversation it holds
+ * read in the same critical section, so a turn appending concurrently can
+ * neither corrupt the copy nor change its attribution.  The copy keeps which
+ * messages and parts are request context (llm_history_copy_marked): extraction
+ * reads what outside text they carried, then strips them.
  *
  * @param session   Session
  * @param conv_out  Receives history_conversation_id (may be NULL)
- * @param count_out Receives the copy's message count (may be NULL)
+ * @param count_out Receives the copy's message count, request context left
+ *                  out (may be NULL)
  * @return New array (caller owns), or NULL
  */
 struct json_object *session_snapshot_history(session_t *session, int64_t *conv_out, int *count_out);

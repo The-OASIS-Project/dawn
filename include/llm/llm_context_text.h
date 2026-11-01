@@ -28,6 +28,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "core/outside_markers.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -75,7 +77,7 @@ char *llm_context_neutralize_line(const char *text);
 
 /** How the WebUI inlines an attached document in a user's text: this line
  *  (then the file's name and size), its contents, and the closing line. */
-#define LLM_CONTEXT_DOC_OPEN "[ATTACHED DOCUMENT: "
+#define LLM_CONTEXT_DOC_OPEN OUTSIDE_MARKER_DOC_OPEN
 #define LLM_CONTEXT_DOC_CLOSE "[END DOCUMENT]"
 
 /**

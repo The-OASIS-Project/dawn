@@ -62,6 +62,7 @@
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_recency.h"
 #include "core/focus/focus_source.h"
+#include "core/outside_markers.h"
 #include "core/prompt_parts.h"
 #include "dawn_error.h"
 #include "logging.h"
@@ -829,7 +830,7 @@ static int relation_adapter_query(int user_id,
             return FAILURE;
          }
          if (outside_is_tainted(rels[i].outside)) {
-            out[produced].kind = "outside";
+            out[produced].kind = OUTSIDE_MARKER_ITEM_KIND;
          }
          if (produced < prod_id_cap)
             produced_relation_ids[produced] = rels[i].id;
@@ -1066,7 +1067,7 @@ static int summary_adapter_query(int user_id,
       out[produced].provenance.msg_id_start = starts[i];
       out[produced].provenance.msg_id_end = ends[i];
       if (outside_is_tainted(merged[i].summary.outside)) {
-         out[produced].kind = "outside";
+         out[produced].kind = OUTSIDE_MARKER_ITEM_KIND;
       }
       produced++;
    }

@@ -1806,6 +1806,9 @@ dawn_add_unit_test(test_memory_extraction_input
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/tools/tool_registry.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+           ${SRC_ROOT}/src/core/hash_util.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/core/prompt_sections.c
            ${SRC_ROOT}/src/core/strbuf.c
@@ -2246,6 +2249,31 @@ dawn_add_unit_test(test_research_run
 dawn_add_unit_test(test_research_allowlist
    SOURCES test_research_allowlist.c
    LIBS    unity
+   LABEL   ci)
+
+# Extraction's outside kind over stored rows, on the real loader and schema.
+dawn_add_unit_test(test_memory_extraction_stored
+   SOURCES test_memory_extraction_stored.c test_tool_registry_stub.c
+           ${SRC_ROOT}/src/memory/memory_extraction_input.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
+           ${SRC_ROOT}/src/llm/llm_third_party.c
+           ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/core/prefix_message.c
+           ${SRC_ROOT}/src/core/image_rehydrate.c
+           ${SRC_ROOT}/src/core/ocp_helpers.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/image_store.c
+           ${SRC_ROOT}/src/blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # A compaction point recorded inside a tool exchange reloads cleanly (real

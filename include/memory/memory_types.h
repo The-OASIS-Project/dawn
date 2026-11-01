@@ -37,6 +37,7 @@
 #include <time.h>
 
 #include "core/outside_kind.h"
+#include "core/outside_markers.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -180,19 +181,19 @@ typedef struct {
  */
 /** What a relation or summary line adds when its batch read outside text
  *  (a fact's kind word says ", outside" instead). */
-#define MEMORY_OUTSIDE_MARK " (outside)"
+#define MEMORY_OUTSIDE_MARK OUTSIDE_MARKER_MEMORY_MARK
 
 /** The longest word memory_fact_kind_word returns (focus lines size for it). */
-#define MEMORY_FACT_KIND_WORD_LONGEST "remembered on request, outside"
+#define MEMORY_FACT_KIND_WORD_LONGEST "remembered on request" OUTSIDE_MARKER_KIND_SUFFIX
 
 static inline const char *memory_fact_kind_word(const memory_fact_t *fact) {
    static const char *const words[][2] = {
-      { "noted", "noted, outside" },
-      { "imported", "imported, outside" },
+      { "noted", "noted" OUTSIDE_MARKER_KIND_SUFFIX },
+      { "imported", "imported" OUTSIDE_MARKER_KIND_SUFFIX },
       { "remembered on request", MEMORY_FACT_KIND_WORD_LONGEST },
-      { "world", "world, outside" },
-      { "told", "told, outside" },
-      { "inferred", "inferred, outside" },
+      { "world", "world" OUTSIDE_MARKER_KIND_SUFFIX },
+      { "told", "told" OUTSIDE_MARKER_KIND_SUFFIX },
+      { "inferred", "inferred" OUTSIDE_MARKER_KIND_SUFFIX },
    };
    if (!fact) {
       return NULL;

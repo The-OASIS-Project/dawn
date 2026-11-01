@@ -1339,6 +1339,32 @@ void test_attached_email_belongs_to_its_turn(void) {
    TEST_ASSERT_NULL(s->turn_attached);
 }
 
+/* Extraction's snapshot keeps what DAWN put in front of the model (it reads
+ * the outside text there), and counts only the conversation's messages. */
+void test_snapshot_keeps_request_context(void) {
+   json_object_put(s->conversation_history);
+   s->conversation_history = json_tokener_parse(
+       "[{\"role\":\"system\",\"content\":\"p\"},"
+       "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"_kind\":\"turn_context\","
+       "\"text\":\"[M3 document_chunk outside 2026-10-01] A page\"},{\"type\":\"text\","
+       "\"text\":\"Hi\"}],\"id\":10},"
+       "{\"role\":\"user\",\"_kind\":\"envelope\",\"content\":\"[automated "
+       "background-job update] done\"},"
+       "{\"role\":\"assistant\",\"content\":\"Hello\",\"id\":11}]");
+   int64_t conv = -1;
+   int count = -1;
+   struct json_object *copy = session_snapshot_history(s, &conv, &count);
+   TEST_ASSERT_NOT_NULL(copy);
+   TEST_ASSERT_EQUAL_INT(4, len(copy));
+   TEST_ASSERT_EQUAL_INT(3, count);
+   struct json_object *parts = NULL;
+   json_object_object_get_ex(json_object_array_get_idx(copy, 1), "content", &parts);
+   TEST_ASSERT_EQUAL_INT(MESSAGE_KIND_TURN_CONTEXT,
+                         llm_history_kind_of(json_object_array_get_idx(parts, 0)));
+   TEST_ASSERT_TRUE(llm_history_is_context(json_object_array_get_idx(copy, 2)));
+   json_object_put(copy);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_turn_on_loaded_conversation_uses_live_history);
@@ -1409,5 +1435,6 @@ int main(void) {
    RUN_TEST(test_rollback_of_a_folded_change_keeps_the_reasoning);
    RUN_TEST(test_stop_keeps_the_question_with_a_note);
    RUN_TEST(test_stop_without_its_question_leaves_it_to_rollback);
+   RUN_TEST(test_snapshot_keeps_request_context);
    return UNITY_END();
 }

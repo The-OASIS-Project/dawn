@@ -646,13 +646,13 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * old-fact lookup for an extracted correction; a LIKE hit on a gloss could
     * otherwise supersede it and silently kill the bridge. */
    { "memory_fact_find_similar",
-     "SELECT id, fact_text, confidence FROM memory_facts "
+     "SELECT id, fact_text, confidence, outside FROM memory_facts "
      "WHERE user_id = ? AND superseded_by IS NULL "
      "AND fact_text LIKE ? ESCAPE '\\' AND note_doc_id IS NULL "
      "ORDER BY confidence DESC LIMIT 5",
      &s_db.stmt_memory_fact_find_similar },
    { "memory_fact_find_by_hash",
-     "SELECT id, fact_text, confidence FROM memory_facts "
+     "SELECT id, fact_text, confidence, outside FROM memory_facts "
      "WHERE user_id = ? AND normalized_hash = ? AND superseded_by IS NULL",
      &s_db.stmt_memory_fact_find_by_hash },
    { "memory_fact_prune_superseded", /* Merged duplicates only (a replaced value is history, kept

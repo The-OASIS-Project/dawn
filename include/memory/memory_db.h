@@ -510,7 +510,7 @@ int memory_db_fact_restore(int user_id, int64_t fact_id, memory_restore_result_t
  *
  * @param user_id User ID
  * @param fact_text Text to search for
- * @param out_facts Output: array of similar facts
+ * @param out_facts Output: array of similar facts (id, text, confidence and outside only)
  * @param max_facts Maximum facts to return
  * @param count_out Output: number of similar facts found
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE

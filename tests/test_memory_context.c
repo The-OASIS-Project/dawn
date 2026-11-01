@@ -206,6 +206,27 @@ static void test_forget_past_a_tool_row_raises_the_floor(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, floor);
 }
 
+/* So does a document attached to the user's message (no tool involved), and
+ * forgetting what read nothing from outside leaves the floor clean. */
+static void test_forget_past_a_document_raises_the_floor(void) {
+   int64_t doc = 0, plain = 0, row = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(1, "Doc", &doc));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(1, "Plain", &plain));
+   const conv_message_row_t attached = { .role = "user",
+                                         .content = "see [ATTACHED DOCUMENT: plan.pdf]\nText" };
+   const conv_message_row_t said = { .role = "user", .content = "my dog is Ash" };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(doc, 1, &attached, &row));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(plain, 1, &said, &row));
+   const int64_t both[] = { doc, plain };
+   memory_conv_learned_t gone = { 0 };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(1, both, 2, &gone));
+   int floor = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get_outside(doc, 1, &floor));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, floor);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get_outside(plain, 1, &floor));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, floor);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_a_tainted_summary_is_left_out);
@@ -215,5 +236,6 @@ int main(void) {
    RUN_TEST(test_semantic_summary_keeps_outside);
    RUN_TEST(test_deleted_parent_keeps_taint);
    RUN_TEST(test_forget_past_a_tool_row_raises_the_floor);
+   RUN_TEST(test_forget_past_a_document_raises_the_floor);
    return UNITY_END();
 }

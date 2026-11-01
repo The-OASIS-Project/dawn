@@ -107,10 +107,11 @@ static char *build_existing_profile(int user_id) {
    size_t off = 0;
    size_t rem = EXISTING_PROFILE_BUF;
 
-   /* Load existing preferences */
+   /* What the user already told DAWN.  Facts and preferences outside text
+    * taught stay out: this batch would read them without taking their kind. */
    memory_preference_t prefs[10];
    int pref_count = 0;
-   memory_db_pref_list(user_id, prefs, 10, 0, &pref_count);
+   memory_db_pref_list_untainted(user_id, prefs, 10, 0, &pref_count);
 
    if (pref_count > 0) {
       BUF_PRINTF(profile, off, rem, "Preferences:\n");
@@ -124,13 +125,16 @@ static char *build_existing_profile(int user_id) {
    int fact_count = 0;
    memory_db_fact_list(user_id, facts, 10, 0, &fact_count);
 
-   if (fact_count > 0) {
-      if (off > 0)
-         BUF_PRINTF(profile, off, rem, "\n");
-      BUF_PRINTF(profile, off, rem, "Known facts:\n");
-      for (int i = 0; i < fact_count && rem > 1; i++) {
-         BUF_PRINTF(profile, off, rem, "- %s\n", facts[i].fact_text);
+   bool facts_head = false;
+   for (int i = 0; i < fact_count && rem > 1; i++) {
+      if (outside_is_tainted(facts[i].outside)) {
+         continue;
       }
+      if (!facts_head) {
+         BUF_PRINTF(profile, off, rem, "%sKnown facts:\n", off > 0 ? "\n" : "");
+         facts_head = true;
+      }
+      BUF_PRINTF(profile, off, rem, "- %s\n", facts[i].fact_text);
    }
 
    /* Load existing entities so LLM reuses canonical names */
@@ -1724,8 +1728,8 @@ static int trigger_extraction(int user_id,
       return 0;
    }
 
-   /* Every caller passes a stripped history; this is the backstop, so no
-    * reasoning a vendor issued for itself reaches the extraction model. */
+   /* memory_extraction_build_input strips the history; this is the backstop,
+    * so no reasoning a vendor issued for itself reaches the extraction model. */
    struct json_object *safe = llm_history_strip_internal(filtered);
    json_object_put(filtered);
    if (!safe) {

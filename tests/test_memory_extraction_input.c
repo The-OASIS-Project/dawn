@@ -48,6 +48,30 @@ void memory_note_guard_free(memory_note_guard_t *guard) {
    (void)guard;
 }
 
+/* The database the stored-rows reads would go to isn't here: no stored
+ * conversation, and nothing outside in its rows (test_memory_extraction_stored
+ * covers both on a real schema). */
+struct json_object *memory_history_load_from_db(int64_t conv_id,
+                                                int user_id,
+                                                size_t *text_len_out) {
+   (void)conv_id;
+   (void)user_id;
+   (void)text_len_out;
+   return NULL;
+}
+int conv_db_rows_outside(int64_t conv_id,
+                         int user_id,
+                         int64_t after_id,
+                         int64_t upto_id,
+                         int *kind_out) {
+   (void)conv_id;
+   (void)user_id;
+   (void)after_id;
+   (void)upto_id;
+   *kind_out = OUTSIDE_NONE;
+   return AUTH_DB_SUCCESS;
+}
+
 /* Every row the test names is the user's, in conversation 1699. */
 int conv_db_messages_ownership(int user_id, const char *ids_json, conv_msg_ownership_t *out) {
    (void)user_id;

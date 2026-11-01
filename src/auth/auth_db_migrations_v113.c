@@ -99,14 +99,16 @@ static int v113_add_column(sqlite3 *db, const char *table, const char *column, b
 /* Which stored conversations read outside text, and from which message.
  * Outside text is a framed result, the result of a tool whose results aren't
  * DAWN's own (by its call's name, v113_own: tools/tool_own_results.h; or
- * whose call isn't found), a document attached to the user's message, a
- * background job's result, or anything in an SMS conversation (anyone can
- * send one).  Only a framed result proves framing ran, so a conversation's
- * cleanness is judged only when it began after the first framed result this
- * database holds (a result read early in it shaped what came after); a taint
- * found in any conversation counts.  v113_conv: every conversation, whether
+ * whose call isn't found), what CONV_ROW_OUTSIDE_KIND_SQL finds (a post, a
+ * turn context's outside item, an attached document, a job's result, a
+ * device's data), or anything in an SMS conversation (anyone can send one).
+ * Only a framed result proves framing ran, so a conversation's cleanness is
+ * judged only when it began after the first framed result this database
+ * holds (a result read early in it shaped what came after); a taint found in
+ * any conversation counts.  v113_conv: every conversation, whether
  * it is judged, and its first message carrying outside text with that kind
  * (NULL when none). */
+/* clang-format off */
 static const char k_judge_sql[] =
     "DROP TABLE IF EXISTS temp.v113_mark;"
     "DROP TABLE IF EXISTS temp.v113_calls;"
@@ -117,12 +119,7 @@ static const char k_judge_sql[] =
     "SELECT id, conversation_id, created_at, CASE "
     "WHEN kind IS NULL AND role = 'tool' AND " V113_EMAIL_FRAMED " THEN 2 "
     "WHEN kind IS NULL AND role = 'tool' AND " V113_WEB_FRAMED " THEN 1 "
-    "WHEN kind IS NULL AND role = 'user' AND instr(content, '" LLM_CONTEXT_DOC_OPEN "') > 0 "
-    "THEN 5 "
-    "WHEN role = 'user' AND substr(content, 1, length('" AUTOMATED_EVENT_JOB_UPDATE
-    "')) = '" AUTOMATED_EVENT_JOB_UPDATE "' THEN 3 "
-    "END AS k FROM messages WHERE (kind IS NULL OR kind = 'envelope') AND "
-    "role IN ('tool', 'user')) WHERE k IS NOT NULL;"
+    "ELSE " CONV_ROW_OUTSIDE_KIND_SQL("messages") " END AS k FROM messages) WHERE k IS NOT NULL;"
     /* Every conversation's tool calls, by call id. */
     "CREATE TEMP TABLE v113_calls (conv INTEGER NOT NULL, call_id TEXT NOT NULL, "
     "name TEXT, action TEXT);"
@@ -149,7 +146,22 @@ static const char k_judge_sql[] =
     "MIN(created_at) FROM v113_mark WHERE k IN (1, 2)), 0) FROM conversations;"
     "UPDATE v113_conv SET first_id = (SELECT MIN(m.id) FROM v113_mark m WHERE m.conv = "
     "v113_conv.conv);"
-    "UPDATE v113_conv SET k = (SELECT m.k FROM v113_mark m WHERE m.id = v113_conv.first_id);";
+    "UPDATE v113_conv SET k = (SELECT m.k FROM v113_mark m WHERE m.id = v113_conv.first_id);"
+    /* A continuation read what the conversations it continues read, before
+     * any message of its own (first_id 0, the closest one's first kind, from
+     * v113_mark, which this leaves alone), and can't be judged when one of
+     * them can't. */
+    "WITH RECURSIVE chain(id, anc, d) AS (SELECT id, continued_from, 1 FROM conversations WHERE "
+    "continued_from IS NOT NULL UNION ALL SELECT chain.id, c.continued_from, chain.d + 1 FROM "
+    "chain JOIN conversations c ON c.id = chain.anc WHERE c.continued_from IS NOT NULL AND "
+    "chain.d < " CONV_CONTINUATION_DEPTH_MAX_SQL ") "
+    "UPDATE v113_conv SET k = COALESCE((SELECT m.k FROM chain JOIN v113_mark m ON m.conv = "
+    "chain.anc WHERE chain.id = v113_conv.conv ORDER BY chain.d, m.id LIMIT 1), k), "
+    "first_id = CASE WHEN EXISTS (SELECT 1 FROM chain JOIN v113_mark m ON m.conv = chain.anc "
+    "WHERE chain.id = v113_conv.conv) THEN 0 ELSE first_id END, judged = "
+    "CASE WHEN EXISTS (SELECT 1 FROM chain WHERE chain.id = v113_conv.conv AND chain.anc NOT IN "
+    "(SELECT conv FROM v113_conv WHERE judged = 1)) THEN 0 ELSE judged END;";
+/* clang-format on */
 
 /* A sourced row's kind.  A taint any source shows wins (its own batch's
  * conversation up to the end of its range first, else the first another
@@ -201,17 +213,10 @@ static const char k_summaries_sql[] =
 static const char k_preferences_sql[] = "UPDATE memory_preferences SET outside = 8;";
 
 /* Each conversation's floor: the first outside text it or a conversation it
- * continues read (closest first), judged or not, else UNKNOWN when one of
- * them can't be judged, else clean. */
+ * continues read, else UNKNOWN when one of them can't be judged, else clean. */
 static const char k_conversations_sql[] =
-    "WITH RECURSIVE chain(id, anc, d) AS (SELECT id, id, 0 FROM conversations UNION ALL "
-    "SELECT chain.id, c.continued_from, chain.d + 1 FROM chain JOIN conversations c ON c.id = "
-    "chain.anc WHERE c.continued_from IS NOT NULL AND chain.d < " CONV_CONTINUATION_DEPTH_MAX_SQL
-    ") "
-    "UPDATE conversations SET outside = COALESCE((SELECT v.k FROM chain JOIN v113_conv v ON "
-    "v.conv = chain.anc WHERE chain.id = conversations.id AND v.k IS NOT NULL ORDER BY chain.d "
-    "LIMIT 1), CASE WHEN EXISTS (SELECT 1 FROM chain WHERE chain.id = conversations.id AND "
-    "chain.anc NOT IN (SELECT conv FROM v113_conv WHERE judged = 1)) THEN 8 ELSE 0 END);";
+    "UPDATE conversations SET outside = (SELECT COALESCE(v.k, CASE WHEN v.judged = 0 THEN 8 ELSE 0 "
+    "END) FROM v113_conv v WHERE v.conv = conversations.id);";
 
 /* Imported facts are the user's own word (they now decay as told ones do);
  * a note's gloss says so in origin too. */

@@ -697,7 +697,8 @@ char *memory_action_search(int user_id,
          strbuf_append(&sb, "\n");
       strbuf_append(&sb, "Preferences:\n");
       for (int i = 0; i < pref_count; i++)
-         strbuf_appendf(&sb, "- %s: %s\n", prefs[i].category, prefs[i].value);
+         strbuf_appendf(&sb, "- %s: %s%s\n", prefs[i].category, prefs[i].value,
+                        outside_is_tainted(prefs[i].outside) ? MEMORY_OUTSIDE_MARK : "");
    }
 
    /* Search summaries */

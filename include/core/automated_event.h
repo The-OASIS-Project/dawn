@@ -23,11 +23,13 @@
 #ifndef AUTOMATED_EVENT_H
 #define AUTOMATED_EVENT_H
 
+#include "core/outside_markers.h"
+
 /* First line of the envelope a finished background job's results are delivered
  * in (job_reinvoke).  It sits in the parent conversation's in-memory history as a
  * user-role message so the model reacts to it, but it is job output, not
  * something the user said, so memory extraction skips it. */
-#define AUTOMATED_EVENT_JOB_UPDATE "[automated background-job update]"
+#define AUTOMATED_EVENT_JOB_UPDATE OUTSIDE_MARKER_JOB_UPDATE
 
 /* First line of the envelope that reports an action the user approved by
  * reply code (an SMS request: messaging_engine_codes.c).  The action's

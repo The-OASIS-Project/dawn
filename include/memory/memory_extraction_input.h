@@ -73,12 +73,16 @@ int64_t memory_extraction_history_first_id(struct json_object *history);
  * first outside text they hold, a result of any tool whose results aren't
  * DAWN's own (a framed one by its frame, any other as OTHER), a document
  * attached to the user's message, a turn context's outside items, a
- * background job's result, a device's relayed data, DAWN's posts.  What came
- * before the cursor is the conversation's floor, the caller's to add.
+ * background job's result, a device's relayed data, DAWN's posts.  Rows a
+ * compaction summarized away are read from the stored conversation (OTHER
+ * when it has none).  What came before the cursor is the conversation's
+ * floor, the caller's to add.
  *
  * @param user_id              Owner
  * @param conversation_id      Conversation being extracted (0 = none)
- * @param conversation_history Session history (read only)
+ * @param conversation_history Session history (read only), its request context
+ *                             still marked (session_snapshot_history): read for
+ *                             its outside text, then stripped
  * @param last_msg_id          Extraction cursor for the conversation
  * @param outside_out          Output: outside_kind_t of the batch's rows (set always)
  * @return New JSON array (caller owns), or NULL when refused or out of memory

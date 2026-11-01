@@ -32,10 +32,13 @@
 #include "auth/auth_db.h"
 #include "core/automated_event.h"
 #include "core/outside_kind.h"
+#include "core/outside_markers.h"
 #include "llm/llm_context_text.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_third_party.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
+#include "memory/memory_history_loader.h"
 #include "memory/memory_note_guard.h"
 #include "memory/memory_types.h"
 #include "prompts.h"
@@ -231,7 +234,8 @@ static int result_outside(struct json_object *history,
    if (frame) {
       return llm_third_party_outside_kind(frame);
    }
-   if (!result_is_own(history, at, call_id) || content_has(content, ", outside)") ||
+   if (!result_is_own(history, at, call_id) ||
+       content_has(content, OUTSIDE_MARKER_KIND_SUFFIX ")") ||
        content_has(content, MEMORY_OUTSIDE_MARK)) {
       return OUTSIDE_OTHER;
    }
@@ -254,8 +258,9 @@ static int focus_items_outside(const char *text) {
          char head[160];
          const size_t len = n - 1 < sizeof(head) - 2 ? n - 1 : sizeof(head) - 2;
          snprintf(head, sizeof(head), " %.*s", (int)len, line + 1);
-         if (strstr(head, " outside")) {
-            return strstr(head, " document_chunk ") ? OUTSIDE_DOCUMENT : OUTSIDE_OTHER;
+         if (strstr(head, " " OUTSIDE_MARKER_ITEM_KIND)) {
+            return strstr(head, " " OUTSIDE_MARKER_DOC_SOURCE " ") ? OUTSIDE_DOCUMENT
+                                                                   : OUTSIDE_OTHER;
          }
       }
       line = end ? end + 1 : NULL;
@@ -341,22 +346,72 @@ static int message_outside(struct json_object *history, size_t at) {
    return OUTSIDE_NONE;
 }
 
+/* Whether message @p i of @p history is one a batch from @p last_msg_id reads
+ * (id-less, or past the cursor). */
+static bool in_batch(struct json_object *history, size_t i, int64_t last_msg_id) {
+   struct json_object *id = NULL;
+   return !json_object_object_get_ex(json_object_array_get_idx(history, i), "id", &id) ||
+          json_object_get_int64(id) <= 0 || json_object_get_int64(id) > last_msg_id;
+}
+
 /* The first outside text in the rows of @p history a batch from
- * @p last_msg_id reads (id-less ones, and those past the cursor); what came
- * before is the conversation's floor (conversations.outside). */
+ * @p last_msg_id reads; what came before is the conversation's floor
+ * (conversations.outside). */
 static int batch_outside(struct json_object *history, int64_t last_msg_id) {
    for (size_t i = 0; i < json_object_array_length(history); i++) {
-      struct json_object *id = NULL;
-      if (json_object_object_get_ex(json_object_array_get_idx(history, i), "id", &id) &&
-          json_object_get_int64(id) > 0 && json_object_get_int64(id) <= last_msg_id) {
-         continue;
-      }
-      const int kind = message_outside(history, i);
+      const int kind = in_batch(history, i, last_msg_id) ? message_outside(history, i)
+                                                         : OUTSIDE_NONE;
       if (outside_is_tainted(kind)) {
          return kind;
       }
    }
    return OUTSIDE_NONE;
+}
+
+static bool has_summary(struct json_object *obj) {
+   return llm_history_kind_of(obj) == MESSAGE_KIND_SUMMARY;
+}
+
+/* Whether the batch's rows hold a compaction's summary: the rows it replaced
+ * are gone from the history, unread. */
+static bool batch_summarized(struct json_object *history, int64_t last_msg_id) {
+   for (size_t i = 0; i < json_object_array_length(history); i++) {
+      struct json_object *msg = json_object_array_get_idx(history, i), *content = NULL;
+      if (!in_batch(history, i, last_msg_id)) {
+         continue;
+      }
+      if (has_summary(msg)) {
+         return true;
+      }
+      for (size_t k = 0;
+           json_object_object_get_ex(msg, "content", &content) &&
+           json_object_is_type(content, json_type_array) && k < json_object_array_length(content);
+           k++) {
+         if (has_summary(json_object_array_get_idx(content, k))) {
+            return true;
+         }
+      }
+   }
+   return false;
+}
+
+/* What the batch's rows read, those a compaction removed included: read from
+ * the conversation's stored rows, or, with none (a history never saved),
+ * counted as outside text. */
+static int history_outside(int user_id,
+                           int64_t conversation_id,
+                           struct json_object *history,
+                           int64_t last_msg_id) {
+   const int kind = batch_outside(history, last_msg_id);
+   if (outside_is_tainted(kind) || !batch_summarized(history, last_msg_id)) {
+      return kind;
+   }
+   struct json_object *stored = conversation_id > 0
+                                    ? memory_history_load_from_db(conversation_id, user_id, NULL)
+                                    : NULL;
+   const int removed = stored ? batch_outside(stored, last_msg_id) : OUTSIDE_OTHER;
+   json_object_put(stored);
+   return outside_combine(kind, removed);
 }
 
 /* A copy of @p obj with its "content" replaced by @p content (taken). */
@@ -601,7 +656,25 @@ struct json_object *memory_extraction_build_input(int user_id,
                                                   struct json_object *conversation_history,
                                                   int64_t last_msg_id,
                                                   int *outside_out) {
-   *outside_out = batch_outside(conversation_history, last_msg_id);
+   /* Read with DAWN's request context (what it put in front of the model),
+    * then extracted without it. */
+   *outside_out = history_outside(user_id, conversation_id, conversation_history, last_msg_id);
+   /* What DAWN wrote into the stored rows past the cursor, as far as this
+    * history reaches: a history loaded from the database has no request
+    * context, and a compaction's rows aren't in the live one.  Unread (a
+    * failed query): outside text. */
+   int stored = OUTSIDE_NONE;
+   if (conversation_id > 0 &&
+       conv_db_rows_outside(conversation_id, user_id, last_msg_id,
+                            memory_extraction_history_max_id(conversation_history),
+                            &stored) != AUTH_DB_SUCCESS) {
+      stored = OUTSIDE_OTHER;
+   }
+   *outside_out = outside_combine(*outside_out, stored);
+   struct json_object *history = llm_history_strip_internal(conversation_history);
+   if (!history) {
+      return NULL;
+   }
 
    /* Note-extraction guard: collect note-filed bodies + document_read echoes
     * from the FULL history so they can be redacted out of the extraction input
@@ -613,13 +686,13 @@ struct json_object *memory_extraction_build_input(int user_id,
     * Messages with missing or zero id (compaction markers, a turn's intermediate
     * tool-call entries, satellite sessions that persist nothing) are included
     * unconditionally.  System messages are always skipped by the role check. */
-   size_t arr_len = json_object_array_length(conversation_history);
+   size_t arr_len = json_object_array_length(history);
    struct json_object *filtered = json_object_new_array();
    struct json_object *row_ids = json_object_new_array(); /* DB ids of the rows sent */
    int unverified_user = 0;                               /* user messages with no row id */
 
    for (size_t i = 0; i < arr_len; i++) {
-      struct json_object *msg = json_object_array_get_idx(conversation_history, i);
+      struct json_object *msg = json_object_array_get_idx(history, i);
       struct json_object *role_obj, *id_obj;
       if (!json_object_object_get_ex(msg, "role", &role_obj))
          continue;
@@ -668,6 +741,7 @@ struct json_object *memory_extraction_build_input(int user_id,
    }
 
    memory_note_guard_free(note_guard);
+   json_object_put(history);
 
    /* Verify from the rows themselves that what is about to be extracted belongs
     * to conversation_id and to no private or background-job conversation.  The

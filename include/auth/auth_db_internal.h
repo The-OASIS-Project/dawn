@@ -46,6 +46,7 @@
 #include "auth/auth_db_messages.h"
 #include "core/hash_util.h"
 #include "core/outside_kind.h"
+#include "core/outside_markers.h"
 
 /* =============================================================================
  * Constants
@@ -951,21 +952,44 @@ int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
    "COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.conversation_id = " conv \
    " AND m.kind IS NULL), 0)"
 
+/* The outside kind a stored row @p m (a messages row, by name) carries as
+ * DAWN wrote it, NULL when none, by the live scan's rules
+ * (memory_extraction_input.c) for what isn't a tool's result: one of DAWN's
+ * posts, a turn context naming an item from outside ("[M3 source outside
+ * YYYY-MM-DD]" or no date), a document attached to the user's message, a
+ * background job's result, a device's relayed data (core/outside_markers.h). */
+/* clang-format off */
+#define CONV_ROW_OUTSIDE_KIND_SQL(m) \
+   "(CASE WHEN " m ".id IN (SELECT message_id FROM message_unprompted) THEN 7 " \
+   "WHEN " m ".role != 'user' THEN NULL " \
+   "WHEN " m ".kind = 'turn_context' THEN (CASE WHEN " m ".content GLOB '* " \
+   OUTSIDE_MARKER_ITEM_KIND " [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]]*' OR instr(" m \
+   ".content, ' " OUTSIDE_MARKER_ITEM_KIND "]') > 0 THEN (CASE WHEN instr(" m ".content, '" \
+   OUTSIDE_MARKER_DOC_SOURCE " " OUTSIDE_MARKER_ITEM_KIND "') > 0 THEN 5 ELSE 7 END) END) " \
+   "WHEN " m ".kind IS NULL AND instr(" m ".content, '" OUTSIDE_MARKER_DOC_OPEN "') > 0 THEN 5 " \
+   "WHEN substr(" m ".content, 1, length('" OUTSIDE_MARKER_JOB_UPDATE "')) = '" \
+   OUTSIDE_MARKER_JOB_UPDATE "' THEN 3 " \
+   "WHEN substr(" m ".content, 1, length('" OUTSIDE_MARKER_DEVICE_DATA "')) = '" \
+   OUTSIDE_MARKER_DEVICE_DATA "' THEN 7 END)"
+/* clang-format on */
+_Static_assert(OUTSIDE_RESEARCH == 3 && OUTSIDE_DOCUMENT == 5 && OUTSIDE_OTHER == 7,
+               "CONV_ROW_OUTSIDE_KIND_SQL writes these outside kinds");
+
 /* The SET clause marking a conversations row extracted up to now (what was
  * learned so far: forgetting, delete-all), and extracting it again from the
  * start (the reextract wipe) beginning there too.  The rows it passes are
- * never scanned, so a tool's result among them raises the outside floor to
- * OTHER (fail closed: unread, it may have been anyone's text). */
+ * never scanned, so one carrying outside text (a tool's result, whichever
+ * tool, or CONV_ROW_OUTSIDE_KIND_SQL) raises the floor to OTHER. */
 /* clang-format off */
 #define CONV_MARK_EXTRACTED_SET_SQL \
    "last_extracted_msg_count = message_count, last_extracted_msg_id = " \
    CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extract_floor_msg_id = " \
    CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extraction_attempts = 0, " \
    "outside = CASE WHEN outside IN (" OUTSIDE_UNTAINTED_SQL ") AND EXISTS (SELECT 1 FROM " \
-   "messages m WHERE m.conversation_id = conversations.id AND m.role = 'tool' AND m.id > " \
-   "conversations.last_extracted_msg_id) THEN 7 ELSE outside END"
+   "messages m WHERE m.conversation_id = conversations.id AND m.id > " \
+   "conversations.last_extracted_msg_id AND (m.role = 'tool' OR " \
+   CONV_ROW_OUTSIDE_KIND_SQL("m") " IS NOT NULL)) THEN 7 ELSE outside END"
 /* clang-format on */
-_Static_assert(OUTSIDE_OTHER == 7, "CONV_MARK_EXTRACTED_SET_SQL writes OTHER");
 
 /* How far a walk up conversations.continued_from goes (a cycle the schema
  * doesn't forbid stops here): the outside floor and its v113 fill. */

@@ -229,16 +229,21 @@ int memory_db_relation_supersede(int user_id,
                                           NULL, prov, out_old_fact_id);
 }
 
-/* Whether @p fact_id still backs an open relation (caller holds the lock). */
-static bool fact_has_open_relation_locked(int user_id, int64_t fact_id) {
+/* Whether @p fact_id stays current when a relation it backed closes: it still
+ * backs an open one, or the closing batch read outside text (@p tainted) and
+ * the fact isn't from such a batch (caller holds the lock). */
+static bool fact_stays_locked(int user_id, int64_t fact_id, bool tainted) {
    sqlite3_stmt *st = NULL;
    bool open = true; /* on error, keep the fact (never hide one by mistake) */
    if (sqlite3_prepare_v2(s_db.db,
-                          "SELECT EXISTS (SELECT 1 FROM memory_relations WHERE user_id = ? AND "
-                          "fact_id = ? AND valid_to IS NULL)",
+                          "SELECT EXISTS (SELECT 1 FROM memory_relations WHERE user_id = ?1 AND "
+                          "fact_id = ?2 AND valid_to IS NULL) OR (?3 AND EXISTS (SELECT 1 FROM "
+                          "memory_facts WHERE id = ?2 AND user_id = ?1 AND outside IN "
+                          "(" OUTSIDE_UNTAINTED_SQL ")))",
                           -1, &st, NULL) == SQLITE_OK) {
       sqlite3_bind_int(st, 1, user_id);
       sqlite3_bind_int64(st, 2, fact_id);
+      sqlite3_bind_int(st, 3, tainted);
       if (sqlite3_step(st) == SQLITE_ROW) {
          open = sqlite3_column_int(st, 0) != 0;
       }
@@ -581,10 +586,12 @@ int memory_db_relation_supersede_ex(int user_id,
 
    /* A closed row's fact goes only when nothing it says is still open (a fact
     * listing two numbers stays when one of them changes), never the new fact
-    * itself, and only with a new fact to point at. */
+    * itself, never one outside text didn't teach for a batch that read some,
+    * and only with a new fact to point at. */
    for (int i = 0; i < n_closed_facts; i++) {
       const int64_t old_id = closed_facts[i];
-      if (old_id == fact_id || fact_has_open_relation_locked(user_id, old_id)) {
+      if (old_id == fact_id ||
+          fact_stays_locked(user_id, old_id, prov && outside_is_tainted(prov->outside))) {
          continue;
       }
       if (fact_id <= 0) {
