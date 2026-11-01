@@ -68,6 +68,20 @@ static inline bool outside_is_tainted(int v) {
    return v != OUTSIDE_NONE && v != OUTSIDE_UNKNOWN;
 }
 
+/**
+ * @brief @p a and @p b read together: the first tainted kind, else UNKNOWN
+ *        when either is (what can't be judged stays so), else NONE
+ */
+static inline int outside_combine(int a, int b) {
+   if (outside_is_tainted(a)) {
+      return a;
+   }
+   if (outside_is_tainted(b)) {
+      return b;
+   }
+   return (a == OUTSIDE_UNKNOWN || b == OUTSIDE_UNKNOWN) ? OUTSIDE_UNKNOWN : OUTSIDE_NONE;
+}
+
 /** Whether @p v is known to carry no outside text. */
 static inline bool outside_is_clean(int v) {
    return v == OUTSIDE_NONE;

@@ -67,6 +67,13 @@ static void build_gloss_text(char *buf, size_t buflen, const char *label) {
 }
 
 int memory_note_bridge_upsert_gloss(int user_id, int64_t note_doc_id, const char *label) {
+   return memory_note_bridge_upsert_gloss_from(user_id, note_doc_id, label, OUTSIDE_NONE);
+}
+
+int memory_note_bridge_upsert_gloss_from(int user_id,
+                                         int64_t note_doc_id,
+                                         const char *label,
+                                         int outside) {
    if (user_id <= 0 || note_doc_id <= 0 || !label || !label[0])
       return FAILURE;
    if (!g_config.memory.enabled)
@@ -96,7 +103,7 @@ int memory_note_bridge_upsert_gloss(int user_id, int64_t note_doc_id, const char
       memory_db_fact_delete(existing, user_id);
 
    int64_t fact_id = 0;
-   const memory_provenance_t gloss = { .origin = MEMORY_ORIGIN_NOTE };
+   const memory_provenance_t gloss = { .origin = MEMORY_ORIGIN_NOTE, .outside = outside };
    if (memory_db_fact_create(user_id, text, MEMORY_NOTE_GLOSS_CONFIDENCE, "explicit", &gloss,
                              &fact_id) != MEMORY_DB_SUCCESS ||
        fact_id <= 0) {

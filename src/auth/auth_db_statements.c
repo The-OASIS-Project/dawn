@@ -564,7 +564,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
      .stmt = &s_db.stmt_memory_pref_source_add,
      .optional = true },
    { "memory_pref_current",
-     "SELECT id, value FROM memory_preferences WHERE user_id = ? AND "
+     "SELECT id, value, outside FROM memory_preferences WHERE user_id = ? AND "
      "category = ?",
      &s_db.stmt_memory_pref_current },
    { .name = "memory_pref_sources_clear",
@@ -693,6 +693,12 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "reinforcement_count, outside FROM memory_preferences WHERE user_id = ? ORDER BY category "
      "LIMIT ? OFFSET ?",
      &s_db.stmt_memory_pref_list },
+   /* The session-start block's: no value that came with outside text. */
+   { "memory_pref_list_untainted",
+     "SELECT id, user_id, category, value, confidence, source, created_at, updated_at, "
+     "reinforcement_count, outside FROM memory_preferences WHERE user_id = ? AND outside IN "
+     "(" OUTSIDE_UNTAINTED_SQL ") ORDER BY category LIMIT ? OFFSET ?",
+     &s_db.stmt_memory_pref_list_untainted },
    { "memory_pref_search",
      "SELECT id, user_id, category, value, confidence, source, created_at, updated_at, "
      "reinforcement_count, outside FROM memory_preferences "
@@ -711,15 +717,22 @@ static const auth_db_stmt_def_t s_stmts[] = {
      &s_db.stmt_memory_summary_create },
    { "memory_summary_list",
      "SELECT id, user_id, session_id, summary, topics, sentiment, created_at, "
-     "message_count, duration_seconds, consolidated FROM memory_summaries "
+     "message_count, duration_seconds, consolidated, outside FROM memory_summaries "
      "WHERE user_id = ? AND consolidated = 0 ORDER BY created_at DESC LIMIT ? OFFSET ?",
      &s_db.stmt_memory_summary_list },
+   /* The session-start block's: no summary of a batch that read outside text. */
+   { "memory_summary_list_untainted",
+     "SELECT id, user_id, session_id, summary, topics, sentiment, created_at, "
+     "message_count, duration_seconds, consolidated, outside FROM memory_summaries "
+     "WHERE user_id = ? AND consolidated = 0 AND outside IN (" OUTSIDE_UNTAINTED_SQL ") "
+     "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+     &s_db.stmt_memory_summary_list_untainted },
 
    /* WebUI sort variant (oldest first): same projection + positional params as
     * stmt_memory_summary_list.  DEFAULT/newest keeps using stmt_memory_summary_list. */
    { "memory_summary_list_created_asc",
      "SELECT id, user_id, session_id, summary, topics, sentiment, created_at, "
-     "message_count, duration_seconds, consolidated FROM memory_summaries "
+     "message_count, duration_seconds, consolidated, outside FROM memory_summaries "
      "WHERE user_id = ? AND consolidated = 0 ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?",
      &s_db.stmt_memory_summary_list_created_asc },
 
@@ -730,7 +743,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
      &s_db.stmt_memory_summary_mark_consolidated },
    { "memory_summary_search",
      "SELECT id, user_id, session_id, summary, topics, sentiment, created_at, "
-     "message_count, duration_seconds, consolidated FROM memory_summaries "
+     "message_count, duration_seconds, consolidated, outside FROM memory_summaries "
      "WHERE user_id = ? AND (summary LIKE ? ESCAPE '\\' OR topics LIKE ? ESCAPE '\\') "
      "ORDER BY created_at DESC LIMIT ?",
      &s_db.stmt_memory_summary_search },
@@ -738,7 +751,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
    /* Date-filtered memory queries (for time_range search and fixed recent) */
    { "memory_summary_search_since",
      "SELECT id, user_id, session_id, summary, topics, sentiment, created_at, "
-     "message_count, duration_seconds, consolidated FROM memory_summaries "
+     "message_count, duration_seconds, consolidated, outside FROM memory_summaries "
      "WHERE user_id = ? AND (summary LIKE ? ESCAPE '\\' OR topics LIKE ? ESCAPE '\\') "
      "AND created_at >= ? ORDER BY created_at DESC LIMIT ?",
      &s_db.stmt_memory_summary_search_since },
@@ -762,13 +775,13 @@ static const auth_db_stmt_def_t s_stmts[] = {
      &s_db.stmt_memory_fact_list_window_desc },
    { "memory_summary_list_window_asc",
      "SELECT id, user_id, session_id, summary, topics, sentiment, created_at, "
-     "message_count, duration_seconds, consolidated FROM memory_summaries "
+     "message_count, duration_seconds, consolidated, outside FROM memory_summaries "
      "WHERE user_id = ? AND created_at >= ? AND created_at <= ? "
      "ORDER BY created_at ASC LIMIT ?",
      &s_db.stmt_memory_summary_list_window_asc },
    { "memory_summary_list_window_desc",
      "SELECT id, user_id, session_id, summary, topics, sentiment, created_at, "
-     "message_count, duration_seconds, consolidated FROM memory_summaries "
+     "message_count, duration_seconds, consolidated, outside FROM memory_summaries "
      "WHERE user_id = ? AND created_at >= ? AND created_at <= ? "
      "ORDER BY created_at DESC LIMIT ?",
      &s_db.stmt_memory_summary_list_window_desc },
@@ -781,11 +794,15 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * re-querying MAX(id) at commit time — avoids TOCTOU when new messages arrive
     * during LLM inference.  CASE guard preserves the existing cursor when the
     * caller passes 0 (early-skip paths with no prov). */
+   /* A cursor advance carries what the rows it passes read: ?4 raises the
+    * outside floor when tainted and the floor isn't yet (the first sticks). */
    { "conv_set_last_extracted",
-     "UPDATE conversations SET last_extracted_msg_count = ?, "
-     "last_extracted_msg_id = CASE WHEN ? > 0 THEN ? ELSE last_extracted_msg_id END, "
-     "extraction_attempts = 0, extraction_last_attempt_at = 0 "
-     "WHERE id = ?",
+     "UPDATE conversations SET last_extracted_msg_count = ?1, "
+     "last_extracted_msg_id = CASE WHEN ?2 > 0 THEN ?2 ELSE last_extracted_msg_id END, "
+     "extraction_attempts = 0, extraction_last_attempt_at = 0, "
+     "outside = CASE WHEN ?4 NOT IN (" OUTSIDE_UNTAINTED_SQL
+     ") AND outside IN (" OUTSIDE_UNTAINTED_SQL ") THEN ?4 ELSE outside END "
+     "WHERE id = ?3",
      &s_db.stmt_conv_set_last_extracted },
 
    /* Conversation privacy statement */
@@ -974,7 +991,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
      "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
      "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
-     "r.mention_count "
+     "r.mention_count, r.outside "
      "FROM memory_relations r "
      "LEFT JOIN memory_entities e ON r.object_entity_id = e.id "
      "WHERE r.user_id = ? AND r.subject_entity_id = ? LIMIT ?",
@@ -988,7 +1005,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
      "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
      "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
-     "r.mention_count "
+     "r.mention_count, r.outside "
      "FROM memory_relations r "
      "LEFT JOIN memory_entities e ON r.object_entity_id = e.id "
      "WHERE r.user_id = ? AND r.subject_entity_id = ? "
@@ -1000,7 +1017,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
      "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
      "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
-     "r.mention_count "
+     "r.mention_count, r.outside "
      "FROM memory_relations r "
      "LEFT JOIN memory_entities e ON r.subject_entity_id = e.id "
      "WHERE r.user_id = ? AND r.object_entity_id = ? LIMIT ?",
@@ -1009,7 +1026,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
      "COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
      "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
-     "r.mention_count "
+     "r.mention_count, r.outside "
      "FROM memory_relations r "
      "LEFT JOIN memory_entities e ON r.subject_entity_id = e.id "
      "WHERE r.user_id = ? AND r.object_entity_id = ? "

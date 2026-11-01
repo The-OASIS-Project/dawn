@@ -80,6 +80,8 @@ typedef struct {
    int new_message_count;   /* Messages being extracted this time */
    int duration_seconds;
    int64_t first_msg_id;                  /* the batch's first saved row (0: none) */
+   int outside;                           /* outside_kind_t its history carries */
+   int64_t checked_max_id;                /* highest row the history held (0: none) */
    bool has_fallback;                     /* Whether fallback LLM info is available */
    memory_extraction_fallback_t fallback; /* Session's active LLM for retry */
 } extraction_context_t;
@@ -270,7 +272,9 @@ static void reinforce_fact(int user_id,
    /* Unreadable: as if it were at the default 0.7. */
    const float new_conf = existing ? existing->confidence + 0.1f : 0.8f;
    memory_db_fact_update_confidence(fact_id, user_id, new_conf > 1.0f ? 1.0f : new_conf);
-   if (now_told && existing && strcmp(existing->source, "explicit") != 0)
+   /* Outside text can't make a fact the user's own word. */
+   if (now_told && existing && strcmp(existing->source, "explicit") != 0 &&
+       !(prov && outside_is_tainted(prov->outside)))
       memory_db_fact_mark_explicit(fact_id, user_id);
    if (prov && prov->conv_id > 0) {
       memory_db_fact_provenance_extend(fact_id, user_id, prov->conv_id, prov->msg_id_start,
@@ -961,7 +965,9 @@ static void process_extraction_response(int user_id,
       }
    }
 
-   /* Process preferences */
+   /* Process preferences.  One from a batch that read outside text is stored
+    * with that kind, never over a value that isn't (memory_db_pref_upsert),
+    * and stays out of the session-start block. */
    struct json_object *prefs_arr;
    if (json_object_object_get_ex(root, "preferences", &prefs_arr)) {
       int count = json_object_array_length(prefs_arr);
@@ -1025,12 +1031,22 @@ static void process_extraction_response(int user_id,
                int64_t new_id = 0;
                memory_db_fact_create_at(user_id, new_fact, 0.9f, "explicit", prov, conv_created_at,
                                         &new_id);
+               /* From a batch that read outside text, a correction of a fact
+                * that isn't from such a batch is stored beside it, never
+                * replacing it. */
+               const bool beside = prov && outside_is_tainted(prov->outside) &&
+                                   !outside_is_tainted(similar[0].outside);
                if (new_id > 0) {
                   /* The old fact is an older value the correction replaced
                    * (back if the correction is forgotten); what it stated stays
                    * open, since a correction rarely retracts all of it.
                    * Refused (logged) when the old one was already superseded. */
-                  if (memory_db_fact_correct(similar[0].id, new_id, user_id) != MEMORY_DB_SUCCESS) {
+                  if (beside) {
+                     OLOG_INFO("memory_extraction: correction of fact %lld kept beside it "
+                               "(outside text read)",
+                               (long long)similar[0].id);
+                  } else if (memory_db_fact_correct(similar[0].id, new_id, user_id) !=
+                             MEMORY_DB_SUCCESS) {
                      OLOG_WARNING("memory_extraction: correction of fact %lld not applied "
                                   "(already merged or replaced)",
                                   (long long)similar[0].id);
@@ -1339,14 +1355,20 @@ static void *extraction_thread(void *arg) {
    bool is_recovery_run = (strncmp(ctx->session_id, "recovery_", 9) == 0);
 #endif
 
-   /* Compute source range for provenance: (last_extracted_msg_id + 1, MAX(messages.id)).
-    * Queried here — after LLM returns — to avoid a race with concurrent inserts. */
-   memory_provenance_t prov = { 0 }; /* zeroed = no provenance */
+   /* Source range for provenance: (last_extracted_msg_id + 1, the highest row
+    * the batch's history held), the cursor's last row read after the LLM
+    * returns (a concurrent extraction may have moved it). */
+   memory_provenance_t prov = { .outside = ctx->outside }; /* no source range yet */
    if (ctx->conversation_id > 0 && response) {
       int64_t last_id = 0;
       memory_db_get_last_extracted_msg_id(ctx->conversation_id, &last_id);
       int64_t max_id = 0;
       conv_db_get_max_msg_id(ctx->conversation_id, ctx->user_id, &max_id);
+      /* No further than the history the batch read: a row saved during the
+       * call is read next time. */
+      if (ctx->checked_max_id > 0 && max_id > ctx->checked_max_id) {
+         max_id = ctx->checked_max_id;
+      }
       if (max_id > 0 && max_id >= last_id) {
          prov.conv_id = ctx->conversation_id;
          prov.msg_id_start = last_id + 1;
@@ -1394,8 +1416,7 @@ static void *extraction_thread(void *arg) {
       /* nothing written; see above */
    } else if (response) {
       process_extraction_response(ctx->user_id, ctx->conversation_id, ctx->session_id, response,
-                                  ctx->new_message_count, ctx->duration_seconds,
-                                  prov.conv_id > 0 ? &prov : NULL, forgotten);
+                                  ctx->new_message_count, ctx->duration_seconds, &prov, forgotten);
       free(response);
 
       /* Notify user if we had to fall back */
@@ -1415,11 +1436,16 @@ static void *extraction_thread(void *arg) {
 #endif
       }
 
-      /* Update extraction high-water mark on success.  Pass prov.msg_id_end so
-       * the cursor is set to the value captured *before* LLM inference, not a
-       * re-queried MAX that may have advanced during the call. */
+      /* Update extraction high-water mark on success, to the end of the range
+       * above: rows saved during the call stay to be read. */
       if (ctx->conversation_id > 0) {
-         memory_db_set_last_extracted(ctx->conversation_id, ctx->message_count, prov.msg_id_end);
+         /* What this batch read stays with the conversation (its floor): a
+          * later batch reads only its own rows. */
+         if (memory_db_set_last_extracted(ctx->conversation_id, ctx->message_count, prov.msg_id_end,
+                                          ctx->outside) != MEMORY_DB_SUCCESS) {
+            OLOG_WARNING("memory_extraction: conv %lld: cursor not advanced",
+                         (long long)ctx->conversation_id);
+         }
          OLOG_INFO("memory_extraction: updated high-water mark to %d (msg_id=%lld) for conv %ld",
                    ctx->message_count, (long long)prov.msg_id_end, (long)ctx->conversation_id);
       }
@@ -1567,8 +1593,8 @@ static int trigger_extraction(int user_id,
    if (message_count < 2) {
       OLOG_INFO("memory_extraction: skipping - too few messages (%d)", message_count);
       if (conversation_id > 0) {
-         memory_db_set_last_extracted(conversation_id, message_count,
-                                      0); /* 0 = leave msg_id cursor unchanged */
+         memory_db_set_last_extracted(conversation_id, message_count, 0,
+                                      OUTSIDE_NONE); /* 0 = leave msg_id cursor unchanged */
       }
       return trigger_skip(user_id, have_slot, 0);
    }
@@ -1578,6 +1604,9 @@ static int trigger_extraction(int user_id,
     * verification — lets spot-checking confirm both cursors agree). */
    int last_extracted = 0;
    int64_t last_msg_id = 0;
+   /* What the conversation read before this batch (its floor), and DAWN's
+    * digest of outside content when a briefing is in it. */
+   int floor = OUTSIDE_NONE;
    if (conversation_id > 0) {
       /* A scheduled briefing is DAWN's digest of outside content (news,
        * weather, email, calendar), not something the user said: it counts as
@@ -1593,7 +1622,11 @@ static int trigger_extraction(int user_id,
                       (long long)conversation_id);
          return trigger_skip(user_id, have_slot, 0);
       }
+      if (conv_db_get_outside(conversation_id, user_id, &floor) != AUTH_DB_SUCCESS) {
+         floor = OUTSIDE_OTHER; /* unreadable: fail closed, as the checks beside it */
+      }
       if (briefing_end > 0) {
+         floor = outside_combine(floor, OUTSIDE_OTHER);
          OLOG_INFO("memory_extraction: conv %lld: briefing rows through %lld not extracted%s",
                    (long long)conversation_id, (long long)briefing_end,
                    briefing_replied ? "" : " (no reply)");
@@ -1647,8 +1680,12 @@ static int trigger_extraction(int user_id,
    /* The messages to extract, verified to belong to conversation_id (see
     * memory_extraction_build_input).  NULL: refused or out of memory; either
     * way nothing is extracted and memory_recovery picks up anything eligible. */
+   int batch_outside = OUTSIDE_NONE;
    struct json_object *filtered = memory_extraction_build_input(user_id, conversation_id,
-                                                                conversation_history, last_msg_id);
+                                                                conversation_history, last_msg_id,
+                                                                &batch_outside);
+   ctx->outside = outside_combine(floor, batch_outside);
+   ctx->checked_max_id = memory_extraction_history_max_id(conversation_history);
    if (!filtered) {
       free(ctx);
       extraction_slot_release(user_id);
@@ -1660,10 +1697,16 @@ static int trigger_extraction(int user_id,
    ctx->first_msg_id = memory_extraction_history_first_id(filtered);
    if (!memory_extraction_input_has_question(filtered)) {
       json_object_put(filtered);
+      /* The rows passed may still have read outside text (DAWN's posts): the
+       * floor takes it with the cursor. */
+      const int outside = ctx->outside;
       free(ctx);
       const int64_t checked_id = memory_extraction_history_max_id(conversation_history);
-      if (conversation_id > 0 && checked_id > last_msg_id) {
-         memory_db_set_last_extracted(conversation_id, message_count, checked_id);
+      if (conversation_id > 0 && checked_id > last_msg_id &&
+          memory_db_set_last_extracted(conversation_id, message_count, checked_id, outside) !=
+              MEMORY_DB_SUCCESS) {
+         OLOG_WARNING("memory_extraction: conv %lld: cursor not advanced",
+                      (long long)conversation_id);
       }
       OLOG_INFO("memory_extraction: conv %lld: nothing the user said is new; skipped",
                 (long long)conversation_id);

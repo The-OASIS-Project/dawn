@@ -31,13 +31,15 @@
 #include "prompts.h"
 #include "tools/tool_registry.h"
 
-/* Each frame (TOOL_FRAMES_ALL) and what it holds, for its first line. */
+/* Each frame (TOOL_FRAMES_ALL), what it holds (for its first line), and the
+ * outside kind of text in it. */
 static const struct {
    const char *name;
    const char *what;
+   outside_kind_t outside;
 } k_frames[] = {
-   { TOOL_FRAME_EMAIL, THIRD_PARTY_WHAT_EMAIL },
-   { TOOL_FRAME_WEB, THIRD_PARTY_WHAT_WEB },
+   { TOOL_FRAME_EMAIL, THIRD_PARTY_WHAT_EMAIL, OUTSIDE_EMAIL },
+   { TOOL_FRAME_WEB, THIRD_PARTY_WHAT_WEB, OUTSIDE_WEB },
 };
 
 char *llm_third_party_frame(const char *name, const char *tag, const char *body) {
@@ -103,4 +105,13 @@ const char *llm_third_party_present(const char *text) {
       }
    }
    return NULL;
+}
+
+outside_kind_t llm_third_party_outside_kind(const char *frame) {
+   for (size_t i = 0; frame && i < sizeof(k_frames) / sizeof(k_frames[0]); i++) {
+      if (strcmp(frame, k_frames[i].name) == 0) {
+         return k_frames[i].outside;
+      }
+   }
+   return OUTSIDE_OTHER;
 }

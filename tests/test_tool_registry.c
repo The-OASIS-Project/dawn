@@ -746,6 +746,25 @@ static void test_kind_table_validation(void) {
    TEST_ASSERT_EQUAL_INT(SUCCESS, tool_registry_register(&meta));
 }
 
+/* Whose text a result is: the tool's say, unless the action's entry says
+ * otherwise; an undecided tool, or none, isn't DAWN's own. */
+static const tool_action_kind_entry_t own_kinds[] = {
+   { "play", TOOL_KIND_DEVICE, NULL },
+   { "pause", TOOL_KIND_DEVICE, NULL, NULL, TOOL_RESULTS_OUTSIDE },
+};
+static void test_results_own(void) {
+   tool_metadata_t meta = mock_tool;
+   meta.results = TOOL_RESULTS_OWN;
+   meta.action_kinds = own_kinds;
+   meta.action_kind_count = TOOL_KIND_COUNT(own_kinds);
+   TEST_ASSERT_TRUE(tool_results_own(&meta, "play"));
+   TEST_ASSERT_TRUE(tool_results_own(&meta, NULL));
+   TEST_ASSERT_FALSE(tool_results_own(&meta, "pause"));
+   meta.results = TOOL_RESULTS_UNDECIDED;
+   TEST_ASSERT_FALSE(tool_results_own(&meta, "play"));
+   TEST_ASSERT_FALSE(tool_results_own(NULL, "play"));
+}
+
 int main(void) {
    UNITY_BEGIN();
 
@@ -790,5 +809,6 @@ int main(void) {
    RUN_TEST(test_escape_and_decode_truncate_safely);
    RUN_TEST(test_extract_zero_out_len_safe);
 
+   RUN_TEST(test_results_own);
    return UNITY_END();
 }

@@ -46,6 +46,7 @@
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
+#include "prompts.h"
 #include "tools/hud_discovery.h"
 #ifdef DAWN_ENABLE_PHONE_TOOL
 #include "tools/phone_service.h"
@@ -238,7 +239,7 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
    char *safe = session_prefix_mask_secret(session_get_local(),
                                            llm_context_neutralize(pending_command_result));
    snprintf(gpt_response, sizeof(gpt_response),
-            "[DEVICE DATA] Speak this information naturally to the user: %s",
+            MQTT_DEVICE_DATA_PREFIX " Speak this information naturally to the user: %s",
             safe ? safe : "(the device's data couldn't be read)");
    free(safe);
    input_queue_push(INPUT_SOURCE_MQTT, gpt_response);

@@ -45,6 +45,7 @@
 #include "auth/auth_db.h"
 #include "auth/auth_db_messages.h"
 #include "core/hash_util.h"
+#include "core/outside_kind.h"
 
 /* =============================================================================
  * Constants
@@ -565,11 +566,13 @@ typedef struct {
    sqlite3_stmt *stmt_memory_pref_upsert;
    sqlite3_stmt *stmt_memory_pref_get;
    sqlite3_stmt *stmt_memory_pref_list;
+   sqlite3_stmt *stmt_memory_pref_list_untainted;
    sqlite3_stmt *stmt_memory_pref_search;
    sqlite3_stmt *stmt_memory_pref_delete;
 
    sqlite3_stmt *stmt_memory_summary_create;
    sqlite3_stmt *stmt_memory_summary_list;
+   sqlite3_stmt *stmt_memory_summary_list_untainted;
    sqlite3_stmt *stmt_memory_summary_list_created_asc; /* WebUI sort: oldest first */
    sqlite3_stmt *stmt_memory_summary_mark_consolidated;
    sqlite3_stmt *stmt_memory_summary_search;
@@ -950,14 +953,23 @@ int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
 
 /* The SET clause marking a conversations row extracted up to now (what was
  * learned so far: forgetting, delete-all), and extracting it again from the
- * start (the reextract wipe) beginning there too. */
-#define CONV_MARK_EXTRACTED_SET_SQL                                                              \
-   "last_extracted_msg_count = message_count, last_extracted_msg_id "                            \
-   "= " CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extract_floor_msg_id "             \
-                                                           "= " CONV_EXTRACTION_MAX_MSG_ID_SQL(  \
-                                                               "conversations.id") ", "          \
-                                                                                   "extraction_" \
-                                                                                   "attempts = 0"
+ * start (the reextract wipe) beginning there too.  The rows it passes are
+ * never scanned, so a tool's result among them raises the outside floor to
+ * OTHER (fail closed: unread, it may have been anyone's text). */
+/* clang-format off */
+#define CONV_MARK_EXTRACTED_SET_SQL \
+   "last_extracted_msg_count = message_count, last_extracted_msg_id = " \
+   CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extract_floor_msg_id = " \
+   CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extraction_attempts = 0, " \
+   "outside = CASE WHEN outside IN (" OUTSIDE_UNTAINTED_SQL ") AND EXISTS (SELECT 1 FROM " \
+   "messages m WHERE m.conversation_id = conversations.id AND m.role = 'tool' AND m.id > " \
+   "conversations.last_extracted_msg_id) THEN 7 ELSE outside END"
+/* clang-format on */
+_Static_assert(OUTSIDE_OTHER == 7, "CONV_MARK_EXTRACTED_SET_SQL writes OTHER");
+
+/* How far a walk up conversations.continued_from goes (a cycle the schema
+ * doesn't forbid stops here): the outside floor and its v113 fill. */
+#define CONV_CONTINUATION_DEPTH_MAX_SQL "64"
 
 /* The columns every fact read selects, in the order populate_fact_from_row
  * (memory_db_facts.c) reads them: MEMORY_FACT_COLS bare, MEMORY_FACT_COLS_MF
@@ -1031,11 +1043,15 @@ int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
  * a re-mention is idempotent), ?7 the one replaced value to close (a literal or an
  * entity's name, case aside), or NULL for every other open value, ?8 the new
  * value's fact (closed_by_fact_id: what a restore of the old fact reopens; NULL
- * with none).  Shared with the tests that prepare it themselves. */
+ * with none), ?9 non-NULL when the new value comes from a batch that read
+ * outside text: only rows from such a batch are closed then (a clean or
+ * unjudged value stays open beside it).  Shared with the tests that prepare
+ * it themselves. */
 #define MEMORY_RELATION_CLOSE_OPEN_SQL                                             \
    "UPDATE memory_relations SET valid_to = ?1, closed_by_fact_id = ?8 "            \
    "WHERE user_id = ?2 AND subject_entity_id = ?3 AND relation = ?4 "              \
    "  AND valid_to IS NULL "                                                       \
+   "  AND (?9 IS NULL OR outside NOT IN (" OUTSIDE_UNTAINTED_SQL ")) "             \
    "  AND (COALESCE(object_entity_id, 0) != COALESCE(?5, 0) "                      \
    "    OR COALESCE(object_value, '') != COALESCE(?6, '')) "                       \
    "  AND (?7 IS NULL OR object_value = ?7 COLLATE NOCASE OR object_entity_id IN " \

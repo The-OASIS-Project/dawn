@@ -519,6 +519,7 @@ static const tool_action_kind_entry_t s_job_action_kinds[] = {
 
 static const tool_metadata_t job_metadata = {
    .name = "job",
+   .results = TOOL_RESULTS_OUTSIDE,
    .action_kinds = s_job_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_job_action_kinds),
    .device_string = "job",

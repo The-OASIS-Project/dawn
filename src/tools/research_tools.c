@@ -402,6 +402,7 @@ static const treg_param_t research_plan_params[] = {
 
 static const tool_metadata_t research_plan_metadata = {
    .name = "research_plan",
+   .results = TOOL_RESULTS_OUTSIDE,
    .default_kind = TOOL_KIND_STATE,
    .device_string = "research_plan",
    .topic = "dawn",
@@ -437,6 +438,7 @@ static const treg_param_t research_record_params[] = {
 
 static const tool_metadata_t research_record_metadata = {
    .name = "research_record",
+   .results = TOOL_RESULTS_OUTSIDE,
    .default_kind = TOOL_KIND_STATE,
    .device_string = "research_record",
    .topic = "dawn",
@@ -544,6 +546,7 @@ static char *research_mark_unanswerable_callback(const char *action,
 
 static const tool_metadata_t research_conclude_metadata = {
    .name = "research_conclude",
+   .results = TOOL_RESULTS_OUTSIDE,
    .default_kind = TOOL_KIND_STATE,
    .device_string = "research_conclude",
    .topic = "dawn",
@@ -576,6 +579,7 @@ static const treg_param_t research_unanswerable_params[] = {
 
 static const tool_metadata_t research_mark_unanswerable_metadata = {
    .name = "research_mark_unanswerable",
+   .results = TOOL_RESULTS_OUTSIDE,
    .default_kind = TOOL_KIND_STATE,
    .device_string = "research_mark_unanswerable",
    .topic = "dawn",

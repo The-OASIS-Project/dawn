@@ -795,6 +795,10 @@
  * model learns no fact from it. */
 #define MEMORY_EXTRACTION_THIRD_PARTY_STUB "[Email or web content: not used for memory.]"
 
+/* The opening of a device's relayed data (mosquitto_comms.c): its turn's input
+ * is the device's text, not the user's (memory extraction marks it outside). */
+#define MQTT_DEVICE_DATA_PREFIX "[DEVICE DATA]"
+
 /* =============================================================================
  * THIRD-PARTY CONTENT
  * The first line of a frame around text neither DAWN nor the user wrote (an

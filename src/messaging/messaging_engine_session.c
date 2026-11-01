@@ -424,6 +424,11 @@ session_t *get_or_create_messaging_session(const channel_ref_t *ref,
    /* A sender the provider can't vouch for (SMS) reads and prepares but
     * doesn't act (core/tool_call_policy.h). */
    s->messaging_identity.sender_unverified = !ref->authenticates_sender;
+   /* Anyone can send what reaches it, so what is learned from it counts as
+    * outside text (the conversation's floor; delete this line to trust such
+    * senders as the user). */
+   if (s->messaging_identity.sender_unverified && conversation_id > 0 && user_id > 0)
+      (void)conv_db_raise_outside(conversation_id, user_id, OUTSIDE_MESSAGING);
    s->messaging_identity.channel_id = ref->channel_id;
    if (ref->display_name[0]) {
       snprintf(s->messaging_identity.channel_name, sizeof(s->messaging_identity.channel_name), "%s",

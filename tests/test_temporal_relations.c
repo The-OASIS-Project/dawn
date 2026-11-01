@@ -102,7 +102,8 @@ static const char *DDL =
    "  source_conversation_id INTEGER DEFAULT NULL,"
    "  source_msg_id_start    INTEGER DEFAULT NULL,"
    "  source_msg_id_end      INTEGER DEFAULT NULL,"
-   "  mention_count INTEGER NOT NULL DEFAULT 1"
+   "  mention_count INTEGER NOT NULL DEFAULT 1,"
+   "  outside INTEGER NOT NULL DEFAULT 0"
    ");"
    /* v49 partial UNIQUE — required for the upsert ON CONFLICT clause to parse. */
    "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_relations_unique_open "

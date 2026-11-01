@@ -99,6 +99,7 @@ static const treg_param_t doc_read_params[] = {
 
 static const tool_metadata_t doc_read_metadata = {
    .name = "document_read",
+   .results = TOOL_RESULTS_OUTSIDE,
    .default_kind = TOOL_KIND_READ,
    .device_string = "document reader",
    .description = "Read the contents of a specific saved document or note, page by page. "

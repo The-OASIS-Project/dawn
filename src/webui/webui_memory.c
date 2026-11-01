@@ -380,6 +380,9 @@ static json_object *build_preferences_json_array(const memory_preference_t *pref
       json_object_object_add(pref_obj, "updated_at", json_object_new_int64(prefs[i].updated_at));
       json_object_object_add(pref_obj, "reinforcement_count",
                              json_object_new_int(prefs[i].reinforcement_count));
+      if (outside_is_tainted(prefs[i].outside)) {
+         json_object_object_add(pref_obj, "outside", json_object_new_boolean(1));
+      }
       json_object_array_add(prefs_array, pref_obj);
    }
    return prefs_array;

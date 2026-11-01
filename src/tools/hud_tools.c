@@ -127,6 +127,7 @@ static bool hud_control_is_available(void) {
 
 static const tool_metadata_t hud_control_metadata = {
    .name = "hud_control",
+   .results = TOOL_RESULTS_OWN,
    /* Kind of action: act (the default): it passes any element name through to
     * the HUD, so what it changes isn't known here. */
    .device_string = "hud_control",
@@ -221,6 +222,7 @@ static bool hud_mode_is_available(void) {
 
 static const tool_metadata_t hud_mode_metadata = {
    .name = "hud_mode",
+   .results = TOOL_RESULTS_OWN,
    .default_kind = TOOL_KIND_DEVICE,
    .device_string = "hud",
    .topic = "hud",
@@ -274,6 +276,7 @@ static const treg_param_t faceplate_params[] = {
 
 static const tool_metadata_t faceplate_metadata = {
    .name = "faceplate",
+   .results = TOOL_RESULTS_OWN,
    .default_kind = TOOL_KIND_DEVICE,
    .device_string = "faceplate",
    .topic = "helmet",
@@ -338,6 +341,7 @@ static const tool_device_map_t recording_device_map[] = {
 
 static const tool_metadata_t recording_metadata = {
    .name = "recording",
+   .results = TOOL_RESULTS_OWN,
    /* Kind of action: act (the default): it records and streams video. */
    .device_string = "recording",
    .topic = "hud",
@@ -389,6 +393,7 @@ static const treg_param_t visual_offset_params[] = {
 
 static const tool_metadata_t visual_offset_metadata = {
    .name = "visual_offset",
+   .results = TOOL_RESULTS_OWN,
    .default_kind = TOOL_KIND_DEVICE,
    .device_string = "visual offset",
    .topic = "hud",

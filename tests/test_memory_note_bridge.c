@@ -370,6 +370,19 @@ void test_kind_word(void) {
    TEST_ASSERT_NULL(memory_fact_kind_word(NULL));
 }
 
+/* A research report's gloss carries the research's outside kind. */
+void test_research_gloss_is_outside(void) {
+   seed_doc(100);
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         memory_note_bridge_upsert_gloss_from(1, 100, "Report", OUTSIDE_RESEARCH));
+   int64_t gloss = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_find_by_note_doc_id(1, 100, &gloss));
+   memory_fact_t f;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(gloss, 1, &f));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, f.outside);
+   TEST_ASSERT_EQUAL_STRING("noted, outside", memory_fact_kind_word(&f));
+}
+
 /* The keyword search reads its score from the column after the shared ones:
  * a column added before the score would read as a score (or as zero) and
  * flatten keyword ranking.  Two facts matching the query to different degrees
@@ -404,5 +417,6 @@ int main(void) {
    RUN_TEST(test_cache_load_order_live_first_then_score);
    RUN_TEST(test_kind_word);
    RUN_TEST(test_bm25_reads_its_score);
+   RUN_TEST(test_research_gloss_is_outside);
    return UNITY_END();
 }

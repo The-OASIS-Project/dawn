@@ -227,6 +227,7 @@ static const tool_action_kind_entry_t s_ha_action_kinds[] = {
 
 static const tool_metadata_t ha_metadata = {
    .name = "home_assistant",
+   .results = TOOL_RESULTS_OWN,
    .action_kinds = s_ha_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_ha_action_kinds),
    .device_string = "home assistant",

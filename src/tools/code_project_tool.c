@@ -169,6 +169,7 @@ static const tool_action_kind_entry_t s_meta_action_kinds[] = {
 
 static const tool_metadata_t s_meta = {
    .name = "code_project",
+   .results = TOOL_RESULTS_OUTSIDE,
    .action_kinds = s_meta_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_meta_action_kinds),
    .description = "Manage code projects: list available repos, set the active project for code "

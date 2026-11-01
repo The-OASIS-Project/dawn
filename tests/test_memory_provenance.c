@@ -73,6 +73,7 @@ static const char *DDL =
    "  is_private INTEGER DEFAULT 0,"
    "  title_locked INTEGER DEFAULT 0,"
    "  origin TEXT DEFAULT 'webui',"
+   "  outside INTEGER NOT NULL DEFAULT 0,"  /* v113 */
    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
    ");"
    "INSERT INTO conversations (id, user_id, is_private) VALUES (10, 1, 0);"
@@ -195,6 +196,7 @@ static const char *DDL =
    "  source_msg_id_start    INTEGER DEFAULT NULL,"
    "  source_msg_id_end      INTEGER DEFAULT NULL,"
    "  origin_unsourced       INTEGER NOT NULL DEFAULT 0,"
+   "  outside                INTEGER NOT NULL DEFAULT 0,"  /* v113 */
    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
    "  FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"
    "  UNIQUE(user_id, category)"
@@ -371,10 +373,11 @@ static int prepare_statements(void) {
                            -1, &s_db.stmt_memory_fact_source_add, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT id, value FROM memory_preferences WHERE user_id = ? AND "
-                           "category = ?",
-                           -1, &s_db.stmt_memory_pref_current, NULL);
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, value, outside FROM memory_preferences WHERE user_id = ? AND "
+       "category = ?",
+       -1, &s_db.stmt_memory_pref_current, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
    rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM memory_preference_sources WHERE preference_id = ?",

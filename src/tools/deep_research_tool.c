@@ -843,6 +843,7 @@ static int deep_research_describe_call(const char *action,
 
 static const tool_metadata_t deep_research_metadata = {
    .name = "deep_research",
+   .results = TOOL_RESULTS_OUTSIDE,
    .action_kinds = s_deep_research_action_kinds,
    .describe_call = deep_research_describe_call,
    .action_kind_count = TOOL_KIND_COUNT(s_deep_research_action_kinds),

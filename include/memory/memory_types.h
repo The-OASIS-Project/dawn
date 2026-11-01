@@ -178,6 +178,10 @@ typedef struct {
  * @param fact The fact (its source, origin, outside and note_doc_id); NULL returns NULL
  * @return A static word, or NULL
  */
+/** What a relation or summary line adds when its batch read outside text
+ *  (a fact's kind word says ", outside" instead). */
+#define MEMORY_OUTSIDE_MARK " (outside)"
+
 /** The longest word memory_fact_kind_word returns (focus lines size for it). */
 #define MEMORY_FACT_KIND_WORD_LONGEST "remembered on request, outside"
 
@@ -259,6 +263,7 @@ typedef struct {
    int message_count;
    int duration_seconds;
    bool consolidated; /* True if rolled up into a larger summary */
+   int outside;       /* outside_kind_t of the batch it summarizes (v113) */
 } memory_summary_t;
 
 /* =============================================================================
@@ -330,6 +335,7 @@ typedef struct {
     * while valid_to IS NULL.  >= 1.  See partial UNIQUE index
     * idx_memory_relations_unique_open. */
    int mention_count;
+   int outside; /* outside_kind_t of the batch that stored it (v113) */
 } memory_relation_t;
 
 #ifdef __cplusplus

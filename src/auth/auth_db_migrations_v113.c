@@ -206,7 +206,8 @@ static const char k_preferences_sql[] = "UPDATE memory_preferences SET outside =
 static const char k_conversations_sql[] =
     "WITH RECURSIVE chain(id, anc, d) AS (SELECT id, id, 0 FROM conversations UNION ALL "
     "SELECT chain.id, c.continued_from, chain.d + 1 FROM chain JOIN conversations c ON c.id = "
-    "chain.anc WHERE c.continued_from IS NOT NULL AND chain.d < 64) "
+    "chain.anc WHERE c.continued_from IS NOT NULL AND chain.d < " CONV_CONTINUATION_DEPTH_MAX_SQL
+    ") "
     "UPDATE conversations SET outside = COALESCE((SELECT v.k FROM chain JOIN v113_conv v ON "
     "v.conv = chain.anc WHERE chain.id = conversations.id AND v.k IS NOT NULL ORDER BY chain.d "
     "LIMIT 1), CASE WHEN EXISTS (SELECT 1 FROM chain WHERE chain.id = conversations.id AND "

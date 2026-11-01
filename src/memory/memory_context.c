@@ -74,7 +74,9 @@ char *memory_build_context(int user_id, const tz_t *zone, int token_budget) {
    /* Load preferences */
    memory_preference_t prefs[MAX_CONTEXT_PREFS];
    int pref_count = 0;
-   if (memory_db_pref_list(user_id, prefs, MAX_CONTEXT_PREFS, 0, &pref_count) !=
+   /* Neither preferences nor summaries that came with outside text: this
+    * block sits in the frozen prefix, where outside text never goes. */
+   if (memory_db_pref_list_untainted(user_id, prefs, MAX_CONTEXT_PREFS, 0, &pref_count) !=
        MEMORY_DB_SUCCESS) {
       OLOG_WARNING("memory_context: failed to load preferences for user %d", user_id);
       pref_count = 0;
@@ -83,8 +85,8 @@ char *memory_build_context(int user_id, const tz_t *zone, int token_budget) {
    /* Load recent summaries */
    memory_summary_t summaries[MAX_CONTEXT_SUMMARIES];
    int summary_count = 0;
-   if (memory_db_summary_list(user_id, summaries, MAX_CONTEXT_SUMMARIES, 0, &summary_count) !=
-       MEMORY_DB_SUCCESS) {
+   if (memory_db_summary_list_untainted(user_id, summaries, MAX_CONTEXT_SUMMARIES, 0,
+                                        &summary_count) != MEMORY_DB_SUCCESS) {
       OLOG_WARNING("memory_context: failed to load summaries for user %d", user_id);
       summary_count = 0;
    }

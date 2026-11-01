@@ -1802,14 +1802,15 @@ dawn_add_unit_test(test_calendar_pick
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_extraction_input
-   SOURCES test_memory_extraction_input.c
+   SOURCES test_memory_extraction_input.c test_tool_registry_stub.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/core/prompt_sections.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
-   LIBS    dawn_common unity json-c
+   LIBS    dawn_common unity pthread json-c
    LABEL   ci)
 
 # The dawn-admin cache stats table.
@@ -1913,6 +1914,28 @@ dawn_add_unit_test(test_memory_note_guard
 dawn_add_unit_test(test_memory_note_bridge
    SOURCES test_memory_note_bridge.c
            ${SRC_ROOT}/src/memory/memory_note_bridge.c
+           ${SRC_ROOT}/src/core/memory_filter.c
+           ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_summaries.c
+           ${SRC_ROOT}/src/memory/memory_db_prefs.c
+           ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_relations.c
+           ${SRC_ROOT}/src/memory/memory_db_provenance.c
+           ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
+           ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
+           ${SRC_ROOT}/src/memory/memory_db_forget.c
+           ${SRC_ROOT}/src/memory/memory_similarity.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# The session-start memory block leaves out summaries of batches that read
+# outside text.
+dawn_add_unit_test(test_memory_context
+   SOURCES test_memory_context.c
+           ${SRC_ROOT}/src/memory/memory_context.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c

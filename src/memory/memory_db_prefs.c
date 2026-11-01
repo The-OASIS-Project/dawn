@@ -87,6 +87,7 @@ int memory_db_pref_upsert(int user_id,
     * the same value reinforced gains a source. */
    int64_t pref_id = 0;
    bool value_changed = false;
+   int old_outside = OUTSIDE_NONE;
    /* The row and its sources change together (a savepoint nests inside a
     * caller's transaction). */
    const bool sp = sqlite3_exec(s_db.db, "SAVEPOINT pref_upsert", NULL, NULL, NULL) == SQLITE_OK;
@@ -99,8 +100,19 @@ int memory_db_pref_upsert(int user_id,
          pref_id = sqlite3_column_int64(cur, 0);
          const char *old = (const char *)sqlite3_column_text(cur, 1);
          value_changed = !old || strcmp(old, value) != 0;
+         old_outside = sqlite3_column_int(cur, 2);
       }
       sqlite3_reset(cur);
+   }
+   /* Outside text never replaces a value that didn't come from it. */
+   if (pref_id > 0 && value_changed && prov && outside_is_tainted(prov->outside) &&
+       !outside_is_tainted(old_outside)) {
+      if (sp) {
+         sqlite3_exec(s_db.db, "RELEASE pref_upsert", NULL, NULL, NULL);
+      }
+      AUTH_DB_UNLOCK();
+      OLOG_INFO("memory_db: preference '%s' kept (the new value came with outside text)", category);
+      return MEMORY_DB_SUCCESS;
    }
 
    time_t now = time(NULL);
@@ -174,11 +186,13 @@ int memory_db_pref_get(int user_id, const char *category, memory_preference_t *o
    return result;
 }
 
-int memory_db_pref_list(int user_id,
-                        memory_preference_t *out_prefs,
-                        int max_prefs,
-                        int offset,
-                        int *count_out) {
+/* Run a preference list statement (user / limit / offset bound positionally). */
+static int pref_list_run(sqlite3_stmt *const *stmtp,
+                         int user_id,
+                         memory_preference_t *out_prefs,
+                         int max_prefs,
+                         int offset,
+                         int *count_out) {
    if (count_out)
       *count_out = 0;
    if (!out_prefs || max_prefs <= 0) {
@@ -187,7 +201,7 @@ int memory_db_pref_list(int user_id,
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   sqlite3_stmt *stmt = s_db.stmt_memory_pref_list;
+   sqlite3_stmt *stmt = *stmtp;
    sqlite3_reset(stmt);
    sqlite3_bind_int(stmt, 1, user_id);
    sqlite3_bind_int(stmt, 2, max_prefs);
@@ -204,6 +218,24 @@ int memory_db_pref_list(int user_id,
    if (count_out)
       *count_out = count;
    return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_pref_list(int user_id,
+                        memory_preference_t *out_prefs,
+                        int max_prefs,
+                        int offset,
+                        int *count_out) {
+   return pref_list_run(&s_db.stmt_memory_pref_list, user_id, out_prefs, max_prefs, offset,
+                        count_out);
+}
+
+int memory_db_pref_list_untainted(int user_id,
+                                  memory_preference_t *out_prefs,
+                                  int max_prefs,
+                                  int offset,
+                                  int *count_out) {
+   return pref_list_run(&s_db.stmt_memory_pref_list_untainted, user_id, out_prefs, max_prefs,
+                        offset, count_out);
 }
 
 int memory_db_pref_search(int user_id,

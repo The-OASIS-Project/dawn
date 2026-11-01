@@ -91,11 +91,13 @@ struct json_object *memory_history_load_from_db(int64_t conv_id,
 struct json_object *memory_extraction_build_input(int user_id,
                                                   int64_t conversation_id,
                                                   struct json_object *conversation_history,
-                                                  int64_t last_msg_id) {
+                                                  int64_t last_msg_id,
+                                                  int *outside_out) {
    (void)user_id;
    (void)conversation_id;
    (void)conversation_history;
    (void)last_msg_id;
+   *outside_out = 0;
    return NULL;
 }
 
@@ -125,6 +127,13 @@ int conv_db_get_created_at(int64_t conv_id, int64_t *created_at_out) {
    if (created_at_out)
       *created_at_out = 0; /* worker treats 0 as "no override", uses NOW() */
    return AUTH_DB_NOT_FOUND;
+}
+
+int conv_db_get_outside(int64_t conv_id, int user_id, int *outside_out) {
+   (void)conv_id;
+   (void)user_id;
+   *outside_out = 0;
+   return AUTH_DB_SUCCESS;
 }
 
 int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out) {

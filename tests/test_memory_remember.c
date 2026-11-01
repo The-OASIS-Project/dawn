@@ -112,6 +112,15 @@ void test_remember_in_a_known_conversation_is_learned_there(void) {
    TEST_ASSERT_TRUE(fact_row("My locker number is 314", &source, &unsourced));
    TEST_ASSERT_EQUAL_INT64(conv, source);
    TEST_ASSERT_EQUAL_INT(0, unsourced); /* forgetting that conversation removes it */
+   /* Stored because the user asked: its word says so, with no outside kind. */
+   TEST_ASSERT_EQUAL_INT64(
+       1, auth_db_query_int64(s_db.db, "SELECT COUNT(*) FROM memory_facts WHERE fact_text = "
+                                       "'My locker number is 314' AND origin = 1 AND outside = 0"));
+   memory_fact_t facts[4];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_list(s_user, facts, 4, 0, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("remembered on request", memory_fact_kind_word(&facts[0]));
 }
 
 void test_remember_outside_a_turn_is_stated_outside_any_conversation(void) {

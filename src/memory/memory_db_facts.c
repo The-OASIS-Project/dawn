@@ -836,7 +836,13 @@ static const char *const MERGE_SOURCES_SQL =
     "EXISTS (SELECT 1 FROM memory_facts m WHERE m.id = ?2 AND m.user_id = ?3 AND "
     "(m.origin_unsourced = 1 OR (NOT EXISTS (SELECT 1 FROM memory_fact_sources x "
     "WHERE x.fact_id = m.id) AND (m.source_conversation_id IS NULL OR "
-    "m.source_conversation_id NOT IN (SELECT id FROM conversations)))));";
+    "m.source_conversation_id NOT IN (SELECT id FROM conversations)))));"
+    /* The keeper of a merge takes the duplicate's outside kind when only the
+     * duplicate's batch read outside text. */
+    "UPDATE memory_facts SET outside = (SELECT m.outside FROM memory_facts m WHERE m.id = ?2 "
+    "AND m.user_id = ?3) WHERE id = ?1 AND user_id = ?3 AND outside IN (" OUTSIDE_UNTAINTED_SQL
+    ") AND EXISTS (SELECT 1 FROM memory_facts m WHERE m.id = ?2 AND m.user_id = ?3 AND "
+    "m.outside NOT IN (" OUTSIDE_UNTAINTED_SQL "));";
 
 /* Caller holds the auth_db lock.  Runs MERGE_SOURCES_SQL's statements. */
 static bool merge_sources_locked(int64_t old_fact_id, int64_t keeper_id, int user_id) {

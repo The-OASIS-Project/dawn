@@ -395,6 +395,11 @@ int memory_db_relation_supersede_ex(int user_id,
       sqlite3_reset(close_stmt);
       bind_close_locked(close_stmt, close_time, user_id, subject_entity_id, relation,
                         object_entity_id, object_value);
+      if (prov && outside_is_tainted(prov->outside)) {
+         sqlite3_bind_int(close_stmt, 9, 1);
+      } else {
+         sqlite3_bind_null(close_stmt, 9);
+      }
       if (named) {
          sqlite3_bind_text(close_stmt, 7, replaces, -1, SQLITE_TRANSIENT);
       } else {
@@ -437,6 +442,7 @@ int memory_db_relation_supersede_ex(int user_id,
           "  AND valid_to IS NULL "
           "  AND COALESCE(object_entity_id, 0) = COALESCE(?5, 0) "
           "  AND COALESCE(object_value, '') = COALESCE(?6, '') "
+          "  AND (?8 IS NULL OR outside NOT IN (" OUTSIDE_UNTAINTED_SQL ")) "
           "RETURNING fact_id",
           -1, &cstmt, NULL);
       if (rc2 != SQLITE_OK) {
@@ -451,6 +457,11 @@ int memory_db_relation_supersede_ex(int user_id,
          sqlite3_bind_int64(cstmt, 7, fact_id);
       } else {
          sqlite3_bind_null(cstmt, 7);
+      }
+      if (prov && outside_is_tainted(prov->outside)) {
+         sqlite3_bind_int(cstmt, 8, 1);
+      } else {
+         sqlite3_bind_null(cstmt, 8);
       }
       const int before = n_closed_facts;
       rc2 = collect_closed_facts(cstmt, closed_facts, &n_closed_facts);
@@ -625,9 +636,11 @@ int memory_db_relation_supersede_ex(int user_id,
 
 /* Reads SELECTs ordered:
  *   0:id, 1:subject_entity_id, 2:relation, 3:object_entity_id,
- *   4:object_name, 5:confidence, 6:valid_from, 7:valid_to, 8:mention_count
+ *   4:object_name, 5:confidence, 6:valid_from, 7:valid_to, 8:mention_count,
+ *   9:outside
  *
- * valid_* (cols 6, 7) appended in v33; mention_count (col 8) appended in v49.
+ * valid_* (cols 6, 7) appended in v33; mention_count (col 8) in v49; outside
+ * (col 9) in v113.
  * COALESCE in SQL converts SQL NULL → 0 in C for the validity columns.
  *
  * Must stay column-symmetric with populate_relation_outgoing_row() in
@@ -655,6 +668,7 @@ static void populate_relation_from_row(sqlite3_stmt *stmt, memory_relation_t *re
    rel->valid_to = sqlite3_column_int64(stmt, 7);
 
    rel->mention_count = sqlite3_column_int(stmt, 8);
+   rel->outside = sqlite3_column_int(stmt, 9);
 }
 
 int memory_db_relation_list_by_subject(int user_id,
@@ -947,7 +961,7 @@ int memory_db_relation_list_with_canonical_roots_by_user(int user_id,
        "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
        "       COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
        "       COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
-       "       r.mention_count, "
+       "       r.mention_count, r.outside, "
        "       COALESCE(s.canonical_id, s.id, 0) AS subj_root, "
        "       COALESCE(e.canonical_id, e.id, 0) AS obj_root "
        "FROM memory_relations r "
@@ -968,10 +982,9 @@ int memory_db_relation_list_with_canonical_roots_by_user(int user_id,
    while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
       populate_relation_from_row(stmt, &out[count]);
       /* Roots are appended after the columns populate_relation_from_row
-       * reads (it stops at mention_count / index 8 in v49).  Indices 9/10
-       * are ours. */
-      subj_roots[count] = sqlite3_column_int64(stmt, 9);
-      obj_roots[count] = sqlite3_column_int64(stmt, 10);
+       * reads (it stops at outside, index 9).  Indices 10/11 are ours. */
+      subj_roots[count] = sqlite3_column_int64(stmt, 10);
+      obj_roots[count] = sqlite3_column_int64(stmt, 11);
       count++;
    }
 

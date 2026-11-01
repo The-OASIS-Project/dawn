@@ -36,6 +36,7 @@
 
 #include "auth/auth_db_conv_prefix.h"
 #include "auth/auth_db_internal.h"
+#include "core/outside_kind.h"
 #include "llm/llm_context_text.h"
 #include "logging.h"
 #include "prompts.h"
@@ -454,8 +455,12 @@ static int create_continuation(int user_id,
    const char *sql_create =
        "INSERT INTO conversations (user_id, title, created_at, updated_at, continued_from, "
        "compaction_summary, llm_type, cloud_provider, model, tools_mode, thinking_mode, "
-       "reasoning_effort, anchor_date, is_private) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+       "reasoning_effort, anchor_date, is_private, outside) "
+       /* The parent's floor as it is now: deleting the parent (continued_from
+        * goes NULL) mustn't drop it; a later rise reaches the child through
+        * the walk in conv_db_get_outside. */
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT outside FROM conversations "
+       "WHERE id = ?5))";
    rc = sqlite3_prepare_v2(s_db.db, sql_create, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("conv_db_create_continuation: prepare insert failed: %s", sqlite3_errmsg(s_db.db));
@@ -955,6 +960,71 @@ int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out) {
    AUTH_DB_UNLOCK();
 
    return AUTH_DB_NOT_FOUND;
+}
+
+int conv_db_get_outside(int64_t conv_id, int user_id, int *outside_out) {
+   if (conv_id <= 0 || !outside_out) {
+      return AUTH_DB_FAILURE;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   /* The conversation and those it continues, closest first: what a parent
+    * read shaped the continuation. */
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "WITH RECURSIVE chain(id, d) AS (SELECT ?1, 0 UNION ALL SELECT "
+                          "c.continued_from, chain.d + 1 FROM chain JOIN conversations c ON "
+                          "c.id = chain.id WHERE c.continued_from IS NOT NULL AND chain.d "
+                          "< " CONV_CONTINUATION_DEPTH_MAX_SQL
+                          ") SELECT c.outside, c.user_id, chain.d "
+                          "FROM chain JOIN conversations c ON c.id = chain.id ORDER BY chain.d",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(stmt, 1, conv_id);
+   int rc, outside = OUTSIDE_NONE;
+   bool found = false;
+   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+      if (sqlite3_column_int(stmt, 2) == 0) {
+         if (sqlite3_column_int(stmt, 1) != user_id) {
+            break; /* not this user's */
+         }
+         found = true;
+      }
+      outside = outside_combine(outside, sqlite3_column_int(stmt, 0));
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+      return AUTH_DB_FAILURE;
+   }
+   if (!found) {
+      return AUTH_DB_NOT_FOUND;
+   }
+   *outside_out = outside;
+   return AUTH_DB_SUCCESS;
+}
+
+int conv_db_raise_outside(int64_t conv_id, int user_id, int outside) {
+   if (conv_id <= 0 || !outside_is_tainted(outside)) {
+      return AUTH_DB_SUCCESS;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE conversations SET outside = ?1 WHERE id = ?2 AND user_id = ?3 "
+                          "AND outside IN (" OUTSIDE_UNTAINTED_SQL ")",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, outside);
+   sqlite3_bind_int64(stmt, 2, conv_id);
+   sqlite3_bind_int(stmt, 3, user_id);
+   const int rc = sqlite3_step(stmt);
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
 }
 
 int conv_db_messages_ownership(int user_id, const char *ids_json, conv_msg_ownership_t *out) {
@@ -2098,10 +2168,13 @@ int conv_db_briefing_mark_extracted(int64_t conv_id,
        "e AS (SELECT MAX(v.id) AS id FROM v, r WHERE r.id IS NULL OR v.id < r.id) "
        "SELECT e.id, (SELECT COUNT(*) FROM v WHERE v.id <= e.id), r.id IS NOT NULL "
        "FROM conversations c, f, e, r WHERE c.id = ?1 AND c.origin = 'briefing'";
-   /* Forward only: never undo a cursor something else (a forget) moved on. */
+   /* Forward only: never undo a cursor something else (a forget) moved on.
+    * The rows passed are DAWN's digest of outside content: the floor takes
+    * OTHER with the cursor. */
    static const char *mark_sql =
        "UPDATE conversations SET last_extracted_msg_id = MAX(last_extracted_msg_id, ?2), "
-       "last_extracted_msg_count = MAX(last_extracted_msg_count, ?3), extraction_attempts = 0 "
+       "last_extracted_msg_count = MAX(last_extracted_msg_count, ?3), extraction_attempts = 0, "
+       "outside = CASE WHEN outside IN (" OUTSIDE_UNTAINTED_SQL ") THEN 7 ELSE outside END "
        "WHERE id = ?1 AND last_extracted_msg_id < ?2";
 
    AUTH_DB_LOCK_OR_FAIL();

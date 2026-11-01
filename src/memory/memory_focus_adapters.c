@@ -828,6 +828,9 @@ static int relation_adapter_query(int user_id,
             focus_adapter_failure_cleanup(out, produced, out_candidates, out_count);
             return FAILURE;
          }
+         if (outside_is_tainted(rels[i].outside)) {
+            out[produced].kind = "outside";
+         }
          if (produced < prod_id_cap)
             produced_relation_ids[produced] = rels[i].id;
          produced++;
@@ -1062,6 +1065,9 @@ static int summary_adapter_query(int user_id,
       out[produced].provenance.conv_id = conv_ids[i];
       out[produced].provenance.msg_id_start = starts[i];
       out[produced].provenance.msg_id_end = ends[i];
+      if (outside_is_tainted(merged[i].summary.outside)) {
+         out[produced].kind = "outside";
+      }
       produced++;
    }
 

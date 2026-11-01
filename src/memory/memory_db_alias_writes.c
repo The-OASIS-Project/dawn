@@ -760,7 +760,8 @@ split_fail:
  *
  * SELECT column layout:
  *   0:id, 1:subject_entity_id, 2:relation, 3:object_entity_id,
- *   4:object_name, 5:confidence, 6:valid_from, 7:valid_to, 8:mention_count
+ *   4:object_name, 5:confidence, 6:valid_from, 7:valid_to, 8:mention_count,
+ *   9:outside
  *
  * mention_count appended in v49.  Must stay column-symmetric with
  * populate_relation_from_row() in memory_db_relations.c — both helpers read
@@ -786,6 +787,7 @@ static void populate_relation_outgoing_row(sqlite3_stmt *stmt, memory_relation_t
    out->valid_to = (sqlite3_column_type(stmt, 7) == SQLITE_NULL) ? 0
                                                                  : sqlite3_column_int64(stmt, 7);
    out->mention_count = sqlite3_column_int(stmt, 8);
+   out->outside = sqlite3_column_int(stmt, 9);
 }
 
 int memory_db_relation_list_by_subject_class(int user_id,
@@ -805,7 +807,7 @@ int memory_db_relation_list_by_subject_class(int user_id,
     * (for canonical_id = ?) on the inner SELECT.  See ckpt summary. */
    const char *sql = "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
                      "       COALESCE(e.name, r.object_value, ''), r.confidence, "
-                     "       r.valid_from, r.valid_to, r.mention_count "
+                     "       r.valid_from, r.valid_to, r.mention_count, r.outside "
                      "FROM memory_relations r "
                      "LEFT JOIN memory_entities e ON e.id = r.object_entity_id "
                      "WHERE r.user_id = ? AND r.subject_entity_id IN ( "
@@ -856,7 +858,7 @@ int memory_db_relation_list_by_subject_class_at(int user_id,
 
    const char *sql = "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
                      "       COALESCE(e.name, r.object_value, ''), r.confidence, "
-                     "       r.valid_from, r.valid_to, r.mention_count "
+                     "       r.valid_from, r.valid_to, r.mention_count, r.outside "
                      "FROM memory_relations r "
                      "LEFT JOIN memory_entities e ON e.id = r.object_entity_id "
                      "WHERE r.user_id = ? AND r.subject_entity_id IN ( "
@@ -910,7 +912,7 @@ int memory_db_relation_list_by_object_class(int user_id,
     * convention). */
    const char *sql = "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
                      "       COALESCE(s.name, ''), r.confidence, r.valid_from, r.valid_to, "
-                     "       r.mention_count "
+                     "       r.mention_count, r.outside "
                      "FROM memory_relations r "
                      "LEFT JOIN memory_entities s ON s.id = r.subject_entity_id "
                      "WHERE r.user_id = ? AND r.object_entity_id IN ( "

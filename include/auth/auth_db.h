@@ -2045,6 +2045,24 @@ int conv_db_set_pinned(int64_t conv_id, int user_id, bool is_pinned);
  */
 int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out);
 
+/**
+ * @brief A conversation's outside floor: the first outside text it, or one
+ *        it continues (closest first), is known to have read
+ *        (conversations.outside, core/outside_kind.h); UNKNOWN when none did
+ *        and one of their pasts can't be judged
+ *
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
+ */
+int conv_db_get_outside(int64_t conv_id, int user_id, int *outside_out);
+
+/**
+ * @brief Raise a conversation's outside floor to @p outside when that is
+ *        tainted and the floor isn't yet (the first taint sticks)
+ *
+ * @return AUTH_DB_SUCCESS (also when nothing changed), or AUTH_DB_FAILURE
+ */
+int conv_db_raise_outside(int64_t conv_id, int user_id, int outside);
+
 /** Which conversations a set of message rows belongs to (conv_db_messages_ownership). */
 typedef struct {
    int matched;        /**< rows found among the given ids, owned by the user */
