@@ -244,6 +244,9 @@ static const char *SCHEMA_SQL =
     "   reasoning_floor_msg_id INTEGER NOT NULL DEFAULT 0,"
     "   reasoning_floor_pending INTEGER NOT NULL DEFAULT 0,"
     "   reasoning_floor_seq INTEGER NOT NULL DEFAULT 0,"
+    /* v113: outside_kind_t, sticky: the first outside text the conversation
+     * (or one it continues) read; UNKNOWN when its past can't be judged. */
+    "   outside INTEGER NOT NULL DEFAULT 0,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (continued_from) REFERENCES conversations(id) ON DELETE SET NULL,"
     "   FOREIGN KEY (parent_id) REFERENCES conversations(id) ON DELETE SET NULL"
@@ -490,6 +493,10 @@ static const char *SCHEMA_SQL =
     /* v95: superseded_at — when the fact was merged into superseded_by; the
      * superseded prune counts its retention window from here. */
     "   superseded_at          INTEGER DEFAULT NULL,"
+    /* v113: origin (memory_origin_t: how it came to be stored) and outside
+     * (outside_kind_t: what outside text its extraction batch read). */
+    "   origin                 INTEGER NOT NULL DEFAULT 0,"
+    "   outside                INTEGER NOT NULL DEFAULT 0,"
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (superseded_by) REFERENCES memory_facts(id) ON DELETE SET NULL,"
     "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"
@@ -502,10 +509,6 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_memory_facts_hash ON memory_facts(user_id, normalized_hash);"
     /* idx_memory_facts_subject: created by the v47 post-migration index block
      * on existing DBs (column doesn't exist until ALTER TABLE runs). */
-    /* idx_memory_facts_user_category is created by the v34 migration block (runs
-     * after ALTER TABLE adds the column).  Keeping it here would fail on an
-     * existing pre-v34 DB because CREATE TABLE IF NOT EXISTS is a no-op for
-     * the already-existing table, so the column isn't added until migrations run. */
 
     /* v48: FTS5 BM25 keyword index.  Contentless — application is responsible
      * for keeping rowid in sync with memory_facts.id and writing
@@ -540,6 +543,7 @@ static const char *SCHEMA_SQL =
     "   source_conversation_id INTEGER DEFAULT NULL,"
     "   source_msg_id_start    INTEGER DEFAULT NULL,"
     "   source_msg_id_end      INTEGER DEFAULT NULL,"
+    "   outside INTEGER NOT NULL DEFAULT 0," /* v113: outside_kind_t of its value */
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"
     "   UNIQUE(user_id, category)"
@@ -565,6 +569,7 @@ static const char *SCHEMA_SQL =
      * keyword + cosine when this is populated; NULL rows fall back to
      * keyword-only matching. */
     "   embedding BLOB DEFAULT NULL,"
+    "   outside INTEGER NOT NULL DEFAULT 0," /* v113: outside_kind_t of its batch */
     "   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "   FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
     ");"
@@ -652,6 +657,7 @@ static const char *SCHEMA_SQL =
     "  source_msg_id_start    INTEGER DEFAULT NULL,"
     "  source_msg_id_end      INTEGER DEFAULT NULL,"
     "  mention_count          INTEGER NOT NULL DEFAULT 1,"
+    "  outside                INTEGER NOT NULL DEFAULT 0," /* v113: outside_kind_t */
     "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "  FOREIGN KEY (subject_entity_id) REFERENCES memory_entities(id) ON DELETE CASCADE,"
     "  FOREIGN KEY (object_entity_id) REFERENCES memory_entities(id) ON DELETE SET NULL,"
@@ -667,6 +673,9 @@ static const char *SCHEMA_SQL =
      * valid_from/valid_to ALTER so the columns exist).
      * idx_memory_relations_unique_open is created by the v49 migration block
      * (and below in the fresh-install index pass). */
+
+    /* What each consolidation batch did to memory, for undo (v113). */
+    MEMORY_CONSOLIDATION_TABLES_SQL
 
     /* Entity-alias audit log (v43) — append-only history of soft/hard merges.
      * Not consulted on hot read paths (those use canonical_id JOIN); this

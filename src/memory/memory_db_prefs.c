@@ -63,6 +63,7 @@ static void populate_pref_from_row(sqlite3_stmt *stmt, memory_preference_t *pref
    pref->created_at = (time_t)sqlite3_column_int64(stmt, 6);
    pref->updated_at = (time_t)sqlite3_column_int64(stmt, 7);
    pref->reinforcement_count = sqlite3_column_int(stmt, 8);
+   pref->outside = sqlite3_column_int(stmt, 9);
 }
 
 /* =============================================================================
@@ -113,6 +114,7 @@ int memory_db_pref_upsert(int user_id,
    sqlite3_bind_int64(stmt, 6, (int64_t)now);
    sqlite3_bind_int64(stmt, 7, (int64_t)now);
    memory_db_internal_bind_provenance(stmt, 8, prov);
+   sqlite3_bind_int(stmt, 11, prov ? prov->outside : OUTSIDE_NONE);
 
    int rc = sqlite3_step(stmt);
    sqlite3_reset(stmt);

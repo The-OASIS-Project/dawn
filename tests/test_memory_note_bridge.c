@@ -331,6 +331,7 @@ void test_kind_word(void) {
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(gloss, 1, &f));
    TEST_ASSERT_EQUAL_INT64(100, f.note_doc_id);
    TEST_ASSERT_EQUAL_STRING("explicit", f.source);
+   TEST_ASSERT_EQUAL_INT(MEMORY_ORIGIN_NOTE, f.origin);
    TEST_ASSERT_EQUAL_STRING("noted", memory_fact_kind_word(&f));
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(told, 1, &f));
    TEST_ASSERT_EQUAL_INT64(0, f.note_doc_id);
@@ -348,8 +349,22 @@ void test_kind_word(void) {
    memset(&f, 0, sizeof(f));
    snprintf(f.source, sizeof(f.source), "inferred");
    TEST_ASSERT_EQUAL_STRING("inferred", memory_fact_kind_word(&f));
-   snprintf(f.source, sizeof(f.source), "import");
+   f.outside = OUTSIDE_WEB;
+   TEST_ASSERT_EQUAL_STRING("inferred, outside", memory_fact_kind_word(&f));
+   f.outside = OUTSIDE_UNKNOWN; /* stored before the kind was kept: not outside */
+   TEST_ASSERT_EQUAL_STRING("inferred", memory_fact_kind_word(&f));
+   snprintf(f.source, sizeof(f.source), "world");
+   TEST_ASSERT_EQUAL_STRING("world", memory_fact_kind_word(&f));
+   snprintf(f.source, sizeof(f.source), "explicit");
+   f.origin = MEMORY_ORIGIN_IMPORT;
    TEST_ASSERT_EQUAL_STRING("imported", memory_fact_kind_word(&f));
+   f.origin = MEMORY_ORIGIN_REQUESTED;
+   f.outside = OUTSIDE_EMAIL;
+   TEST_ASSERT_EQUAL_STRING("remembered on request, outside", memory_fact_kind_word(&f));
+   f.origin = MEMORY_ORIGIN_NOTE;
+   f.outside = OUTSIDE_NONE;
+   TEST_ASSERT_EQUAL_STRING("noted", memory_fact_kind_word(&f));
+   f.origin = MEMORY_ORIGIN_CONVERSATION;
    snprintf(f.source, sizeof(f.source), "whatever");
    TEST_ASSERT_NULL(memory_fact_kind_word(&f));
    TEST_ASSERT_NULL(memory_fact_kind_word(NULL));

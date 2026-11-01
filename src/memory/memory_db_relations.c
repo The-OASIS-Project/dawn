@@ -171,6 +171,7 @@ int memory_db_relation_create(int user_id,
       sqlite3_bind_null(s_db.stmt_memory_relation_create, 9);
    }
    memory_db_internal_bind_provenance(s_db.stmt_memory_relation_create, 10, prov);
+   sqlite3_bind_int(s_db.stmt_memory_relation_create, 13, prov ? prov->outside : OUTSIDE_NONE);
 
    /* The relation and its source commit together (a savepoint nests inside a
     * caller's transaction). */
@@ -502,6 +503,7 @@ int memory_db_relation_supersede_ex(int user_id,
       sqlite3_bind_null(create_stmt, 9);
    }
    memory_db_internal_bind_provenance(create_stmt, 10, prov);
+   sqlite3_bind_int(create_stmt, 13, prov ? prov->outside : OUTSIDE_NONE);
    /* v49 upsert: RETURNING id, mention_count.  Consume the first row to learn
     * the dedup outcome (mention_count > 1 means an existing row was bumped
     * rather than a fresh row inserted), then drain to SQLITE_DONE.  Done

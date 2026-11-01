@@ -1082,9 +1082,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       const char *v34_sql = "ALTER TABLE memory_facts ADD COLUMN category TEXT NOT NULL "
                             "  DEFAULT 'general';"
                             "ALTER TABLE users ADD COLUMN categories_backfilled_at INTEGER "
-                            "  DEFAULT 0;"
-                            "CREATE INDEX IF NOT EXISTS idx_memory_facts_user_category "
-                            "  ON memory_facts(user_id, category);";
+                            "  DEFAULT 0;";
       rc = sqlite3_exec(s_db.db, v34_sql, NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {
          OLOG_WARNING("auth_db: v34 migration (fact category) returned: %s",
@@ -2593,15 +2591,13 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       errmsg = NULL;
    }
 
-   /* Indexes on migration-added columns (v33/v34/v43).  Must run here rather
+   /* Indexes on migration-added columns (v33/v43).  Must run here rather
     * than in SCHEMA_SQL because on an existing pre-migration DB, CREATE TABLE
     * IF NOT EXISTS is a no-op, so the new columns don't exist until migrations
     * run.  Migrations also create these indexes but only fire on DBs with
     * current_version >= 1 — fresh installs (version 0) skip all migrations
     * and reach this block instead. */
    rc = sqlite3_exec(s_db.db,
-                     "CREATE INDEX IF NOT EXISTS idx_memory_facts_user_category "
-                     "ON memory_facts(user_id, category);"
                      "CREATE INDEX IF NOT EXISTS idx_memory_relations_user_validity "
                      "ON memory_relations(user_id, valid_to);"
                      "CREATE INDEX IF NOT EXISTS idx_memory_relations_subject_open "
@@ -3524,6 +3520,13 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       v112_ok = auth_db_migrations_v112(s_db.db) == AUTH_DB_SUCCESS;
    }
 
+   /* v113: memory_facts.origin, the outside kind on facts, relations and
+    * summaries, and the consolidation record tables. */
+   bool v113_ok = (current_version >= 113);
+   if (current_version < 113) {
+      v113_ok = auth_db_migrations_v113(s_db.db) == AUTH_DB_SUCCESS;
+   }
+
    /* Log migration if upgrading from an older version */
    if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
       OLOG_INFO("auth_db: migrated schema from v%d to v%d", current_version,
@@ -3551,7 +3554,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v90_ok && v91_ok && v92_ok && v93_ok && v94_ok && v95_ok && v96_ok &&
                               v97_ok && v98_ok && v99_ok && v100_ok && v101_ok && v102_ok &&
                               v103_ok && v104_ok && v106_ok && v107_ok && v108_ok && v109_ok &&
-                              v110_ok && v111_ok && v112_ok;
+                              v110_ok && v111_ok && v112_ok && v113_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

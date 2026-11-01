@@ -62,6 +62,7 @@
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_recency.h"
 #include "core/focus/focus_source.h"
+#include "core/prompt_parts.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_db.h"
@@ -73,6 +74,10 @@
 #include "memory/memory_implied.h"
 #include "memory/memory_types.h"
 #include "utils/string_utils.h"
+
+/* A fact's kind word fits the room a focus line keeps for it. */
+_Static_assert(sizeof(" " MEMORY_FACT_KIND_WORD_LONGEST) <= PROMPT_FOCUS_KIND_LEN,
+               "PROMPT_FOCUS_KIND_LEN must fit the longest fact kind word");
 
 /* =============================================================================
  * Constants

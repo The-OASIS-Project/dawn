@@ -104,6 +104,7 @@ int memory_db_summary_create_at(int user_id,
    sqlite3_bind_int(stmt, 7, message_count);
    sqlite3_bind_int(stmt, 8, duration_seconds);
    memory_db_internal_bind_provenance(stmt, 9, prov);
+   sqlite3_bind_int(stmt, 12, prov ? prov->outside : OUTSIDE_NONE);
 
    int rc = sqlite3_step(stmt);
    sqlite3_reset(stmt);

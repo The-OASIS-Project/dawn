@@ -66,7 +66,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 112
+#define AUTH_DB_SCHEMA_VERSION 113
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -959,6 +959,72 @@ int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
                                                                                    "extraction_" \
                                                                                    "attempts = 0"
 
+/* The columns every fact read selects, in the order populate_fact_from_row
+ * (memory_db_facts.c) reads them: MEMORY_FACT_COLS bare, MEMORY_FACT_COLS_MF
+ * on the "mf" alias.  A statement's own extra column follows them.  Shared
+ * with the tests that prepare fact reads themselves. */
+#define MEMORY_FACT_COLS_SQL(t)                                                                \
+   t "id, " t "user_id, " t "fact_text, " t "confidence, " t "source, " t "created_at, " t     \
+     "last_accessed, " t "access_count, " t "superseded_by, " t "note_doc_id, " t "origin, " t \
+     "outside"
+#define MEMORY_FACT_COLS MEMORY_FACT_COLS_SQL("")
+#define MEMORY_FACT_COLS_MF MEMORY_FACT_COLS_SQL("mf.")
+
+/* The record of what a consolidation batch did to memory (v113): one row per
+ * batch, one per operation, each with what it changed so the user can undo it.
+ * In the base schema and repeated by the v113 step, so the two can't drift. */
+#define MEMORY_CONSOLIDATION_TABLES_SQL                                                     \
+   "CREATE TABLE IF NOT EXISTS memory_consolidation_batches ("                              \
+   "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                               \
+   "   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,"                    \
+   "   conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,"             \
+   "   msg_id_start INTEGER,"                                                               \
+   "   msg_id_end INTEGER,"                                                                 \
+   "   summary_id INTEGER REFERENCES memory_summaries(id) ON DELETE SET NULL,"              \
+   "   path TEXT NOT NULL,"                                                                 \
+   "   stop TEXT NOT NULL,"                                                                 \
+   "   outside INTEGER NOT NULL DEFAULT 0,"                                                 \
+   "   rounds INTEGER NOT NULL DEFAULT 0,"                                                  \
+   "   input_tokens INTEGER NOT NULL DEFAULT 0,"                                            \
+   "   created_at INTEGER NOT NULL,"                                                        \
+   "   undone_at INTEGER);"                                                                 \
+   "CREATE INDEX IF NOT EXISTS idx_mcb_conv ON "                                            \
+   "memory_consolidation_batches(conversation_id, msg_id_end);"                             \
+   "CREATE INDEX IF NOT EXISTS idx_mcb_user ON "                                            \
+   "memory_consolidation_batches(user_id, created_at DESC);"                                \
+   "CREATE INDEX IF NOT EXISTS idx_mcb_summary ON "                                         \
+   "memory_consolidation_batches(summary_id) WHERE summary_id IS NOT NULL;"                 \
+   "CREATE TABLE IF NOT EXISTS memory_consolidation_ops ("                                  \
+   "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                               \
+   "   batch_id INTEGER NOT NULL REFERENCES memory_consolidation_batches(id) "              \
+   "ON DELETE CASCADE,"                                                                     \
+   "   user_id INTEGER NOT NULL,"                                                           \
+   "   seq INTEGER NOT NULL,"                                                               \
+   "   op TEXT NOT NULL,"                                                                   \
+   "   fact_id INTEGER,"                                                                    \
+   "   other_fact_id INTEGER,"                                                              \
+   "   relation_id INTEGER,"                                                                \
+   "   entity_id INTEGER,"                                                                  \
+   "   other_entity_id INTEGER,"                                                            \
+   "   link_id INTEGER,"                                                                    \
+   "   outside INTEGER NOT NULL DEFAULT 0,"                                                 \
+   "   text TEXT,"                                                                          \
+   "   target_text TEXT,"                                                                   \
+   "   reason TEXT,"                                                                        \
+   "   pre_image TEXT,"                                                                     \
+   "   post_image TEXT,"                                                                    \
+   "   status TEXT NOT NULL DEFAULT 'applied',"                                             \
+   "   created_at INTEGER NOT NULL,"                                                        \
+   "   undone_at INTEGER);"                                                                 \
+   "CREATE INDEX IF NOT EXISTS idx_mco_batch ON memory_consolidation_ops(batch_id, seq);"   \
+   "CREATE INDEX IF NOT EXISTS idx_mco_fact ON memory_consolidation_ops(user_id, fact_id) " \
+   "WHERE fact_id IS NOT NULL;"                                                             \
+   "CREATE INDEX IF NOT EXISTS idx_mco_other ON "                                           \
+   "memory_consolidation_ops(user_id, other_fact_id) WHERE other_fact_id IS NOT NULL;"      \
+   "CREATE INDEX IF NOT EXISTS idx_mco_deferred ON "                                        \
+   "memory_consolidation_ops(user_id, created_at) "                                         \
+   "WHERE op = 'deferred' AND status = 'applied';"
+
 /* Close the open relations a new value supersedes (memory_db_relation_supersede_ex),
  * returning each one's fact_id.  ?1 close time, ?2 user, ?3 subject, ?4 relation,
  * ?5/?6 the new object (entity id / literal: the same object is never closed, so
@@ -1174,6 +1240,10 @@ int auth_db_migrations_v111(sqlite3 *db);
 
 /** v112: user_settings persona_values / persona_voice and their modes. */
 int auth_db_migrations_v112(sqlite3 *db);
+
+/** v113: a fact's origin and every memory row's outside kind (backfilled), and
+ *  the consolidation record tables. */
+int auth_db_migrations_v113(sqlite3 *db);
 
 /**
  * @brief The v98 rebuild's room check: the bytes it needs free next to the

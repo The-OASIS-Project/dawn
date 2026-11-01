@@ -443,15 +443,16 @@ static const auth_db_stmt_def_t s_stmts[] = {
      &s_db.stmt_blob_get_orphan_ids },
    { "blob_stats", "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM blobs", &s_db.stmt_blob_stats },
 
-   /* Memory fact statements.  The SELECTs share one projection (see
-    * populate_fact_from_row).  source_* columns (v40) are always bound last —
-    * NULL when no provenance; the category column takes its DEFAULT. */
+   /* Memory fact statements.  The SELECTs share one projection
+    * (MEMORY_FACT_COLS, read by populate_fact_from_row).  source_* columns
+    * (v40) are bound 7-9, NULL when no provenance, then origin and outside
+    * (v113); the category column takes its DEFAULT. */
    { "memory_fact_create",
      "INSERT INTO memory_facts (user_id, fact_text, confidence, source, "
      "created_at, normalized_hash, "
      "source_conversation_id, source_msg_id_start, source_msg_id_end, "
-     "origin_unsourced) "
-     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?7 IS NULL)",
+     "origin_unsourced, origin, outside) "
+     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?7 IS NULL, ?10, ?11)",
      &s_db.stmt_memory_fact_create },
 
    /* CWE-639 defense-in-depth: SQL filters on (id, user_id) so a foreign
@@ -460,13 +461,11 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * return zero rows (caller maps to MEMORY_DB_NOT_FOUND, same response a
     * legitimately-missing fact would get; no oracle). */
    { "memory_fact_get",
-     "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-     "access_count, superseded_by, note_doc_id, expires_at FROM memory_facts "
+     "SELECT " MEMORY_FACT_COLS ", expires_at FROM memory_facts "
      "WHERE id = ? AND user_id = ?",
      &s_db.stmt_memory_fact_get },
    { "memory_fact_list",
-     "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-     "access_count, superseded_by, note_doc_id FROM memory_facts "
+     "SELECT " MEMORY_FACT_COLS " FROM memory_facts "
      "WHERE user_id = ?1 AND superseded_by IS NULL "
      "  AND (expires_at IS NULL OR expires_at >= ?4) "
      "ORDER BY confidence DESC LIMIT ?2 OFFSET ?3",
@@ -476,22 +475,19 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * stmt_memory_fact_list so memory_db_fact_list_sorted's one bind block serves
     * all three.  The id tiebreak keeps OFFSET paging stable across same-second rows. */
    { "memory_fact_list_created_desc",
-     "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-     "access_count, superseded_by, note_doc_id FROM memory_facts "
+     "SELECT " MEMORY_FACT_COLS " FROM memory_facts "
      "WHERE user_id = ?1 AND superseded_by IS NULL "
      "  AND (expires_at IS NULL OR expires_at >= ?4) "
      "ORDER BY created_at DESC, id DESC LIMIT ?2 OFFSET ?3",
      &s_db.stmt_memory_fact_list_created_desc },
    { "memory_fact_list_created_asc",
-     "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-     "access_count, superseded_by, note_doc_id FROM memory_facts "
+     "SELECT " MEMORY_FACT_COLS " FROM memory_facts "
      "WHERE user_id = ?1 AND superseded_by IS NULL "
      "  AND (expires_at IS NULL OR expires_at >= ?4) "
      "ORDER BY created_at ASC, id ASC LIMIT ?2 OFFSET ?3",
      &s_db.stmt_memory_fact_list_created_asc },
    { "memory_fact_search",
-     "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-     "access_count, superseded_by, note_doc_id FROM memory_facts "
+     "SELECT " MEMORY_FACT_COLS " FROM memory_facts "
      "WHERE user_id = ?1 AND superseded_by IS NULL AND fact_text LIKE ?2 ESCAPE '\\' "
      "  AND (expires_at IS NULL OR expires_at >= ?4) "
      "ORDER BY confidence DESC LIMIT ?3",
@@ -501,18 +497,16 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * (space-separated pre-stemmed tokens, OR-combined), 2=user_id,
     * 3=max_facts.  Returns rows ordered by BM25 score (raw negative;
     * caller flips sign + sigmoid-normalizes via memory_bm25_normalize).
-    * Score column appears as col 10 — populate_fact_from_row reads
-    * cols 0-9 by index so the extra col is ignored on the fact-fill
-    * side; the caller pulls the score at FACT_COL_EXTRA. */
+    * The score column follows the shared projection; populate_fact_from_row
+    * reads the projection by index and the caller pulls the score at
+    * FACT_COL_EXTRA. */
    /* v48 BM25 prep statements are SOFT failures: if the FTS5 table is
     * missing (DB held at v47 because the v48 migration failed) these
     * preps fail.  Leave the pointers NULL: memory_db_fact_search_bm25_since then
     * finds nothing, and memory search runs on embeddings alone, rather than
     * the daemon failing to start. */
    { .name = "memory_fact_search_bm25",
-     .sql = "SELECT mf.id, mf.user_id, mf.fact_text, mf.confidence, mf.source, mf.created_at, "
-            "mf.last_accessed, mf.access_count, mf.superseded_by, mf.note_doc_id, "
-            "bm25(memory_facts_fts) AS score "
+     .sql = "SELECT " MEMORY_FACT_COLS_MF ", bm25(memory_facts_fts) AS score "
             "FROM memory_facts_fts "
             "JOIN memory_facts mf ON mf.id = memory_facts_fts.rowid "
             "WHERE memory_facts_fts MATCH ?1 "
@@ -527,9 +521,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * appended.  Used by focus-injection adapters and any time-windowed
     * memory.search query. */
    { .name = "memory_fact_search_bm25_since",
-     .sql = "SELECT mf.id, mf.user_id, mf.fact_text, mf.confidence, mf.source, mf.created_at, "
-            "mf.last_accessed, mf.access_count, mf.superseded_by, mf.note_doc_id, "
-            "bm25(memory_facts_fts) AS score "
+     .sql = "SELECT " MEMORY_FACT_COLS_MF ", bm25(memory_facts_fts) AS score "
             "FROM memory_facts_fts "
             "JOIN memory_facts mf ON mf.id = memory_facts_fts.rowid "
             "WHERE memory_facts_fts MATCH ?1 "
@@ -677,13 +669,15 @@ static const auth_db_stmt_def_t s_stmts[] = {
    { "memory_pref_upsert",
      "INSERT INTO memory_preferences (user_id, category, value, confidence, source, created_at, "
      "updated_at, source_conversation_id, source_msg_id_start, source_msg_id_end, "
-     "origin_unsourced) "
-     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?8 IS NULL) "
+     "origin_unsourced, outside) "
+     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?8 IS NULL, ?11) "
      "ON CONFLICT(user_id, category) DO UPDATE SET "
      /* A new value comes only from where it was set; the same value keeps
-      * every origin it had. */
+      * every origin it had, and its outside kind (a re-mention never changes
+      * it). */
      "origin_unsourced = CASE WHEN excluded.value != value THEN excluded.origin_unsourced "
      "ELSE MAX(origin_unsourced, excluded.origin_unsourced) END, "
+     "outside = CASE WHEN excluded.value != value THEN excluded.outside ELSE outside END, "
      "value=excluded.value, confidence=excluded.confidence, updated_at=excluded.updated_at, "
      "source_conversation_id=excluded.source_conversation_id, "
      "source_msg_id_start=excluded.source_msg_id_start, "
@@ -692,16 +686,16 @@ static const auth_db_stmt_def_t s_stmts[] = {
      &s_db.stmt_memory_pref_upsert },
    { "memory_pref_get",
      "SELECT id, user_id, category, value, confidence, source, created_at, updated_at, "
-     "reinforcement_count FROM memory_preferences WHERE user_id = ? AND category = ?",
+     "reinforcement_count, outside FROM memory_preferences WHERE user_id = ? AND category = ?",
      &s_db.stmt_memory_pref_get },
    { "memory_pref_list",
      "SELECT id, user_id, category, value, confidence, source, created_at, updated_at, "
-     "reinforcement_count FROM memory_preferences WHERE user_id = ? ORDER BY category "
+     "reinforcement_count, outside FROM memory_preferences WHERE user_id = ? ORDER BY category "
      "LIMIT ? OFFSET ?",
      &s_db.stmt_memory_pref_list },
    { "memory_pref_search",
      "SELECT id, user_id, category, value, confidence, source, created_at, updated_at, "
-     "reinforcement_count FROM memory_preferences "
+     "reinforcement_count, outside FROM memory_preferences "
      "WHERE user_id = ? AND (category LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\') "
      "ORDER BY confidence DESC LIMIT ?",
      &s_db.stmt_memory_pref_search },
@@ -712,8 +706,8 @@ static const auth_db_stmt_def_t s_stmts[] = {
    { "memory_summary_create",
      "INSERT INTO memory_summaries (user_id, session_id, summary, topics, sentiment, "
      "created_at, message_count, duration_seconds, "
-     "source_conversation_id, source_msg_id_start, source_msg_id_end) "
-     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+     "source_conversation_id, source_msg_id_start, source_msg_id_end, outside) "
+     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
      &s_db.stmt_memory_summary_create },
    { "memory_summary_list",
      "SELECT id, user_id, session_id, summary, topics, sentiment, created_at, "
@@ -753,16 +747,14 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * (user_id + created_at range) so the DESC variant collapses cleanly to
     * the legacy _list_since semantics when callers pass until=INT64_MAX. */
    { "memory_fact_list_window_asc",
-     "SELECT id, user_id, fact_text, confidence, source, created_at, "
-     "last_accessed, access_count, superseded_by, note_doc_id FROM memory_facts "
+     "SELECT " MEMORY_FACT_COLS " FROM memory_facts "
      "WHERE user_id = ?1 AND superseded_by IS NULL "
      "  AND created_at >= ?2 AND created_at <= ?3 "
      "  AND (expires_at IS NULL OR expires_at >= ?5) "
      "ORDER BY created_at ASC LIMIT ?4",
      &s_db.stmt_memory_fact_list_window_asc },
    { "memory_fact_list_window_desc",
-     "SELECT id, user_id, fact_text, confidence, source, created_at, "
-     "last_accessed, access_count, superseded_by, note_doc_id FROM memory_facts "
+     "SELECT " MEMORY_FACT_COLS " FROM memory_facts "
      "WHERE user_id = ?1 AND superseded_by IS NULL "
      "  AND created_at >= ?2 AND created_at <= ?3 "
      "  AND (expires_at IS NULL OR expires_at >= ?5) "
@@ -957,14 +949,16 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "object_entity_id, object_value, fact_id, confidence, created_at, "
      "valid_from, valid_to, "
      "source_conversation_id, source_msg_id_start, source_msg_id_end, "
-     "origin_unsourced) "
+     "origin_unsourced, outside) "
      "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?, "
-     "?10 IS NULL) "
+     "?10 IS NULL, ?13) "
      "ON CONFLICT(user_id, subject_entity_id, relation, "
      "            COALESCE(object_entity_id, 0), COALESCE(object_value, '')) "
      "WHERE valid_to IS NULL DO UPDATE SET "
      "  mention_count = mention_count + 1, "
      "  origin_unsourced = MAX(origin_unsourced, excluded.origin_unsourced), "
+     /* A re-mention keeps the row's outside kind: only new content carries a
+      * batch's. */
      "  confidence = MAX(confidence, excluded.confidence), "
      "  source_conversation_id = excluded.source_conversation_id, "
      "  source_msg_id_start = excluded.source_msg_id_start, "

@@ -49,11 +49,14 @@
  * Helper: Populate fact from statement row
  * ============================================================================= */
 
-/* Reads from SELECTs ordered: id, user_id, fact_text, confidence, source,
- * created_at, last_accessed, access_count, superseded_by, note_doc_id.
- * A statement's own extra column (expires_at, a BM25 score) follows them. */
+/* Reads from SELECTs of the shared projection (MEMORY_FACT_COLS): id,
+ * user_id, fact_text, confidence, source, created_at, last_accessed,
+ * access_count, superseded_by, note_doc_id, origin, outside.  A statement's
+ * own extra column (expires_at, a BM25 score) follows them. */
 #define FACT_COL_NOTE_DOC_ID 9
-#define FACT_COL_EXTRA 10
+#define FACT_COL_ORIGIN 10
+#define FACT_COL_OUTSIDE 11
+#define FACT_COL_EXTRA 12
 static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
    fact->id = sqlite3_column_int64(stmt, 0);
    fact->user_id = sqlite3_column_int(stmt, 1);
@@ -75,6 +78,8 @@ static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
    fact->access_count = sqlite3_column_int(stmt, 7);
    fact->superseded_by = sqlite3_column_int64(stmt, 8);
    fact->note_doc_id = sqlite3_column_int64(stmt, FACT_COL_NOTE_DOC_ID);
+   fact->origin = sqlite3_column_int(stmt, FACT_COL_ORIGIN);
+   fact->outside = sqlite3_column_int(stmt, FACT_COL_OUTSIDE);
 
    /* expires_at (v58) is NOT in the shared projection: only the by-id read
     * carries it, at FACT_COL_EXTRA.  The keyword/list retrieval statements
@@ -162,6 +167,8 @@ int memory_db_fact_create_at(int user_id,
    sqlite3_bind_int64(stmt, 5, created_at);
    sqlite3_bind_int64(stmt, 6, (int64_t)normalized_hash);
    memory_db_internal_bind_provenance(stmt, 7, prov);
+   sqlite3_bind_int(stmt, 10, prov ? prov->origin : MEMORY_ORIGIN_CONVERSATION);
+   sqlite3_bind_int(stmt, 11, prov ? prov->outside : OUTSIDE_NONE);
 
    int rc = sqlite3_step(stmt);
    sqlite3_reset(stmt);

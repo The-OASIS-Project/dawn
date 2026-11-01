@@ -121,6 +121,8 @@ static const char *DDL =
    "  note_doc_id            INTEGER DEFAULT NULL,"  /* v61 (memory→note bridge) */
    "  subject_entity_id      INTEGER DEFAULT NULL,"
    "  origin_unsourced       INTEGER NOT NULL DEFAULT 0,"
+   "  origin                 INTEGER NOT NULL DEFAULT 0,"  /* v113 */
+   "  outside                INTEGER NOT NULL DEFAULT 0,"  /* v113 */
    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
    "  FOREIGN KEY (superseded_by) REFERENCES memory_facts(id) ON DELETE SET NULL,"
    "  FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
@@ -212,6 +214,7 @@ static const char *DDL =
    "  source_conversation_id INTEGER DEFAULT NULL,"
    "  source_msg_id_start    INTEGER DEFAULT NULL,"
    "  source_msg_id_end      INTEGER DEFAULT NULL,"
+   "  outside                INTEGER NOT NULL DEFAULT 0,"  /* v113 */
    "  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,"
    "  FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL"
    ");"
@@ -231,6 +234,7 @@ static const char *DDL =
    "  valid_to INTEGER DEFAULT NULL,"
    "  merged_from_fact_id INTEGER DEFAULT NULL REFERENCES memory_facts(id) ON DELETE SET NULL,"
    "  closed_by_fact_id INTEGER DEFAULT NULL REFERENCES memory_facts(id) ON DELETE SET NULL,"
+   "  outside INTEGER NOT NULL DEFAULT 0,"  /* v113 */
    "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
    "  source_conversation_id INTEGER DEFAULT NULL,"
    "  source_msg_id_start    INTEGER DEFAULT NULL,"
@@ -254,8 +258,8 @@ static int prepare_statements(void) {
                            "INSERT INTO memory_facts (user_id, fact_text, confidence, source, "
                            "created_at, normalized_hash, "
                            "source_conversation_id, source_msg_id_start, source_msg_id_end, "
-                           "origin_unsourced) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?7 IS NULL)",
+                           "origin_unsourced, origin, outside) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?7 IS NULL, ?10, ?11)",
                            -1, &s_db.stmt_memory_fact_create, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
@@ -264,12 +268,10 @@ static int prepare_statements(void) {
     * facts tests to verify row-level state.  Production DDL keeps these
     * columns; mirror that here.  SQL filters on (id, user_id) to mirror
     * the CWE-639 defense-in-depth in production. */
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, note_doc_id, expires_at FROM memory_facts "
-       "WHERE id = ? AND user_id = ?",
-       -1, &s_db.stmt_memory_fact_get, NULL);
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT " MEMORY_FACT_COLS ", expires_at FROM memory_facts "
+                           "WHERE id = ? AND user_id = ?",
+                           -1, &s_db.stmt_memory_fact_get, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
 
@@ -295,8 +297,8 @@ static int prepare_statements(void) {
        s_db.db,
        "INSERT INTO memory_summaries (user_id, session_id, summary, topics, sentiment, "
        "created_at, message_count, duration_seconds, "
-       "source_conversation_id, source_msg_id_start, source_msg_id_end) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+       "source_conversation_id, source_msg_id_start, source_msg_id_end, outside) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
        -1, &s_db.stmt_memory_summary_create, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
@@ -318,38 +320,32 @@ static int prepare_statements(void) {
     * expires_at retrieval guard, numbered params) + prune_expired statements
     * so memory_db_fact_list / memory_db_fact_prune_expired exercise their real
     * bind logic against this DB.  Keep in sync with auth_db_statements.c. */
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, note_doc_id FROM memory_facts "
-       "WHERE user_id = ?1 AND superseded_by IS NULL "
-       "  AND (expires_at IS NULL OR expires_at >= ?4) "
-       "ORDER BY confidence DESC LIMIT ?2 OFFSET ?3",
-       -1, &s_db.stmt_memory_fact_list, NULL);
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT " MEMORY_FACT_COLS " FROM memory_facts "
+                           "WHERE user_id = ?1 AND superseded_by IS NULL "
+                           "  AND (expires_at IS NULL OR expires_at >= ?4) "
+                           "ORDER BY confidence DESC LIMIT ?2 OFFSET ?3",
+                           -1, &s_db.stmt_memory_fact_list, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
 
    /* WebUI sort variants — mirror auth_db_statements.c so memory_db_fact_list_sorted
     * exercises its real statement selection + bind logic here. */
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, note_doc_id FROM memory_facts "
-       "WHERE user_id = ?1 AND superseded_by IS NULL "
-       "  AND (expires_at IS NULL OR expires_at >= ?4) "
-       "ORDER BY created_at DESC, id DESC LIMIT ?2 OFFSET ?3",
-       -1, &s_db.stmt_memory_fact_list_created_desc, NULL);
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT " MEMORY_FACT_COLS " FROM memory_facts "
+                           "WHERE user_id = ?1 AND superseded_by IS NULL "
+                           "  AND (expires_at IS NULL OR expires_at >= ?4) "
+                           "ORDER BY created_at DESC, id DESC LIMIT ?2 OFFSET ?3",
+                           -1, &s_db.stmt_memory_fact_list_created_desc, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
 
-   rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT id, user_id, fact_text, confidence, source, created_at, last_accessed, "
-       "access_count, superseded_by, note_doc_id FROM memory_facts "
-       "WHERE user_id = ?1 AND superseded_by IS NULL "
-       "  AND (expires_at IS NULL OR expires_at >= ?4) "
-       "ORDER BY created_at ASC, id ASC LIMIT ?2 OFFSET ?3",
-       -1, &s_db.stmt_memory_fact_list_created_asc, NULL);
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "SELECT " MEMORY_FACT_COLS " FROM memory_facts "
+                           "WHERE user_id = ?1 AND superseded_by IS NULL "
+                           "  AND (expires_at IS NULL OR expires_at >= ?4) "
+                           "ORDER BY created_at ASC, id ASC LIMIT ?2 OFFSET ?3",
+                           -1, &s_db.stmt_memory_fact_list_created_asc, NULL);
    if (rc != SQLITE_OK)
       return FAILURE;
 

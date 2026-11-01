@@ -75,6 +75,7 @@ void memory_import_clean_text(char *s) {
 memory_import_status_t memory_import_fact(int user_id,
                                           const char *text,
                                           float confidence,
+                                          int outside,
                                           bool commit,
                                           char out_text[MEMORY_FACT_TEXT_MAX]) {
    out_text[0] = '\0';
@@ -100,7 +101,14 @@ memory_import_status_t memory_import_fact(int user_id,
       return MEMORY_IMPORT_ACCEPTED;
    }
 
-   if (memory_db_fact_create(user_id, out_text, confidence, "import", NULL, NULL) !=
+   /* The user's own word, whoever wrote the file; a tag an export carried
+    * stays with the fact. */
+   const memory_provenance_t imported = {
+      .origin = MEMORY_ORIGIN_IMPORT,
+      .outside = (outside >= OUTSIDE_NONE && outside <= OUTSIDE_KIND_MAX) ? outside
+                                                                          : OUTSIDE_UNKNOWN,
+   };
+   if (memory_db_fact_create(user_id, out_text, confidence, "explicit", &imported, NULL) !=
        MEMORY_DB_SUCCESS) {
       return MEMORY_IMPORT_FAILED;
    }

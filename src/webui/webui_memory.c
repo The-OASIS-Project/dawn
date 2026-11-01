@@ -96,6 +96,17 @@ void handle_get_memory_stats(ws_connection_t *conn) {
  * Memory Facts Handlers
  * ============================================================================= */
 
+/* The outside kind an imported item's "outside" field names; UNKNOWN when it
+ * has none or one out of range (the file isn't DAWN's to vouch for). */
+static int import_outside(json_object *item) {
+   json_object *v = NULL;
+   if (!json_object_object_get_ex(item, "outside", &v) || !json_object_is_type(v, json_type_int)) {
+      return OUTSIDE_UNKNOWN;
+   }
+   const int outside = json_object_get_int(v);
+   return outside >= OUTSIDE_NONE && outside <= OUTSIDE_KIND_MAX ? outside : OUTSIDE_UNKNOWN;
+}
+
 /* The panel's word for how a fact was learned ("told", "noted", ...); left out
  * when there is none, and the panel shows the raw source. */
 static void add_fact_kind(json_object *obj, const memory_fact_t *fact) {
@@ -1352,6 +1363,8 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
          json_object_object_add(f, "confidence", json_object_new_double(facts[i].confidence));
          json_object_object_add(f, "source", json_object_new_string(facts[i].source));
          json_object_object_add(f, "created_at", json_object_new_int64(facts[i].created_at));
+         json_object_object_add(f, "origin", json_object_new_int(facts[i].origin));
+         json_object_object_add(f, "outside", json_object_new_int(facts[i].outside));
          json_object_array_add(facts_arr, f);
       }
       json_object_object_add(export_obj, "facts", facts_arr);
@@ -1365,6 +1378,7 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
          json_object_object_add(p, "confidence", json_object_new_double(prefs[i].confidence));
          json_object_object_add(p, "source", json_object_new_string(prefs[i].source));
          json_object_object_add(p, "created_at", json_object_new_int64(prefs[i].created_at));
+         json_object_object_add(p, "outside", json_object_new_int(prefs[i].outside));
          json_object_array_add(prefs_arr, p);
       }
       json_object_object_add(export_obj, "preferences", prefs_arr);
@@ -1548,10 +1562,14 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
             float confidence = MEMORY_IMPORT_DEFAULT_CONFIDENCE;
             if (json_object_object_get_ex(f, "confidence", &conf_obj))
                confidence = memory_import_confidence(json_object_get_double(conf_obj));
+            /* An export's outside kind, UNKNOWN when it has none (a file
+             * older than the kind, or from elsewhere); its origin is left: an
+             * imported fact is imported. */
+            const int outside = import_outside(f);
 
             char stored[MEMORY_FACT_TEXT_MAX];
             memory_import_status_t st = memory_import_fact(conn->auth_user_id, text, confidence,
-                                                           commit, stored);
+                                                           outside, commit, stored);
             if (!count_import_status(st, &skipped_blocked, &skipped_dupes, &skipped_failed)) {
                continue;
             }
@@ -1610,8 +1628,9 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
             json_object_array_add(preview_arr, preview_item);
 
             if (commit) {
+               const memory_provenance_t imported = { .outside = import_outside(p) };
                memory_db_pref_upsert(conn->auth_user_id, category, value, confidence, "import",
-                                     NULL);
+                                     &imported);
             }
             imported_prefs++;
          }
@@ -1695,8 +1714,8 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
          }
 
          char stored[MEMORY_FACT_TEXT_MAX];
-         memory_import_status_t st = memory_import_fact(conn->auth_user_id, fact_text, 0.7f, commit,
-                                                        stored);
+         memory_import_status_t st = memory_import_fact(conn->auth_user_id, fact_text, 0.7f,
+                                                        OUTSIDE_UNKNOWN, commit, stored);
          if (!count_import_status(st, &skipped_blocked, &skipped_dupes, &skipped_failed)) {
             line = strtok_r(NULL, "\n", &saveptr);
             continue;
