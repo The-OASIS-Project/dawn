@@ -420,6 +420,40 @@ static char *schema_of(sqlite3 *db) {
    return out;
 }
 
+/* A database already at v113 from before the record's later column and
+ * indexes gets them at start, and matches a new one again. */
+static void test_v113_without_the_later_column_gets_it(void) {
+   char *migrated = schema_of(s_db.db);
+   /* The ops table as v113 shipped it, with its indexes. */
+   TEST_ASSERT_EQUAL_INT(
+       SQLITE_OK,
+       sqlite3_exec(s_db.db,
+                    "DROP TABLE memory_consolidation_ops; DROP INDEX idx_mcb_created; "
+                    "CREATE TABLE memory_consolidation_ops (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "batch_id INTEGER NOT NULL REFERENCES memory_consolidation_batches(id) ON "
+                    "DELETE CASCADE, user_id INTEGER NOT NULL, seq INTEGER NOT NULL, op TEXT NOT "
+                    "NULL, fact_id INTEGER, other_fact_id INTEGER, relation_id INTEGER, entity_id "
+                    "INTEGER, other_entity_id INTEGER, link_id INTEGER, outside INTEGER NOT NULL "
+                    "DEFAULT 0, text TEXT, target_text TEXT, reason TEXT, pre_image TEXT, "
+                    "post_image TEXT, status TEXT NOT NULL DEFAULT 'applied', created_at INTEGER "
+                    "NOT NULL, undone_at INTEGER);"
+                    "CREATE INDEX idx_mco_batch ON memory_consolidation_ops(batch_id, seq);"
+                    "CREATE INDEX idx_mco_fact ON memory_consolidation_ops(user_id, fact_id) WHERE "
+                    "fact_id IS NOT NULL;"
+                    "CREATE INDEX idx_mco_other ON memory_consolidation_ops(user_id, "
+                    "other_fact_id) WHERE other_fact_id IS NOT NULL;"
+                    "CREATE INDEX idx_mco_deferred ON memory_consolidation_ops(user_id, "
+                    "created_at) WHERE op = 'deferred' AND status = 'applied';",
+                    NULL, NULL, NULL));
+   auth_db_shutdown();
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_path));
+   char *again = schema_of(s_db.db);
+   TEST_ASSERT_NOT_NULL(strstr(again, "memory_consolidation_ops.source_conversation_id"));
+   TEST_ASSERT_EQUAL_STRING(migrated, again);
+   free(migrated);
+   free(again);
+}
+
 /* A migrated database and a new one have the same memory schema. */
 static void test_migrated_schema_matches_new(void) {
    char *migrated = schema_of(s_db.db);
@@ -446,5 +480,6 @@ int main(void) {
    RUN_TEST(test_category_index_gone_for_good);
    RUN_TEST(test_rerun_keeps_new_tags);
    RUN_TEST(test_migrated_schema_matches_new);
+   RUN_TEST(test_v113_without_the_later_column_gets_it);
    return UNITY_END();
 }

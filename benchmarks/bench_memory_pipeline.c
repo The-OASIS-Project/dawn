@@ -1427,17 +1427,38 @@ const char *bench_mp_extraction_prompt_sha256(void) {
    unsigned char digest[SHA256_DIGEST_LENGTH];
    /* What else changes what a batch stores from the same prompt keys the
     * snapshots too: the bench's real entity linking (snapshots from before it
-    * merged no entities), the consolidator, and its sample count. */
+    * merged no entities), the consolidator, its sample count, whether entity
+    * merging is on (the lists and the link op depend on it), and the fixed
+    * text of the prompts it sends.  Left out: how each list item is written
+    * (code), and the persona half and kind words (the install's own text). */
    const bool agent = strcmp(g_config.memory.consolidator, "agent") == 0;
-   const char *key = !agent          ? "\nstore=linked"
-                     : s_two_samples ? "\nstore=linked\nconsolidator=agent\nsamples=2"
-                                     : "\nstore=linked\nconsolidator=agent";
-   const size_t len = strlen(tmpl);
-   const size_t klen = strlen(key);
-   char *keyed = malloc(len + klen + 1);
+   const bool merging = g_config.memory.entity_merge_enabled;
+   const char *const pieces[] = {
+      tmpl,
+      "\nstore=linked",
+      agent ? "\nconsolidator=agent" : "",
+      agent && s_two_samples ? "\nsamples=2" : "",
+      agent && !merging ? "\nentity_merge=off" : "",
+      agent ? MEMORY_CONSOLIDATE_LEAD : "",
+      agent ? MEMORY_CONSOLIDATE_LINK_RULE MEMORY_CONSOLIDATE_LINK_OP : "",
+      agent ? MEMORY_CONSOLIDATE_HEAD_C MEMORY_CONSOLIDATE_HEAD_S MEMORY_CONSOLIDATE_HEAD_R
+                  MEMORY_CONSOLIDATE_HEAD_E MEMORY_CONSOLIDATE_HEAD_F MEMORY_CONSOLIDATE_HEAD_D
+            : "",
+      agent ? MEMORY_CONSOLIDATE_REPAIR_TEMPLATE : "",
+   };
+   size_t len = 0;
+   for (size_t i = 0; i < sizeof(pieces) / sizeof(pieces[0]); i++) {
+      len += strlen(pieces[i]);
+   }
+   char *keyed = malloc(len + 1);
    if (keyed) {
-      memcpy(keyed, tmpl, len);
-      memcpy(keyed + len, key, klen + 1);
+      size_t off = 0;
+      for (size_t i = 0; i < sizeof(pieces) / sizeof(pieces[0]); i++) {
+         const size_t n = strlen(pieces[i]);
+         memcpy(keyed + off, pieces[i], n);
+         off += n;
+      }
+      keyed[off] = '\0';
    }
    const char *hashed = keyed ? keyed : tmpl;
    SHA256((const unsigned char *)hashed, strlen(hashed), digest);

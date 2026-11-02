@@ -771,21 +771,59 @@ static void consume(mc_batch_t *b, mc_slot_t s) {
 
 static void record_forgotten(mc_batch_t *b, mc_slot_t s, const char *reason);
 
+/* Whether a D may still be acted on: taken up now (its row consumed) while its
+ * own conversation can still be learned from.  Made private or deleted since
+ * it was loaded: nothing of it is stored or recorded. */
+static bool d_taken(mc_batch_t *b, mc_slot_t s) {
+   if (!s.d) {
+      return true;
+   }
+   if (s.d->taken) {
+      return true;
+   }
+   const int rc = memory_db_consolidation_deferred_claim(s.d->row.op_id, b->in->user_id);
+   if (rc == MEMORY_DB_SUCCESS) {
+      s.d->taken = true;
+      return true;
+   }
+   if (rc == MEMORY_DB_NOT_FOUND) {
+      OLOG_INFO("memory_consolidate: batch %lld: a set-aside candidate's conversation can't be "
+                "learned from now; left out",
+                (long long)b->batch_id);
+   } else {
+      OLOG_WARNING("memory_consolidate: batch %lld: taking up a set-aside candidate failed "
+                   "(database); left out",
+                   (long long)b->batch_id);
+   }
+   s.d->done = true;
+   return false;
+}
+
+/* The conversation a row about @p s quotes, when it isn't the batch's. */
+static int64_t slot_source(mc_slot_t s) {
+   return s.d ? s.d->row.conversation_id : 0;
+}
+
 /* Record a candidate set aside or dropped (@p what), with its JSON.  A D set
  * aside again keeps its own row (its batch's conversation, its expiry); one
  * whose words the user forgot is recorded without them. */
 static void record_candidate(mc_batch_t *b, mc_slot_t s, const char *what, const char *reason) {
    const memory_candidate_t *cand = slot_cand(s);
-   if (memory_forgotten_names(b->in->forgotten, cand->text)) {
-      record_forgotten(b, s, MC_REASON_BACKSTOP_FORGOTTEN);
+   const bool forgotten = memory_forgotten_names(b->in->forgotten, cand->text);
+   if (s.d && !forgotten && strcmp(what, "deferred") == 0) {
       return;
    }
-   if (s.d && strcmp(what, "deferred") == 0) {
+   if (!d_taken(b, s)) {
+      return;
+   }
+   if (forgotten) {
+      record_forgotten(b, s, MC_REASON_BACKSTOP_FORGOTTEN);
       return;
    }
    memory_consolidation_op_t op = {
       .op = what,
       .outside = slot_outside(b, s),
+      .source_conversation_id = slot_source(s),
       .text = cand->text,
       .reason = reason,
       .pre_image = cand->json ? json_object_to_json_string_ext(cand->json, JSON_C_TO_STRING_PLAIN)
@@ -805,6 +843,7 @@ static void record_candidate(mc_batch_t *b, mc_slot_t s, const char *what, const
 static void record_forgotten(mc_batch_t *b, mc_slot_t s, const char *reason) {
    memory_consolidation_op_t op = { .op = "dropped",
                                     .outside = slot_outside(b, s),
+                                    .source_conversation_id = slot_source(s),
                                     .reason = reason };
    record(b, &op);
    b->res->dropped++;
@@ -844,6 +883,7 @@ static int reinforce(mc_batch_t *b,
    memory_consolidation_op_t op = { .op = "reinforced",
                                     .fact_id = fact_id,
                                     .outside = p ? p->outside : b->outside,
+                                    .source_conversation_id = prov ? prov->conv_id : 0,
                                     .text = before.fact_text,
                                     .target_text = said,
                                     .reason = why,
@@ -871,6 +911,9 @@ static int64_t store_slot(mc_batch_t *b, mc_slot_t s, const char *why, bool unju
       record_candidate(b, s, "deferred", MC_REASON_NEAR_FORGOTTEN);
       return 0;
    }
+   if (!d_taken(b, s)) {
+      return 0;
+   }
    *done = true; /* one disposition, whatever follows */
    const memory_candidate_t *cand = slot_cand(s);
    const bool shortened = s.mc && s.mc->shortened;
@@ -891,6 +934,7 @@ static int64_t store_slot(mc_batch_t *b, mc_slot_t s, const char *why, bool unju
    if (memory_store_candidate(b->st, s.c, s.idx, &opts, &res) != SUCCESS || res.fact_id <= 0) {
       memory_consolidation_op_t op = { .op = "added",
                                        .outside = slot_outside(b, s),
+                                       .source_conversation_id = slot_source(s),
                                        .text = text,
                                        .reason = MC_REASON_NOT_STORED,
                                        .status = "refused" };
@@ -911,6 +955,7 @@ static int64_t store_slot(mc_batch_t *b, mc_slot_t s, const char *why, bool unju
    memory_consolidation_op_t op = { .op = "added",
                                     .fact_id = res.fact_id,
                                     .outside = slot_outside(b, s),
+                                    .source_conversation_id = slot_source(s),
                                     .text = text,
                                     .reason = why,
                                     .post_image = post };
@@ -935,8 +980,17 @@ static void record_refused(mc_batch_t *b, const mc_op_t *op, const char *why) {
    memory_fact_t buf;
    const char *text = op->a.kind == MC_REF_S ? fact_text(b->in->user_id, b->s[op->a.i].id, &buf)
                                              : NULL;
+   int64_t source = 0;
    if (is_cand(op->a)) {
-      text = slot_cand(slot_of(b, op->a))->text;
+      const mc_slot_t s = slot_of(b, op->a);
+      /* A D whose conversation can't be learned from now: no row quotes it. */
+      if (s.d && !s.d->taken &&
+          memory_db_consolidation_deferred_open(s.d->row.op_id, b->in->user_id) !=
+              MEMORY_DB_SUCCESS) {
+         return;
+      }
+      text = slot_cand(s)->text;
+      source = slot_source(s);
    }
    char reason[MEMORY_CONSOLIDATE_REASON_MAX + 1];
    snprintf(reason, sizeof(reason), "%s", why);
@@ -945,6 +999,7 @@ static void record_refused(mc_batch_t *b, const mc_op_t *op, const char *why) {
                                      .relation_id = op->a.kind == MC_REF_R ? b->r[op->a.i].rel.id
                                                                            : 0,
                                      .outside = b->outside,
+                                     .source_conversation_id = source,
                                      .text = text,
                                      .reason = reason,
                                      .status = "refused" };
@@ -1009,6 +1064,10 @@ static void apply_retire(mc_batch_t *b, const mc_op_t *op, bool merge) {
 static void apply_close(mc_batch_t *b, const mc_op_t *op) {
    const mc_rel_t *r = &b->r[op->a.i];
    const int64_t by = op->b.kind != MC_REF_NONE ? fact_of(b, op->b, op->reason) : 0;
+   if (is_cand(op->b) && by <= 0) {
+      record_refused(b, op, "the new value wasn't stored");
+      return;
+   }
    memory_fact_t by_fact;
    const bool by_out = by > 0 &&
                        memory_db_fact_get(by, b->in->user_id, &by_fact) == MEMORY_DB_SUCCESS &&

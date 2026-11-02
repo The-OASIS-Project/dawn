@@ -42,6 +42,7 @@
 #include "memory/memory_db.h"
 #include "memory/memory_db_consolidation.h"
 #include "memory/memory_db_entities.h"
+#include "memory/memory_db_provenance.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_forgotten.h"
 #include "unity.h"
@@ -1159,6 +1160,102 @@ void test_a_link_with_merging_off_is_rejected_and_not_counted(void) {
    TEST_ASSERT_TRUE(current("Jonathan Smith lives in Springfield") > 0);
 }
 
+/* A candidate set aside by conversation B, which goes private while this
+ * batch plans: neither stored nor recorded here (B's record goes with it). */
+static int64_t s_private_conv;
+static void source_goes_private(int call) {
+   if (call == 0) {
+      conv_db_set_private(s_private_conv, s_user, true);
+   }
+}
+
+static void deferred_source_goes_private(const char *plan) {
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "B", &s_private_conv));
+   set_aside(s_private_conv, 0, LISBON,
+             "{\"text\": \"" LISBON "\", \"subject\": \"Jonathan Smith\"}");
+   s_before_call = source_goes_private;
+   script(plan, NULL);
+   const memory_consolidate_result_t res = run(ONE_FACT("Jonathan Smith plays the cello"), 0, 0);
+   TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATE_FINISHED, res.stop);
+   TEST_ASSERT_EQUAL_INT(0, current(LISBON));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE user_id = ?1 "
+                              "AND (text = ?2 OR pre_image LIKE '%Lisbon%')",
+                              s_user, LISBON));
+   TEST_ASSERT_TRUE(current("Jonathan Smith plays the cello") > 0);
+}
+
+void test_a_deferred_candidate_whose_conversation_went_private_is_not_stored(void) {
+   deferred_source_goes_private("{\"ops\": [{\"op\": \"add\", \"c\": \"D1\"}], \"finish\": true}");
+}
+
+void test_a_deferred_candidate_whose_conversation_went_private_is_not_recorded(void) {
+   deferred_source_goes_private("{\"ops\": [{\"op\": \"drop\", \"c\": \"D1\"}], \"finish\": true}");
+}
+
+/* A relation closed "by" a set-aside candidate whose conversation went
+ * private: the candidate isn't stored, so nothing closes the relation. */
+void test_a_close_by_a_revoked_deferred_candidate_is_refused(void) {
+   bool created = false;
+   int64_t jon = 0;
+   memory_db_entity_upsert(s_user, "Jonathan Smith", "person", "jonathan smith", &created, &jon);
+   const int64_t old = stored("Jonathan Smith's favorite color is blue", "explicit", 0);
+   memory_db_relation_create(s_user, jon, "favorite_color", 0, "blue", old, 0.9f, 0, 0, NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "B", &s_private_conv));
+   set_aside(s_private_conv, 0, "Jonathan Smith's favorite color is green",
+             "{\"text\": \"Jonathan Smith's favorite color is green\", \"subject\": \"Jonathan "
+             "Smith\"}");
+   s_before_call = source_goes_private;
+   script("{\"ops\": [{\"op\": \"add\", \"c\": \"C1\"}, {\"op\": \"add\", \"c\": \"D1\"}, "
+          "{\"op\": \"close_relation\", \"r\": \"R1\", \"valid_to\": \"2026-10-01\", \"by\": "
+          "\"D1\"}], \"finish\": true}",
+          NULL);
+   const memory_consolidate_result_t res = run(
+       "{\"facts\": [{\"text\": \"Jonathan Smith's favorite color might be green\", "
+       "\"subject\": \"Jonathan Smith\", \"relations\": [{\"subject\": \"Jonathan Smith\", "
+       "\"predicate\": \"favorite_color\", \"object\": \"green\"}]}]}",
+       0, 0);
+   TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATE_FINISHED, res.stop);
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT COUNT(*) FROM memory_relations WHERE user_id = ?1 AND "
+                              "object_value = 'blue' AND valid_to IS NULL",
+                              s_user, NULL));
+   TEST_ASSERT_EQUAL_INT(0, rows(res.batch_id, "closed", "applied"));
+   TEST_ASSERT_EQUAL_INT(1, rows(res.batch_id, "closed", "refused"));
+}
+
+/* A candidate conversation B set aside, dropped by a batch of this
+ * conversation: B made private, or its memories forgotten, removes the row
+ * that quotes it. */
+static int64_t drop_a_candidate_from_b(void) {
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "B", &s_private_conv));
+   set_aside(s_private_conv, 0, LISBON,
+             "{\"text\": \"" LISBON "\", \"subject\": \"Jonathan Smith\"}");
+   script("{\"ops\": [{\"op\": \"drop\", \"c\": \"D1\"}], \"finish\": true}", NULL);
+   const memory_consolidate_result_t res = run(ONE_FACT("Jonathan Smith plays the cello"), 0, 0);
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE batch_id = ?1 "
+                              "AND text = ?2",
+                              res.batch_id, LISBON));
+   return res.batch_id;
+}
+
+void test_its_source_made_private_removes_a_row_quoting_a_set_aside_candidate(void) {
+   const int64_t batch = drop_a_candidate_from_b();
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(s_private_conv, s_user, true));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE user_id = ?1 "
+                              "AND text = ?2",
+                              s_user, LISBON));
+   TEST_ASSERT_TRUE(q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE batch_id = ?1", batch,
+                      NULL) > 0); /* the batch's own rows stay */
+}
+
+void test_its_source_forgotten_removes_a_row_quoting_a_set_aside_candidate(void) {
+   drop_a_candidate_from_b();
+   const int64_t ids[1] = { s_private_conv };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(s_user, ids, 1, NULL));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE user_id = ?1 "
+                              "AND text = ?2",
+                              s_user, LISBON));
+}
+
 /* Last: the stop can't be undone in the process. */
 void test_cancelled_at_shutdown_stores_additions(void) {
    stored("Jonathan Smith lives in Portland", "explicit", 0);
@@ -1225,6 +1322,11 @@ int main(void) {
    RUN_TEST(test_a_repeated_candidate_text_is_recorded);
    RUN_TEST(test_a_repeated_candidate_with_forgotten_words_is_recorded_without_them);
    RUN_TEST(test_a_link_with_merging_off_is_rejected_and_not_counted);
+   RUN_TEST(test_a_deferred_candidate_whose_conversation_went_private_is_not_stored);
+   RUN_TEST(test_a_deferred_candidate_whose_conversation_went_private_is_not_recorded);
+   RUN_TEST(test_a_close_by_a_revoked_deferred_candidate_is_refused);
+   RUN_TEST(test_its_source_made_private_removes_a_row_quoting_a_set_aside_candidate);
+   RUN_TEST(test_its_source_forgotten_removes_a_row_quoting_a_set_aside_candidate);
    RUN_TEST(test_cancelled_at_shutdown_stores_additions);
    return UNITY_END();
 }

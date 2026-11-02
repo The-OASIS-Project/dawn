@@ -152,7 +152,8 @@ typedef struct {
    mc_disp_t disp;
    int disp_op;
    int64_t fact_id;
-   bool done; /* stored, or dropped as forgotten */
+   bool done;  /* stored, or dropped as forgotten */
+   bool taken; /* its row taken up by this batch (memory_db_consolidation_deferred_claim) */
 } mc_deferred_t;
 
 typedef enum {

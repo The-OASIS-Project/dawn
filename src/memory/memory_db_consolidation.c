@@ -141,6 +141,38 @@ int memory_db_consolidation_op_set_status(int64_t op_id, int user_id, const char
                  : MEMORY_DB_FAILURE;
 }
 
+/* A deferred row still open, in a batch whose conversation can still be
+ * learned from (?1 the op, ?2 the user). */
+#define DEFERRED_OPEN_SQL                                                                 \
+   "id = ?1 AND user_id = ?2 AND op = 'deferred' AND status = 'applied' AND batch_id IN " \
+   "(SELECT b.id FROM memory_consolidation_batches b WHERE b.user_id = ?2 AND "           \
+   "(b.conversation_id IS NULL OR EXISTS (SELECT 1 FROM conversations c WHERE c.id = "    \
+   "b.conversation_id AND c.is_private = 0)))"
+
+int memory_db_consolidation_deferred_claim(int64_t op_id, int user_id) {
+   return update_one(
+       "UPDATE memory_consolidation_ops SET status = 'consumed' WHERE " DEFERRED_OPEN_SQL, op_id,
+       user_id, 0, NULL);
+}
+
+int memory_db_consolidation_deferred_open(int64_t op_id, int user_id) {
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT 1 FROM memory_consolidation_ops WHERE " DEFERRED_OPEN_SQL,
+                               -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, op_id);
+      sqlite3_bind_int(st, 2, user_id);
+      rc = sqlite3_step(st);
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_ROW    ? MEMORY_DB_SUCCESS
+          : rc == SQLITE_DONE ? MEMORY_DB_NOT_FOUND
+                              : MEMORY_DB_FAILURE;
+}
+
 int memory_db_consolidation_op_add(const memory_consolidation_op_t *op, int64_t *id_out) {
    if (id_out) {
       *id_out = 0;
@@ -154,8 +186,9 @@ int memory_db_consolidation_op_add(const memory_consolidation_op_t *op, int64_t 
        s_db.db,
        "INSERT INTO memory_consolidation_ops (batch_id, user_id, seq, op, fact_id, "
        "other_fact_id, relation_id, entity_id, other_entity_id, link_id, outside, text, "
-       "target_text, reason, pre_image, post_image, status, created_at) VALUES (?1, ?2, ?3, ?4, "
-       "?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+       "target_text, reason, pre_image, post_image, status, created_at, source_conversation_id) "
+       "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, "
+       "?19)",
        -1, &st, NULL);
    if (rc == SQLITE_OK) {
       sqlite3_bind_int64(st, 1, op->batch_id);
@@ -184,6 +217,7 @@ int memory_db_consolidation_op_add(const memory_consolidation_op_t *op, int64_t 
       }
       sqlite3_bind_text(st, 17, op->status ? op->status : "applied", -1, SQLITE_STATIC);
       sqlite3_bind_int64(st, 18, (int64_t)time(NULL));
+      bind_id(st, 19, op->source_conversation_id);
       rc = sqlite3_step(st);
    }
    if (rc == SQLITE_DONE && id_out) {
@@ -497,15 +531,24 @@ int memory_db_consolidation_drop_conversations_locked(int user_id, const char *i
    if (user_id <= 0 || !ids_json) {
       return MEMORY_DB_FAILURE;
    }
+   /* Its batches, and the rows other batches made quoting what it set aside. */
+   static const char *const k_sql[] = {
+      "DELETE FROM memory_consolidation_batches WHERE user_id = ?1 AND conversation_id IN "
+      "(SELECT value FROM json_each(?2))",
+      "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND source_conversation_id IN "
+      "(SELECT value FROM json_each(?2))",
+   };
    sqlite3_stmt *st = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db,
-                               "DELETE FROM memory_consolidation_batches WHERE user_id = ?1 AND "
-                               "conversation_id IN (SELECT value FROM json_each(?2))",
-                               -1, &st, NULL);
-   if (rc == SQLITE_OK) {
-      sqlite3_bind_int(st, 1, user_id);
-      sqlite3_bind_text(st, 2, ids_json, -1, SQLITE_STATIC);
-      rc = sqlite3_step(st);
+   int rc = SQLITE_DONE;
+   for (size_t i = 0; i < sizeof(k_sql) / sizeof(k_sql[0]) && rc == SQLITE_DONE; i++) {
+      rc = sqlite3_prepare_v2(s_db.db, k_sql[i], -1, &st, NULL);
+      if (rc == SQLITE_OK) {
+         sqlite3_bind_int(st, 1, user_id);
+         sqlite3_bind_text(st, 2, ids_json, -1, SQLITE_STATIC);
+         rc = sqlite3_step(st);
+      }
+      sqlite3_finalize(st);
+      st = NULL;
    }
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("memory_db: removing a conversation's consolidation record failed: %s",

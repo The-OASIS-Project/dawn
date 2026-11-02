@@ -75,6 +75,9 @@ typedef struct {
    const char *pre_image;  /* JSON */
    const char *post_image; /* JSON */
    const char *status;     /* NULL: "applied" */
+   /* A set-aside candidate's own conversation, when the row quotes it (0:
+    * the batch's): that conversation made private or forgotten removes it. */
+   int64_t source_conversation_id;
 } memory_consolidation_op_t;
 
 /**
@@ -96,6 +99,21 @@ int memory_db_consolidation_op_add(const memory_consolidation_op_t *op, int64_t 
 
 /** Set an op's status (consumed, expired, ...); the owner is checked. */
 int memory_db_consolidation_op_set_status(int64_t op_id, int user_id, const char *status);
+
+/**
+ * @brief Take up deferred candidate @p op_id: marked consumed only while it is
+ *        still open and its batch's conversation can still be learned from
+ *        (not private, not deleted).  In one statement, so a privacy change
+ *        either comes first (nothing taken) or after (it was taken in time).
+ * @return MEMORY_DB_SUCCESS when taken, MEMORY_DB_NOT_FOUND when not (gone,
+ *         taken, or its conversation made private), MEMORY_DB_FAILURE
+ */
+int memory_db_consolidation_deferred_claim(int64_t op_id, int user_id);
+
+/** Whether deferred candidate @p op_id is still open and its conversation can
+ *  still be learned from (as the claim checks, without taking it up).
+ *  @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE */
+int memory_db_consolidation_deferred_open(int64_t op_id, int user_id);
 
 /** A deferred candidate a later batch may still take up. */
 typedef struct {
