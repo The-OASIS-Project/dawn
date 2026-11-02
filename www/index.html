@@ -1982,14 +1982,24 @@ Format rules:
                <label for="llm-provider-select" class="llm-label" id="provider-label"
                   >Provider:</label
                >
-               <select id="llm-provider-select" title="Switch cloud provider" disabled>
+               <select
+                  id="llm-provider-select"
+                  title="Switch cloud provider"
+                  aria-describedby="provider-hint"
+                  disabled
+               >
                   <option value="openai">OpenAI</option>
                   <option value="claude">Claude</option>
                </select>
                <span class="control-hint hidden" id="provider-hint"></span>
 
                <label for="llm-model-select" class="llm-label">Model:</label>
-               <select id="llm-model-select" title="Select model" disabled>
+               <select
+                  id="llm-model-select"
+                  title="Select model"
+                  aria-describedby="model-hint"
+                  disabled
+               >
                   <option value="">Loading...</option>
                </select>
                <span class="control-hint hidden" id="model-hint"></span>
