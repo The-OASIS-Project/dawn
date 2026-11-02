@@ -42,6 +42,7 @@
 #include "core/utterance_dedup.h"
 #include "core/worker_pool.h"
 #include "llm/llm_context.h"
+#include "llm/llm_selection.h"
 #include "logging.h"
 #include "tts/text_to_speech.h"
 #include "tts/tts_preprocessing.h"
@@ -1532,15 +1533,43 @@ static void *audio_worker_thread(void *arg) {
     * conversation's own context (session_turn_set_conversation). */
    int64_t turn_conv = atomic_load(&session->stream_conversation_id);
    if (turn_conv <= 0 && conn) {
-      const int64_t viewed = webui_get_active_conversation_id(session);
-      if (viewed > 0) {
-         turn_conv = viewed;
-      } else if (webui_voice_transcript_substantive(transcript)) {
-         turn_conv = webui_ensure_active_conversation(conn, transcript);
-      }
+      turn_conv = webui_get_active_conversation_id(session);
    }
    if (turn_conv > 0) {
       session_turn_set_conversation(session, turn_conv, true); /* also tags the stream */
+   }
+
+   /* Voice reply routing, chosen here so a refusal is spoken the same way as a reply.  A
+    * satellite ORIGIN must self-target via the single-target callback: the multi-target
+    * fan-out's conn_is_audio_target rejects non-WEBUI sessions AND emits 48kHz browser-rate
+    * PCM, so routing a satellite through it drops the reply entirely (no eligible browser → no
+    * synth). The single-target callback sends native-rate (Tier-2: 22050Hz) PCM to the
+    * originating device. A WEBUI origin keeps the multi-target fan-out (every speaker-capable
+    * viewer of this conversation, origin included; self-gates when no listener exists). */
+   session_sentence_callback sentence_cb = (session->type == SESSION_TYPE_DAP2 &&
+                                            session->tier == DAP2_TIER_2)
+                                               ? webui_sentence_audio_callback
+                                               : webui_sentence_audio_fanout_callback;
+
+   /* An LLM that can't run refuses the turn before anything is created or saved
+    * (its conversation is bound first: it may carry its own LLM settings). */
+   char refusal[LLM_SELECTION_REASON_MAX];
+   if (session_turn_selection_problem(session, refusal, sizeof(refusal)) != 0) {
+      OLOG_WARNING("WebUI: session %u: voice turn refused: %s", session->session_id, refusal);
+      webui_send_turn_refusal(session, refusal, sentence_cb,
+                              conn ? atomic_load(&conn->use_opus) : false);
+      webui_send_state(session, "idle");
+      audio_worker_end(session);
+      free(transcript);
+      free(work);
+      return NULL;
+   }
+
+   if (turn_conv <= 0 && conn && webui_voice_transcript_substantive(transcript)) {
+      turn_conv = webui_ensure_active_conversation(conn, transcript);
+      if (turn_conv > 0) {
+         session_turn_set_conversation(session, turn_conv, true);
+      }
    }
 
    /* Add user message to session history immediately (before LLM call can be cancelled) */
@@ -1624,16 +1653,6 @@ static void *audio_worker_thread(void *arg) {
     * bound above (stream_conversation_id), which the hook reads live. */
    webui_turn_persist_scope_t voice_persist_scope;
    webui_turn_persist_arm(session, turn_user_id, &voice_persist_scope);
-   /* Voice reply routing. A satellite ORIGIN must self-target via the single-target callback:
-    * the §Phase-4 fan-out's conn_is_audio_target rejects non-WEBUI sessions AND emits 48kHz
-    * browser-rate PCM, so routing a satellite through it drops the reply entirely (no eligible
-    * browser → no synth). The single-target callback sends native-rate (Tier-2: 22050Hz) PCM to
-    * the originating device. A WEBUI origin keeps the multi-target fan-out (every speaker-capable
-    * viewer of this conversation, origin included; self-gates when no listener exists). */
-   session_sentence_callback sentence_cb = (session->type == SESSION_TYPE_DAP2 &&
-                                            session->tier == DAP2_TIER_2)
-                                               ? webui_sentence_audio_callback
-                                               : webui_sentence_audio_fanout_callback;
    char *response = session_llm_call_with_tts_no_add(session, transcript, sentence_cb, session);
    webui_turn_persist_disarm(session, &voice_persist_scope);
    free(transcript);

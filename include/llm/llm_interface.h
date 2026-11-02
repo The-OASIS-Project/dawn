@@ -437,6 +437,9 @@ int llm_check_connection(const char *url, int timeout_seconds);
  * LLM_ERR_NONE on entry so each call's outcome stands on its own. */
 #define LLM_ERR_NONE 0
 #define LLM_ERR_TRANSIENT_NETWORK 1 /* pre-flight check failed, host unreachable */
+/* The selected LLM can't run (llm_selection_problem says why): never retried,
+ * never sent to another provider. */
+#define LLM_ERR_NOT_SELECTED 2
 
 /**
  * @brief Get the last LLM error code for the calling thread.

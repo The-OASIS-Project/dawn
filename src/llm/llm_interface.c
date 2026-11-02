@@ -940,47 +940,68 @@ static const char *call_model(cloud_provider_t provider, const char *model) {
    return model;
 }
 
+/* The LLM a bare (non-tool-loop) completion goes to: the command context's
+ * session's config, or the global selection with no session.  FAILURE with
+ * LLM_ERR_NOT_SELECTED when that config can't run (no provider, or no key for the
+ * selected one), so the caller sends nothing anywhere.  @p cfg is the caller's
+ * storage for that config: a session's own endpoint is returned pointing into it. */
+static int call_target(session_t *session,
+                       session_llm_config_t *cfg,
+                       llm_type_t *type,
+                       cloud_provider_t *provider,
+                       const char **url,
+                       const char **api_key,
+                       char model_buf[LLM_MODEL_NAME_MAX],
+                       const char **model) {
+   *type = current_type;
+   *provider = current_cloud_provider;
+   *url = llm_url;
+   *api_key = NULL;
+   model_buf[0] = '\0';
+   *model = NULL;
+
+   memset(cfg, 0, sizeof(*cfg));
+   if (session) {
+      session_get_llm_config(session, cfg);
+   } else {
+      cfg->type = current_type;
+      cfg->cloud_provider = current_cloud_provider;
+   }
+   llm_resolved_config_t resolved = { 0 };
+   if (llm_resolve_config(cfg, &resolved) != 0) {
+      llm_set_last_error(LLM_ERR_NOT_SELECTED);
+      return FAILURE;
+   }
+   *api_key = resolved.api_key;
+   if (session) {
+      *type = resolved.type;
+      *provider = resolved.cloud_provider;
+      *url = resolved.endpoint ? resolved.endpoint : llm_url;
+      /* Copy the model out: resolved lives on this frame. */
+      safe_strncpy(model_buf, resolved.model ? resolved.model : "", LLM_MODEL_NAME_MAX);
+      if (model_buf[0] != '\0') {
+         *model = model_buf;
+      }
+   }
+   return SUCCESS;
+}
+
 char *llm_chat_completion(struct json_object *conversation_history,
                           const char *input_text,
                           bool allow_fallback) {
    llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
    char *response = NULL;
-   llm_type_t type = current_type;
-   cloud_provider_t provider = current_cloud_provider;
-   const char *url = llm_url;
-   const char *api_key = NULL;
-   char model_buf[LLM_MODEL_NAME_MAX] = ""; /* Buffer to hold model name (survives scope) */
-   const char *model = NULL;
-
-   /* Check session context first (set during streaming calls) */
+   llm_type_t type;
+   cloud_provider_t provider;
+   const char *url;
+   const char *api_key;
+   char model_buf[LLM_MODEL_NAME_MAX];
+   const char *model;
+   session_llm_config_t target_cfg;
    session_t *session = session_get_command_context();
-   if (session) {
-      session_llm_config_t session_config = { 0 }; /* Zero-init for safety */
-      session_get_llm_config(session, &session_config);
-
-      llm_resolved_config_t resolved = { 0 }; /* Zero-init for safety */
-      if (llm_resolve_config(&session_config, &resolved) == 0) {
-         type = resolved.type;
-         provider = resolved.cloud_provider;
-         url = resolved.endpoint ? resolved.endpoint : llm_url;
-         api_key = resolved.api_key;
-         /* Copy model to local buffer (resolved.model may be dangling pointer) */
-         safe_strscpy(model_buf, resolved.model);
-         if (model_buf[0] != '\0') {
-            model = model_buf;
-         }
-      }
-   } else {
-      /* Use global state for non-session context */
-      if (provider == CLOUD_PROVIDER_OPENAI) {
-         api_key = get_openai_api_key();
-      } else if (provider == CLOUD_PROVIDER_CLAUDE) {
-         api_key = get_claude_api_key();
-      } else if (provider == CLOUD_PROVIDER_GEMINI) {
-         api_key = get_gemini_api_key();
-      } else if (provider == CLOUD_PROVIDER_OPENROUTER) {
-         api_key = get_openrouter_api_key();
-      }
+   if (call_target(session, &target_cfg, &type, &provider, &url, &api_key, model_buf, &model) !=
+       SUCCESS) {
+      return NULL; /* refused: never sent to another provider, nor to the local LLM */
    }
 
    /* Gate cloud API calls through rate limiter.  Single-shot (non-tool-loop)
@@ -1062,42 +1083,17 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
    llm_clear_interrupt();
 
    char *response = NULL;
-   llm_type_t type = current_type;
-   cloud_provider_t provider = current_cloud_provider;
-   const char *url = llm_url;
-   const char *api_key = NULL;
-   char model_buf[LLM_MODEL_NAME_MAX] = ""; /* Buffer to hold model name (survives scope) */
-   const char *model = NULL;
-
-   /* Check session context first (set during streaming calls) */
+   llm_type_t type;
+   cloud_provider_t provider;
+   const char *url;
+   const char *api_key;
+   char model_buf[LLM_MODEL_NAME_MAX];
+   const char *model;
+   session_llm_config_t target_cfg;
    session_t *session = session_get_command_context();
-   if (session) {
-      session_llm_config_t session_config = { 0 }; /* Zero-init for safety */
-      session_get_llm_config(session, &session_config);
-
-      llm_resolved_config_t resolved = { 0 }; /* Zero-init for safety */
-      if (llm_resolve_config(&session_config, &resolved) == 0) {
-         type = resolved.type;
-         provider = resolved.cloud_provider;
-         url = resolved.endpoint ? resolved.endpoint : llm_url;
-         api_key = resolved.api_key;
-         /* Copy model to local buffer (resolved.model may be dangling pointer) */
-         safe_strscpy(model_buf, resolved.model);
-         if (model_buf[0] != '\0') {
-            model = model_buf;
-         }
-      }
-   } else {
-      /* Use global state for non-session context */
-      if (provider == CLOUD_PROVIDER_OPENAI) {
-         api_key = get_openai_api_key();
-      } else if (provider == CLOUD_PROVIDER_CLAUDE) {
-         api_key = get_claude_api_key();
-      } else if (provider == CLOUD_PROVIDER_GEMINI) {
-         api_key = get_gemini_api_key();
-      } else if (provider == CLOUD_PROVIDER_OPENROUTER) {
-         api_key = get_openrouter_api_key();
-      }
+   if (call_target(session, &target_cfg, &type, &provider, &url, &api_key, model_buf, &model) !=
+       SUCCESS) {
+      return NULL; /* refused: never sent to another provider, nor to the local LLM */
    }
 
    /* Track LLM total time */

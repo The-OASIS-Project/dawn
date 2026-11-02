@@ -45,6 +45,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
@@ -1799,6 +1800,12 @@ void session_get_llm_config(session_t *session, session_llm_config_t *config) {
       memcpy(config, &session->llm_config, sizeof(session_llm_config_t));
    }
    pthread_mutex_unlock(&session->llm_config_mutex);
+}
+
+int session_turn_selection_problem(session_t *session, char *reason, size_t reason_len) {
+   session_llm_config_t cfg;
+   session_get_llm_config(session, &cfg);
+   return llm_selection_problem(session ? &cfg : NULL, reason, reason_len);
 }
 
 // =============================================================================

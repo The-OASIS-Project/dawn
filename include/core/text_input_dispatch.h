@@ -182,6 +182,12 @@ typedef struct {
     * the session currently holds.  Interactive/messaging callers leave this
     * false (the default) and get the normal per-turn rebuild. */
    bool skip_prompt_rebuild;
+
+   /* Out: when the turn's LLM can't run, the sentence telling the user why
+    * (session_turn_selection_problem()); "" otherwise.  NULL when the caller
+    * doesn't tell the user. */
+   char *refusal;
+   size_t refusal_len;
 } text_input_dispatch_opts_t;
 
 /**
@@ -201,7 +207,10 @@ typedef struct {
  * Returns the LLM response text on success; caller must free().  Returns
  * NULL on LLM error or session cancellation (the caller is expected to
  * have already incremented the session's request_generation if it cares
- * about cancellation semantics).
+ * about cancellation semantics).  When the turn's LLM can't run (no provider
+ * selected, or the selected one has no API key), nothing is added or saved and
+ * llm_last_error() is LLM_ERR_NOT_SELECTED: the caller tells the user the
+ * sentence it gets back in opts->refusal.
  *
  * Does NOT:
  *   - Increment / read session->request_generation (caller's lifecycle).

@@ -164,7 +164,7 @@ Layer 1 (Core infrastructure) — deps: Layer 0
 │                               device, prepare, act) and the frame its result goes in when it is someone
 │                               else's text, checked at registration and at build time
 ├── src/core/ primitives        Command routing/execution, worker pool, wake word, time parsing, utterance
-│                               dedup, reply codes, text-input dispatch, prompt sections, input queue
+│                               dedup, reply codes, prompt sections, input queue
 ├── src/core/tz.c               Clock times in a named zone (libical), never the process's TZ.  tz_lookup only
 │                               returns zones libical lists (it never makes libical load a name, which appends to
 │                               a list other threads read); only tz_daemon_init, at startup, loads other names
@@ -183,8 +183,9 @@ Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 │                               include it from Layer 2 up
 ├── src/llm/                    Providers, streaming, tool loop, turn blocks, compaction core, tool-result views;
 │                               llm_third_party.c frames an email's or a page's text as someone else's
-├── src/core/ services          Session unit (below), focus framework (src/core/focus/), prompt prefix
-│                               (prefix_*), embeddings, crypto store, scheduler, tool-result store, OTA, images
+├── src/core/ services          Session unit (below), text-input dispatch, focus framework (src/core/focus/),
+│                               prompt prefix (prefix_*), embeddings, crypto store, scheduler, tool-result
+│                               store, OTA, images
 ├── src/core/tool_call_policy.c Who may make a tool call: the caller's kind of turn (user, unverified sender,
 │                               background job, unattended, a user turn carrying an attached email) against the
 │                               action's kind; decided once per call

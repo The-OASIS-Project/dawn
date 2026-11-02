@@ -44,6 +44,7 @@
 #include "core/text_input_dispatch.h"
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
@@ -176,6 +177,10 @@ static void job_worker_run(job_work_t *work) {
       .user_msg_added_ctx = NULL,
       .channel_hint = NULL,
    };
+   /* An LLM that can't run: the job fails with the reason, which its notice shows. */
+   char refusal[LLM_SELECTION_REASON_MAX];
+   opts.refusal = refusal;
+   opts.refusal_len = sizeof(refusal);
    /* First run: frame the goal with the deliverable contract so the answer comes
     * back as the final message, not saved off as a document.  A resume already
     * carries this — its restored history holds the framed first turn, and it gets
@@ -369,9 +374,10 @@ static void job_worker_run(job_work_t *work) {
       job_manager_set_terminal(work->conv_id, work->user_id, "failed", JOB_ERR_TIMED_OUT, now, 0);
       OLOG_WARNING("job_worker: job conv %lld timed out (reaped)", (long long)work->conv_id);
    } else {
-      job_manager_set_terminal(work->conv_id, work->user_id, "failed", "no response from model",
-                               now, 0);
-      OLOG_WARNING("job_worker: job conv %lld failed (empty response)", (long long)work->conv_id);
+      job_manager_set_terminal(work->conv_id, work->user_id, "failed",
+                               refusal[0] ? refusal : "no response from model", now, 0);
+      OLOG_WARNING("job_worker: job conv %lld failed (%s)", (long long)work->conv_id,
+                   refusal[0] ? refusal : "empty response");
    }
    free(response);
 

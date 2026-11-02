@@ -33,6 +33,9 @@
 extern "C" {
 #endif
 
+/** Room for llm_selection_problem()'s sentence (the longest is under 100 bytes). */
+#define LLM_SELECTION_REASON_MAX 128
+
 /** The LLM a chat runs on. */
 typedef struct {
    llm_type_t type;           /**< LLM_LOCAL or LLM_CLOUD */

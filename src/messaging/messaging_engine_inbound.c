@@ -51,6 +51,7 @@
 #include "core/tool_call_challenge.h"
 #include "core/wake_word.h"
 #include "dawn_error.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "messaging/messaging_engine.h"
@@ -610,7 +611,10 @@ static void process_inbound(inbound_item_t *item) {
     * code, and only reports it: no tools in that turn. */
    char *envelope = NULL;
    if (item->kind == INBOUND_CODE) {
-      envelope = engine_run_reply_code(item, session, &taken);
+      /* The approved action runs either way; with no LLM to report it, the
+       * user is told its outcome directly. */
+      const bool llm_can_run = session_turn_selection_problem(session, NULL, 0) == 0;
+      envelope = engine_run_reply_code(item, session, &taken, !llm_can_run);
       if (!envelope) {
          session_set_tool_persist_hook(session, NULL, NULL);
          if (ka_started) {
@@ -627,7 +631,14 @@ static void process_inbound(inbound_item_t *item) {
    if (envelope) {
       session_set_tools_suppressed(session, true);
    }
+   /* An LLM that can't run: nothing is added or saved, and the reason is the reply. */
+   char refusal[LLM_SELECTION_REASON_MAX];
+   opts.refusal = refusal;
+   opts.refusal_len = sizeof(refusal);
    char *response = core_text_input_dispatch(session, envelope ? envelope : item->body, &opts);
+   if (refusal[0]) {
+      OLOG_WARNING("messaging: %s turn refused: %s", item->provider, refusal);
+   }
    if (envelope) {
       session_set_tools_suppressed(session, false);
    }
@@ -653,6 +664,13 @@ static void process_inbound(inbound_item_t *item) {
       session_turn_end(session);
       session_release(session);
       free(response);
+      const messaging_driver_t *rdrv = refusal[0] ? find_driver(item->provider) : NULL;
+      if (rdrv && rdrv->send_text) {
+         char address_json[MESSAGING_ADDRESS_JSON_BUF_SIZE];
+         build_address_json_for(item->provider, item->provider_address, address_json,
+                                sizeof(address_json));
+         messaging_deliver(rdrv, item->ref.user_id, item->provider_address, address_json, refusal);
+      }
       engine_send_reply_code(item);
       return;
    }

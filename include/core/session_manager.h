@@ -1853,6 +1853,23 @@ int session_set_turn_llm_config(session_t *session, const session_llm_config_t *
  */
 void session_get_llm_config(session_t *session, session_llm_config_t *config);
 
+/**
+ * @brief Whether the LLM this turn would run on can run, and if not, why.
+ *
+ * Checks the config session_get_llm_config() returns on this thread (the running
+ * turn's, once its conversation is bound) with llm_selection_problem().  A surface
+ * that doesn't go through core_text_input_dispatch() calls it before saving the
+ * user's message; the dispatch's callers get the sentence in opts->refusal.
+ *
+ * @param session    Session to check
+ * @param[out] reason The sentence for the user (may be NULL)
+ * @param reason_len Size of @p reason
+ * @return 0 when it can run, 1 when it can't
+ *
+ * @locks session->llm_config_mutex, then g_config_rwlock (read), not nested
+ */
+int session_turn_selection_problem(session_t *session, char *reason, size_t reason_len);
+
 
 // =============================================================================
 // Per-Session Metrics

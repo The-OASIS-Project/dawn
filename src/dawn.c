@@ -95,6 +95,7 @@
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_rate_limit.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_tool_loop.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
@@ -1322,9 +1323,10 @@ void *llm_worker_thread(void *arg) {
    session_llm_config_t session_config;
    session_get_llm_config(local_session, &session_config);
 
-   // Resolve to final config (merges session override with global)
+   /* Resolve to final config.  The main loop checked it before starting this
+    * worker; one that can't run now (its key removed meanwhile) is not sent. */
    llm_resolved_config_t resolved_config;
-   llm_resolve_config(&session_config, &resolved_config);
+   const bool can_run = llm_resolve_config(&session_config, &resolved_config) == 0;
 
    // Set command context so tool callbacks (e.g., switch_llm) use local session's config
    // Uses scope guard to ensure cleanup even on early returns
@@ -1334,7 +1336,8 @@ void *llm_worker_thread(void *arg) {
    // The turn's own history, referenced for the call (other threads' writes to
    // it wait for the turn to end).
    // Vision is handled by native tool calling - viewing tool captures image internally
-   struct json_object *history = interrupted ? NULL : session_get_turn_history(local_session);
+   struct json_object *history = interrupted || !can_run ? NULL
+                                                         : session_get_turn_history(local_session);
    char *response = history
                         ? llm_chat_completion_streaming_tts_with_config(history, request_text,
                                                                         dawn_tts_sentence_callback,
@@ -4056,6 +4059,26 @@ mqtt_disabled:
                      /* This turn only (this thread holds the turn begun with
                       * the user message): later turns keep their setting. */
                      session_set_turn_llm_config(local_session, &trigger_config);
+                  }
+
+                  /* An LLM that can't run: the question comes back out and the
+                   * reason is spoken (direct commands above still ran). */
+                  char refusal[LLM_SELECTION_REASON_MAX];
+                  if (session_turn_selection_problem(local_session, refusal, sizeof(refusal)) !=
+                      0) {
+                     OLOG_WARNING("Voice command refused: %s", refusal);
+                     (void)session_rollback_turn(local_session);
+                     end_local_turn();
+                     free(command_text);
+                     command_text = NULL;
+                     text_to_speech(refusal);
+
+                     silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
+                     recState = DAWN_STATE_SILENCE;
+                     reset_for_new_utterance(vad_ctx, asr_ctx, chunk_mgr, &silence_duration,
+                                             &speech_duration, &recording_duration,
+                                             &preroll_write_pos, &preroll_valid_bytes);
+                     break;  // Exit DAWN_STATE_PROCESS_COMMAND case
                   }
 
                   /* The turn is carried by the worker thread (its token): it

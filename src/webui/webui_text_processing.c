@@ -51,6 +51,7 @@
 #include "image_store.h"
 #include "llm/llm_context.h"
 #include "llm/llm_context_text.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "utils/string_utils.h"
@@ -580,6 +581,9 @@ static void *text_worker_thread(void *arg) {
       .email_message_id = work->email.present ? work->email.message_id : NULL,
       .email_ref = work->email.present ? work->email.stored : NULL,
    };
+   char refusal[LLM_SELECTION_REASON_MAX];
+   dispatch_opts.refusal = refusal;
+   dispatch_opts.refusal_len = sizeof(refusal);
 
    /* Clear the per-turn error flag before the call; the provider layer sets it via
     * webui_send_error_ex if it emits a specific error, which we then honor below to
@@ -595,9 +599,23 @@ static void *text_worker_thread(void *arg) {
    webui_turn_persist_scope_t persist_scope;
    webui_turn_persist_arm(session, conn ? conn->auth_user_id : 0, &persist_scope);
    char *response = core_text_input_dispatch(session, text, &dispatch_opts);
+   const bool refused = !response && refusal[0] != '\0';
    webui_turn_persist_disarm(session, &persist_scope);
    json_object_put(question); /* the history holds its own reference */
    question = NULL;
+
+   if (refused) {
+      /* Nothing was added or saved: tell the user why, spoken when this tab speaks. */
+      OLOG_WARNING("WebUI: session %u: turn refused: %s", session->session_id, refusal);
+      webui_send_turn_refusal(session, refusal,
+                              fanout_tts ? webui_sentence_audio_fanout_callback : NULL, use_opus);
+      webui_send_state(session, "idle");
+      text_worker_end(session);
+      free(text);
+      free(work->persist_content);
+      free(work);
+      return NULL;
+   }
 
    /* Promote the persisted image turn's images to permanent retention — AFTER
     * dispatch persisted the row, so images are pinned only for turns that reached
@@ -831,12 +849,16 @@ int webui_process_text_input_with_images(session_t *session,
     * is replaced by the queue; Stop still works via cancel_requested. */
    unsigned int new_gen = atomic_load(&session->request_generation);
 
+   /* A turn whose LLM can't run is refused when it runs (it says why); no
+    * conversation is created for it here. */
+   const bool llm_can_run = session_turn_selection_problem(session, NULL, 0) == 0;
+
    /* Voice turns are server-dispatched, so the browser never ran its conversation
     * pre-create.  Bind (lazily creating) a conversation here — titled from the
     * transcript — or this turn's user row + reply evaporate on the next reload.
     * No-op when a conversation is already selected; leaves the typed-text path
     * (client pre-creates) untouched. */
-   if (input_was_voice && webui_voice_transcript_substantive(text)) {
+   if (llm_can_run && input_was_voice && webui_voice_transcript_substantive(text)) {
       ws_connection_t *vconn = session ? (ws_connection_t *)session->client_data : NULL;
       if (vconn && vconn->active_conversation_id <= 0) {
          webui_ensure_active_conversation(vconn, text);
@@ -847,7 +869,7 @@ int webui_process_text_input_with_images(session_t *session,
     * its conversation exists before it runs (created now when none is open,
     * as for a voice turn). */
    const webui_email_ref_t *email = webui_turn_email_get();
-   if (email && email->present) {
+   if (llm_can_run && email && email->present) {
       ws_connection_t *econn = (ws_connection_t *)session->client_data;
       if (!econn || (econn->active_conversation_id <= 0 &&
                      webui_ensure_active_conversation(econn, text) <= 0)) {

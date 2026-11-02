@@ -33,6 +33,8 @@
  * webui_internal.h.
  */
 
+#include "webui/webui_send.h"
+
 #include <json-c/json.h>
 #include <libwebsockets.h>
 #include <pthread.h>
@@ -1182,5 +1184,16 @@ void process_response_queue(void) {
    process_one_response();
 }
 
+
+void webui_send_turn_refusal(session_t *session,
+                             const char *reason,
+                             session_sentence_callback speak,
+                             bool use_opus) {
+   webui_send_error(session, "LLM_NOT_SELECTED", reason);
+   if (speak) {
+      speak(reason, session);
+      webui_send_audio_end(session, use_opus);
+   }
+}
 
 /* HTTP auth handlers and protocol callback moved to webui_http.c */

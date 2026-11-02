@@ -59,6 +59,7 @@
 #include "dawn_error.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
 #include "webui/webui_server.h" /* webui_tool_iteration_cb — bubble-seal hook (jobs run only in WebUI builds) */
@@ -258,6 +259,26 @@ static void reinvoke_notify_fallback(int user_id, const char *title, int64_t job
     * broadcast would fire the row into an empty room.  The funnel queues it
     * durably when nobody is listening. */
    job_notify_user(user_id, text, job_id, job_manager_running_count());
+}
+
+/* The re-engagement was refused: its LLM can't run (@p reason, from the
+ * dispatch; "" when it wasn't refused), and nothing was added or saved.  Retrying
+ * would be refused the same way, so the jobs are fired and the user is told once
+ * why. */
+static bool reinvoke_refused(const char *reason,
+                             int user_id,
+                             const int64_t *fired_ids,
+                             int n_fired) {
+   if (reason[0] == '\0' || n_fired <= 0) {
+      return false;
+   }
+   conv_db_job_mark_fired_many(fired_ids, n_fired);
+   char text[LLM_SELECTION_REASON_MAX + 64];
+   snprintf(text, sizeof(text), "A background job has ended, but I can't respond to it. %s",
+            reason);
+   job_notify_user(user_id, text, fired_ids[0], job_manager_running_count());
+   OLOG_WARNING("job_reinvoke: re-engagement refused (%d job(s) fired): %s", n_fired, reason);
+   return true;
 }
 
 /* Build the coalesced user-role automated-event envelope for a group of jobs.
@@ -511,6 +532,9 @@ static void *reinvoke_turn_entry(void *arg) {
        * entries pile below it.  A live viewer is a WEBUI session, so this renders. */
       session_set_tool_iteration_hook(live, webui_tool_iteration_cb, NULL);
       text_input_dispatch_opts_t opts = reinvoke_dispatch_opts(parent, user_id);
+      char refusal[LLM_SELECTION_REASON_MAX];
+      opts.refusal = refusal;
+      opts.refusal_len = sizeof(refusal);
       /* LIVE path only: if this viewer has TTS on, speak the re-engagement like a
        * normal turn (state:speaking + streamed audio via the wired callback,
        * closed by _finish → audio_end + state:idle).  No-op weak default off the
@@ -539,11 +563,13 @@ static void *reinvoke_turn_entry(void *arg) {
        * jobs fired ONLY on a durable insert (invariant C3): a persist failure leaves
        * them for the monitor to retry rather than silently dropping the reply. */
       char *reply = response;
-      if (reply == NULL) {
+      if (reply == NULL && refusal[0] == '\0') { /* a refused turn completed nothing */
          reply = live->cancelled_final_response;
          live->cancelled_final_response = NULL;
       }
-      if (reply == NULL || reply[0] == '\0') {
+      if (reply == NULL && reinvoke_refused(refusal, user_id, fired_ids, n_fired)) {
+         /* told the user; nothing to retract */
+      } else if (reply == NULL || reply[0] == '\0') {
          OLOG_INFO("job_reinvoke: live re-engage of parent %lld empty/cancelled; will retry",
                    (long long)parent);
          retract_attempt(live, parent, user_id);
@@ -622,6 +648,9 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
     * job_worker. */
    session_set_tool_iteration_hook(s, webui_tool_iteration_cb, NULL);
    text_input_dispatch_opts_t opts = reinvoke_dispatch_opts(w->parent_conv, w->user_id);
+   char refusal[LLM_SELECTION_REASON_MAX];
+   opts.refusal = refusal;
+   opts.refusal_len = sizeof(refusal);
    /* The turn belongs to the parent conversation (see session_turn_begin),
     * whose standing directions stay: this pool session is none of its
     * surfaces. */
@@ -665,6 +694,8 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
                     (long long)w->parent_conv, n_fired);
          retract_attempt(s, w->parent_conv, w->user_id);
       }
+   } else if (response == NULL && reinvoke_refused(refusal, w->user_id, fired_ids, n_fired)) {
+      /* told the user; nothing to retract */
    } else {
       OLOG_WARNING("job_reinvoke: detached re-engage of parent %lld empty/cancelled; retrying",
                    (long long)w->parent_conv);
