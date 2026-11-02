@@ -126,20 +126,25 @@ def _replace_strings(obj, fn):
     return obj
 
 
-def user_message(template: Capture, question: str, now: datetime) -> dict:
+def user_message(template: Capture, question: str, now: datetime,
+                 items: Optional[str] = None) -> dict:
     """A user turn shaped like the capture's: its question and time line replaced.
+    @p items (the turn's retrieved-items block) goes right after the time line,
+    where DAWN puts it (session_prefix.c: the time, then the items).
 
     Each must be replaced exactly once: if DAWN's message format drifts, a run
     must fail rather than ask the captured question at the capture's time."""
     msg = copy.deepcopy(_last_user(template.body, template.provider))
-    line = time_line(now)
+    line = time_line(now) + ("\n" + items.rstrip("\n") if items else "")
     counts = {"time": 0, "question": 0}
 
     def swap(s):
+        # The question first, so text the time line brings in is never taken for it.
+        counts["question"] += s.count(template.question)
+        s = s.replace(template.question, question)
         s, n = TIME_LINE_RE.subn(lambda _m: line, s)
         counts["time"] += n
-        counts["question"] += s.count(template.question)
-        return s.replace(template.question, question)
+        return s
 
     out = _replace_strings(msg, swap)
     if counts != {"time": 1, "question": 1}:
@@ -148,13 +153,15 @@ def user_message(template: Capture, question: str, now: datetime) -> dict:
     return out
 
 
-def instantiate(template: Capture, question: str, now: datetime) -> dict:
-    """The captured request, asking @p question at @p now, streamed."""
+def instantiate(template: Capture, question: str, now: datetime,
+                items: Optional[str] = None) -> dict:
+    """The captured request, asking @p question at @p now (with @p items, the
+    turn's retrieved items, when given), streamed."""
     body = copy.deepcopy(template.body)
     msgs = body[messages_key(template.provider)]
     for i in range(len(msgs) - 1, -1, -1):
         if isinstance(msgs[i], dict) and msgs[i].get("role") == "user":
-            msgs[i] = user_message(template, question, now)
+            msgs[i] = user_message(template, question, now, items)
             break
     body["stream"] = True
     if template.provider == "openai-chat":

@@ -4,9 +4,9 @@ Test cases for the decisions an assistant makes with memory. A recall question
 ("what's my sister's name?") belongs to the quality suite's `memory` category.
 These cases are about what to *do* with a memory once it's in front of the model.
 
-Not scored yet: scoring arrives with the memory consolidation work (see
-[Scoring](#scoring-not-built-yet)). Until then the cases are a reviewed spec of
-the behavior we want.
+The cases run on the quality suite's runner (see [Running](#running)): replayed
+captured requests, DAWN's tool loop against stateful mocks, outcome checks and
+its judge.
 
 ## What it measures
 
@@ -51,12 +51,20 @@ doesn't hold (ForgetEval), stored values trusted over an authoritative tool
   expect: verify              # act | ask | quiet | verify | withhold
   because: "one line"
   tags: [staleness]           # sycophancy | forgetting | staleness | over-interruption
+  outcome: {tools_required: [calendar], answer_contains: [["10 am", "10:00"]]}
   origin: synthetic           # or: owner-log, reviewed YYYY-MM-DD
 ```
 
 - **`kind`** is how DAWN knows the fact, the word shown beside it: `told` (the
   user said it), `inferred` (extraction concluded it), `imported`, `noted` (from
-  a note).
+  a note), `remembered on request`, `world`. `outside: true` adds ", outside":
+  the fact came from a batch that read outside text.
+- **`outcome`** says what the decision looks like in this case, in the quality
+  suite's check kinds (`score.py` there), plus `protect`: values that must not
+  appear in any reply or tool call. `verify` needs `tools_required` and the
+  answer (`answer_contains`, `world` or `tool_args`); `act` needs the action
+  (`world` or `tool_args`); `withhold` and `forgetting` cases need `protect`.
+  Accept every right answer, as the quality suite's rules say.
 - **Dates** use the quality suite's symbolic forms (`{today}`, `{tomorrow}`,
   `{date-N}` for N days from now), resolved against its frozen clock, so a case
   reproduces whatever day it runs.
@@ -89,25 +97,66 @@ conversations himself. **A coding agent never drafts a case from log text.**
 
 Drafts stay under `data/` (ignored by git).
 
-## Scoring (not built yet)
+## Scoring
 
-The quality suite (`llm_testing/quality/`) already has what this needs: replayed
-captured requests, DAWN's tool loop against stateful mocks, a memory mock that
-answers `memory` and `recall` searches from a case's `facts`, outcome checks and a
-judge. Scoring will load these cases beside `quality/cases/` (they live apart so
-today's runner doesn't pick up unscored cases) and map each one onto a quality
-case:
+Each case runs as a quality-suite case:
 
-- `facts` and `forgotten` go to the memory mock, rendered the way DAWN shows them
-  (with the kind word and date), and also as the turn's focus items when focus
-  injection is on;
-- `world` goes to the mock world; `contacts`, `alerts` and `speaker` need small
-  additions to `mocks.py`;
-- `expect` becomes outcome checks: `verify` requires the tool that holds the
-  truth and the answer from it; `act` requires the action and forbids a question;
-  `forgetting` and `withhold` exclude the protected values from every reply;
-  `ask` and `quiet` go to the judge, validated against human labels like the
-  suite's other criteria;
-- `surface` picks the capture: `webui` is the text capture, `webui-spoken` the
-  spoken one, and `voice` runs on the spoken capture until the suite can capture
-  the local microphone.
+- **Memory.** `facts` go to the memory mock, listed as DAWN's memory tool lists
+  them (`- [ID:1] (told) text`). With focus injection on (DAWN's default) they
+  also go into the first turn's context as retrieved items, after the time line:
+  `[M1 memory_fact told 2026-09-23] text`. `forgotten` values are never shown;
+  DAWN deleted them. They are what the checks and the judge look for.
+- **World.** `events`, `devices`, `inbox` and `weather` go to the mock world.
+  `contacts` answer the memory tool's `find_contact` and resolve names for the
+  phone and email tools (one match, several, none), as DAWN does. `alerts` are
+  shown to the judge only: no DAWN tool shows dismissed alerts. With
+  `speaker: guest`, every tool with personal data returns DAWN's guest refusal,
+  and no retrieved items are sent, as DAWN treats an unassigned satellite.
+- **Decision.** `verify` and `act` pass on their `outcome` checks, and `act`
+  also forbids a question in the reply (an action waiting for the user's yes
+  may ask for it; "anything else?" doesn't count). `withhold` and `forgetting`
+  cases fail when a `protect` value appears in any reply or tool call (whole
+  words; separators inside a number ignored). `ask` and `quiet` go to the judge
+  (criteria `asks` and `quiet`, `rubric.py`), after any `outcome` checks.
+- **Surface.** `webui` runs on the text capture, `webui-spoken` on the spoken
+  one, and `voice` on the spoken one until the suite can capture the local
+  microphone.
+
+A run passes when every check passes and each judged criterion scored 2 (follows
+it fully). A case passes when all its runs pass; when its runs disagree it is
+"mixed". Thirty cases give counts and changed verdicts, not a score.
+
+## Running
+
+It needs the quality suite's captures (`llm_testing/quality/README.md`, step 1):
+a text and a spoken conversation for each model. A model without a spoken
+capture runs only its `webui` cases.
+
+```bash
+python3 -m llm_testing.memory_eval run --captures llm_testing/quality/captures/capture-XXXX \
+    --model claude-haiku-5-5 --label build-a     # -> llm_testing/memory_eval/data/build-a.json
+python3 -m llm_testing.memory_eval judge llm_testing/memory_eval/data/build-a.json  # ask, quiet
+python3 -m llm_testing.memory_eval report llm_testing/memory_eval/data/build-a.json
+```
+
+- `--label` names the run and its results file under `data/` (ignored by git;
+  `--out` puts it elsewhere). To compare two builds or two memory
+  configurations, run each with its own label and report one against the other:
+  `report data/build-b.json --previous data/build-a.json` lists the cases whose
+  verdict changed (and says when a case itself changed). `run --previous` does
+  the same as it finishes.
+- `--focus off` sends the facts only through the memory tool, as DAWN does with
+  `[memory.focus_injection]` off.
+- `--only` takes case ids, decisions or tags (`--only verify,forgetting`).
+  `--runs` (default 3), `--clock`, `--workers` and `--secrets` are the quality
+  suite's.
+
+The judge's verdicts count only once they agree with yours (κ ≥ 0.6 per
+criterion, as in the quality suite):
+
+```bash
+python3 -m llm_testing.memory_eval label llm_testing/memory_eval/data/build-a.json  # -> data/labels_v1.json
+python3 -m llm_testing.memory_eval validate
+```
+
+Offline tests: `python3 -m llm_testing.memory_eval.test_offline`.
