@@ -84,6 +84,7 @@ static const char *const s_kind_names[LLM_CALL_KIND_COUNT] = {
    [LLM_CALL_OBSERVE] = "observe",
    [LLM_CALL_SUMMARIZER] = "summarizer",
    [LLM_CALL_SYNTHESIS] = "synthesis",
+   [LLM_CALL_CONSOLIDATION] = "consolidation",
    [LLM_CALL_OTHER] = "other",
 };
 

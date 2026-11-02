@@ -34,14 +34,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <time.h>
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/automated_event.h"
 #include "core/buf_printf.h"
-#include "core/iso8601.h"
 #include "core/memory_filter.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
@@ -52,8 +50,8 @@
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
+#include "memory/memory_candidates.h"
 #include "memory/memory_db.h"
-#include "memory/memory_db_aliases.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_embeddings_internal.h"
@@ -62,7 +60,6 @@
 #include "memory/memory_forgotten.h"
 #include "memory/memory_history_loader.h"
 #include "memory/memory_note_guard.h"
-#include "memory/memory_predicate_dedup.h"
 #include "memory/memory_types.h"
 #include "prompts.h"
 #include "utils/string_utils.h"
@@ -184,190 +181,12 @@ static char *build_existing_profile(int user_id) {
 }
 
 /* =============================================================================
- * Helper: Extract JSON from LLM response
- *
- * LLMs often wrap JSON in markdown code blocks or include preamble text.
- * This function extracts the JSON object from such responses.
- * ============================================================================= */
-
-struct json_object *memory_extraction_parse_json(const char *response) {
-   if (!response || response[0] == '\0') {
-      return NULL;
-   }
-
-   struct json_object *root = NULL;
-
-   /* First try direct parse (pure JSON) */
-   root = json_tokener_parse(response);
-   if (root) {
-      return root;
-   }
-
-   /* Look for JSON in markdown code block: ```json ... ``` or ``` ... ``` */
-   const char *json_block_start = strstr(response, "```json");
-   if (json_block_start) {
-      json_block_start += 7; /* Skip "```json" */
-   } else {
-      json_block_start = strstr(response, "```");
-      if (json_block_start) {
-         json_block_start += 3; /* Skip "```" */
-      }
-   }
-
-   if (json_block_start) {
-      /* Skip any newline after opening ``` */
-      while (*json_block_start == '\n' || *json_block_start == '\r') {
-         json_block_start++;
-      }
-
-      const char *json_block_end = strstr(json_block_start, "```");
-      if (json_block_end) {
-         size_t len = json_block_end - json_block_start;
-         char *json_str = malloc(len + 1);
-         if (json_str) {
-            memcpy(json_str, json_block_start, len);
-            json_str[len] = '\0';
-            root = json_tokener_parse(json_str);
-            free(json_str);
-            if (root) {
-               return root;
-            }
-         }
-      }
-   }
-
-   /* Last resort: find first '{' or '[' and try to parse from there */
-   const char *brace = strchr(response, '{');
-   const char *bracket = strchr(response, '[');
-   const char *start = NULL;
-   if (brace && bracket)
-      start = (brace < bracket) ? brace : bracket;
-   else if (brace)
-      start = brace;
-   else
-      start = bracket;
-
-   if (start) {
-      root = json_tokener_parse(start);
-      if (root) {
-         return root;
-      }
-   }
-
-   return NULL;
-}
-
-/* =============================================================================
  * WebUI broadcast (provided by webui_server.c when ENABLE_WEBUI)
  * ============================================================================= */
 
 #ifdef ENABLE_WEBUI
 #include "webui/webui_server.h"
 #endif
-
-/* Phase 0 removed the fact_map array, FACT_MAP_MAX cap, and
- * `find_fact_for_relation` helper: the new prompt schema (v47) pairs
- * relations inside their parent fact's `relations[]` array, so the parser
- * knows `fact_id` directly at relation-insert time.  Post-hoc text-
- * matching is no longer needed and the 128-entry cap no longer bounds
- * relation linkage coverage. */
-
-/* An extracted fact seen again (@p existing as stored, NULL when unreadable):
- * raise its confidence and record this conversation as teaching it too.  Said
- * again word for word as stated (@p now_told), a fact not yet told becomes told. */
-static void reinforce_fact(int user_id,
-                           int64_t fact_id,
-                           const memory_fact_t *existing,
-                           bool now_told,
-                           const memory_provenance_t *prov) {
-   /* Unreadable: as if it were at the default 0.7. */
-   const float new_conf = existing ? existing->confidence + 0.1f : 0.8f;
-   memory_db_fact_update_confidence(fact_id, user_id, new_conf > 1.0f ? 1.0f : new_conf);
-   /* Outside text can't make a fact the user's own word. */
-   if (now_told && existing && strcmp(existing->source, "explicit") != 0 &&
-       !(prov && outside_is_tainted(prov->outside)))
-      memory_db_fact_mark_explicit(fact_id, user_id);
-   if (prov && prov->conv_id > 0) {
-      memory_db_fact_provenance_extend(fact_id, user_id, prov->conv_id, prov->msg_id_start,
-                                       prov->msg_id_end);
-   }
-}
-
-/* =============================================================================
- * Helper: Phase 2 auto-merge gate sweep
- *
- * Iterates each was_created entity captured during the entity loop and runs
- * the resolver cascade against the current graph state.  Runs AFTER the
- * relations loop in process_extraction_response so the cascade's
- * exclusive_relation_overlap signal sees this turn's freshly-stored
- * relations.  Routes by composite band (auto / review / silent reject)
- * and broadcasts ONCE at the end if any proposal was queued (rather than
- * per-entity, which would emit redundant DB queries + lock acquisitions
- * + UI dot-restart flicker).
- *
- * No-op when entity_merge_enabled = false in config.
- * ============================================================================= */
-
-static void apply_phase2_merge_gate(int user_id, const int64_t *fresh_ids, int fresh_count) {
-   if (!g_config.memory.entity_merge_enabled || fresh_count <= 0)
-      return;
-
-   bool any_proposed = false;
-   for (int i = 0; i < fresh_count; i++) {
-      int64_t fid = fresh_ids[i];
-      memory_alias_evaluate_t eval = { 0 };
-      int merge_rc = memory_db_entity_consider_auto_merge(user_id, fid, &eval);
-      if (merge_rc == MEMORY_DB_SUCCESS) {
-         if (eval.outcome == MEMORY_ALIAS_OUTCOME_AUTO_MERGED) {
-            /* Print eval.source → eval.target so the log reflects the
-             * actual alias direction.  The longer-canonical swap in
-             * consider_auto_merge may have flipped fid and winner; in
-             * the non-swap case eval.source_entity_id == fid. */
-            OLOG_INFO("memory_extraction: alias auto-merged %ld → %ld (composite=%.2f)",
-                      (long)eval.source_entity_id, (long)eval.target_entity_id,
-                      (double)eval.evidence.composite_score);
-         } else if (eval.outcome == MEMORY_ALIAS_OUTCOME_PROPOSED) {
-            /* Print eval.source → eval.target so the log reflects the
-             * stored proposal direction.  Like AUTO_MERGED, the longer-
-             * canonical preference may have flipped fid and winner at
-             * propose time. */
-            OLOG_INFO("memory_extraction: alias proposed %ld → %ld (composite=%.2f)",
-                      (long)eval.source_entity_id, (long)eval.target_entity_id,
-                      (double)eval.evidence.composite_score);
-            any_proposed = true;
-         } else if (eval.outcome == MEMORY_ALIAS_OUTCOME_REJECTED && eval.target_entity_id > 0) {
-            /* Cascade found a candidate but composite was below the
-             * runtime review_threshold.  Useful operator signal:
-             * distinguishes "no candidate at all" (NO_CANDIDATES,
-             * silent) from "candidate considered, rejected".  Makes the
-             * Stage 2 substring rescue path observable end-to-end. */
-            OLOG_INFO("memory_extraction: alias considered %ld → %ld but below "
-                      "threshold (composite=%.2f)",
-                      (long)fid, (long)eval.target_entity_id,
-                      (double)eval.evidence.composite_score);
-         }
-         /* NO_CANDIDATES is silent — the common case where the cascade
-          * finds nothing comparable for the fresh entity. */
-      } else if (merge_rc != MEMORY_DB_NOT_FOUND) {
-         /* NOT_FOUND can happen if the entity was deleted between upsert
-          * and resolve; treat as a non-error skip.  Other failures are
-          * unexpected — log so operators can spot a resolver-side
-          * regression. */
-         OLOG_WARNING("memory_extraction: consider_auto_merge failed for entity %ld", (long)fid);
-      }
-   }
-
-   /* Single coalesced broadcast at the end of the sweep.  Without this
-    * coalesce, N fresh entities producing proposals would fire N back-
-    * to-back broadcasts — each with its own COUNT(*) query + auth_db
-    * lock acquisition + conn registry lock + per-connection strdup —
-    * and the WebUI dot animation would restart N times. */
-   if (any_proposed) {
-#ifdef ENABLE_WEBUI
-      webui_broadcast_memory_proposals_changed(user_id);
-#endif
-   }
-}
 
 /* =============================================================================
  * Helper: Parse extraction response
@@ -386,38 +205,6 @@ static void process_extraction_response(int user_id,
       return;
    }
 
-   /* Pre-warm the per-user fact embedding cache once at extraction entry so
-    * the per-fact paraphrase-dedup gate hits warm cache on its first call.
-    * Cold-load latency (~5-15ms at the dev's ~1200-fact scale) is paid here
-    * on the async sleep-consolidation worker rather than mid-loop where it
-    * would compete with the per-fact embed step.  No-op for users with
-    * already-warm cache; failure is silent — the gate falls back to "no
-    * match" rather than blocking extraction. */
-   if (g_config.memory.paraphrase_dedup_enabled && memory_embeddings_available()) {
-      memory_embeddings_warm_cache(user_id);
-   }
-
-   /* Look up the source conversation's created_at ONCE so every fact /
-    * summary inserted below inherits the conv's actual creation time
-    * rather than `now`.  Without this, a full `dawn-admin memory
-    * reextract` collapses every record's created_at into the reextract
-    * window, breaking recency-ordered LIMITs (semantic scan, keyword
-    * search_since) and weight_recency tiebreaks downstream.  0 = caller
-    * didn't supply a conv (e.g. legacy session_id-only path) — the
-    * downstream _at variants treat 0 as "use NOW()" and behave like the
-    * old API.  NOT_FOUND is silent (conv deleted mid-extraction, or
-    * legacy row pre-dating the column); FAILURE surfaces because it
-    * usually signals a real DB issue worth investigating. */
-   int64_t conv_created_at = 0;
-   if (conversation_id > 0) {
-      int lookup_rc = conv_db_get_created_at(conversation_id, &conv_created_at);
-      if (lookup_rc != AUTH_DB_SUCCESS && lookup_rc != AUTH_DB_NOT_FOUND) {
-         OLOG_WARNING("memory_extraction: conv_db_get_created_at failed for conv %lld (rc=%d) — "
-                      "facts/summaries will use NOW() instead of conv time",
-                      (long long)conversation_id, lookup_rc);
-      }
-   }
-
    /* Extract JSON from response (handles markdown blocks, preamble text, etc.) */
    struct json_object *root = memory_extraction_parse_json(response_text);
    if (!root) {
@@ -426,560 +213,35 @@ static void process_extraction_response(int user_id,
       return;
    }
 
-   /* Phase 0: entities processed FIRST (moved from below the facts loop) so
-    * entity_map is populated when facts try to resolve their required
-    * `subject` field — the new prompt's schema requires every fact to name
-    * its subject as a real entity.  Subjects that don't appear in the
-    * entities[] array auto-upsert as "thing" entities during fact
-    * processing (see the facts loop below). */
-/* Phase 0 raised the cap from 32 → 128 because the entity_map now absorbs
- * THREE sources (entities[] array + fact-subject auto-upserts + relation-
- * subject auto-upserts) versus the old code's one source (entities[] only).
- * Bundle 2 already established 128 as the right cap for similar pressure on
- * FACT_MAP_MAX (now retired by Phase 0).  Each entry is ~268 B (canonical
- * name + int64), so 128 entries ≈ 34 KB stack — comfortable on glibc's
- * 8 MB default pthread stack.  Excess entities beyond this cap still
- * resolve correctly via per-call `memory_db_entity_upsert_at` (logged
- * WARNING) but at O(N) DB hits per fact-subject lookup instead of O(1)
- * in-memory hit — perf degradation only, not correctness. */
-#define ENTITY_MAP_MAX 128
-   struct {
-      char canonical[MEMORY_ENTITY_NAME_MAX];
-      int64_t id;
-   } entity_map[ENTITY_MAP_MAX];
-   int entity_map_count = 0;
-
-   /* Track was_created entity IDs so the Phase 2 auto-merge gate can fire
-    * AFTER all relations are stored.  Under the Phase 0 schema, relations
-    * live inside facts; the gate runs after the facts loop below, when
-    * exclusive_relation_overlap can be correctly scored against the
-    * freshly-stored relation rows. */
-   int64_t fresh_entity_ids[ENTITY_MAP_MAX];
-   int fresh_entity_count = 0;
-
-   /* Per-extraction cache for the auto-promote-user_self check.  Without
-    * it, every was_created entity does its own find_user_self_id query
-    * just to bail when the anchor is already set.  Seeding once at the
-    * top + flipping to true on first successful promotion keeps the gate
-    * cost at one lock acquisition per extraction in steady state instead
-    * of N per fresh-entity.
-    *
-    * ORDERING INVARIANT: this flag is read by BOTH the maybe_auto_promote
-    * and maybe_alias_user_to_self blocks in the entities loop below.  The
-    * promote block writes the flag (true on success); the alias block
-    * gates on it being true.  Within ONE iteration the same entity can't
-    * be both promoted and aliased (canonical_name matches real_name OR
-    * literal "user", not both — except the silly real_name="user" edge
-    * case which maybe_alias's self-link refusal handles).  Across
-    * iterations the flag flip from a promote in iteration N makes the
-    * alias path eligible for any later 'user' entity in the same JSON
-    * payload.  Don't reorder the two helper blocks without preserving
-    * this invariant. */
-   bool user_self_already_exists = false;
-   {
-      int64_t self_id_probe = 0;
-      if (memory_db_entity_get_user_self_id(user_id, &self_id_probe) == MEMORY_DB_SUCCESS &&
-          self_id_probe > 0) {
-         user_self_already_exists = true;
-      }
+   memory_candidates_t cands = { 0 };
+   memory_store_t *st = memory_store_open(user_id, conversation_id, prov, false);
+   if (!st || memory_candidates_parse(root, user_id, &cands) != SUCCESS) {
+      OLOG_WARNING("memory_extraction: out of memory reading the extraction reply");
+      memory_store_close(st);
+      memory_candidates_free(&cands);
+      json_object_put(root);
+      return;
    }
+   const int64_t conv_created_at = memory_store_created_at(st);
 
-   struct json_object *entities_arr;
-   if (json_object_object_get_ex(root, "entities", &entities_arr)) {
-      int count = json_object_array_length(entities_arr);
-      for (int i = 0; i < count; i++) {
-         struct json_object *entity = json_object_array_get_idx(entities_arr, i);
-         struct json_object *name_obj, *type_obj;
-         if (!json_object_object_get_ex(entity, "name", &name_obj) ||
-             !json_object_object_get_ex(entity, "type", &type_obj)) {
-            continue;
-         }
+   /* Entities first: each fact names its subject, resolved against them. */
+   memory_store_entities(st, &cands);
 
-         const char *ent_name = json_object_get_string(name_obj);
-         const char *ent_type = json_object_get_string(type_obj);
-         if (!ent_name || !ent_type)
-            continue;
+   for (int i = 0; i < cands.count; i++) {
+      const char *text = cands.items[i].text;
+      /* No substring filter on extracted facts — LLM paraphrase, not raw user
+       * input.  See INJECTION_FILTER.md §"Filtering at the trust boundary,
+       * not after paraphrase". */
 
-         /* Validate entity type against known allowlist */
-         static const char *valid_types[] = { "person", "pet", "place", "org", "thing", NULL };
-         bool type_valid = false;
-         for (int t = 0; valid_types[t]; t++) {
-            if (strcmp(ent_type, valid_types[t]) == 0) {
-               type_valid = true;
-               break;
-            }
-         }
-         if (!type_valid)
-            ent_type = "thing";
-
-         /* No substring filter — LLM-emitted entity name (paraphrase). */
-
-         char canonical[MEMORY_ENTITY_NAME_MAX];
-         memory_make_canonical_name(ent_name, canonical, sizeof(canonical));
-
-         bool was_created = false;
-         int64_t eid = 0;
-         /* Pass conv_created_at for both first_seen + last_seen so a
-          * reextract preserves the original conversation time on the
-          * entity row instead of stamping it into the reextract window. */
-         if (memory_db_entity_upsert_at(user_id, ent_name, ent_type, canonical, conv_created_at,
-                                        conv_created_at, &was_created, &eid) != MEMORY_DB_SUCCESS)
-            continue;
-         if (eid == 0)
-            continue;
-
-         OLOG_INFO("memory_extraction: entity: %s (%s) id=%ld %s", ent_name, ent_type, (long)eid,
-                   was_created ? "[new]" : "[updated]");
-
-         /* Embed only newly created entities */
-         if (was_created && memory_embeddings_available()) {
-            memory_embeddings_embed_and_store_entity(eid, user_id, ent_name);
-         }
-
-         /* Track was_created for the post-facts Phase 2 gate sweep. */
-         if (was_created) {
-            if (fresh_entity_count < ENTITY_MAP_MAX) {
-               fresh_entity_ids[fresh_entity_count++] = eid;
-            } else {
-               OLOG_WARNING("memory_extraction: fresh-entity gate array full (max %d), Phase 2 "
-                            "skipped for '%s'",
-                            ENTITY_MAP_MAX, ent_name);
-            }
-         }
-
-         /* Auto-promote to is_user_self=1 when canonical matches the
-          * user's real_name and no self-anchor exists yet.  Failures are
-          * non-fatal (extraction continues) but log them so real DB
-          * errors don't go unnoticed — the helper's docstring promises
-          * MEMORY_DB_SUCCESS on all benign no-ops, so any FAILURE here
-          * represents a genuine SQLite-level issue worth surfacing. */
-         if (was_created && !user_self_already_exists) {
-            bool promoted = false;
-            int prom_rc = memory_db_entity_maybe_auto_promote_user_self(user_id, eid, canonical,
-                                                                        &promoted);
-            if (prom_rc != MEMORY_DB_SUCCESS) {
-               OLOG_WARNING("memory_extraction: auto-promote-user-self DB error for entity %ld "
-                            "(rc=%d)",
-                            (long)eid, prom_rc);
-            }
-            if (promoted)
-               user_self_already_exists = true;
-         }
-
-         /* Auto-alias the abstract "user" canonical to the existing
-          * user_self anchor.  The LLM commonly emits relations like
-          * (User, married_to, X) which materialise as a generic 'user'
-          * row that has no token overlap with the anchor's canonical
-          * (e.g. "kris kersey"), so the Phase 2 cascade can't catch it.
-          * Definitionally the same entity → unconditional soft-link,
-          * no review. No-op when no anchor exists; the maybe_auto_promote
-          * block above handles that side. */
-         if (was_created && user_self_already_exists) {
-            int alias_rc = memory_db_entity_maybe_alias_user_to_self(user_id, eid, canonical, NULL);
-            if (alias_rc != MEMORY_DB_SUCCESS) {
-               OLOG_WARNING("memory_extraction: alias-user-to-self DB error for entity %ld "
-                            "(rc=%d)",
-                            (long)eid, alias_rc);
-            }
-         }
-
-         /* Add to local map */
-         if (entity_map_count < ENTITY_MAP_MAX) {
-            safe_strscpy(entity_map[entity_map_count].canonical, canonical);
-            entity_map[entity_map_count].id = eid;
-            entity_map_count++;
-         } else {
-            OLOG_WARNING("memory_extraction: entity map full (max %d), skipping '%s'",
-                         ENTITY_MAP_MAX, ent_name);
-         }
+      /* A fact the user forgot, said again: skipped with its relations.  One
+       * that only mentions it is stored without that part (and without
+       * relations: they may be the forgotten part). */
+      if (memory_forgotten_is_repeat(forgotten, text, conversation_id)) {
+         continue;
       }
-   }
-
-   /* Process facts — Phase 0 paired-output schema: each fact has a `subject`
-    * field (required, resolves to an entity FK on the fact row) and a
-    * nested `relations[]` array (processed inline with fact_id known, no
-    * post-hoc text matching). */
-
-   /* Phase 0 counters: track how often the subject-entity FK is left NULL
-    * so we can quantify the gap before tightening to NOT NULL in a follow-
-    * up migration.  See `TODO(phase-0-followup)` annotation below. */
-   int phase0_facts_total = 0;
-   int phase0_facts_null_subject = 0;
-
-   struct json_object *facts_arr;
-   if (json_object_object_get_ex(root, "facts", &facts_arr)) {
-      int count = json_object_array_length(facts_arr);
-      for (int i = 0; i < count; i++) {
-         struct json_object *fact = json_object_array_get_idx(facts_arr, i);
-         struct json_object *text_obj;
-         if (!json_object_object_get_ex(fact, "text", &text_obj))
-            continue;
-         const char *text = json_object_get_string(text_obj);
-         if (!text || !*text)
-            continue;
-
-         /* Phase 0: required `subject` field naming the entity this fact is about. */
-         const char *subject_text = NULL;
-         struct json_object *subj_obj;
-         if (json_object_object_get_ex(fact, "subject", &subj_obj)) {
-            subject_text = json_object_get_string(subj_obj);
-         }
-
-         /* Optional fields with defaults */
-         const char *source = "inferred";
-         float confidence = 0.7f;
-         struct json_object *src_obj, *conf_obj;
-         /* Only the two values extraction may claim; anything else the model
-          * writes is stored as inferred, so the word surfaces show is true. */
-         if (json_object_object_get_ex(fact, "source", &src_obj)) {
-            const char *claimed = json_object_get_string(src_obj);
-            if (claimed && strcmp(claimed, "explicit") == 0)
-               source = "explicit";
-         }
-         if (json_object_object_get_ex(fact, "confidence", &conf_obj))
-            confidence = (float)json_object_get_double(conf_obj);
-
-         /* No substring filter on extracted facts — LLM paraphrase, not
-          * raw user input.  See INJECTION_FILTER.md §"Filtering at the
-          * trust boundary, not after paraphrase". */
-
-         /* A fact the user forgot, said again: skipped with its relations.  One
-          * that only mentions it is stored without that part (and without
-          * relations). */
-         if (memory_forgotten_is_repeat(forgotten, text, conversation_id))
-            continue;
-         const char *reworded = memory_forgotten_rewritten(forgotten, text);
-         if (reworded)
-            text = reworded;
-
-         /* Paraphrase dedup + insert.  Sets `fact_id` to the row we'll
-          * attribute relations to — either the newly-created row or the
-          * matched-existing row for paraphrase merges. */
-         int64_t fact_id = 0;
-         /* Diagnostic: track which branch assigned fact_id so the
-          * defensive-check probe below can distinguish paraphrase-merge
-          * vs fresh-create as the leak source for the "vanished" race. */
-         const char *fact_id_origin = "unset";
-         float vec[MAX_EMBEDDING_DIMS];
-         int dims = 0;
-         int64_t repeat_id = 0;
-         memory_fact_t seen = { 0 };
-         bool reused = false; /* a stored fact said again (seen: as stored) */
-         if (memory_db_fact_find_exact(user_id, text, &repeat_id) == MEMORY_DB_SUCCESS) {
-            /* Stored before word for word: reinforce it, as a paraphrase hit is. */
-            const bool read = memory_db_fact_get(repeat_id, user_id, &seen) == MEMORY_DB_SUCCESS;
-            reinforce_fact(user_id, repeat_id, read ? &seen : NULL, strcmp(source, "explicit") == 0,
-                           prov);
-            OLOG_INFO("memory_extraction: repeat of fact_id=%lld: %s", (long long)repeat_id, text);
-            fact_id = repeat_id;
-            fact_id_origin = "hash_match";
-            reused = true;
-         } else if (g_config.memory.paraphrase_dedup_enabled && memory_embeddings_available() &&
-                    memory_embeddings_embed(text, vec, &dims) == SUCCESS && dims > 0) {
-            int64_t matched_id = 0;
-            float score = 0.0f;
-            memory_embeddings_nearest_fact(user_id, vec, dims,
-                                           g_config.memory.paraphrase_dedup_threshold, &matched_id,
-                                           &score);
-            /* An expired fact the prune hasn't removed yet is no match. */
-            const bool read = matched_id > 0 &&
-                              memory_db_fact_get(matched_id, user_id, &seen) == MEMORY_DB_SUCCESS;
-            if (read && memory_db_fact_expiry_hidden(seen.expires_at))
-               matched_id = 0;
-            if (matched_id > 0) {
-               /* Paraphrase hit — bump existing fact's confidence +
-                * extend provenance.  No fact_map population: relations are
-                * paired with their fact, so no text lookup. */
-               reinforce_fact(user_id, matched_id, read ? &seen : NULL, false, prov);
-               OLOG_INFO("memory_extraction: paraphrase merged into fact_id=%lld "
-                         "score=%.3f: %s",
-                         (long long)matched_id, (double)score, text);
-               fact_id = matched_id;
-               fact_id_origin = "paraphrase_match";
-               reused = true;
-            } else {
-               /* No paraphrase — create new fact + store precomputed vector. */
-               memory_db_fact_create_at(user_id, text, confidence, source, prov, conv_created_at,
-                                        &fact_id);
-               OLOG_INFO("memory_extraction: stored fact: %s", text);
-               if (fact_id > 0) {
-                  memory_embeddings_store_precomputed(user_id, fact_id, vec, dims);
-                  fact_id_origin = "paraphrase_create";
-               }
-            }
-         } else {
-            /* Dedup off, or no embedding: store it.  A failed embed is covered
-             * by the embedding backfill. */
-            memory_db_fact_create_at(user_id, text, confidence, source, prov, conv_created_at,
-                                     &fact_id);
-            OLOG_INFO("memory_extraction: stored fact: %s", text);
-            if (fact_id > 0 && memory_embeddings_available())
-               memory_embeddings_embed_and_store(user_id, fact_id, text);
-            if (fact_id > 0)
-               fact_id_origin = "create";
-         }
-
-         if (fact_id <= 0)
-            continue; /* fact insert/match failed; skip to next fact */
-
-         /* Fact expiry (v58, C3) — AI-decided.  Apply whenever the extraction LLM
-          * attached an expires_at to THIS fact, for BOTH fresh creates AND
-          * repeat/paraphrase merges.  Adopting on merge is deliberate: a transient
-          * fact often arrives first via the 'remember' tool (or a prior session)
-          * and is then re-stated, so the merge path is exactly where a transient
-          * fact gets reinforced — skipping it would leave it immortal (the failure
-          * the 2026-06-05 live test surfaced).  We only ever SET from an inbound
-          * date, never clear, so a durable fact keeps its state unless the AI
-          * explicitly marked this inbound transient.  expires_at is a reference
-          * date; the stored cutoff adds the grace window.  A batch that read
-          * outside text never sets it on a stored fact no such batch taught. */
-         if (g_config.memory.expire_enabled &&
-             !(reused && prov && outside_is_tainted(prov->outside) &&
-               !outside_is_tainted(seen.outside))) {
-            struct json_object *exp_obj;
-            if (json_object_object_get_ex(fact, "expires_at", &exp_obj)) {
-               const char *exp_str = json_object_get_string(exp_obj);
-               int64_t ref = (exp_str && *exp_str) ? iso8601_parse_date_utc(exp_str) : 0;
-               if (ref > 0) {
-                  int64_t cutoff = ref + (int64_t)g_config.memory.expire_grace_days * 86400;
-                  memory_db_fact_set_expires_at(fact_id, user_id, cutoff);
-                  OLOG_INFO("memory_extraction: fact %lld set expires_at=%ld "
-                            "(ref=%s + grace=%dd, origin=%s): %s",
-                            (long long)fact_id, (long)cutoff, exp_str,
-                            g_config.memory.expire_grace_days, fact_id_origin, text);
-               }
-            }
-         }
-
-         /* Phase 0: resolve fact.subject text → entity_id and set the FK
-          * on the fact row.  Map-then-upsert: check entity_map first (the
-          * entities[] array was processed above so the LLM's named entities
-          * are already there), upsert as "thing" if the subject isn't in
-          * the map (subject names an entity the LLM didn't include in
-          * entities[]).  Fresh auto-upserted entities get tracked for the
-          * Phase 2 merge gate.  NULL subject_entity_id is acceptable
-          * (logged WARNING for evaluation per dev's request — facts stay
-          * cosine-reachable but lose graph traversal). */
-         int64_t subject_entity_id = 0;
-         if (subject_text && *subject_text) {
-            char subj_canonical[MEMORY_ENTITY_NAME_MAX];
-            memory_make_canonical_name(subject_text, subj_canonical, sizeof(subj_canonical));
-            for (int m = 0; m < entity_map_count; m++) {
-               if (strcmp(entity_map[m].canonical, subj_canonical) == 0) {
-                  subject_entity_id = entity_map[m].id;
-                  break;
-               }
-            }
-            if (subject_entity_id == 0) {
-               bool subj_created = false;
-               if (memory_db_entity_upsert_at(user_id, subject_text, "thing", subj_canonical,
-                                              conv_created_at, conv_created_at, &subj_created,
-                                              &subject_entity_id) == MEMORY_DB_SUCCESS &&
-                   subject_entity_id > 0) {
-                  if (entity_map_count < ENTITY_MAP_MAX) {
-                     safe_strscpy(entity_map[entity_map_count].canonical, subj_canonical);
-                     entity_map[entity_map_count].id = subject_entity_id;
-                     entity_map_count++;
-                  }
-                  if (subj_created && fresh_entity_count < ENTITY_MAP_MAX) {
-                     fresh_entity_ids[fresh_entity_count++] = subject_entity_id;
-                  }
-               }
-            }
-         }
-         phase0_facts_total++;
-         if (subject_entity_id > 0) {
-            memory_db_fact_set_subject_entity(fact_id, user_id, subject_entity_id);
-         } else {
-            /* TODO(phase-0-followup): measure how often this fires and what
-             * it implies for retrieval quality.  The LLM was asked for a
-             * required `subject` field — if this WARNING is frequent post-
-             * Phase 0 ship, the prompt change isn't landing the field.
-             * Aggregate counter (`phase0_facts_null_subject`) is logged
-             * once per extraction below. */
-            phase0_facts_null_subject++;
-            OLOG_WARNING("memory_extraction: fact %lld stored with NULL subject_entity_id "
-                         "(subject_text='%s')",
-                         (long long)fact_id, subject_text ? subject_text : "(missing)");
-         }
-
-         /* Phase 0: process this fact's nested relations[] array.  Each
-          * relation knows its fact_id directly (the whole point of the
-          * paired-output schema).  Predicates run through the two-tier
-          * vocab resolver so trivial duplicates collapse onto canonical
-          * forms.  Subject/object resolution mirrors the prior standalone
-          * relations loop (entity_map → upsert for subject, entity_map → DB
-          * lookup for object since objects are often literal values). */
-         struct json_object *rels_arr;
-         /* A fact reworded without a forgotten one: its relations may be the
-          * forgotten part, so none are stored. */
-         if (!reworded && json_object_object_get_ex(fact, "relations", &rels_arr) &&
-             json_object_is_type(rels_arr, json_type_array)) {
-            int rel_count = json_object_array_length(rels_arr);
-            for (int r = 0; r < rel_count; r++) {
-               struct json_object *rel = json_object_array_get_idx(rels_arr, r);
-               struct json_object *r_subj_obj, *r_pred_obj, *r_obj_obj;
-               /* Phase 0 schema uses "predicate"; accept legacy "relation"
-                * for tolerance during the prompt-rollout window. */
-               bool has_predicate = json_object_object_get_ex(rel, "predicate", &r_pred_obj) ||
-                                    json_object_object_get_ex(rel, "relation", &r_pred_obj);
-               if (!json_object_object_get_ex(rel, "subject", &r_subj_obj) || !has_predicate ||
-                   !json_object_object_get_ex(rel, "object", &r_obj_obj)) {
-                  continue;
-               }
-               const char *r_subj = json_object_get_string(r_subj_obj);
-               const char *r_pred_raw = json_object_get_string(r_pred_obj);
-               const char *r_obj = json_object_get_string(r_obj_obj);
-               if (!r_subj || !r_pred_raw || !r_obj)
-                  continue;
-
-               /* Canonicalize predicate via the two-tier resolver (standard
-                * Schema.org / ConceptNet vocab matches first; Jaccard
-                * dedup against this user's previously-used predicates
-                * collapses morphological duplicates; otherwise accept as
-                * a new custom predicate). */
-               char canon_pred[MEMORY_RELATION_MAX];
-               memory_predicate_canonicalize(user_id, r_pred_raw, canon_pred, sizeof(canon_pred));
-
-               /* Resolve subject entity: map → upsert as "thing" if missing. */
-               int64_t r_subj_id = 0;
-               char r_subj_canon[MEMORY_ENTITY_NAME_MAX];
-               memory_make_canonical_name(r_subj, r_subj_canon, sizeof(r_subj_canon));
-               for (int m = 0; m < entity_map_count; m++) {
-                  if (strcmp(entity_map[m].canonical, r_subj_canon) == 0) {
-                     r_subj_id = entity_map[m].id;
-                     break;
-                  }
-               }
-               if (r_subj_id == 0) {
-                  bool r_subj_created = false;
-                  if (memory_db_entity_upsert_at(user_id, r_subj, "thing", r_subj_canon,
-                                                 conv_created_at, conv_created_at, &r_subj_created,
-                                                 &r_subj_id) != MEMORY_DB_SUCCESS)
-                     continue;
-                  if (entity_map_count < ENTITY_MAP_MAX) {
-                     safe_strscpy(entity_map[entity_map_count].canonical, r_subj_canon);
-                     entity_map[entity_map_count].id = r_subj_id;
-                     entity_map_count++;
-                  }
-                  if (r_subj_created && fresh_entity_count < ENTITY_MAP_MAX) {
-                     fresh_entity_ids[fresh_entity_count++] = r_subj_id;
-                  }
-               }
-
-               /* Resolve object: map → DB lookup (no upsert — objects are
-                * often literal values like dates or numbers).  Fall
-                * through to object_value text when no entity match. */
-               int64_t r_obj_id = 0;
-               char r_obj_canon[MEMORY_ENTITY_NAME_MAX];
-               memory_make_canonical_name(r_obj, r_obj_canon, sizeof(r_obj_canon));
-               for (int m = 0; m < entity_map_count; m++) {
-                  if (strcmp(entity_map[m].canonical, r_obj_canon) == 0) {
-                     r_obj_id = entity_map[m].id;
-                     break;
-                  }
-               }
-               if (r_obj_id == 0) {
-                  memory_entity_t found;
-                  if (memory_db_entity_get_by_name(user_id, r_obj_canon, &found) ==
-                      MEMORY_DB_SUCCESS) {
-                     r_obj_id = found.id;
-                  }
-               }
-
-               /* Validity period — same logic as the prior standalone loop. */
-               int64_t valid_from = 0, valid_to = 0;
-               struct json_object *vf_obj, *vt_obj;
-               if (json_object_object_get_ex(rel, "valid_from", &vf_obj))
-                  valid_from = iso8601_parse_date_utc(json_object_get_string(vf_obj));
-               if (json_object_object_get_ex(rel, "valid_to", &vt_obj))
-                  valid_to = iso8601_parse_date_utc(json_object_get_string(vt_obj));
-               /* Only an INVERTED range is bad data.  `valid_to == valid_from` is
-                * the normal shape for a single-day event — iso8601_parse_date_utc
-                * resolves a bare date to UTC midnight, so "spoke at Dragon Con
-                * 2023" on one date yields identical endpoints.  Rejecting `<=`
-                * therefore discarded the temporal data of every same-day event
-                * while keeping the relation, so the relation survived with no
-                * date at all and "when did that happen?" lost its answer.
-                *
-                * The range is inclusive downstream — memory_db_relation_add
-                * stores the endpoints independently and treats a past valid_to as
-                * a bounded historical slice (new_is_current), which is exactly
-                * what a one-day past event is — so a point interval needs no
-                * special handling once it is allowed through. */
-               if (valid_from != 0 && valid_to != 0 && valid_to < valid_from) {
-                  OLOG_WARNING("memory_extraction: dropping inverted validity range for "
-                               "(%s, %s, %s): [%ld..%ld]",
-                               r_subj, canon_pred, r_obj, (long)valid_from, (long)valid_to);
-                  valid_from = 0;
-                  valid_to = 0;
-               }
-
-               /* Defensive: confirm fact_id still exists.  Same probe shape
-                * as the previous loop's defensive check — handles the FK-
-                * violation race from Bundle 1's diagnostic (paraphrase-merge
-                * branch may have matched a row that gets superseded mid-
-                * extraction by a concurrent worker).
-                *
-                * Phase 3.1 diagnostic: log fact_id_origin (paraphrase_match /
-                * paraphrase_create / hash_match / create / unset) and
-                * fact_text so the analysis script can post-correlate against
-                * the live DB (existence + superseded_by) at log-parse time.
-                * Origin tag narrows the leak source: if every vanish is
-                * paraphrase_match the stale-embedding-cache hypothesis is
-                * supported; if creates also vanish, look at fact_supersede /
-                * relation_supersede cascading in the same extraction. */
-               int64_t rel_fact_id = fact_id;
-               memory_fact_t fact_check;
-               if (memory_db_fact_get(rel_fact_id, user_id, &fact_check) != MEMORY_DB_SUCCESS) {
-                  /* Deleted meanwhile (a forget): the relation goes with it, as
-                   * it would have had it been stored first. */
-                  OLOG_WARNING("memory_extraction: fact_id=%lld vanished before relation "
-                               "supersede (subj=%s pred=%s obj=%s) — relation not stored "
-                               "[diag origin=%s conv=%lld fact_text='%.80s']",
-                               (long long)fact_id, r_subj, canon_pred, r_obj, fact_id_origin,
-                               prov ? (long long)prov->conv_id : -1L, text);
-                  continue;
-               }
-
-               /* "replaces": the user said this value replaced an old one (a new
-                * number, a move, a job change): the old value it names, or true
-                * when it can't say which. */
-               struct json_object *repl_obj = NULL;
-               const char *replaces = NULL;
-               if (json_object_object_get_ex(rel, "replaces", &repl_obj)) {
-                  const char *v = json_object_is_type(repl_obj, json_type_string)
-                                      ? json_object_get_string(repl_obj)
-                                      : NULL;
-                  /* "unknown" too: a model may spell "can't say which" that way. */
-                  const bool unsure = v &&
-                                      (strcasecmp(v, "true") == 0 || strcasecmp(v, "unknown") == 0);
-                  if (v && !unsure && strcasecmp(v, "false") != 0) {
-                     replaces = v[0] ? v : NULL;
-                  } else if (v ? unsure : json_object_get_boolean(repl_obj)) {
-                     replaces = MEMORY_RELATION_REPLACES_UNKNOWN;
-                  }
-               }
-               int64_t old_fact_id = 0;
-               int rel_rc = memory_db_relation_supersede_ex(
-                   user_id, r_subj_id, canon_pred, r_obj_id, (r_obj_id == 0) ? r_obj : NULL,
-                   rel_fact_id, 0.8f, valid_from, valid_to, replaces, prov, &old_fact_id);
-               if (rel_rc == MEMORY_DB_SUCCESS && old_fact_id > 0 && rel_fact_id > 0) {
-                  /* Superseded in the same transaction; the cache keeps current facts. */
-                  memory_embeddings_invalidate_cache_for_user(user_id);
-                  OLOG_INFO("memory_extraction: contradiction — fact %ld superseded by %ld "
-                            "(relation: %s)",
-                            (long)old_fact_id, (long)rel_fact_id, canon_pred);
-               }
-               if (valid_from || valid_to) {
-                  OLOG_INFO("memory_extraction: relation: (%s, %s, %s) valid [%ld..%ld]", r_subj,
-                            canon_pred, r_obj, (long)valid_from, (long)valid_to);
-               } else {
-                  OLOG_INFO("memory_extraction: relation: (%s, %s, %s)", r_subj, canon_pred, r_obj);
-               }
-            }
-         }
-      }
+      const char *reworded = memory_forgotten_rewritten(forgotten, text);
+      const memory_store_opts_t opts = { .text = reworded, .no_relations = reworded != NULL };
+      memory_store_candidate(st, &cands, i, &opts, NULL);
    }
 
    /* Process preferences.  One from a batch that read outside text is stored
@@ -1079,25 +341,8 @@ static void process_extraction_response(int user_id,
       }
    }
 
-   /* Phase 0 summary: per-extraction counter for NULL subject_entity_id rate.
-    * Logged at INFO level so operators can monitor the prompt's effectiveness
-    * over time (a sustained high rate signals the LLM isn't honoring the
-    * required `subject` field — investigate prompt + model combination).
-    * Skipped when no facts were processed (avoids spurious log lines on
-    * extraction passes that emit only preferences / corrections / entities). */
-   if (phase0_facts_total > 0) {
-      OLOG_INFO("memory_extraction: phase0 summary — %d facts processed, %d with NULL "
-                "subject_entity_id (%.1f%%)",
-                phase0_facts_total, phase0_facts_null_subject,
-                100.0 * (double)phase0_facts_null_subject / (double)phase0_facts_total);
-   }
-
-   /* Phase 0: standalone "relations" array removed — relations now live
-    * inside each fact's "relations[]" sub-array under the new paired-output
-    * schema.  See process_extraction_response_relation_for_fact() above and
-    * the inline call site in the facts loop.  A top-level "relations" array
-    * is still skimmed below and a WARNING logged so we can detect when the
-    * LLM regresses to old shape (vs the new prompt being silently dropped). */
+   /* Relations live inside each fact's "relations[]".  A top-level array is
+    * ignored, with a warning, so a model back on the old shape is noticed. */
    struct json_object *legacy_relations_arr;
    if (json_object_object_get_ex(root, "relations", &legacy_relations_arr) &&
        json_object_is_type(legacy_relations_arr, json_type_array) &&
@@ -1108,17 +353,10 @@ static void process_extraction_response(int user_id,
                    json_object_array_length(legacy_relations_arr));
    }
 
-   /* Phase 2 auto-merge gate.  Extracted into apply_phase2_merge_gate
-    * so process_extraction_response stays at a manageable size and so
-    * the broadcast can be coalesced once across all fresh entities (vs
-    * one broadcast per proposal, which thrashes the DB lock + UI dot).
-    * See the helper's header comment for the full design rationale. */
-   apply_phase2_merge_gate(user_id, fresh_entity_ids, fresh_entity_count);
-
-   /* Invalidate entity embedding cache once after all extractions */
-   if (entity_map_count > 0) {
-      memory_embeddings_invalidate_entity_cache_for_user(user_id);
-   }
+   /* The merge check on the entities this batch created, and the caches its
+    * writes made stale. */
+   memory_store_close(st);
+   memory_candidates_free(&cands);
 
    /* Process summary */
    struct json_object *summary_obj, *topics_arr;

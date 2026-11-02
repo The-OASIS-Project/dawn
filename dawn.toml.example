@@ -587,6 +587,15 @@
                                   # 2.4x the output tokens; extraction runs in the background.
                                   # Reasoning tokens count against [llm] max_tokens: keep it at
                                   # the default (16384) or higher when this is on.
+# consolidator = "prompt"         # How a conversation's extracted facts are stored: "prompt"
+                                  # (fixed rules: paraphrase merge at paraphrase_dedup_threshold,
+                                  # automatic replace of one-at-a-time relations) or "agent" (the
+                                  # extraction model, continued in the same request history, sees
+                                  # the stored facts near each one and decides: add, merge,
+                                  # replace, close a relation, defer or drop; code checks every
+                                  # decision and records each batch).  "agent" adds one reply
+                                  # to each conversation's extraction: two model calls, about
+                                  # 2x the extraction tokens.
 # note_extraction_guard = true    # Keep reference text filed via the document_manage
                                   # save_note/save_text tool out of semantic memory
                                   # facts. At extraction time the filed bodies (and

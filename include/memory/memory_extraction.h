@@ -31,6 +31,7 @@
 #include <stdbool.h>
 
 #include "llm/llm_interface.h"
+#include "memory/memory_candidates.h"
 #include "memory/memory_types.h"
 
 #ifdef __cplusplus
@@ -178,17 +179,6 @@ void memory_extraction_release_user(int user_id);
  *         failure; false otherwise.  The flag is cleared by this call.
  */
 bool memory_extraction_consume_last_transient(int user_id);
-
-/**
- * @brief Parse a JSON response from an LLM, handling common formatting variants.
- *
- * Tries direct parse, markdown code block extraction, and brace/bracket fallback.
- * Caller owns the returned object and must call json_object_put().
- *
- * @param response Raw LLM response text
- * @return Parsed json_object, or NULL on failure
- */
-struct json_object *memory_extraction_parse_json(const char *response);
 
 /**
  * @brief Resolve memory.extraction_provider/extraction_model into an llm_resolved_config_t.

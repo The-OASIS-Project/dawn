@@ -1080,6 +1080,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_callback_restore.c
     src/memory/memory_callback_forget.c
     src/memory/memory_extraction.c
+    src/memory/memory_candidates.c
     src/memory/memory_extraction_queue.c
     src/memory/memory_extraction_slots.c
     src/memory/memory_extraction_input.c
