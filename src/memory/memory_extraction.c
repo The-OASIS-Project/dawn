@@ -49,6 +49,7 @@
 #include "dawn_error.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
@@ -1282,6 +1283,7 @@ static void *extraction_thread(void *arg) {
    /* If primary model failed and we have a fallback, retry with the session's active model */
    bool used_fallback = false;
    llm_resolved_config_t fallback_config = { 0 }; /* the model that answered, when it did */
+   session_llm_config_t fallback_sc = { 0 };      /* backs fallback_config's endpoint */
    if (!response && ctx->has_fallback && ctx->fallback.model[0] != '\0') {
       /* Skip retry if fallback is the same model, provider, and endpoint */
       bool same_config = (extraction_config.model && ctx->fallback.model[0] != '\0' &&
@@ -1293,38 +1295,28 @@ static void *extraction_thread(void *arg) {
          OLOG_WARNING("memory_extraction: primary model failed, retrying with session model %s",
                       ctx->fallback.model);
 
-         fallback_config.type = ctx->fallback.type;
-         fallback_config.cloud_provider = ctx->fallback.cloud_provider;
-         fallback_config.endpoint = ctx->fallback.endpoint;
-         fallback_config.model = ctx->fallback.model;
-         fallback_config.suppress_tools = true;
-         safe_strscpy(fallback_config.thinking_mode, "disabled");
+         /* The session's model through the resolver: its own provider's key and URL,
+          * or no retry when that can't run. */
+         fallback_sc.type = ctx->fallback.type;
+         fallback_sc.cloud_provider = ctx->fallback.cloud_provider;
+         safe_strscpy(fallback_sc.endpoint, ctx->fallback.endpoint);
+         safe_strscpy(fallback_sc.model, ctx->fallback.model);
+         if (llm_resolve_config(&fallback_sc, &fallback_config) == 0) {
+            fallback_config.suppress_tools = true;
+            safe_strscpy(fallback_config.thinking_mode, "disabled");
+            fallback_config.timeout_ms = g_config.memory.extraction_timeout_ms;
 
-         fallback_config.timeout_ms = g_config.memory.extraction_timeout_ms;
-
-         /* Resolve API key for cloud providers */
-         if (fallback_config.type == LLM_CLOUD) {
-            if (fallback_config.cloud_provider == CLOUD_PROVIDER_OPENAI)
-               fallback_config.api_key = g_secrets.openai_api_key;
-            else if (fallback_config.cloud_provider == CLOUD_PROVIDER_CLAUDE)
-               fallback_config.api_key = g_secrets.claude_api_key;
-            else if (fallback_config.cloud_provider == CLOUD_PROVIDER_GEMINI)
-               fallback_config.api_key = g_secrets.gemini_api_key;
-            else if (fallback_config.cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
-               /* Session provider is OpenRouter: its model is already a "vendor/model"
-                * slug, so keep it (fall back to the main OpenRouter default if unset). */
-               fallback_config.api_key = g_secrets.openrouter_api_key;
-               fallback_config.endpoint = OPENROUTER_URL;
-               if (!fallback_config.model || !fallback_config.model[0])
-                  fallback_config.model = llm_get_default_openrouter_model();
+            llm_tools_suppress_push();
+            response = llm_chat_completion_with_config(extraction_history, prompt,
+                                                       &fallback_config);
+            llm_tools_suppress_pop();
+            if (response) {
+               used_fallback = true;
             }
-         }
-
-         llm_tools_suppress_push();
-         response = llm_chat_completion_with_config(extraction_history, prompt, &fallback_config);
-         llm_tools_suppress_pop();
-         if (response) {
-            used_fallback = true;
+         } else {
+            char reason[LLM_SELECTION_REASON_MAX];
+            llm_selection_problem(&fallback_sc, reason, sizeof(reason));
+            OLOG_WARNING("memory_extraction: no retry: %s", reason);
          }
       }
    }

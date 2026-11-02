@@ -319,7 +319,7 @@ session's *resolved/actual* LLM state (not just config defaults):
 }
 ```
 - `thinking_mode` / `reasoning_effort`: the session's current reasoning settings (same
-  vocabulary as `set_llm_runtime`). This is the only place a fresh connection learns
+  vocabulary as `set_session_llm`). This is the only place a fresh connection learns
   them — `llm_state_update` is only pushed on a `switch_llm` tool call.
 
 #### `set_config`
@@ -394,21 +394,6 @@ Response: `list_llm_models_response`
 ---
 
 ### LLM Runtime Control
-
-#### `set_llm_runtime`
-Switch LLM type/provider globally. **Admin only.** Affects all clients.
-```json
-{
-   "type": "set_llm_runtime",
-   "payload": {
-      "type": "cloud",
-      "provider": "claude"
-   }
-}
-```
-- `type`: `"local"` or `"cloud"`
-- `provider`: `"openai"`, `"claude"`, or `"gemini"`
-- Response: `set_llm_runtime_response`
 
 #### `set_session_llm`
 Configure LLM settings for this session only (does not affect other clients).
@@ -2647,7 +2632,6 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `list_interfaces` | `list_interfaces_response` |
 | `list_llm_models` | `list_llm_models_response` |
 | `restart` | `restart_response` |
-| `set_llm_runtime` | `set_llm_runtime_response` |
 | `set_session_llm` | `set_session_llm_response` |
 | `get_system_prompt` | `system_prompt_response` |
 | `get_tools_config` | `get_tools_config_response` |

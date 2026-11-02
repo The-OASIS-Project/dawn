@@ -160,32 +160,6 @@ bool llm_has_openrouter_key(void) {
    return is_openrouter_available();
 }
 
-/* Resolved global cloud provider (the effective default). Written by the init/refresh
- * ladder; read throughout resolution. */
-static cloud_provider_t current_cloud_provider = CLOUD_PROVIDER_NONE;
-
-cloud_provider_t llm_detect_available_provider(void) {
-   if (is_claude_available())
-      return CLOUD_PROVIDER_CLAUDE;
-   if (is_openai_available())
-      return CLOUD_PROVIDER_OPENAI;
-   if (is_gemini_available())
-      return CLOUD_PROVIDER_GEMINI;
-   /* OpenRouter is a valid fallback (an OpenRouter-only install still boots cloud) but
-    * deliberately does NOT jump ahead of the direct providers in the auto-default order
-    * (decision O1). */
-   if (is_openrouter_available())
-      return CLOUD_PROVIDER_OPENROUTER;
-   return CLOUD_PROVIDER_NONE;
-}
-
-// Global state
-// current_type: written on the main/config thread, read on the mosquitto
-// HUD-discovery thread — atomic so those cross-thread accesses are race-free.
-// (current_cloud_provider is defined earlier in this file.)
-static _Atomic llm_type_t current_type = LLM_UNDEFINED;
-static char llm_url[2048] = "";
-
 // Global interrupt flag - set by main thread (signal handler / wake word) during
 // LLM processing, read by the curl progress callback on worker threads.  _Atomic
 // sig_atomic_t keeps it async-signal-safe (lock-free) AND race-free under TSan.
@@ -373,9 +347,8 @@ int llm_check_connection(const char *url, int timeout_seconds) {
    return result;
 }
 
-void llm_init(const char *cloud_provider_override) {
+void llm_init(void) {
    // Initialize tool calling system first - needed for both local and cloud LLMs
-   // Must happen before any early returns so tools are available for local mode
    llm_tools_init();
 
    // Initialize rate limiter (pass 0 to disable)
@@ -391,355 +364,74 @@ void llm_init(const char *cloud_provider_override) {
       llm_tools_apply_config(&g_config.llm.tools);
    }
 
-   /* OpenRouter is a first-class provider (the use_openrouter gateway was retired and
-    * folded into provider="openrouter" by config_migrate). "-P openrouter" and a config
-    * provider="openrouter" both flow through the normal provider ladder below. */
-
-   // Detect available providers from runtime config (secrets.toml)
-   bool openai_available = is_openai_available();
-   bool claude_available = is_claude_available();
-   bool gemini_available = is_gemini_available();
-   bool openrouter_available = is_openrouter_available();
-
-   if (!openai_available && !claude_available && !gemini_available && !openrouter_available) {
-      OLOG_WARNING("No cloud LLM providers configured (check secrets.toml)");
-      current_cloud_provider = CLOUD_PROVIDER_NONE;
-      /* The type is set by dawn.c after this returns, as on the keyed path below.  Not
-       * llm_set_type() here: it announces the change aloud, before TTS is up. */
-      return;
-   }
-
-   // Priority: CLI override > config file > auto-detect
-   const char *provider_source = NULL;
-   if (cloud_provider_override != NULL) {
-      provider_source = cloud_provider_override;
-   } else if (g_config.llm.cloud.provider[0] != '\0') {
-      provider_source = g_config.llm.cloud.provider;
-   }
-
-   if (provider_source != NULL) {
-      bool provider_ok = false;
-      if (strcmp(provider_source, "openai") == 0 && openai_available) {
-         current_cloud_provider = CLOUD_PROVIDER_OPENAI;
-         provider_ok = true;
-         OLOG_INFO("Cloud provider set to OpenAI (%s)",
-                   cloud_provider_override ? "CLI override" : "config file");
-      } else if (strcmp(provider_source, "claude") == 0 && claude_available) {
-         current_cloud_provider = CLOUD_PROVIDER_CLAUDE;
-         provider_ok = true;
-         OLOG_INFO("Cloud provider set to Claude (%s)",
-                   cloud_provider_override ? "CLI override" : "config file");
-      } else if (strcmp(provider_source, "gemini") == 0 && gemini_available) {
-         current_cloud_provider = CLOUD_PROVIDER_GEMINI;
-         provider_ok = true;
-         OLOG_INFO("Cloud provider set to Gemini (%s)",
-                   cloud_provider_override ? "CLI override" : "config file");
-      } else if (strcmp(provider_source, "openrouter") == 0 && openrouter_available) {
-         current_cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-         provider_ok = true;
-         OLOG_INFO("Cloud provider set to OpenRouter (%s)",
-                   cloud_provider_override ? "CLI override" : "config file");
-      }
-
-      if (!provider_ok) {
-         /* Configured provider unavailable — fall through to auto-detect */
-         OLOG_WARNING("Cloud provider '%s' has no API key — auto-detecting available provider",
-                      provider_source);
-         provider_source = NULL;
-      }
-   }
-
-   if (provider_source == NULL) {
-      /* Auto-detect: pick the first provider with an API key */
-      current_cloud_provider = llm_detect_available_provider();
-      if (current_cloud_provider != CLOUD_PROVIDER_NONE) {
-         OLOG_INFO("Cloud provider auto-detected: %s",
-                   cloud_provider_to_string(current_cloud_provider));
-      }
-   }
-
-   // Note: LLM type (local/cloud) is set by dawn.c after this function returns,
-   // allowing proper TTS announcement after TTS is initialized.
+   /* No LLM is chosen here: the default selection is read from dawn.toml at each
+    * use (llm_default_selection), and llm_announce_selection() says what it is. */
 }
 
-/* Re-derive the global llm_url from current_cloud_provider + config endpoint (no TTS).
- * llm_refresh_providers() can change the provider at runtime (e.g. a WebUI gateway
- * toggle or secrets reload) but historically left llm_url stale — the non-session
- * global chat path (MQTT replies, search/summary fallback) uses llm_url + the live
- * provider together, so they must stay in sync.  Custom llm.cloud.endpoint still wins. */
-static void refresh_cloud_llm_url(void) {
-   if (current_type != LLM_CLOUD || current_cloud_provider == CLOUD_PROVIDER_NONE) {
-      return; /* NONE — about to fall back to local; leave llm_url unchanged */
+void llm_announce_selection(void) {
+   session_llm_config_t def;
+   llm_get_default_config(&def);
+   llm_selection_resolve(&def);
+   char reason[LLM_SELECTION_REASON_MAX];
+   if (llm_selection_problem(&def, reason, sizeof(reason)) != 0) {
+      OLOG_WARNING("Default LLM can't run: %s", reason);
+      text_to_speech(reason);
+   } else if (def.type == LLM_CLOUD) {
+      char announcement[64];
+      snprintf(announcement, sizeof(announcement), "Setting AI to cloud LLM using %s.",
+               cloud_provider_display_name(def.cloud_provider));
+      text_to_speech(announcement);
+      OLOG_INFO("Default LLM: cloud (%s)", cloud_provider_to_string(def.cloud_provider));
+   } else {
+      text_to_speech("Setting AI to local LLM.");
+      OLOG_INFO("Default LLM: local (%s)", g_config.llm.local.endpoint);
    }
-   snprintf(llm_url, sizeof(llm_url), "%s", llm_cloud_url(current_cloud_provider));
+   metrics_update_llm_config(def.type, def.cloud_provider);
 }
 
-int llm_refresh_providers(void) {
-   bool openai_available = is_openai_available();
-   bool claude_available = is_claude_available();
-   bool gemini_available = is_gemini_available();
-   bool openrouter_available = is_openrouter_available();
-
-   if (!openai_available && !claude_available && !gemini_available && !openrouter_available) {
-      OLOG_INFO("LLM refresh: No cloud providers available");
-      current_cloud_provider = CLOUD_PROVIDER_NONE;
-      return 0;
+/* The settings the current command runs on: its session's, else the default. */
+static void current_selection(session_llm_config_t *cfg) {
+   session_t *session = session_get_command_context();
+   if (session) {
+      session_get_llm_config(session, cfg);
+   } else {
+      /* Only the selection: type, provider and model, one locked read. */
+      memset(cfg, 0, sizeof(*cfg));
+      llm_selection_t sel;
+      llm_default_selection(&sel);
+      llm_selection_apply(&sel, cfg);
    }
-
-   /* An explicit OpenRouter session stays on OpenRouter while its key is present; if the
-    * key was removed, fall back to auto-detect rather than silently keeping a dead
-    * provider. (Direct providers get the same per-provider validity checks below; an
-    * OpenRouter session whose key is still present falls through them unchanged.) */
-   if (current_cloud_provider == CLOUD_PROVIDER_OPENROUTER && !openrouter_available) {
-      current_cloud_provider = llm_detect_available_provider();
-      if (current_cloud_provider == CLOUD_PROVIDER_NONE) {
-         OLOG_INFO("LLM refresh: OpenRouter key removed, no cloud providers available");
-         return 0;
-      }
-      OLOG_INFO("LLM refresh: OpenRouter key removed, switched to %s",
-                cloud_provider_to_string(current_cloud_provider));
-   }
-
-   // Check if current provider is still valid
-   if (current_cloud_provider == CLOUD_PROVIDER_OPENAI && !openai_available) {
-      // OpenAI key removed, switch to Claude or Gemini if available
-      if (claude_available) {
-         current_cloud_provider = CLOUD_PROVIDER_CLAUDE;
-         OLOG_INFO("LLM refresh: Switched to Claude (OpenAI key removed)");
-      } else if (gemini_available) {
-         current_cloud_provider = CLOUD_PROVIDER_GEMINI;
-         OLOG_INFO("LLM refresh: Switched to Gemini (OpenAI key removed)");
-      } else {
-         current_cloud_provider = CLOUD_PROVIDER_NONE;
-         OLOG_INFO("LLM refresh: No cloud providers available");
-         return 0;
-      }
-   } else if (current_cloud_provider == CLOUD_PROVIDER_CLAUDE && !claude_available) {
-      // Claude key removed, switch to OpenAI or Gemini if available
-      if (openai_available) {
-         current_cloud_provider = CLOUD_PROVIDER_OPENAI;
-         OLOG_INFO("LLM refresh: Switched to OpenAI (Claude key removed)");
-      } else if (gemini_available) {
-         current_cloud_provider = CLOUD_PROVIDER_GEMINI;
-         OLOG_INFO("LLM refresh: Switched to Gemini (Claude key removed)");
-      } else {
-         current_cloud_provider = CLOUD_PROVIDER_NONE;
-         OLOG_INFO("LLM refresh: No cloud providers available");
-         return 0;
-      }
-   } else if (current_cloud_provider == CLOUD_PROVIDER_GEMINI && !gemini_available) {
-      // Gemini key removed, switch to OpenAI or Claude if available
-      if (openai_available) {
-         current_cloud_provider = CLOUD_PROVIDER_OPENAI;
-         OLOG_INFO("LLM refresh: Switched to OpenAI (Gemini key removed)");
-      } else if (claude_available) {
-         current_cloud_provider = CLOUD_PROVIDER_CLAUDE;
-         OLOG_INFO("LLM refresh: Switched to Claude (Gemini key removed)");
-      } else {
-         current_cloud_provider = CLOUD_PROVIDER_NONE;
-         OLOG_INFO("LLM refresh: No cloud providers available");
-         return 0;
-      }
-   } else if (current_cloud_provider == CLOUD_PROVIDER_NONE) {
-      // No provider was set, auto-detect (prefer OpenAI)
-      if (openai_available) {
-         current_cloud_provider = CLOUD_PROVIDER_OPENAI;
-         OLOG_INFO("LLM refresh: OpenAI now available");
-      } else if (claude_available) {
-         current_cloud_provider = CLOUD_PROVIDER_CLAUDE;
-         OLOG_INFO("LLM refresh: Claude now available");
-      } else {
-         current_cloud_provider = CLOUD_PROVIDER_GEMINI;
-         OLOG_INFO("LLM refresh: Gemini now available");
-      }
-   }
-
-   refresh_cloud_llm_url();
-   OLOG_INFO("LLM refresh: Cloud provider ready (%s)", llm_get_cloud_provider_name());
-   return 1;
-}
-
-/* @p announce: say it (TTS) and log it.  Off for the silent set at startup,
- * before TTS is up; the same type is set again, announced, once it is. */
-static int set_type(llm_type_t type, bool announce) {
-   if (type == LLM_CLOUD) {
-      // Check if API key is available for the current cloud provider
-      int has_api_key = 0;
-      const char *provider_name = "unknown";
-
-      if (current_cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-         has_api_key = is_claude_available();
-         provider_name = "Claude";
-      } else if (current_cloud_provider == CLOUD_PROVIDER_GEMINI) {
-         has_api_key = is_gemini_available();
-         provider_name = "Gemini";
-      } else if (current_cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
-         has_api_key = is_openrouter_available();
-         provider_name = "OpenRouter";
-      } else {
-         has_api_key = is_openai_available();
-         provider_name = "OpenAI";
-      }
-
-      if (!has_api_key) {
-         if (announce) {
-            OLOG_WARNING("Cannot switch to cloud LLM: %s API key not configured in secrets.toml - "
-                         "staying on local LLM",
-                         provider_name);
-            text_to_speech("Cannot switch to cloud. API key not configured. Staying on local.");
-         }
-         // Don't change current_type, stay on whatever we were using
-         return 1; /* Failure - API key not configured */
-      }
-
-      // API key available, proceed with switch
-      current_type = type;
-
-      /* The provider whose key was checked above (none is taken as OpenAI there). */
-      snprintf(llm_url, sizeof(llm_url), "%s",
-               llm_cloud_url(current_cloud_provider == CLOUD_PROVIDER_NONE
-                                 ? CLOUD_PROVIDER_OPENAI
-                                 : current_cloud_provider));
-      if (announce) {
-         char announcement[64];
-         snprintf(announcement, sizeof(announcement), "Setting AI to cloud LLM using %s.",
-                  cloud_provider_display_name(current_cloud_provider));
-         text_to_speech(announcement);
-         OLOG_INFO("LLM set to CLOUD (%s): %s", llm_get_cloud_provider_name(), llm_url);
-      }
-   } else if (type == LLM_LOCAL) {
-      current_type = type;
-      snprintf(llm_url, sizeof(llm_url), "%s", g_config.llm.local.endpoint);
-      if (announce) {
-         text_to_speech("Setting AI to local LLM.");
-         OLOG_INFO("LLM set to LOCAL (%s)", g_config.llm.local.endpoint);
-      }
-   }
-
-   // Update metrics with current LLM configuration
-   metrics_update_llm_config(current_type, current_cloud_provider);
-   return 0; /* Success */
-}
-
-int llm_set_type(llm_type_t type) {
-   return set_type(type, true);
-}
-
-int llm_set_type_quiet(llm_type_t type) {
-   return set_type(type, false);
 }
 
 llm_type_t llm_get_type(void) {
-   /* Check session context first (set during streaming calls) */
-   session_t *session = session_get_command_context();
-   if (session) {
-      session_llm_config_t config;
-      session_get_llm_config(session, &config);
-      return config.type;
-   }
-
-   /* Fallback to global state for paths without session context */
-   return current_type;
+   session_llm_config_t cfg;
+   current_selection(&cfg);
+   return cfg.type;
 }
 
 const char *llm_get_cloud_provider_name(void) {
-   cloud_provider_t provider = current_cloud_provider;
-
-   /* Check session context first (set during streaming calls) */
-   session_t *session = session_get_command_context();
-   if (session) {
-      session_llm_config_t config;
-      session_get_llm_config(session, &config);
-      provider = config.cloud_provider;
-   }
-
-   return cloud_provider_display_name(provider);
-}
-
-int llm_set_cloud_provider(cloud_provider_t provider) {
-   if (provider == CLOUD_PROVIDER_OPENAI) {
-      if (!is_openai_available()) {
-         OLOG_ERROR("Cannot switch to OpenAI: API key not configured");
-         return 1;
-      }
-      current_cloud_provider = CLOUD_PROVIDER_OPENAI;
-      // Update URL if we're currently in cloud mode
-      if (current_type == LLM_CLOUD) {
-         snprintf(llm_url, sizeof(llm_url), "%s", llm_cloud_url(current_cloud_provider));
-      }
-      OLOG_INFO("Cloud provider set to OpenAI");
-      return 0;
-   } else if (provider == CLOUD_PROVIDER_CLAUDE) {
-      if (!is_claude_available()) {
-         OLOG_ERROR("Cannot switch to Claude: API key not configured");
-         return 1;
-      }
-      current_cloud_provider = CLOUD_PROVIDER_CLAUDE;
-      // Update URL if we're currently in cloud mode
-      if (current_type == LLM_CLOUD) {
-         snprintf(llm_url, sizeof(llm_url), "%s", llm_cloud_url(current_cloud_provider));
-      }
-      OLOG_INFO("Cloud provider set to Claude");
-      return 0;
-   } else if (provider == CLOUD_PROVIDER_GEMINI) {
-      if (!is_gemini_available()) {
-         OLOG_ERROR("Cannot switch to Gemini: API key not configured");
-         return 1;
-      }
-      current_cloud_provider = CLOUD_PROVIDER_GEMINI;
-      // Update URL if we're currently in cloud mode
-      if (current_type == LLM_CLOUD) {
-         snprintf(llm_url, sizeof(llm_url), "%s", llm_cloud_url(current_cloud_provider));
-      }
-      OLOG_INFO("Cloud provider set to Gemini");
-      return 0;
-   } else if (provider == CLOUD_PROVIDER_OPENROUTER) {
-      if (!is_openrouter_available()) {
-         OLOG_ERROR("Cannot switch to OpenRouter: API key not configured");
-         return 1;
-      }
-      current_cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-      // Update URL if we're currently in cloud mode
-      if (current_type == LLM_CLOUD) {
-         snprintf(llm_url, sizeof(llm_url), "%s", llm_cloud_url(current_cloud_provider));
-      }
-      OLOG_INFO("Cloud provider set to OpenRouter");
-      return 0;
-   }
-   return 1;
+   session_llm_config_t cfg;
+   current_selection(&cfg);
+   return cloud_provider_display_name(cfg.cloud_provider);
 }
 
 cloud_provider_t llm_get_cloud_provider(void) {
-   /* Check session context first (set during streaming calls) */
-   session_t *session = session_get_command_context();
-   if (session) {
-      session_llm_config_t config;
-      session_get_llm_config(session, &config);
-      return config.cloud_provider;
-   }
-
-   /* Fallback to global state for paths without session context */
-   return current_cloud_provider;
+   session_llm_config_t cfg;
+   current_selection(&cfg);
+   return cfg.cloud_provider;
 }
 
 const char *llm_get_model_name(void) {
-   static char session_model_buf[LLM_MODEL_NAME_MAX]; /* Static buffer for session model */
-   llm_type_t type = current_type;
-   cloud_provider_t provider = current_cloud_provider;
+   static __thread char session_model_buf[LLM_MODEL_NAME_MAX]; /* this thread's last answer */
+   session_llm_config_t config;
+   current_selection(&config);
+   const llm_type_t type = config.type;
+   const cloud_provider_t provider = config.cloud_provider;
 
-   /* Check session context first (set during streaming calls) */
-   session_t *session = session_get_command_context();
-   if (session) {
-      session_llm_config_t config = { 0 }; /* Zero-init for safety */
-      session_get_llm_config(session, &config);
-      type = config.type;
-      provider = config.cloud_provider;
-
-      /* If session has a custom model, copy to static buffer and return */
-      if (config.model[0] != '\0') {
-         safe_strscpy(session_model_buf, config.model);
-         return session_model_buf;
-      }
+   /* A custom model: copy to static buffer and return */
+   if (config.model[0] != '\0') {
+      safe_strscpy(session_model_buf, config.model);
+      return session_model_buf;
    }
 
    /* Return model name based on type and provider */
@@ -899,7 +591,7 @@ static const char *call_model(cloud_provider_t provider, const char *model) {
 }
 
 /* The LLM a bare (non-tool-loop) completion goes to: the command context's
- * session's config, or the global selection with no session.  FAILURE with
+ * session's config, or the default selection with no session.  FAILURE with
  * LLM_ERR_NOT_SELECTED when that config can't run (no provider, or no key for the
  * selected one), so the caller sends nothing anywhere.  @p cfg is the caller's
  * storage for that config: a session's own endpoint is returned pointing into it. */
@@ -911,42 +603,27 @@ static int call_target(session_t *session,
                        const char **api_key,
                        char model_buf[LLM_MODEL_NAME_MAX],
                        const char **model) {
-   *type = current_type;
-   *provider = current_cloud_provider;
-   *url = llm_url;
-   *api_key = NULL;
-   model_buf[0] = '\0';
-   *model = NULL;
-
-   memset(cfg, 0, sizeof(*cfg));
    if (session) {
       session_get_llm_config(session, cfg);
    } else {
-      cfg->type = current_type;
-      cfg->cloud_provider = current_cloud_provider;
+      llm_get_default_config(cfg);
    }
    llm_resolved_config_t resolved = { 0 };
    if (llm_resolve_config(cfg, &resolved) != 0) {
       llm_set_last_error(LLM_ERR_NOT_SELECTED);
       return FAILURE;
    }
+   *type = resolved.type;
+   *provider = resolved.cloud_provider;
+   *url = resolved.endpoint ? resolved.endpoint : "";
    *api_key = resolved.api_key;
-   if (session) {
-      *type = resolved.type;
-      *provider = resolved.cloud_provider;
-      *url = resolved.endpoint ? resolved.endpoint : llm_url;
-      /* Copy the model out: resolved lives on this frame. */
-      safe_strncpy(model_buf, resolved.model ? resolved.model : "", LLM_MODEL_NAME_MAX);
-      if (model_buf[0] != '\0') {
-         *model = model_buf;
-      }
-   }
+   /* Copy the model out: resolved lives on this frame. */
+   safe_strncpy(model_buf, resolved.model ? resolved.model : "", LLM_MODEL_NAME_MAX);
+   *model = model_buf[0] != '\0' ? model_buf : NULL;
    return SUCCESS;
 }
 
-char *llm_chat_completion(struct json_object *conversation_history,
-                          const char *input_text,
-                          bool allow_fallback) {
+char *llm_chat_completion(struct json_object *conversation_history, const char *input_text) {
    llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
    char *response = NULL;
    llm_type_t type;
@@ -1009,154 +686,6 @@ char *llm_chat_completion(struct json_object *conversation_history,
       }
    }
 
-   /* If cloud LLM failed (but not interrupted by user), try falling back to local.
-    * "Interrupted" is global OR session cancel (see the loop's ictx), so the
-    * suppression must check BOTH — a turn aborted purely by its session cancel
-    * flag (global unset) must not fall through to a spoken "Unable to contact
-    * cloud LLM" + a global provider switch. */
-   if (response == NULL && type == LLM_CLOUD && allow_fallback && !llm_is_interrupt_requested() &&
-       !(session && atomic_load(&session->cancel_requested))) {
-      if (strcmp(CLOUDAI_URL, url) == 0 || strcmp(CLAUDE_URL, url) == 0 ||
-          strcmp(GEMINI_URL, url) == 0 || strcmp(OPENROUTER_URL, url) == 0) {
-         OLOG_WARNING("Falling back to local LLM due to connection failure.");
-         text_to_speech("Unable to contact cloud LLM.");
-         llm_set_type(LLM_LOCAL);
-
-         /* Retry with local LLM (uses OpenAI-compatible API without auth) */
-         response = llm_openai_chat_completion(conversation_history, input_text, llm_url, NULL,
-                                               NULL);
-      }
-   }
-
-   return response;
-}
-
-char *llm_chat_completion_streaming(struct json_object *conversation_history,
-                                    const char *input_text,
-                                    llm_text_chunk_callback chunk_callback,
-                                    void *callback_userdata,
-                                    bool allow_fallback) {
-   llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
-   // Clear any previous interrupt flag from cancelled requests
-   llm_clear_interrupt();
-
-   char *response = NULL;
-   llm_type_t type;
-   cloud_provider_t provider;
-   const char *url;
-   const char *api_key;
-   char model_buf[LLM_MODEL_NAME_MAX];
-   const char *model;
-   session_llm_config_t target_cfg;
-   session_t *session = session_get_command_context();
-   if (call_target(session, &target_cfg, &type, &provider, &url, &api_key, model_buf, &model) !=
-       SUCCESS) {
-      return NULL; /* refused: never sent to another provider, nor to the local LLM */
-   }
-
-   /* Track LLM total time */
-   struct timeval start_time, end_time;
-   gettimeofday(&start_time, NULL);
-
-   /* Record query metrics */
-   metrics_record_llm_query(type);
-
-   /* Determine provider function and history format */
-   uint32_t session_id = session ? session->session_id : 0;
-   llm_single_shot_fn provider_fn;
-   llm_history_format_t history_format;
-
-   const char *messages_model = call_model(provider, model);
-   if (llm_uses_anthropic_messages(type, provider, messages_model, url)) {
-      /* Claude, and OpenRouter's anthropic/ models (its Messages endpoint) */
-      provider_fn = (llm_single_shot_fn)llm_claude_streaming_single_shot;
-      history_format = LLM_HISTORY_CLAUDE;
-      model = messages_model;
-   } else {
-      /* OpenAI, Gemini, OpenRouter's other vendors, and local use the
-       * OpenAI-compatible API. */
-      provider_fn = (llm_single_shot_fn)llm_openai_streaming_single_shot;
-      history_format = LLM_HISTORY_OPENAI;
-      if (type == LLM_LOCAL) {
-         api_key = NULL; /* Local LLM needs no API key */
-      }
-   }
-
-   /* Run the central tool iteration loop */
-   llm_tool_loop_params_t loop_params = {
-      .conversation_history = conversation_history,
-      .input_text = input_text,
-      .base_url = url,
-      .api_key = api_key,
-      .model = model,
-      .chunk_callback = (void *)chunk_callback,
-      .callback_userdata = callback_userdata,
-      .provider_fn = provider_fn,
-      .history_format = history_format,
-      .session_id = session_id,
-      /* A side call (a tool's summarizer, extraction) runs inside a turn but
-       * is none of its conversation: it reads and writes no session state. */
-      .has_session = session != NULL && !llm_cache_monitor_in_side_call(),
-      .llm_type = type,
-      .cloud_provider = provider,
-      /* cancel_flag borrows &session->cancel_requested for the loop's lifetime.
-       * Safe because the caller holds a session ref for the whole synchronous
-       * loop and session teardown sets cancel_requested BEFORE freeing (see
-       * session_destroy ordering) — the loop observes the flag and exits first. */
-      .cancel_flag = session ? &session->cancel_requested : NULL,
-      .is_background = session_is_background(session),
-      .cumulative_input_token_ceiling = session ? session->input_token_ceiling : 0,
-   };
-
-   response = llm_tool_iteration_loop(&loop_params);
-
-   /* If cloud LLM failed (but not interrupted by user), try falling back to local.
-    * "Interrupted" is global OR session cancel (see the loop's ictx), so the
-    * suppression must check BOTH — a turn aborted purely by its session cancel
-    * flag (global unset) must not fall through to a spoken "Unable to contact
-    * cloud LLM" + a global provider switch. */
-   if (response == NULL && type == LLM_CLOUD && allow_fallback && !llm_is_interrupt_requested() &&
-       !(session && atomic_load(&session->cancel_requested))) {
-      if (strcmp(CLOUDAI_URL, url) == 0 || strcmp(CLAUDE_URL, url) == 0 ||
-          strcmp(GEMINI_URL, url) == 0 || strcmp(OPENROUTER_URL, url) == 0) {
-         OLOG_WARNING("Falling back to local LLM due to connection failure.");
-         text_to_speech("Unable to contact cloud LLM.");
-         llm_set_type(LLM_LOCAL);
-
-         /* Retry with local LLM via tool iteration loop */
-         loop_params.base_url = llm_url;
-         loop_params.api_key = NULL;
-         loop_params.model = NULL;
-         loop_params.provider_fn = (llm_single_shot_fn)llm_openai_streaming_single_shot;
-         loop_params.history_format = LLM_HISTORY_OPENAI;
-         loop_params.llm_type = LLM_LOCAL;
-         loop_params.cloud_provider = CLOUD_PROVIDER_NONE;
-         response = llm_tool_iteration_loop(&loop_params);
-         /* Record fallback event */
-         metrics_record_fallback();
-      }
-   }
-
-   /* The turn ended: a history nearing its window is summarized ahead, applied
-    * at the next turn's seam (session_compaction.h). */
-   if (loop_params.has_session) {
-      session_t *trigger_session = session_get(loop_params.session_id);
-      if (trigger_session) {
-         session_compaction_trigger(trigger_session, loop_params.conversation_history,
-                                    loop_params.llm_type, loop_params.cloud_provider,
-                                    loop_params.model);
-         session_release(trigger_session);
-      }
-   }
-
-   /* Record LLM total time */
-   if (response != NULL) {
-      gettimeofday(&end_time, NULL);
-      double total_ms = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
-                        (end_time.tv_usec - start_time.tv_usec) / 1000.0;
-      metrics_record_llm_total_time(total_ms);
-   }
-
    return response;
 }
 
@@ -1164,7 +693,7 @@ char *llm_chat_completion_streaming(struct json_object *conversation_history,
  * @brief Context for TTS streaming
  *
  * THREADING SAFETY CONTRACT:
- * This structure is stack-allocated in llm_chat_completion_streaming_tts() and relies
+ * This structure is stack-allocated in llm_chat_completion_streaming_tts_with_config() and relies
  * on synchronous CURL execution. The context remains valid throughout the entire CURL
  * request because curl_easy_perform() blocks until completion, invoking all callbacks
  * from the calling thread before returning.
@@ -1208,38 +737,6 @@ static void tts_sentence_callback(const char *sentence, void *userdata) {
    ctx->user_callback(sentence, ctx->user_userdata);
 }
 
-char *llm_chat_completion_streaming_tts(struct json_object *conversation_history,
-                                        const char *input_text,
-                                        llm_sentence_callback sentence_callback,
-                                        void *callback_userdata,
-                                        bool allow_fallback) {
-   llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
-   char *response = NULL;
-   tts_streaming_context_t ctx;
-
-   // Create sentence buffer
-   ctx.sentence_buffer = sentence_buffer_create(tts_sentence_callback, &ctx);
-   if (!ctx.sentence_buffer) {
-      OLOG_ERROR("Failed to create sentence buffer for TTS streaming");
-      return NULL;
-   }
-
-   ctx.user_callback = sentence_callback;
-   ctx.user_userdata = callback_userdata;
-
-   // Call streaming with chunk callback that feeds sentence buffer
-   response = llm_chat_completion_streaming(conversation_history, input_text, tts_chunk_callback,
-                                            &ctx, allow_fallback);
-
-   // Flush any remaining sentence
-   sentence_buffer_flush(ctx.sentence_buffer);
-
-   // Cleanup
-   sentence_buffer_free(ctx.sentence_buffer);
-
-   return response;
-}
-
 /* ============================================================================
  * Per-Session LLM Configuration Support
  * ============================================================================ */
@@ -1251,40 +748,10 @@ void llm_get_default_config(session_llm_config_t *config) {
 
    memset(config, 0, sizeof(*config));
 
-   // Determine default LLM type from g_config
-   if (strcmp(g_config.llm.type, "local") == 0) {
-      config->type = LLM_LOCAL;
-   } else {
-      config->type = LLM_CLOUD;
-   }
-
-   // Set default cloud provider (used when switching from local to cloud).
-   // If config specifies a provider AND it has a key, use it; otherwise auto-detect.
-   // (OpenRouter is a first-class provider here — the gateway bool was retired.)
-   {
-      cloud_provider_t configured = CLOUD_PROVIDER_NONE;
-      bool configured_has_key = false;
-      if (strcasecmp(g_config.llm.cloud.provider, "claude") == 0) {
-         configured = CLOUD_PROVIDER_CLAUDE;
-         configured_has_key = is_claude_available();
-      } else if (strcasecmp(g_config.llm.cloud.provider, "gemini") == 0) {
-         configured = CLOUD_PROVIDER_GEMINI;
-         configured_has_key = is_gemini_available();
-      } else if (strcasecmp(g_config.llm.cloud.provider, "openai") == 0) {
-         configured = CLOUD_PROVIDER_OPENAI;
-         configured_has_key = is_openai_available();
-      } else if (strcasecmp(g_config.llm.cloud.provider, "openrouter") == 0) {
-         configured = CLOUD_PROVIDER_OPENROUTER;
-         configured_has_key = is_openrouter_available();
-      }
-
-      if (configured != CLOUD_PROVIDER_NONE && configured_has_key) {
-         config->cloud_provider = configured;
-      } else {
-         // Config provider unavailable or empty — use the auto-detected provider
-         config->cloud_provider = llm_get_cloud_provider();
-      }
-   }
+   /* No selection of its own: it follows the default (llm_selection_resolve), read
+    * from dawn.toml at each use. */
+   config->type = LLM_UNDEFINED;
+   config->cloud_provider = CLOUD_PROVIDER_NONE;
 
    // Endpoint and model are empty by default (resolved at call time from config)
    config->endpoint[0] = '\0';
@@ -1307,10 +774,6 @@ void llm_get_default_config(session_llm_config_t *config) {
    } else {
       safe_strscpy(config->reasoning_effort, LLM_REASONING_EFFORT_DEFAULT);
    }
-
-   OLOG_INFO("Default LLM config: type=%s, provider=%s",
-             config->type == LLM_LOCAL ? "local" : "cloud",
-             cloud_provider_to_string(config->cloud_provider));
 }
 
 int llm_resolve_config(const session_llm_config_t *session_config,
@@ -1328,7 +791,15 @@ int llm_resolve_config(const session_llm_config_t *session_config,
    llm_selection_resolve(&cfg);
    char reason[LLM_SELECTION_REASON_MAX];
    if (llm_selection_problem(&cfg, reason, sizeof(reason)) != 0) {
-      OLOG_ERROR("LLM config can't run: %s", reason);
+      /* Refused, but still what is selected, for a display (no key, no URL); the
+       * callers that would send log the refusal. */
+      OLOG_DEBUG("LLM config can't run: %s", reason);
+      resolved->type = cfg.type;
+      resolved->cloud_provider = cfg.cloud_provider;
+      safe_strscpy(resolved->model_buf, cfg.model);
+      resolved->model = resolved->model_buf[0] != '\0' ? resolved->model_buf : NULL;
+      safe_strscpy(resolved->thinking_mode, cfg.thinking_mode);
+      safe_strscpy(resolved->reasoning_effort, cfg.reasoning_effort);
       return 1;
    }
 
@@ -1377,8 +848,12 @@ int llm_resolve_config(const session_llm_config_t *session_config,
       if (!resolved->api_key) {
          OLOG_ERROR("LLM config can't run: %s has no API key",
                     cloud_provider_display_name(resolved->cloud_provider));
-         memset(resolved, 0, sizeof(*resolved)); /* model still points into cfg */
-         return 1;                               /* the key was removed after the check */
+         /* The key was removed after the check: what is selected, as on refusal
+          * above, without the model (it still points into cfg). */
+         memset(resolved, 0, sizeof(*resolved));
+         resolved->type = cfg.type;
+         resolved->cloud_provider = cfg.cloud_provider;
+         return 1;
       }
    }
 
@@ -1461,8 +936,8 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
    llm_set_last_error(LLM_ERR_NONE);
 
    if (!config) {
-      // No config provided, use global (with fallback enabled)
-      return llm_chat_completion(conversation_history, input_text, true);
+      llm_set_last_error(LLM_ERR_NOT_SELECTED); /* nothing to send it to */
+      return NULL;
    }
 
    char *response = NULL;
@@ -1472,14 +947,8 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
    if (endpoint == NULL || endpoint[0] == '\0') {
       if (config->type == LLM_LOCAL) {
          endpoint = g_config.llm.local.endpoint;
-      } else if (config->cloud_provider == CLOUD_PROVIDER_OPENAI) {
-         endpoint = CLOUDAI_URL;
-      } else if (config->cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-         endpoint = CLAUDE_URL;
-      } else if (config->cloud_provider == CLOUD_PROVIDER_GEMINI) {
-         endpoint = GEMINI_URL;
-      } else if (config->cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
-         endpoint = OPENROUTER_URL;
+      } else {
+         endpoint = llm_cloud_url(config->cloud_provider);
       }
    }
 
@@ -1779,9 +1248,8 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
    llm_clear_interrupt();
 
    if (!config) {
-      // No config provided, use global (with fallback enabled)
-      return llm_chat_completion_streaming(conversation_history, input_text, chunk_callback,
-                                           callback_userdata, true);
+      llm_set_last_error(LLM_ERR_NOT_SELECTED); /* nothing to send it to */
+      return NULL;
    }
 
    const cloud_provider_t provider = config->cloud_provider;
@@ -1865,9 +1333,8 @@ char *llm_chat_completion_streaming_tts_with_config(struct json_object *conversa
                                                     const llm_resolved_config_t *config) {
    llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
    if (!config) {
-      // No config provided, use global (with fallback enabled)
-      return llm_chat_completion_streaming_tts(conversation_history, input_text, sentence_callback,
-                                               callback_userdata, true);
+      llm_set_last_error(LLM_ERR_NOT_SELECTED); /* nothing to send it to */
+      return NULL;
    }
 
    char *response = NULL;

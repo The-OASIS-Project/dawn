@@ -53,6 +53,7 @@
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
 #include "llm/llm_rate_limit.h"
+#include "llm/llm_selection.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
 #include "tools/messaging_tool.h"
@@ -1360,6 +1361,10 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
    char old_local_endpoint[128];
    safe_strscpy(old_local_endpoint, g_config.llm.local.endpoint);
 
+   /* Whether the default LLM changes (announced below). */
+   llm_selection_t old_default;
+   llm_default_selection(&old_default);
+
    /* Apply changes to global config with mutex protection.
     * The write lock ensures no other threads are reading config during modification.
     * TOML write is also inside the lock to prevent concurrent reads of partial state.
@@ -1377,52 +1382,18 @@ void handle_set_config(ws_connection_t *conn, struct json_object *payload) {
                              json_object_new_string("Configuration saved successfully"));
       OLOG_INFO("WebUI: Configuration saved to %s", config_path);
 
-      /* Apply runtime changes for LLM type if it was updated */
-      struct json_object *llm_section = NULL;
-      struct json_object *llm_type_obj = NULL;
-      if (json_object_object_get_ex(payload, "llm", &llm_section) &&
-          json_object_object_get_ex(llm_section, "type", &llm_type_obj)) {
-         const char *new_type = json_object_get_string(llm_type_obj);
-         if (new_type) {
-            if (strcmp(new_type, "cloud") == 0) {
-               int rc = llm_set_type(LLM_CLOUD);
-               if (rc != 0) {
-                  /* Update response to indicate partial success */
-                  json_object_object_add(resp_payload, "warning",
-                                         json_object_new_string(
-                                             "Config saved but failed to switch to cloud LLM - "
-                                             "API key not configured"));
-               }
-            } else if (strcmp(new_type, "local") == 0) {
-               llm_set_type(LLM_LOCAL);
-            }
-         }
-      }
-
-      /* Apply runtime changes for cloud provider if it was updated */
-      struct json_object *cloud_section = NULL;
-      struct json_object *provider_obj = NULL;
-      if (json_object_object_get_ex(payload, "llm", &llm_section) &&
-          json_object_object_get_ex(llm_section, "cloud", &cloud_section) &&
-          json_object_object_get_ex(cloud_section, "provider", &provider_obj)) {
-         const char *new_provider = json_object_get_string(provider_obj);
-         if (new_provider) {
-            int rc = 0;
-            if (strcmp(new_provider, "openai") == 0) {
-               rc = llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI);
-            } else if (strcmp(new_provider, "claude") == 0) {
-               rc = llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE);
-            } else if (strcmp(new_provider, "gemini") == 0) {
-               rc = llm_set_cloud_provider(CLOUD_PROVIDER_GEMINI);
-            } else if (strcmp(new_provider, "openrouter") == 0) {
-               rc = llm_set_cloud_provider(CLOUD_PROVIDER_OPENROUTER);
-            }
-            if (rc != 0) {
-               json_object_object_add(resp_payload, "warning",
-                                      json_object_new_string(
-                                          "Config saved but failed to switch cloud provider - "
-                                          "API key not configured"));
-            }
+      /* A changed default reaches every conversation that follows it at its next
+       * turn; say what it is now, or why it can't run. */
+      llm_selection_t new_default;
+      llm_default_selection(&new_default);
+      if (new_default.type != old_default.type || new_default.provider != old_default.provider ||
+          strcmp(new_default.model, old_default.model) != 0) {
+         llm_announce_selection();
+         session_llm_config_t def;
+         llm_get_default_config(&def);
+         char reason[LLM_SELECTION_REASON_MAX];
+         if (llm_selection_problem(&def, reason, sizeof(reason)) != 0) {
+            json_object_object_add(resp_payload, "warning", json_object_new_string(reason));
          }
       }
 
@@ -1529,6 +1500,11 @@ void handle_set_secrets(ws_connection_t *conn, struct json_object *payload) {
       /* No secrets file loaded - use default path */
       secrets_path = "./secrets.toml";
    }
+
+   /* Whether the default LLM can run, before the keys change (said again if it changes). */
+   session_llm_config_t def;
+   llm_get_default_config(&def);
+   const int default_problem_before = llm_selection_problem(&def, NULL, 0);
 
    /* Create backup before modifying */
    config_backup_file(secrets_path);
@@ -1675,13 +1651,14 @@ void handle_set_secrets(ws_connection_t *conn, struct json_object *payload) {
          json_object_object_add(resp_payload, "secrets", secrets_status);
       }
 
-      /* Refresh LLM providers to pick up new API keys immediately */
-      llm_refresh_providers();
-
       /* Start any messaging driver whose bot token was just added, so a linked
        * Telegram/Discord/Slack channel works without a daemon restart.  Additive
        * only — rotating/removing a token is still restart-to-apply. */
       messaging_tool_refresh_drivers();
+
+      if (llm_selection_problem(&def, NULL, 0) != default_problem_before) {
+         llm_announce_selection(); /* e.g. the selected provider's key was just added */
+      }
 
       OLOG_INFO("WebUI: Secrets saved to %s", secrets_path);
    } else {

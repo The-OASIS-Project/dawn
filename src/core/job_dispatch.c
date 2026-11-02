@@ -27,13 +27,13 @@
 #include "auth/auth_db_messages.h"
 #include "core/session_manager.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "logging.h"
 
 job_provider_class_t job_provider_from_default(void) {
-   session_llm_config_t defcfg;
-   memset(&defcfg, 0, sizeof(defcfg));
-   llm_get_default_config(&defcfg);
-   return (defcfg.type == LLM_LOCAL) ? JOB_PROVIDER_LOCAL : JOB_PROVIDER_CLOUD;
+   llm_selection_t sel;
+   llm_default_selection(&sel);
+   return (sel.type == LLM_LOCAL) ? JOB_PROVIDER_LOCAL : JOB_PROVIDER_CLOUD;
 }
 
 void job_disposition_signals(session_t *s,

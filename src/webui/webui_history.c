@@ -42,6 +42,7 @@
 #include "core/session_prefix.h"
 #include "image_store.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
@@ -850,6 +851,7 @@ static int load_msg_callback(const conversation_message_t *msg, void *context) {
 static json_object *build_conv_llm_settings_json(const conversation_t *conv) {
    session_llm_config_t def_sc;
    llm_get_default_config(&def_sc);
+   llm_selection_resolve(&def_sc); /* the conversation's columns go over a concrete default */
    llm_resolved_config_t def_r = { 0 };
    llm_resolve_config(&def_sc, &def_r);
 

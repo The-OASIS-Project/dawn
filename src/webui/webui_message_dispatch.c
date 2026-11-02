@@ -450,103 +450,6 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
 
       /* Request restart - this will trigger clean shutdown and re-exec */
       dawn_request_restart();
-   } else if (strcmp(type, "set_llm_runtime") == 0) {
-      /* Admin-only: affects all clients */
-      if (!conn_require_admin(conn)) {
-         return;
-      }
-      /* Switch LLM type or provider at runtime (immediate effect, no restart) */
-      struct json_object *response = json_object_new_object();
-      json_object_object_add(response, "type", json_object_new_string("set_llm_runtime_response"));
-      struct json_object *resp_payload = json_object_new_object();
-
-      int success = 1;
-      const char *error_msg = NULL;
-
-      if (payload) {
-         struct json_object *type_obj, *provider_obj;
-
-         /* Handle LLM type change (local/cloud) */
-         if (json_object_object_get_ex(payload, "type", &type_obj)) {
-            const char *new_type = json_object_get_string(type_obj);
-            if (new_type) {
-               if (strcmp(new_type, "local") == 0) {
-                  llm_set_type(LLM_LOCAL);
-                  OLOG_INFO("WebUI: Switched to local LLM");
-               } else if (strcmp(new_type, "cloud") == 0) {
-                  /* When switching to cloud, ensure a provider with a key is selected.
-                   * OpenRouter is a normal provider now; it is picked last so it does
-                   * not preempt a configured direct provider (decision O1). */
-                  if (llm_has_openai_key()) {
-                     llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI);
-                  } else if (llm_has_claude_key()) {
-                     llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE);
-                  } else if (llm_has_gemini_key()) {
-                     llm_set_cloud_provider(CLOUD_PROVIDER_GEMINI);
-                  } else if (llm_has_openrouter_key()) {
-                     llm_set_cloud_provider(CLOUD_PROVIDER_OPENROUTER);
-                  }
-                  int rc = llm_set_type(LLM_CLOUD);
-                  if (rc != 0) {
-                     success = 0;
-                     error_msg = "No cloud API key configured in secrets.toml";
-                  } else {
-                     OLOG_INFO("WebUI: Switched to cloud LLM");
-                  }
-               }
-            }
-         }
-
-         /* Handle cloud provider change (openai/claude/gemini) */
-         if (success && json_object_object_get_ex(payload, "provider", &provider_obj)) {
-            const char *new_provider = json_object_get_string(provider_obj);
-            if (new_provider) {
-               int rc = 0;
-               if (strcmp(new_provider, "openai") == 0) {
-                  rc = llm_set_cloud_provider(CLOUD_PROVIDER_OPENAI);
-               } else if (strcmp(new_provider, "claude") == 0) {
-                  rc = llm_set_cloud_provider(CLOUD_PROVIDER_CLAUDE);
-               } else if (strcmp(new_provider, "gemini") == 0) {
-                  rc = llm_set_cloud_provider(CLOUD_PROVIDER_GEMINI);
-               } else if (strcmp(new_provider, "openrouter") == 0) {
-                  rc = llm_set_cloud_provider(CLOUD_PROVIDER_OPENROUTER);
-               }
-               if (rc != 0) {
-                  success = 0;
-                  error_msg = "API key not configured for this provider";
-               } else {
-                  OLOG_INFO("WebUI: Switched cloud provider to %s", new_provider);
-               }
-            }
-         }
-      }
-
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(success));
-      if (error_msg) {
-         json_object_object_add(resp_payload, "error", json_object_new_string(error_msg));
-      }
-
-      /* Return updated runtime state */
-      llm_type_t current_type = llm_get_type();
-      json_object_object_add(resp_payload, "type",
-                             json_object_new_string(current_type == LLM_LOCAL ? "local" : "cloud"));
-      json_object_object_add(resp_payload, "provider",
-                             json_object_new_string(llm_get_cloud_provider_name()));
-      json_object_object_add(resp_payload, "model", json_object_new_string(llm_get_model_name()));
-
-      /* Include API key availability so client can populate provider dropdown */
-      json_object_object_add(resp_payload, "openai_available",
-                             json_object_new_boolean(llm_has_openai_key()));
-      json_object_object_add(resp_payload, "claude_available",
-                             json_object_new_boolean(llm_has_claude_key()));
-      json_object_object_add(resp_payload, "gemini_available",
-                             json_object_new_boolean(llm_has_gemini_key()));
-      json_object_object_add(resp_payload, "openrouter_available",
-                             json_object_new_boolean(llm_has_openrouter_key()));
-
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
    } else if (strcmp(type, "set_session_llm") == 0) {
       /* Per-session LLM configuration (does NOT affect other clients) */
       struct json_object *response = json_object_new_object();
@@ -599,17 +502,6 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
                } else if (strcmp(new_type, "cloud") == 0) {
                   config.type = LLM_CLOUD;
                   type_explicitly_set = true;
-                  /* If no provider is set, pick the first one with an API key */
-                  if (config.cloud_provider == CLOUD_PROVIDER_NONE) {
-                     config.cloud_provider = llm_detect_available_provider();
-                     if (config.cloud_provider != CLOUD_PROVIDER_NONE) {
-                        OLOG_INFO("WebUI: Auto-selected %s (API key available)",
-                                  cloud_provider_to_string(config.cloud_provider));
-                     } else {
-                        OLOG_WARNING("WebUI: No cloud API keys found — configure in "
-                                     "Settings or secrets.toml");
-                     }
-                  }
                } else if (strcmp(new_type, "reset") == 0) {
                   /* Reset to defaults from dawn.toml, in the working copy:
                    * anything else this request sets applies over them, and the
@@ -694,7 +586,7 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
           *       paths that match none, so this never misfires on a local pick; or
           *   (b) the client explicitly set a cloud provider this request (covers OpenRouter,
           *       whose "vendor/model" slug matches no prefix) — an active cloud selection.
-          * A missing key then fails loudly in session_set_llm_config below rather than
+          * A missing key then refuses the next turn with the reason rather than
           * silently substituting local.
           *
           * Gated on !type_explicitly_set: this only reconciles the case where the client

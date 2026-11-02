@@ -411,10 +411,6 @@ int session_defer_fact_source(session_t *session,
 void session_set_turn_token(uint64_t token) {
    (void)token;
 }
-void session_set_llm_config_override(const session_t *session, const session_llm_config_t *config) {
-   (void)session;
-   (void)config;
-}
 void session_history_append(struct json_object *history, struct json_object *msg) {
    json_object_array_add(history, msg);
 }
