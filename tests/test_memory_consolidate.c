@@ -1256,6 +1256,44 @@ void test_its_source_forgotten_removes_a_row_quoting_a_set_aside_candidate(void)
                               s_user, LISBON));
 }
 
+/* Deleting an entity (the Memory panel's delete) leaves nothing of it in the
+ * record: no row about its relations (a closed relation's row quotes its
+ * subject and object), no link or proposal naming it. */
+void test_deleting_an_entity_removes_its_rows_from_the_record(void) {
+   bool created = false;
+   int64_t jon = 0;
+   memory_db_entity_upsert(s_user, "Jonathan Smith", "person", "jonathan smith", &created, &jon);
+   const int64_t old = stored("Jonathan Smith's favorite color is blue", "explicit", 0);
+   memory_db_relation_create(s_user, jon, "favorite_color", 0, "blue", old, 0.9f, 0, 0, NULL);
+   script("{\"ops\": [{\"op\": \"add\", \"c\": \"C1\"}, {\"op\": \"close_relation\", \"r\": "
+          "\"R1\", \"valid_to\": \"2026-10-01\", \"by\": \"C1\"}], \"finish\": true}",
+          NULL);
+   const memory_consolidate_result_t res = run(
+       "{\"facts\": [{\"text\": \"Jonathan Smith's favorite color is green\", \"subject\": "
+       "\"Jonathan Smith\", \"relations\": [{\"subject\": \"Jonathan Smith\", \"predicate\": "
+       "\"favorite_color\", \"object\": \"green\"}]}]}",
+       0, 0);
+   TEST_ASSERT_EQUAL_INT(1, rows(res.batch_id, "closed", "applied"));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_entity_delete(jon, s_user));
+   TEST_ASSERT_EQUAL_INT(0, rows(res.batch_id, "closed", NULL));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE user_id = ?1 "
+                              "AND relation_id IS NOT NULL",
+                              s_user, NULL));
+}
+
+void test_deleting_a_linked_entity_removes_the_link_row(void) {
+   const memory_consolidate_result_t res = no_round_with_a_pair(0);
+   TEST_ASSERT_EQUAL_INT(1, rows(res.batch_id, "linked", "applied") +
+                                rows(res.batch_id, "proposed", "applied"));
+   const int64_t jon = q("SELECT id FROM memory_entities WHERE user_id = ?1 AND name = "
+                         "'Jonathan Smith'",
+                         s_user, NULL);
+   TEST_ASSERT_TRUE(jon > 0);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_entity_delete(jon, s_user));
+   TEST_ASSERT_EQUAL_INT(0,
+                         rows(res.batch_id, "linked", NULL) + rows(res.batch_id, "proposed", NULL));
+}
+
 /* Last: the stop can't be undone in the process. */
 void test_cancelled_at_shutdown_stores_additions(void) {
    stored("Jonathan Smith lives in Portland", "explicit", 0);
@@ -1327,6 +1365,8 @@ int main(void) {
    RUN_TEST(test_a_close_by_a_revoked_deferred_candidate_is_refused);
    RUN_TEST(test_its_source_made_private_removes_a_row_quoting_a_set_aside_candidate);
    RUN_TEST(test_its_source_forgotten_removes_a_row_quoting_a_set_aside_candidate);
+   RUN_TEST(test_deleting_an_entity_removes_its_rows_from_the_record);
+   RUN_TEST(test_deleting_a_linked_entity_removes_the_link_row);
    RUN_TEST(test_cancelled_at_shutdown_stores_additions);
    return UNITY_END();
 }

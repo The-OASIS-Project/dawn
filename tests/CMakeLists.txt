@@ -949,6 +949,7 @@ dawn_add_unit_test(test_temporal_relations
            ${SRC_ROOT}/src/memory/memory_db_summaries.c
            ${SRC_ROOT}/src/memory/memory_db_prefs.c
            ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_consolidation.c
            ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
@@ -966,6 +967,7 @@ dawn_add_unit_test(test_relation_supersede
            ${SRC_ROOT}/src/memory/memory_db_summaries.c
            ${SRC_ROOT}/src/memory/memory_db_prefs.c
            ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_consolidation.c
            ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
@@ -990,6 +992,7 @@ dawn_add_unit_test(test_memory_db_alias
            ${SRC_ROOT}/src/memory/memory_db_summaries.c
            ${SRC_ROOT}/src/memory/memory_db_prefs.c
            ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_consolidation.c
            ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            # memory_bm25.c + memory_stem.c arrive via AUTH_DB_SOURCES below.

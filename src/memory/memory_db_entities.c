@@ -36,6 +36,7 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_aliases.h"
+#include "memory/memory_db_consolidation.h"
 #include "memory/memory_db_internal.h"
 #include "memory/memory_embeddings.h"
 #include "utils/string_utils.h"
@@ -506,6 +507,12 @@ int memory_db_entity_get_photo(int user_id,
 
 int memory_db_entity_delete(int64_t entity_id, int user_id) {
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   /* One transaction: the entity, its relations, and the consolidation record's
+    * rows that name it go together. */
+   if (auth_db_txn_begin_locked("memory_db: entity delete") != AUTH_DB_SUCCESS) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
 
    /* Delete relations where this entity is subject or object */
    sqlite3_stmt *rel_stmt = s_db.stmt_memory_relation_delete_by_entity;
@@ -513,24 +520,33 @@ int memory_db_entity_delete(int64_t entity_id, int user_id) {
    sqlite3_bind_int(rel_stmt, 1, user_id);
    sqlite3_bind_int64(rel_stmt, 2, entity_id);
    sqlite3_bind_int64(rel_stmt, 3, entity_id);
-   int rel_rc = sqlite3_step(rel_stmt);
+   int rc = sqlite3_step(rel_stmt);
    sqlite3_reset(rel_stmt);
-   if (rel_rc != SQLITE_DONE) {
+   if (rc != SQLITE_DONE) {
       OLOG_ERROR("memory_db: relation delete failed for entity %ld: %s", (long)entity_id,
                  sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
    }
 
    /* Delete the entity itself */
-   sqlite3_stmt *stmt = s_db.stmt_memory_entity_delete;
-   sqlite3_reset(stmt);
-   sqlite3_bind_int64(stmt, 1, entity_id);
-   sqlite3_bind_int(stmt, 2, user_id);
-
-   int rc = sqlite3_step(stmt);
-   int changes = sqlite3_changes(s_db.db);
-   sqlite3_reset(stmt);
+   int changes = 0;
+   if (rc == SQLITE_DONE) {
+      sqlite3_stmt *stmt = s_db.stmt_memory_entity_delete;
+      sqlite3_reset(stmt);
+      sqlite3_bind_int64(stmt, 1, entity_id);
+      sqlite3_bind_int(stmt, 2, user_id);
+      rc = sqlite3_step(stmt);
+      changes = sqlite3_changes(s_db.db);
+      sqlite3_reset(stmt);
+   }
+   /* The consolidation record mustn't keep its name, or its relations' text. */
+   if (rc == SQLITE_DONE && changes > 0 &&
+       memory_db_consolidation_scrub_entities_locked(user_id) != MEMORY_DB_SUCCESS) {
+      rc = SQLITE_ERROR;
+   }
+   if (auth_db_txn_end_locked(rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
+                              "memory_db: entity delete") != AUTH_DB_SUCCESS) {
+      rc = SQLITE_ERROR;
+   }
 
    AUTH_DB_UNLOCK();
 

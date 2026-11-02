@@ -194,6 +194,33 @@ class OutcomeTests(unittest.TestCase):
                            ("$1.00 pm", "13:00")]:
             self.assertFalse(score.gives_time(text, hhmm), text)
 
+    def test_o_clock_with_a_day_period(self):
+        self.assertFalse(score.gives_time("one o'clock in the morning", "13:00"))
+        self.assertTrue(score.gives_time("one o'clock in the morning", "01:00"))
+        self.assertTrue(score.gives_time("one o'clock in the afternoon", "13:00"))
+        self.assertFalse(score.gives_time("one o'clock in the afternoon", "01:00"))
+        self.assertTrue(score.gives_time("one o'clock", "13:00"))
+        self.assertTrue(score.gives_time("one o'clock", "01:00"))
+        for text, yes, no in [("one o'clock at night", "01:00", "13:00"),
+                              ("1 at night", "01:00", "13:00"),
+                              ("12 at night", "00:00", "12:00"),
+                              ("eleven at night", "23:00", "11:00"),
+                              ("7 at night", "19:00", "07:00"),
+                              ("ten this morning", "10:00", "22:00"),
+                              ("10:30 tonight", "22:30", "10:30"),
+                              ("ten o'clock sharp, in the morning", "10:00", "22:00"),
+                              ("1 pm sharp", "13:00", "01:00"),
+                              ("one o'clock, in the afternoon", "13:00", "01:00"),
+                              ("13:00 tonight", "13:00", "01:00"),
+                              ("21:00 at night", "21:00", "09:00"),
+                              ("00:30 at night", "00:30", "12:30")]:
+            self.assertTrue(score.gives_time(text, yes), text)
+            self.assertFalse(score.gives_time(text, no), text)
+        # "Tonight" with one to five may be either; "at night" stays early.
+        self.assertTrue(score.gives_time("5 tonight", "17:00"))
+        self.assertTrue(score.gives_time("5 tonight", "05:00"))
+        self.assertFalse(score.gives_time("5 at night", "17:00"))
+
     def test_case_hash_sees_a_fact_s_date(self):
         import copy
         mc = _case("verify-002")

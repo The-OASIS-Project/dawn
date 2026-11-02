@@ -559,22 +559,29 @@ int memory_db_consolidation_drop_conversations_locked(int user_id, const char *i
 }
 
 int memory_db_consolidation_scrub_entities_locked(int user_id) {
-   sqlite3_stmt *st = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db,
-                               "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND op IN "
-                               "('linked', 'proposed') AND (entity_id NOT IN (SELECT id FROM "
-                               "memory_entities WHERE user_id = ?1) OR other_entity_id NOT IN "
-                               "(SELECT id FROM memory_entities WHERE user_id = ?1))",
-                               -1, &st, NULL);
-   if (rc == SQLITE_OK) {
-      sqlite3_bind_int(st, 1, user_id);
-      rc = sqlite3_step(st);
+   /* Two statements: the relation half then uses idx_mco_rel; the entity half
+    * scans the user's ops (bounded by the record's retention). */
+   static const char *const k_sql[] = {
+      "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND op IN ('linked', 'proposed') "
+      "AND (entity_id NOT IN (SELECT id FROM memory_entities WHERE user_id = ?1) OR "
+      "other_entity_id NOT IN (SELECT id FROM memory_entities WHERE user_id = ?1))",
+      "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND relation_id IS NOT NULL AND "
+      "relation_id NOT IN (SELECT id FROM memory_relations WHERE user_id = ?1)",
+   };
+   int rc = SQLITE_DONE;
+   for (size_t i = 0; i < sizeof(k_sql) / sizeof(k_sql[0]) && rc == SQLITE_DONE; i++) {
+      sqlite3_stmt *st = NULL;
+      rc = sqlite3_prepare_v2(s_db.db, k_sql[i], -1, &st, NULL);
+      if (rc == SQLITE_OK) {
+         sqlite3_bind_int(st, 1, user_id);
+         rc = sqlite3_step(st);
+      }
+      sqlite3_finalize(st);
    }
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("memory_db: removing a forgotten entity's consolidation record failed: %s",
                  sqlite3_errmsg(s_db.db));
    }
-   sqlite3_finalize(st);
    return rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 

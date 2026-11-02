@@ -224,8 +224,10 @@ int memory_db_consolidation_scrub_facts_locked(int user_id, const char *going_sq
 int memory_db_consolidation_drop_conversations_locked(int user_id, const char *ids_json);
 
 /**
- * @brief In a forget's transaction (lock held), after its deletes: remove the
- *        linked and proposed rows that name an entity no longer there
+ * @brief In a forget's transaction or an entity delete (lock held), after its
+ *        deletes: remove the linked and proposed rows that name an entity no
+ *        longer there, and the rows about a relation no longer there (a closed
+ *        relation's row quotes its subject and object)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_consolidation_scrub_entities_locked(int user_id);

@@ -51,9 +51,29 @@ _HOURS = {w: i + 1 for i, w in enumerate(["one", "two", "three", "four", "five",
 _TIME = re.compile(
     r"(?<![\w:.$])(?P<h>\d{1,2}|" + "|".join(_HOURS) + r")"
     r"(?:(?P<sep>[:.])(?P<m>\d{2}))?(?!\d|[:.]\d)"
-    r"(?:\s*(?P<mer>a\.?\s?m\b\.?|p\.?\s?m\b\.?|o'clock|noon|midnight|"
-    r"in the (?:morning|afternoon|evening)|at night))?", re.I)
+    r"(?:\s*(?P<mer>a\.?\s?m\b\.?|p\.?\s?m\b\.?|o'clock|noon|midnight))?"
+    r"(?:\s+sharp\b)?"
+    r"(?:\s*,?\s*(?P<day>(?:in the|this) (?:morning|afternoon|evening)|at night|tonight))?",
+    re.I)
 _NOON = re.compile(r"(?<![\w-])(noon|midday|midnight)\b")
+
+
+def _with_period(h: int, mi: int, period: str) -> Tuple[int, Optional[int]]:
+    """Hour @p h (1-12) in a day period: the morning's, the afternoon's, the
+    evening's (twelve is midnight), the night's (one to five are early morning,
+    twelve is midnight, six to eleven the evening).  "Tonight" with one to five
+    may be either ("5 tonight" is usually 17:00)."""
+    if "morning" in period:
+        return (h % 12) * 60 + mi, None
+    if "afternoon" in period:
+        return ((h % 12) + 12) * 60 + mi, None
+    if h == 12:
+        return mi, None  # twelve in the evening, at night: midnight
+    if "evening" in period or h >= 6:
+        return (h + 12) * 60 + mi, None
+    if period == "tonight":
+        return h * 60 + mi, (h + 12) * 60 + mi
+    return h * 60 + mi, None  # one to five at night
 
 
 def clock_times(text: str) -> List[Tuple[int, Optional[int]]]:
@@ -62,30 +82,28 @@ def clock_times(text: str) -> List[Tuple[int, Optional[int]]]:
     text = qscore._norm(text or "")
     out = []
     for m in _TIME.finditer(text):
-        word, mins, mer = m.group("h"), m.group("m"), (m.group("mer") or "")
-        if not mins and not mer:
+        word, mins = m.group("h"), m.group("m")
+        mer, day = (m.group("mer") or ""), (m.group("day") or "")
+        if not mins and not mer and not day:
             continue  # a bare number is no time
         h = _HOURS[word] if word in _HOURS else int(word)
         mi = int(mins) if mins else 0
         if h > 23 or mi > 59:
             continue
-        if m.group("sep") == "." and not mer and h <= 12:
+        if m.group("sep") == "." and not mer and not day and h <= 12:
             continue  # "2.50" is a number, "13.00" a time
-        late = "evening" in mer or "night" in mer
-        pm = mer.startswith("p") or "afternoon" in mer or late
-        am = mer.startswith("a") or "morning" in mer
+        am, pm = mer.startswith("a"), mer.startswith("p")
         if mer in ("noon", "midnight"):
-            if h != 12:
-                continue
-            out.append((12 * 60 + mi if mer == "noon" else mi, None))
-        elif (pm or am) and not 1 <= h <= 12:
-            continue
-        elif late and h == 12:
-            out.append((mi, None))  # twelve at night is midnight
-        elif pm:
-            out.append((((h % 12) + 12) * 60 + mi, None))
-        elif am:
-            out.append(((h % 12) * 60 + mi, None))
+            if h == 12:
+                out.append((12 * 60 + mi if mer == "noon" else mi, None))
+        elif am or pm:
+            if 1 <= h <= 12:
+                out.append((((h % 12) + (12 if pm else 0)) * 60 + mi, None))
+        elif day and (h > 12 or h == 0):
+            out.append((h * 60 + mi, None))  # a 24-hour time keeps its value
+        elif day:
+            if 1 <= h <= 12:
+                out.append(_with_period(h, mi, day))
         elif h > 12 or h == 0:
             out.append((h * 60 + mi, None))
         else:
