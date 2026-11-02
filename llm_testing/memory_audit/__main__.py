@@ -36,7 +36,7 @@ import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
-from . import candidates, coverage, models, reextract, rubric
+from . import candidates, coverage, models, reextract, rubric, store
 from .storage import DATA, data_path, private_open, text_sha
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -461,6 +461,12 @@ def main(argv=None):
     s.add_argument("--label", default="", help="output name (default: prompt hash, model, effort)")
     s.add_argument("--config", default="",
                    help="dawn.toml for the bench (default: the run dir's); a variant's settings")
+    s.add_argument("--consolidator", choices=["prompt", "agent"], default="",
+                   help="how the bench stores each batch (default: the config's)")
+    s.add_argument("--samples", type=int, choices=[1, 2], default=0,
+                   help="the consolidator's extraction samples per batch (default 1)")
+    s.add_argument("--forgotten", default="",
+                   help="forgotten facts to seed first (JSON list or JSONL under data/)")
     s.add_argument("--dump-candidates", action="store_true",
                    help="also save each batch's raw extraction facts, before the store "
                         "(reextract_<label>_candidates.jsonl, a B set for coverage)")
@@ -486,7 +492,28 @@ def main(argv=None):
     s.add_argument("--workers", type=int, default=4)
     s.add_argument("--out", default="", help="verdict cache (default: from both set names)")
 
+    s = sub.add_parser("store", help="what re-extraction runs stored, by count")
+    s.add_argument("runs", nargs="+", help="run labels (reextract_<label>.db under data/)")
+    s.add_argument("--assistant", default="", help="assistant name (default: friday)")
+
+    s = sub.add_parser("comebacks", help="seeded forgotten facts stored again (counts)")
+    s.add_argument("runs", nargs="+", help="run labels")
+    s.add_argument("--forgotten", required=True, help="the seed file under data/")
+    s.add_argument("--model", default="claude:claude-haiku-5-5")
+    s.add_argument("--endpoint", default="")
+    s.add_argument("--secrets", default=DEFAULT_SECRETS)
+
+    s = sub.add_parser("world", help="extraction candidates that are world facts (counts)")
+    s.add_argument("candidates", help="reextract_<label>_candidates.jsonl under data/")
+    s.add_argument("--model", default="claude:claude-haiku-5-5")
+    s.add_argument("--endpoint", default="")
+    s.add_argument("--secrets", default=DEFAULT_SECRETS)
+
     a = p.parse_args(argv)
+    if a.cmd in ("store", "comebacks", "world"):
+        {"store": store.run_store, "comebacks": store.run_comebacks,
+         "world": store.run_world}[a.cmd](a)
+        return
     if a.cmd == "coverage":
         a.a_class = a.a_class or _class_name(a.class_model or a.model, a.a_set, "kind")
         if not os.path.exists(_data(a.a_class)):
