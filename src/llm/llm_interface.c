@@ -47,6 +47,7 @@
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_context.h"
 #include "llm/llm_local_fallback.h"
+#include "llm/llm_model_retire.h"
 #include "llm/llm_selection.h"
 #include "llm/llm_tool_loop.h"
 #include "llm/llm_tools.h"
@@ -776,6 +777,27 @@ void llm_get_default_config(session_llm_config_t *config) {
    }
 }
 
+/* A model its vendor retired: the same vendor's replacement (models.toml).  Only
+ * at the vendor's own URL: behind a proxy or on Azure a model id is a deployment
+ * name the user chose.  For every request: turns through llm_resolve_config(),
+ * side calls (extraction, compaction, silent observe) through
+ * llm_chat_completion_with_config(). */
+static void replace_retired_model(llm_resolved_config_t *r) {
+   if (r->type != LLM_CLOUD || !r->model) {
+      return;
+   }
+   /* No endpoint of its own: it is sent where llm_cloud_url() says (a custom
+    * endpoint when the provider has one). */
+   const char *url = r->endpoint && r->endpoint[0] ? r->endpoint : llm_cloud_url(r->cloud_provider);
+   if (strcmp(url, llm_builtin_url(r->cloud_provider)) != 0) {
+      return;
+   }
+   const char *by = llm_model_replacement(r->cloud_provider, r->model, time(NULL));
+   if (by) {
+      r->model = by;
+   }
+}
+
 int llm_resolve_config(const session_llm_config_t *session_config,
                        llm_resolved_config_t *resolved) {
    if (!resolved || !session_config) {
@@ -882,6 +904,8 @@ int llm_resolve_config(const session_llm_config_t *session_config,
       }
    }
 
+   replace_retired_model(resolved);
+
    // Propagate the per-call tool suppression flag (global on/off is checked
    // directly in llm_tools_enabled()).
    resolved->suppress_tools = session_config->suppress_tools;
@@ -905,18 +929,11 @@ int llm_resolve_config(const session_llm_config_t *session_config,
    }
 
    /* Stabilize `model` into the config's own inline model_buf.  Until here it may
-    * still alias the CALLER's session_config->model — a stack local for every
-    * caller (llm_call_prepare, llm_get_current_resolved_config, ...) that is
-    * popped the moment this function's caller returns, leaving resolved->model
-    * dangling.  The next strncpy() from it then reads clobbered stack as a
-    * garbage model name (observed as a Claude 400 "str is not valid UTF-8" on a
-    * multi-iteration turn that survives a mid-turn client disconnect — the
-    * disconnect-survival path lets iteration 1 run, where before it was aborted).
-    * session_config is still alive HERE (caller passed it by pointer), so the
-    * copy is valid; afterward the resolved config is self-contained for `model`.
-    * (endpoint/api_key alias global config or secret buffers and stay valid; only
-    * `model` can alias a per-call local — a custom-endpoint sibling gap remains,
-    * but no struct buffer backs endpoint today.) */
+    * point into this function's copy `cfg` (popped on return), a default-model
+    * getter or a retired model's replacement (static).  A pointer into a frame that
+    * is gone, read on a later tool-loop iteration, was once seen as a Claude 400
+    * "str is not valid UTF-8".  endpoint and api_key point at the caller's config,
+    * the global config or the secrets, which outlive the call. */
    if (resolved->model != NULL && resolved->model != resolved->model_buf) {
       safe_strscpy(resolved->model_buf, resolved->model);
       resolved->model = resolved->model_buf;
@@ -939,6 +956,10 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
       llm_set_last_error(LLM_ERR_NOT_SELECTED); /* nothing to send it to */
       return NULL;
    }
+   /* Side calls build their config themselves: a retired model is replaced here. */
+   llm_resolved_config_t current = *config;
+   replace_retired_model(&current);
+   config = &current;
 
    char *response = NULL;
 

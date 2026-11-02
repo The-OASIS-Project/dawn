@@ -1164,6 +1164,7 @@ dawn_add_unit_test(test_claude_format
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/third_party/tomlc99/toml.c
@@ -1188,6 +1189,7 @@ dawn_add_unit_test(test_prompt_cache_layout
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/third_party/tomlc99/toml.c
@@ -1508,6 +1510,7 @@ dawn_add_unit_test(test_llm_cache_monitor
 dawn_add_unit_test(test_llm_capabilities
    SOURCES test_llm_capabilities.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
@@ -2224,6 +2227,16 @@ dawn_add_unit_test(test_config_validate
    LIBS    unity
    LABEL   ci)
 
+# Retired models (models.toml [retired]): matching, dates, chains, refused rows.
+dawn_add_unit_test(test_llm_model_retire
+   SOURCES test_llm_model_retire.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
+           ${SRC_ROOT}/src/config/config_defaults.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
+   LIBS    dawn_common unity pthread
+   DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
+   LABEL   ci)
+
 # Which LLM a chat runs on, and whether it can: a key only for the selected provider.
 dawn_add_unit_test(test_llm_selection
    SOURCES test_llm_selection.c
@@ -2504,6 +2517,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_claude_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/src/llm/llm_openai.c
@@ -2632,6 +2646,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_claude_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/src/llm/llm_openai.c
@@ -2755,6 +2770,7 @@ dawn_add_unit_test(test_memory_supersede_kinds
            ${SRC_ROOT}/src/llm/llm_claude_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/src/llm/llm_openai.c

@@ -47,6 +47,7 @@
 #include "llm/llm_compaction.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
+#include "llm/llm_model_retire.h"
 #include "llm/llm_models_toml.h"
 #include "llm/llm_pricing.h"
 #include "llm/llm_selection.h"
@@ -292,6 +293,56 @@ static void free_model_table(model_context_entry_t **arr) {
    *arr = NULL;
 }
 
+/* One configured model that is retired: it is replaced at each call, but the
+ * setting should be changed. */
+static void warn_if_retired(const char *where,
+                            const char *provider_name,
+                            const char *model,
+                            time_t now) {
+   llm_type_t type;
+   cloud_provider_t provider;
+   if (!model || !model[0] ||
+       cloud_provider_from_string(provider_name, &type, &provider) != SUCCESS ||
+       type != LLM_CLOUD) {
+      return;
+   }
+   if (strcmp(llm_cloud_url(provider), llm_builtin_url(provider)) != 0) {
+      return; /* a custom endpoint: its model ids are the user's own names, kept */
+   }
+   const char *by = llm_model_replacement(provider, model, now);
+   if (by) {
+      OLOG_WARNING("Settings: %s names %s, which %s retired; %s answers instead. Choose another.",
+                   where, model, cloud_provider_display_name(provider), by);
+   }
+}
+
+/* Configured models that are retired: every model list, and the extraction,
+ * compaction and silent-observe models. */
+static void warn_retired_models(void) {
+   const time_t now = time(NULL);
+   const llm_cloud_config_t *c = &g_config.llm.cloud;
+   for (int i = 0; i < c->openai_models_count; i++) {
+      warn_if_retired("the OpenAI model list", "openai", c->openai_models[i], now);
+   }
+   for (int i = 0; i < c->claude_models_count; i++) {
+      warn_if_retired("the Claude model list", "claude", c->claude_models[i], now);
+   }
+   for (int i = 0; i < c->gemini_models_count; i++) {
+      warn_if_retired("the Gemini model list", "gemini", c->gemini_models[i], now);
+   }
+   for (int i = 0; i < c->openrouter_models_count; i++) {
+      warn_if_retired("the OpenRouter model list", "openrouter", c->openrouter_models[i], now);
+   }
+   warn_if_retired("[memory] extraction_model", g_config.memory.extraction_provider,
+                   g_config.memory.extraction_model, now);
+   if (!g_config.llm.compact_use_session) {
+      warn_if_retired("[llm] compact_model", g_config.llm.compact_provider,
+                      g_config.llm.compact_model, now);
+   }
+   warn_if_retired("[llm.silent_observe] model", g_config.llm.silent_observe.provider,
+                   g_config.llm.silent_observe.model, now);
+}
+
 /* Load the model reference tables from models.toml: the context windows here,
  * cache pricing and reasoning capabilities in their modules.  Each table comes
  * from the disk copy when it has it, else from the shipped copy compiled in. */
@@ -306,6 +357,8 @@ static void load_model_registry(void) {
    llm_capabilities_load_mid_system(llm_models_toml_root_for(&m, "mid_system"));
    llm_capabilities_load_inline_tools(llm_models_toml_root_for(&m, "inline_tools"));
    llm_capabilities_load_image_limits(llm_models_toml_root_for(&m, "max_request_images"));
+   llm_model_retire_load(llm_models_toml_root_for(&m, "retired"));
+   warn_retired_models();
    OLOG_INFO("llm_context: loaded the model registry (%s)",
              m.disk ? m.path : "built-in models.toml");
    llm_models_toml_close(&m);

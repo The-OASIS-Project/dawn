@@ -154,7 +154,7 @@ static const char *provider_default_model(cloud_provider_t provider) {
    }
 }
 
-static const char *builtin_url(cloud_provider_t provider) {
+const char *llm_builtin_url(cloud_provider_t provider) {
    switch (provider) {
       case CLOUD_PROVIDER_OPENAI:
          return CLOUDAI_URL;
@@ -171,7 +171,7 @@ static const char *builtin_url(cloud_provider_t provider) {
 }
 
 const char *llm_cloud_url(cloud_provider_t provider) {
-   const char *url = builtin_url(provider);
+   const char *url = llm_builtin_url(provider);
    pthread_rwlock_rdlock(&g_config_rwlock);
    llm_type_t type;
    cloud_provider_t configured;

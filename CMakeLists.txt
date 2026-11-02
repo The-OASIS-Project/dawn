@@ -652,6 +652,7 @@ set(DAWN_SOURCES
     src/llm/llm_context.c
     src/llm/llm_cache_monitor.c
     src/llm/llm_capabilities.c
+    src/llm/llm_model_retire.c
     src/llm/llm_model_family.c
     src/llm/llm_models_toml.c
     src/llm/llm_claude_betas.c

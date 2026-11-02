@@ -100,6 +100,33 @@ returns 0 → provider default, exactly as today.
 No `dawn_config_t`, no `config_env.c`, no `webui_config.c`, no `schema.js`. This is
 reference data, not user settings.
 
+### Retired models (`[retired.<provider>]`)
+
+A row names a model its vendor shuts down and the same vendor's replacement:
+`"claude-sonnet-4-5" = { by = "claude-sonnet-5-5", on = "2026-11-30" }`.
+`src/llm/llm_model_retire.c` loads the rows with the other tables and
+`llm_resolve_config()` (the one place every request's model is decided) sends the
+replacement instead, from the `on` date (UTC; none: now), logged once per model.
+DAWN doesn't rewrite stored conversations for it (a later save from the picker
+stores the model that now runs, as any pick does).  At
+startup DAWN warns about each retired model in the settings (the model lists and
+the extraction, compaction and silent-observe models).
+
+- A row matches the id and its snapshots (the id, `-`, then digits and dashes
+  starting with at least three digits), so `claude-opus-4` never catches
+  `claude-opus-4-8`.
+- A replacement that is itself retired is followed (a few steps).
+- Only at the vendor's own URL: with `[llm.cloud] endpoint` (a proxy, Azure) the
+  model id is a name the user chose, and is sent as it is.
+- Applied in `llm_resolve_config()` (turns) and `llm_chat_completion_with_config()`
+  (side calls that build their config: extraction, compaction, silent observe).
+- `[retired.openrouter]` ships empty: OpenRouter ids differ from the vendors'
+  (`anthropic/claude-sonnet-4.5`) and OpenRouter doesn't document what a retired
+  slug does, so rows go in per slug as they are known.
+- The replacement is always the same vendor's: the table is per provider, and an
+  OpenRouter row whose replacement names another vendor is refused at load.
+  DAWN never moves a conversation to a vendor nobody chose.
+
 ## Shipped default numbers (researched Aug 2026)
 
 OpenAI (developers.openai.com + model reference):

@@ -31,11 +31,11 @@ from instance import ADMIN_USER, CLOUD_LLM_PORT, LOCAL_LLM_PORT, WEBUI_PORT, Liv
 CLOUD_URL = f"http://127.0.0.1:{CLOUD_LLM_PORT}"
 
 
-def config(provider):
+def config(provider, model="fake-cloud"):
     return {
         "llm": {"type": "cloud"},
         "llm.cloud": {"provider": provider, "endpoint": CLOUD_URL,
-                      "openai_models": ["fake-cloud"], "openai_default_model_idx": 0,
+                      "openai_models": [model], "openai_default_model_idx": 0,
                       "openai_use_responses_api": "never"},
         "llm.local": {"endpoint": f"http://127.0.0.1:{LOCAL_LLM_PORT}", "model": "fake-local"},
     }
@@ -44,12 +44,13 @@ def config(provider):
 class SelectionCase(LiveTestCase):
     provider = ""
     secrets = ""
+    model = "fake-cloud"
 
     @classmethod
     def setUpClass(cls):
         cls.cloud = FakeLLM(CLOUD_LLM_PORT, "fake-cloud")
         cls.local = FakeLLM(LOCAL_LLM_PORT, "fake-local")
-        cls.start_instance(config(cls.provider), cls.secrets, [cls.cloud, cls.local])
+        cls.start_instance(config(cls.provider, cls.model), cls.secrets, [cls.cloud, cls.local])
         try:
             cls.conv = cls.client.new_conversation()
         except Exception:
@@ -140,6 +141,22 @@ class TestFollowsTheDefault(SelectionCase):
         self.assertNoErrorFrames(t)
         self.assertIn("fake-cloud model answering", t.reply)
         self.assertEqual(len(self.local.chat_requests()), before)
+
+
+class TestRetiredModelOnACustomEndpoint(SelectionCase):
+    """A retired model's replacement (models.toml [retired]) is for the vendor's own
+    URL: behind a proxy or on Azure the id is a deployment name the user chose."""
+
+    provider = "openai"
+    secrets = '[secrets]\nopenai_api_key = "sk-live-test"\n'
+    model = "gpt-4"
+
+    def test_the_request_keeps_its_model(self):
+        nonce, t = self.ask()
+        self.assertNoErrorFrames(t)
+        reqs = self.cloud.chat_requests(nonce)
+        self.assertEqual(len(reqs), 1)
+        self.assertEqual(reqs[0]["body"].get("model"), "gpt-4")
 
 
 if __name__ == "__main__":

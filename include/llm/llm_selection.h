@@ -130,6 +130,9 @@ bool llm_provider_has_key(cloud_provider_t provider);
  */
 const char *llm_cloud_url(cloud_provider_t provider);
 
+/** @brief @p provider's own URL, ignoring [llm.cloud] endpoint ("" for none). */
+const char *llm_builtin_url(cloud_provider_t provider);
+
 /**
  * @brief The provider's name for the user ("OpenAI", "Claude", "Gemini",
  *        "OpenRouter"; "None" otherwise).
