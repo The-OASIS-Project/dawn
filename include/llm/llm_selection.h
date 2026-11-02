@@ -92,6 +92,21 @@ int llm_selection_problem(const session_llm_config_t *cfg, char *reason, size_t 
 bool llm_provider_has_key(cloud_provider_t provider);
 
 /**
+ * @brief The URL @p provider's requests go to.
+ *
+ * `[llm.cloud] endpoint` when it belongs to @p provider (it's set and
+ * `[llm.cloud] provider` names @p provider), else the provider's own URL; "" for
+ * NONE.  So one provider's key never goes to a host set up for another.  The two
+ * settings are read as one snapshot under the config read lock; must not be
+ * called with g_config_rwlock held.
+ *
+ * @return Static storage (a built-in URL, or the configured endpoint in g_config,
+ *         as the local endpoint is used): the pointer outlives any caller; a
+ *         settings save can still rewrite the endpoint's text under it
+ */
+const char *llm_cloud_url(cloud_provider_t provider);
+
+/**
  * @brief The provider's name for the user ("OpenAI", "Claude", "Gemini",
  *        "OpenRouter"; "None" otherwise).
  */

@@ -227,6 +227,23 @@ static void test_no_config_is_refused(void) {
    TEST_ASSERT_TRUE(reason[0] != '\0');
 }
 
+/* [llm.cloud] endpoint belongs to the configured provider only: another
+ * provider's key never goes to a host set up for it. */
+static void test_cloud_url_endpoint_belongs_to_its_provider(void) {
+   set_default("cloud", "openai");
+   safe_strscpy(g_config.llm.cloud.endpoint, "http://proxy.example:8000");
+   TEST_ASSERT_EQUAL_STRING("http://proxy.example:8000", llm_cloud_url(CLOUD_PROVIDER_OPENAI));
+   TEST_ASSERT_EQUAL_STRING(CLAUDE_URL, llm_cloud_url(CLOUD_PROVIDER_CLAUDE));
+   TEST_ASSERT_EQUAL_STRING("", llm_cloud_url(CLOUD_PROVIDER_NONE));
+
+   set_default("cloud", ""); /* no provider: the endpoint belongs to none */
+   TEST_ASSERT_EQUAL_STRING(CLOUDAI_URL, llm_cloud_url(CLOUD_PROVIDER_OPENAI));
+
+   g_config.llm.cloud.endpoint[0] = '\0';
+   set_default("cloud", "gemini");
+   TEST_ASSERT_EQUAL_STRING(GEMINI_URL, llm_cloud_url(CLOUD_PROVIDER_GEMINI));
+}
+
 static void test_has_key_per_provider(void) {
    TEST_ASSERT_FALSE(llm_provider_has_key(CLOUD_PROVIDER_OPENROUTER));
    g_secrets.openrouter_api_key[0] = 'k';
@@ -253,5 +270,6 @@ int main(void) {
    RUN_TEST(test_undefined_is_the_default_selection);
    RUN_TEST(test_no_config_is_refused);
    RUN_TEST(test_has_key_per_provider);
+   RUN_TEST(test_cloud_url_endpoint_belongs_to_its_provider);
    return UNITY_END();
 }

@@ -116,6 +116,10 @@ typedef enum {
 /** CURL connect timeout in milliseconds (TCP + TLS handshake) */
 #define LLM_CONNECT_TIMEOUT_MS 10000L
 
+/** The connect timeout, with one attempt, while the local LLM can still take the
+ *  turn (llm_provider_errors_quiet()): an unreachable cloud is noticed sooner. */
+#define LLM_FALLBACK_CONNECT_TIMEOUT_MS 4000L
+
 /** Maximum length for thinking mode strings */
 #define LLM_THINKING_MODE_MAX 16
 
@@ -436,10 +440,47 @@ int llm_check_connection(const char *url, int timeout_seconds);
  * Every public llm_chat_completion* entry point resets the code to
  * LLM_ERR_NONE on entry so each call's outcome stands on its own. */
 #define LLM_ERR_NONE 0
-#define LLM_ERR_TRANSIENT_NETWORK 1 /* pre-flight check failed, host unreachable */
+/* HTTP 429/5xx, a reply that ended before any output, or (non-streaming calls) an
+ * unreachable host. */
+#define LLM_ERR_TRANSIENT_NETWORK 1
 /* The selected LLM can't run (llm_selection_problem says why): never retried,
  * never sent to another provider. */
 #define LLM_ERR_NOT_SELECTED 2
+/* The cloud can't be reached at all: the pre-flight connect failed, or curl gave up
+ * before the request went out (DNS, connect, TLS). */
+#define LLM_ERR_UNREACHABLE 3
+
+/**
+ * @brief Whether @p code is a temporary failure worth retrying later: the provider
+ *        couldn't be reached (LLM_ERR_UNREACHABLE) or answered 429/5xx
+ *        (LLM_ERR_TRANSIENT_NETWORK).
+ */
+bool llm_error_is_transient(int code);
+
+/**
+ * @brief Record a failed curl transfer of a provider request as this thread's error.
+ *
+ * Only while the local LLM can take the turn (llm_provider_errors_quiet()), and
+ * only a network failure before the request went out (DNS, connect, the TLS
+ * handshake, a connect timeout): LLM_ERR_UNREACHABLE.  Anything else, a TLS
+ * certificate failure included, is left as it is.
+ *
+ * @param curl_handle The transfer's CURL handle
+ * @param curl_code   Its CURLcode
+ */
+void llm_note_curl_failure(void *curl_handle, int curl_code);
+
+/**
+ * @brief Whether the local LLM can still take this thread's provider call
+ *        (a cloud turn with the fallback on, before any tool ran).  While set,
+ *        a provider makes one attempt with LLM_FALLBACK_CONNECT_TIMEOUT_MS and
+ *        keeps its transient-failure error frames to itself (a failure the local
+ *        LLM doesn't answer is reported by the surface).
+ */
+bool llm_provider_errors_quiet(void);
+
+/** @brief Set llm_provider_errors_quiet() for this thread (the tool loop's). */
+void llm_set_provider_errors_quiet(bool quiet);
 
 /**
  * @brief Get the last LLM error code for the calling thread.

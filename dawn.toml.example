@@ -179,6 +179,15 @@
 # max_tokens = 16384              # Maximum response tokens (ceiling, not a target). 16384 is the
                                   # universally-safe max (= GPT-4o's cap); Claude 4.x allows up to 64K.
                                   # Env: DAWN_LLM_MAX_TOKENS
+# local_fallback = false          # true: when the cloud provider can't be reached (or keeps
+                                  # failing with 429/5xx), an interactive turn (voice, chat,
+                                  # satellite, message; not background jobs) is
+                                  # answered by [llm.local] instead, and the first such reply says
+                                  # so; the cloud is tried again after a minute, then less often
+                                  # (up to 10 min) while it stays down. Only for a local LLM you run.
+                                  # An http:// endpoint on another machine carries the whole
+                                  # conversation unencrypted, and anyone who can cut this machine's
+                                  # internet can make DAWN use it: prefer https or 127.0.0.1.
 # compact_soft_threshold = 0.60   # Async background compaction trigger
 # compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)
 # compact_use_session = true      # Use session's LLM for compaction. Set false to compact with a
@@ -197,7 +206,9 @@
 [llm.cloud]
 # provider = "openai"             # "openai", "claude", "gemini", or "openrouter"
                                   # Env: DAWN_LLM_CLOUD_PROVIDER
-# endpoint = ""                   # Custom endpoint (empty = default provider URL)
+# endpoint = ""                   # Custom endpoint for the provider above (empty = its default
+                                  # URL). Only that provider uses it: a conversation on another
+                                  # provider keeps its own URL, so no key goes to the wrong host.
                                   # Env: DAWN_LLM_CLOUD_ENDPOINT
 # vision_enabled = true           # Cloud models typically support vision/images
                                   # Env: DAWN_LLM_CLOUD_VISION_ENABLED

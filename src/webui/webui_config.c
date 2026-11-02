@@ -466,6 +466,7 @@ static void apply_config_from_json(dawn_config_t *config, struct json_object *pa
    if (json_object_object_get_ex(payload, "llm", &section)) {
       JSON_TO_CONFIG_STR(section, "type", config->llm.type);
       JSON_TO_CONFIG_INT(section, "max_tokens", config->llm.max_tokens);
+      JSON_TO_CONFIG_BOOL(section, "local_fallback", config->llm.local_fallback);
 
       struct json_object *cloud;
       if (json_object_object_get_ex(section, "cloud", &cloud)) {

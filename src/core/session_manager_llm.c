@@ -131,7 +131,7 @@ typedef struct {
    const char *llm_input;
    llm_resolved_config_t resolved_config;
    char model_buf[LLM_MODEL_NAME_MAX]; /* Buffer for model name (outlives stack) */
-   char endpoint_buf[128];             /* Buffer for endpoint (outlives stack) */
+   char endpoint_buf[CONFIG_PATH_MAX]; /* Buffer for endpoint (outlives stack) */
 } llm_call_ctx_t;
 
 /* A private copy of the reply's blocks for the writer that saves it
@@ -312,7 +312,7 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
          const char *reason;
          if (response) {
             reason = "complete";
-         } else if (post_call_error == LLM_ERR_TRANSIENT_NETWORK) {
+         } else if (llm_error_is_transient(post_call_error)) {
             reason = "transient_error";
          } else {
             reason = "error";
@@ -386,7 +386,7 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
    }
 
    if (!response) {
-      if (post_call_error == LLM_ERR_TRANSIENT_NETWORK) {
+      if (llm_error_is_transient(post_call_error)) {
          OLOG_ERROR("Session %u: LLM call failed (transient network error, retries exhausted)",
                     session->session_id);
       } else {

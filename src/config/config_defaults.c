@@ -113,8 +113,9 @@ void config_set_defaults(dawn_config_t *config) {
 
    /* LLM */
    safe_strscpy(config->llm.type, "cloud");
-   config->llm.max_tokens = 16384; /* Generous, universally-safe ceiling (= GPT-4o max output,
-                                      well within Claude 4.x 64K); a ceiling, not a target */
+   config->llm.local_fallback = false; /* opt-in: a local LLM the user set up */
+   config->llm.max_tokens = 16384;     /* Generous, universally-safe ceiling (= GPT-4o max output,
+                                          well within Claude 4.x 64K); a ceiling, not a target */
 
    /* LLM Cloud */
    config->llm.cloud.provider[0] = '\0'; /* Empty = auto-detect from available API keys */

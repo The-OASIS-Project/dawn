@@ -153,6 +153,36 @@ static const char *provider_default_model(cloud_provider_t provider) {
    }
 }
 
+static const char *builtin_url(cloud_provider_t provider) {
+   switch (provider) {
+      case CLOUD_PROVIDER_OPENAI:
+         return CLOUDAI_URL;
+      case CLOUD_PROVIDER_CLAUDE:
+         return CLAUDE_URL;
+      case CLOUD_PROVIDER_GEMINI:
+         return GEMINI_URL;
+      case CLOUD_PROVIDER_OPENROUTER:
+         return OPENROUTER_URL;
+      case CLOUD_PROVIDER_NONE:
+      default:
+         return "";
+   }
+}
+
+const char *llm_cloud_url(cloud_provider_t provider) {
+   const char *url = builtin_url(provider);
+   pthread_rwlock_rdlock(&g_config_rwlock);
+   llm_type_t type;
+   cloud_provider_t configured;
+   if (url[0] != '\0' && g_config.llm.cloud.endpoint[0] != '\0' &&
+       cloud_provider_from_string(g_config.llm.cloud.provider, &type, &configured) == SUCCESS &&
+       type == LLM_CLOUD && configured == provider) {
+      url = g_config.llm.cloud.endpoint;
+   }
+   pthread_rwlock_unlock(&g_config_rwlock);
+   return url;
+}
+
 /* ---- selection ---- */
 
 bool llm_provider_has_key(cloud_provider_t provider) {

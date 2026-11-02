@@ -34,16 +34,19 @@
 #include <string.h>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "config/dawn_config.h"
 #include "core/curl_buffer.h"
 #include "core/session_compaction.h"
+#include "core/session_history.h"
 #include "core/session_manager.h"
 #include "dawn.h"
 #include "dawn_error.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_context.h"
+#include "llm/llm_local_fallback.h"
 #include "llm/llm_selection.h"
 #include "llm/llm_tool_loop.h"
 #include "llm/llm_tools.h"
@@ -465,28 +468,10 @@ void llm_init(const char *cloud_provider_override) {
  * global chat path (MQTT replies, search/summary fallback) uses llm_url + the live
  * provider together, so they must stay in sync.  Custom llm.cloud.endpoint still wins. */
 static void refresh_cloud_llm_url(void) {
-   if (current_type != LLM_CLOUD) {
-      return;
+   if (current_type != LLM_CLOUD || current_cloud_provider == CLOUD_PROVIDER_NONE) {
+      return; /* NONE — about to fall back to local; leave llm_url unchanged */
    }
-   const char *cfg_ep = g_config.llm.cloud.endpoint[0] != '\0' ? g_config.llm.cloud.endpoint : NULL;
-   const char *def_url = NULL;
-   switch (current_cloud_provider) {
-      case CLOUD_PROVIDER_CLAUDE:
-         def_url = CLAUDE_URL;
-         break;
-      case CLOUD_PROVIDER_GEMINI:
-         def_url = GEMINI_URL;
-         break;
-      case CLOUD_PROVIDER_OPENROUTER:
-         def_url = OPENROUTER_URL;
-         break;
-      case CLOUD_PROVIDER_OPENAI:
-         def_url = CLOUDAI_URL;
-         break;
-      default:
-         return; /* NONE — about to fall back to local; leave llm_url unchanged */
-   }
-   snprintf(llm_url, sizeof(llm_url), "%s", cfg_ep ? cfg_ep : def_url);
+   snprintf(llm_url, sizeof(llm_url), "%s", llm_cloud_url(current_cloud_provider));
 }
 
 int llm_refresh_providers(void) {
@@ -610,32 +595,17 @@ static int set_type(llm_type_t type, bool announce) {
       // API key available, proceed with switch
       current_type = type;
 
-      // Use config endpoint if set, otherwise use default provider URLs
-      const char *cloud_endpoint = g_config.llm.cloud.endpoint[0] != '\0'
-                                       ? g_config.llm.cloud.endpoint
-                                       : NULL;
-      if (current_cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-         snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint ? cloud_endpoint : CLAUDE_URL);
-         if (announce)
-            text_to_speech("Setting AI to cloud LLM using Claude.");
-      } else if (current_cloud_provider == CLOUD_PROVIDER_GEMINI) {
-         snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint ? cloud_endpoint : GEMINI_URL);
-         if (announce)
-            text_to_speech("Setting AI to cloud LLM using Gemini.");
-      } else if (current_cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
-         snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint ? cloud_endpoint : OPENROUTER_URL);
-         if (announce)
-            text_to_speech("Setting AI to cloud LLM using OpenRouter.");
-      } else {
-         snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint ? cloud_endpoint : CLOUDAI_URL);
-         if (announce)
-            text_to_speech("Setting AI to cloud LLM using OpenAI.");
-      }
-      if (announce && cloud_endpoint) {
-         OLOG_INFO("LLM set to CLOUD (%s) via custom endpoint: %s", llm_get_cloud_provider_name(),
-                   cloud_endpoint);
-      } else if (announce) {
-         OLOG_INFO("LLM set to CLOUD (%s)", llm_get_cloud_provider_name());
+      /* The provider whose key was checked above (none is taken as OpenAI there). */
+      snprintf(llm_url, sizeof(llm_url), "%s",
+               llm_cloud_url(current_cloud_provider == CLOUD_PROVIDER_NONE
+                                 ? CLOUD_PROVIDER_OPENAI
+                                 : current_cloud_provider));
+      if (announce) {
+         char announcement[64];
+         snprintf(announcement, sizeof(announcement), "Setting AI to cloud LLM using %s.",
+                  cloud_provider_display_name(current_cloud_provider));
+         text_to_speech(announcement);
+         OLOG_INFO("LLM set to CLOUD (%s): %s", llm_get_cloud_provider_name(), llm_url);
       }
    } else if (type == LLM_LOCAL) {
       current_type = type;
@@ -695,10 +665,7 @@ int llm_set_cloud_provider(cloud_provider_t provider) {
       current_cloud_provider = CLOUD_PROVIDER_OPENAI;
       // Update URL if we're currently in cloud mode
       if (current_type == LLM_CLOUD) {
-         const char *cloud_endpoint = g_config.llm.cloud.endpoint[0] != '\0'
-                                          ? g_config.llm.cloud.endpoint
-                                          : CLOUDAI_URL;
-         snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint);
+         snprintf(llm_url, sizeof(llm_url), "%s", llm_cloud_url(current_cloud_provider));
       }
       OLOG_INFO("Cloud provider set to OpenAI");
       return 0;
@@ -710,10 +677,7 @@ int llm_set_cloud_provider(cloud_provider_t provider) {
       current_cloud_provider = CLOUD_PROVIDER_CLAUDE;
       // Update URL if we're currently in cloud mode
       if (current_type == LLM_CLOUD) {
-         const char *cloud_endpoint = g_config.llm.cloud.endpoint[0] != '\0'
-                                          ? g_config.llm.cloud.endpoint
-                                          : CLAUDE_URL;
-         snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint);
+         snprintf(llm_url, sizeof(llm_url), "%s", llm_cloud_url(current_cloud_provider));
       }
       OLOG_INFO("Cloud provider set to Claude");
       return 0;
@@ -725,10 +689,7 @@ int llm_set_cloud_provider(cloud_provider_t provider) {
       current_cloud_provider = CLOUD_PROVIDER_GEMINI;
       // Update URL if we're currently in cloud mode
       if (current_type == LLM_CLOUD) {
-         const char *cloud_endpoint = g_config.llm.cloud.endpoint[0] != '\0'
-                                          ? g_config.llm.cloud.endpoint
-                                          : GEMINI_URL;
-         snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint);
+         snprintf(llm_url, sizeof(llm_url), "%s", llm_cloud_url(current_cloud_provider));
       }
       OLOG_INFO("Cloud provider set to Gemini");
       return 0;
@@ -740,10 +701,7 @@ int llm_set_cloud_provider(cloud_provider_t provider) {
       current_cloud_provider = CLOUD_PROVIDER_OPENROUTER;
       // Update URL if we're currently in cloud mode
       if (current_type == LLM_CLOUD) {
-         const char *cloud_endpoint = g_config.llm.cloud.endpoint[0] != '\0'
-                                          ? g_config.llm.cloud.endpoint
-                                          : OPENROUTER_URL;
-         snprintf(llm_url, sizeof(llm_url), "%s", cloud_endpoint);
+         snprintf(llm_url, sizeof(llm_url), "%s", llm_cloud_url(current_cloud_provider));
       }
       OLOG_INFO("Cloud provider set to OpenRouter");
       return 0;
@@ -1424,14 +1382,9 @@ int llm_resolve_config(const session_llm_config_t *session_config,
    if (resolved->endpoint == NULL || resolved->endpoint[0] == '\0') {
       if (resolved->type == LLM_LOCAL) {
          resolved->endpoint = g_config.llm.local.endpoint;
-      } else if (resolved->cloud_provider == CLOUD_PROVIDER_OPENAI) {
-         resolved->endpoint = CLOUDAI_URL;
-      } else if (resolved->cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-         resolved->endpoint = CLAUDE_URL;
-      } else if (resolved->cloud_provider == CLOUD_PROVIDER_GEMINI) {
-         resolved->endpoint = GEMINI_URL;
-      } else if (resolved->cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
-         resolved->endpoint = OPENROUTER_URL;
+      } else {
+         const char *url = llm_cloud_url(resolved->cloud_provider);
+         resolved->endpoint = url[0] != '\0' ? url : NULL;
       }
    }
 
@@ -1598,21 +1551,67 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
    return response;
 }
 
-char *llm_chat_completion_streaming_with_config(struct json_object *conversation_history,
-                                                const char *input_text,
-                                                llm_text_chunk_callback chunk_callback,
-                                                void *callback_userdata,
-                                                const llm_resolved_config_t *config) {
-   llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
-   // Clear any previous interrupt flag from cancelled requests
-   llm_clear_interrupt();
+bool llm_error_is_transient(int code) {
+   return code == LLM_ERR_UNREACHABLE || code == LLM_ERR_TRANSIENT_NETWORK;
+}
 
-   if (!config) {
-      // No config provided, use global (with fallback enabled)
-      return llm_chat_completion_streaming(conversation_history, input_text, chunk_callback,
-                                           callback_userdata, true);
+void llm_note_curl_failure(void *curl_handle, int curl_code) {
+   if (!llm_provider_errors_quiet()) {
+      return;
    }
+   const bool network = curl_code == CURLE_COULDNT_RESOLVE_HOST ||
+                        curl_code == CURLE_COULDNT_RESOLVE_PROXY ||
+                        curl_code == CURLE_COULDNT_CONNECT ||
+                        curl_code == CURLE_SSL_CONNECT_ERROR ||
+                        curl_code == CURLE_OPERATION_TIMEDOUT;
+   curl_off_t pretransfer = 0;
+   if (curl_handle) {
+      curl_easy_getinfo((CURL *)curl_handle, CURLINFO_PRETRANSFER_TIME_T, &pretransfer);
+   }
+   if (network && pretransfer == 0) {
+      llm_set_last_error(LLM_ERR_UNREACHABLE);
+   }
+}
 
+static _Thread_local bool s_provider_errors_quiet = false;
+
+bool llm_provider_errors_quiet(void) {
+   return s_provider_errors_quiet;
+}
+
+void llm_set_provider_errors_quiet(bool quiet) {
+   s_provider_errors_quiet = quiet;
+}
+
+/* Cloud-to-local fallback ([llm] local_fallback, opt-in).  An interactive turn whose
+ * cloud provider can't be reached, or keeps failing (429/5xx), before any tool ran,
+ * is answered by the [llm.local] endpoint instead, and says so once per outage.  The
+ * conversation keeps its cloud selection.  A provider that was unreachable while
+ * local answered is skipped for a window (llm_local_fallback.h) that grows while it
+ * stays unreachable, so the next turns don't wait on it. */
+#define LLM_LOCAL_REACHABLE_TIMEOUT_SEC 2
+
+static int64_t monotonic_sec(void) {
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return (int64_t)ts.tv_sec;
+}
+
+typedef struct {
+   bool fallback_available; /* in: an unreachable cloud returns at once (the caller falls back) */
+   bool pinned;             /* in: stay on this config for the whole turn */
+   bool skip_compaction;    /* in: no compaction trigger after the turn */
+   bool tools_ran;          /* out: a tool batch ran */
+   int error;               /* out: llm_last_error() as the loop returned */
+} turn_run_t;
+
+/* One turn's tool loop on @p config (resolved). */
+static char *run_tool_loop(struct json_object *conversation_history,
+                           const char *input_text,
+                           llm_text_chunk_callback chunk_callback,
+                           void *callback_userdata,
+                           const llm_resolved_config_t *config,
+                           turn_run_t *run) {
    char *response = NULL;
 
    // Track LLM total time
@@ -1667,13 +1666,20 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
       .cancel_flag = session ? &session->cancel_requested : NULL,
       .is_background = session_is_background(session),
       .cumulative_input_token_ceiling = session ? session->input_token_ceiling : 0,
+      .fallback_available = run->fallback_available,
+      .pinned = run->pinned,
    };
 
    response = llm_tool_iteration_loop(&loop_params);
+   run->tools_ran = loop_params.tools_ran;
+   run->error = llm_last_error();
 
    /* The turn ended: a history nearing its window is summarized ahead, applied
-    * at the next turn's seam (session_compaction.h). */
-   if (loop_params.has_session) {
+    * at the next turn's seam (session_compaction.h).  Not after a turn the local
+    * LLM answered for a cloud conversation (it would be sized to the local window),
+    * nor after a cloud call that couldn't be made (its summary would go nowhere). */
+   if (loop_params.has_session && !run->skip_compaction &&
+       (response || !llm_error_is_transient(run->error))) {
       session_t *trigger_session = session_get(loop_params.session_id);
       if (trigger_session) {
          session_compaction_trigger(trigger_session, loop_params.conversation_history,
@@ -1694,6 +1700,157 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
       metrics_record_llm_total_time(total_ms);
    }
 
+   return response;
+}
+
+/* Stopped by the user, not a failure (a background job ignores the wake word, as
+ * its tool loop does). */
+static bool turn_stopped(session_t *session) {
+   return (llm_is_interrupt_requested() && !session_is_background(session)) ||
+          (session && atomic_load(&session->cancel_requested));
+}
+
+/* The local LLM can take this turn: it answers and the history fits its window.
+ * @p local is the caller's storage for its config (its reasoning settings are the
+ * session's), which @p resolved points into. */
+static bool local_usable(session_t *session,
+                         struct json_object *history,
+                         session_llm_config_t *local,
+                         llm_resolved_config_t *resolved) {
+   session_get_llm_config(session, local);
+   local->type = LLM_LOCAL;
+   local->cloud_provider = CLOUD_PROVIDER_NONE;
+   local->model[0] = '\0';
+   local->endpoint[0] = '\0';
+   if (llm_resolve_config(local, resolved) != 0 || !resolved->endpoint) {
+      return false;
+   }
+   if (!llm_check_connection(resolved->endpoint, LLM_LOCAL_REACHABLE_TIMEOUT_SEC)) {
+      OLOG_WARNING("Local LLM fallback: %s isn't answering", resolved->endpoint);
+      return false;
+   }
+   if (llm_context_over_threshold(session->session_id, history, 0, LLM_LOCAL, CLOUD_PROVIDER_NONE,
+                                  resolved->model, 0)) {
+      OLOG_WARNING("Local LLM fallback: the conversation doesn't fit the local window");
+      return false;
+   }
+   return true;
+}
+
+/* The turn on the local LLM: its answer, with the note in front when @p note (the
+ * note is streamed first, so it's heard while the local LLM reads the conversation),
+ * or NULL.  @p answered is set when local answered, a tool's own silent reply
+ * included (a NULL answer then). */
+static char *run_on_local(struct json_object *conversation_history,
+                          const char *input_text,
+                          llm_text_chunk_callback chunk_callback,
+                          void *callback_userdata,
+                          const llm_resolved_config_t *local,
+                          bool note,
+                          bool *answered) {
+   metrics_record_fallback();
+   if (note && chunk_callback) {
+      chunk_callback(LLM_LOCAL_FALLBACK_NOTE, callback_userdata);
+   }
+   turn_run_t run = { .pinned = true, .skip_compaction = true };
+   char *answer = run_tool_loop(conversation_history, input_text, chunk_callback, callback_userdata,
+                                local, &run);
+   *answered = answer || llm_tool_loop_did_skip_followup();
+   if (*answered) {
+      llm_set_last_error(LLM_ERR_NONE);
+   }
+   if (!answer) {
+      return NULL;
+   }
+   return note ? llm_local_fallback_with_note(answer) : answer;
+}
+
+char *llm_chat_completion_streaming_with_config(struct json_object *conversation_history,
+                                                const char *input_text,
+                                                llm_text_chunk_callback chunk_callback,
+                                                void *callback_userdata,
+                                                const llm_resolved_config_t *config) {
+   llm_set_last_error(LLM_ERR_NONE); /* see contract on llm_chat_completion_with_config */
+   // Clear any previous interrupt flag from cancelled requests
+   llm_clear_interrupt();
+
+   if (!config) {
+      // No config provided, use global (with fallback enabled)
+      return llm_chat_completion_streaming(conversation_history, input_text, chunk_callback,
+                                           callback_userdata, true);
+   }
+
+   const cloud_provider_t provider = config->cloud_provider;
+   session_t *session = session_get_command_context();
+   bool eligible = config->type == LLM_CLOUD && g_config.llm.local_fallback && session &&
+                   !llm_cache_monitor_in_side_call() && !session_is_background(session) &&
+                   !session_turn_is_background(session);
+   session_llm_config_t local;
+   llm_resolved_config_t local_resolved;
+
+   /* Inside an outage window: the local LLM answers, and the turn ends with it (a
+    * local run that fails may already have run tools or spoken). */
+   if (eligible && llm_local_fallback_cloud_down(provider, monotonic_sec())) {
+      if (local_usable(session, conversation_history, &local, &local_resolved)) {
+         OLOG_INFO("Cloud LLM (%s) still unreachable: this turn goes to the local LLM",
+                   cloud_provider_to_string(provider));
+         bool answered = false;
+         char *answer = run_on_local(conversation_history, input_text, chunk_callback,
+                                     callback_userdata, &local_resolved, false, &answered);
+         if (!answered && !turn_stopped(session)) {
+            llm_local_fallback_retry_now(provider); /* the next turn tries the cloud */
+         }
+         return answer;
+      }
+      eligible = false; /* local can't take it: the cloud, as without the fallback */
+   }
+
+   turn_run_t cloud = { .fallback_available = eligible };
+   char *response = run_tool_loop(conversation_history, input_text, chunk_callback,
+                                  callback_userdata, config, &cloud);
+   if (response) {
+      if (config->type == LLM_CLOUD) {
+         llm_local_fallback_mark_up(provider);
+      }
+      return response;
+   }
+   if (!eligible || cloud.tools_ran || !llm_error_is_transient(cloud.error) ||
+       turn_stopped(session)) {
+      return NULL;
+   }
+   if (!local_usable(session, conversation_history, &local, &local_resolved)) {
+      if (cloud.error != LLM_ERR_UNREACHABLE) {
+         return NULL;
+      }
+      /* It skipped its retries for a local answer that can't come: retry it as
+       * without the fallback. */
+      if (turn_stopped(session)) {
+         return NULL;
+      }
+      turn_run_t again = { 0 };
+      char *retried = run_tool_loop(conversation_history, input_text, chunk_callback,
+                                    callback_userdata, config, &again);
+      if (retried) {
+         llm_local_fallback_mark_up(provider);
+      }
+      return retried;
+   }
+
+   const bool unreachable = cloud.error == LLM_ERR_UNREACHABLE;
+   OLOG_WARNING("Cloud LLM (%s) %s: answering this turn on the local LLM",
+                cloud_provider_to_string(provider), unreachable ? "unreachable" : "failing");
+   /* Once per outage; a failing (429/5xx) turn starts no outage, so it says so each time. */
+   const bool note = !(unreachable && llm_local_fallback_in_outage(provider));
+   bool answered = false;
+   response = run_on_local(conversation_history, input_text, chunk_callback, callback_userdata,
+                           &local_resolved, note, &answered);
+   if (!answered) {
+      if (!turn_stopped(session)) {
+         llm_set_last_error(cloud.error); /* the turn failed as the cloud did */
+      }
+   } else if (unreachable) {
+      llm_local_fallback_mark_down(provider, monotonic_sec());
+   }
    return response;
 }
 

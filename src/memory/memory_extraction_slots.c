@@ -78,7 +78,7 @@ static void extraction_cond_init(void) {
 
 /* Last-extraction-outcome flag for the recovery/reextract orchestrator.
  * Set by the extraction thread when an LLM call signals transient failure
- * (LLM_ERR_TRANSIENT_NETWORK), read+cleared by memory_recovery's
+ * (llm_error_is_transient()), read+cleared by memory_recovery's
  * post-wait branch via memory_extraction_consume_last_transient().  Lives
  * outside the slot table because the slot is released BEFORE the recovery
  * worker observes "not in progress" — the flag must survive that

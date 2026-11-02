@@ -243,6 +243,17 @@ static void test_llm_tools_roundtrip(void) {
    TEST_ASSERT_FALSE(g_read.llm.tools.enabled);
 }
 
+/* --- [llm] local_fallback -------------------------------------------------- */
+
+static void test_llm_local_fallback_roundtrip(void) {
+   /* Default is false: writing true and reading it back proves the writer emits it. */
+   g_written.llm.local_fallback = true;
+
+   round_trip();
+
+   TEST_ASSERT_TRUE(g_read.llm.local_fallback);
+}
+
 /* --- [memory.decay] citation_enabled --------------------------------------- */
 
 static void test_memory_citation_roundtrip(void) {
@@ -621,6 +632,7 @@ int main(void) {
    RUN_TEST(test_event_chunk_cap_has_a_floor);
    RUN_TEST(test_scheduler_roundtrip);
    RUN_TEST(test_llm_tools_roundtrip);
+   RUN_TEST(test_llm_local_fallback_roundtrip);
    RUN_TEST(test_memory_citation_roundtrip);
    RUN_TEST(test_focus_document_min_relevance_roundtrip);
    RUN_TEST(test_memory_fact_cache_mb_roundtrip);

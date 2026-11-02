@@ -62,8 +62,9 @@
 #include "webui/webui_server.h"
 
 /* Transient-network retry policy.  Triggered when the provider returns rc != 0
- * AND llm_last_error() == LLM_ERR_TRANSIENT_NETWORK (pre-flight unreachable,
- * HTTP 429, or HTTP 5xx).  Backoff is exponential from BASE: 1s, 2s, 4s. */
+ * with LLM_ERR_TRANSIENT_NETWORK (HTTP 429/5xx, or sent with nothing back) or
+ * LLM_ERR_UNREACHABLE (see the loop for when that one isn't retried).  Backoff is
+ * exponential from BASE: 1s, 2s, 4s. */
 #define LLM_TRANSIENT_RETRY_MAX 3
 #define LLM_TRANSIENT_BACKOFF_BASE_MS 1000
 
@@ -606,6 +607,23 @@ static void append_loop_note(struct json_object *history, const char *text) {
    session_history_append(history, note);
 }
 
+/* One provider call: this attempt's outcome alone (the error reset), and while the
+ * local LLM can still take the turn, a single short attempt with its transient error
+ * frames held back (llm_provider_errors_quiet). */
+static int call_provider(const llm_tool_loop_params_t *params,
+                         const char *input_text,
+                         int iteration,
+                         llm_tool_response_t *result) {
+   const bool was_quiet = llm_provider_errors_quiet();
+   llm_set_provider_errors_quiet(params->fallback_available && !params->tools_ran);
+   llm_set_last_error(LLM_ERR_NONE);
+   const int rc = params->provider_fn(params->conversation_history, input_text, params->base_url,
+                                      params->api_key, params->model, params->chunk_callback,
+                                      params->callback_userdata, iteration, result);
+   llm_set_provider_errors_quiet(was_quiet);
+   return rc;
+}
+
 /* The turn's last word: @p note appended (and saved) after the tool results,
  * then one call with tools disabled.  Returns the answer (caller frees), or
  * NULL when the call fails or brings no text. */
@@ -620,9 +638,7 @@ static char *final_answer_without_tools(llm_tool_loop_params_t *params,
    llm_tool_response_t result;
    memset(&result, 0, sizeof(result));
    note_request(params, "");
-   const int rc = params->provider_fn(params->conversation_history, "", params->base_url,
-                                      params->api_key, params->model, params->chunk_callback,
-                                      params->callback_userdata, LLM_TOOLS_MAX_ITERATIONS, &result);
+   const int rc = call_provider(params, "", LLM_TOOLS_MAX_ITERATIONS, &result);
    char *text = NULL;
    if (rc == 0 && result.text) {
       text = strdup(result.text);
@@ -759,12 +775,12 @@ static void finish_batch(const tool_call_list_t *calls, tool_result_list_t *resu
 }
 
 static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
+   s_did_skip_followup = false; /* this run's alone, even one refused below */
    if (!params || !params->provider_fn || !params->conversation_history) {
       OLOG_ERROR("Tool loop: Invalid parameters");
       return NULL;
    }
 
-   s_did_skip_followup = false;
    char *final_response = NULL;
 
    /* Cancellation policy for this turn (loop-invariant).  A background turn
@@ -869,13 +885,10 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
       memset(&result, 0, sizeof(result));
 
       note_request(params, params->input_text);
-      int rc = params->provider_fn(params->conversation_history, params->input_text,
-                                   params->base_url, params->api_key, params->model,
-                                   params->chunk_callback, params->callback_userdata, iteration,
-                                   &result);
+      int rc = call_provider(params, params->input_text, iteration, &result);
 
-      /* Retry transient network failures (pre-flight unreachable, HTTP 429,
-       * HTTP 5xx) with exponential backoff before bubbling up.  Each retry is
+      /* Retry transient network failures (unreachable, HTTP 429, HTTP 5xx) with
+       * exponential backoff before bubbling up.  Each retry is
        * a fresh provider call within the same iteration — failed attempts
        * don't burn an iteration slot.  Hard errors (auth, bad request,
        * parse failure) bypass this loop.
@@ -884,7 +897,12 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
        * 429 means we're locally overcounted, so we must consult the local
        * budget again rather than racing past it.  Log noise stays bounded:
        * intermediate retries log at INFO, final give-up logs at ERROR. */
-      for (int retry = 0; rc != 0 && llm_last_error() == LLM_ERR_TRANSIENT_NETWORK &&
+      /* An unreachable cloud with a local answer still possible goes straight back
+       * to the caller; once a tool ran, the turn can't move, so it retries. */
+      const bool retry_unreachable = !(params->fallback_available && !params->tools_ran);
+      for (int retry = 0; rc != 0 &&
+                          (llm_last_error() == LLM_ERR_TRANSIENT_NETWORK ||
+                           (llm_last_error() == LLM_ERR_UNREACHABLE && retry_unreachable)) &&
                           retry < LLM_TRANSIENT_RETRY_MAX;
            retry++) {
          int backoff_ms = LLM_TRANSIENT_BACKOFF_BASE_MS << retry; /* 1s, 2s, 4s */
@@ -911,14 +929,15 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          llm_tool_response_free(&result);
          memset(&result, 0, sizeof(result));
          note_request(params, params->input_text);
-         rc = params->provider_fn(params->conversation_history, params->input_text,
-                                  params->base_url, params->api_key, params->model,
-                                  params->chunk_callback, params->callback_userdata, iteration,
-                                  &result);
+         rc = call_provider(params, params->input_text, iteration, &result);
       }
 
       if (rc != 0) {
-         if (llm_last_error() == LLM_ERR_TRANSIENT_NETWORK) {
+         if (llm_last_error() == LLM_ERR_UNREACHABLE && !retry_unreachable) {
+            OLOG_INFO("Tool loop: cloud unreachable at iteration %d; back to the caller for the "
+                      "local LLM",
+                      iteration);
+         } else if (llm_error_is_transient(llm_last_error())) {
             OLOG_ERROR("Tool loop: transient network error at iteration %d after %d retries, "
                        "giving up",
                        iteration, LLM_TRANSIENT_RETRY_MAX);
@@ -1025,9 +1044,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          OLOG_INFO("Tool loop: Making final call without tools to force text response");
          memset(&result, 0, sizeof(result));
          note_request(params, "");
-         rc = params->provider_fn(params->conversation_history, "", params->base_url,
-                                  params->api_key, params->model, params->chunk_callback,
-                                  params->callback_userdata, LLM_TOOLS_MAX_ITERATIONS, &result);
+         rc = call_provider(params, "", LLM_TOOLS_MAX_ITERATIONS, &result);
 
          if (rc != 0) {
             llm_tool_response_free(&result);
@@ -1065,6 +1082,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          .budget = &view_budget,
       };
       llm_tools_execute_all(&result.tool_calls, results, finish_batch, (void *)&view_batch);
+      params->tools_ran = true;
       if (view_session) {
          tool_result_store_set_read_budget(view_session, 0);
          session_release(view_session);
@@ -1158,7 +1176,9 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
       }
 
       /* Step 12: Handle provider switching (switch_llm tool) */
-      resolve_provider_switch(params);
+      if (!params->pinned) {
+         resolve_provider_switch(params);
+      }
 
       /* Clear input text for follow-up calls (history already contains the context) */
       params->input_text = "";

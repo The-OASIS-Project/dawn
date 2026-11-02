@@ -1277,7 +1277,7 @@ static void *extraction_thread(void *arg) {
     * for a non-transient reason (local model returned empty), the final
     * llm_last_error() reading would lose the primary's transient signal
     * and recovery would incorrectly take the give-up branch. */
-   bool primary_was_transient = (response == NULL && llm_last_error() == LLM_ERR_TRANSIENT_NETWORK);
+   bool primary_was_transient = (response == NULL && llm_error_is_transient(llm_last_error()));
 
    /* If primary model failed and we have a fallback, retry with the session's active model */
    bool used_fallback = false;
@@ -1455,7 +1455,7 @@ static void *extraction_thread(void *arg) {
        * primary_was_transient OR current llm_last_error() so the signal
        * survives a non-transient fallback failure overwriting it. */
       bool final_was_transient = (primary_was_transient ||
-                                  llm_last_error() == LLM_ERR_TRANSIENT_NETWORK);
+                                  llm_error_is_transient(llm_last_error()));
       if (final_was_transient) {
          OLOG_INFO("memory_extraction: failure was transient (cloud unreachable) for "
                    "conv %ld -- caller should roll back attempt counter",
@@ -1477,8 +1477,8 @@ static void *extraction_thread(void *arg) {
     * same thread that produced the value, so no synchronization needed
     * for the read; the store into s_last_outcome takes the mutex. */
    {
-      bool was_transient = (response == NULL && (primary_was_transient ||
-                                                 llm_last_error() == LLM_ERR_TRANSIENT_NETWORK));
+      bool was_transient = (response == NULL &&
+                            (primary_was_transient || llm_error_is_transient(llm_last_error())));
       extraction_record_outcome(ctx->user_id, was_transient);
    }
 
