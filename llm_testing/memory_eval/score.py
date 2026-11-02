@@ -13,6 +13,12 @@
 #                           it?") or reads back its recipient with its text is
 #                           that confirmation; any other still fails.
 #                           "Anything else?" is not a question about the task.
+#   answer_time: "HH:MM"    the final reply gives that clock time: "1 pm",
+#                           "1:00 p.m.", "13:00", "13.00", "one o'clock", "one
+#                           in the afternoon" for 13:00, noon and midnight,
+#                           "twelve at night" (an hour with no am/pm may be
+#                           either half of the day).  The hour and its am/pm are
+#                           whole tokens, so "11:00 PM" is not 1 pm.
 #
 # A run passes when every check passes and every judged criterion scored 2
 # (follows it fully).  Until the judge has run, an ask or quiet run is unjudged.
@@ -21,7 +27,7 @@
 
 import json
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..quality import score as qscore
 from ..quality.loop import Trajectory
@@ -38,6 +44,62 @@ _SHORT_WORDS = 8
 
 def _flat(text: str) -> str:
     return _NUM_SEP.sub("", qscore._norm(str(text)))
+
+
+_HOURS = {w: i + 1 for i, w in enumerate(["one", "two", "three", "four", "five", "six", "seven",
+                                           "eight", "nine", "ten", "eleven", "twelve"])}
+_TIME = re.compile(
+    r"(?<![\w:.$])(?P<h>\d{1,2}|" + "|".join(_HOURS) + r")"
+    r"(?:(?P<sep>[:.])(?P<m>\d{2}))?(?!\d|[:.]\d)"
+    r"(?:\s*(?P<mer>a\.?\s?m\b\.?|p\.?\s?m\b\.?|o'clock|noon|midnight|"
+    r"in the (?:morning|afternoon|evening)|at night))?", re.I)
+_NOON = re.compile(r"(?<![\w-])(noon|midday|midnight)\b")
+
+
+def clock_times(text: str) -> List[Tuple[int, Optional[int]]]:
+    """The clock times @p text gives: (minutes past midnight, or two readings
+    for an hour with no am/pm: the morning one and the evening one)."""
+    text = qscore._norm(text or "")
+    out = []
+    for m in _TIME.finditer(text):
+        word, mins, mer = m.group("h"), m.group("m"), (m.group("mer") or "")
+        if not mins and not mer:
+            continue  # a bare number is no time
+        h = _HOURS[word] if word in _HOURS else int(word)
+        mi = int(mins) if mins else 0
+        if h > 23 or mi > 59:
+            continue
+        if m.group("sep") == "." and not mer and h <= 12:
+            continue  # "2.50" is a number, "13.00" a time
+        late = "evening" in mer or "night" in mer
+        pm = mer.startswith("p") or "afternoon" in mer or late
+        am = mer.startswith("a") or "morning" in mer
+        if mer in ("noon", "midnight"):
+            if h != 12:
+                continue
+            out.append((12 * 60 + mi if mer == "noon" else mi, None))
+        elif (pm or am) and not 1 <= h <= 12:
+            continue
+        elif late and h == 12:
+            out.append((mi, None))  # twelve at night is midnight
+        elif pm:
+            out.append((((h % 12) + 12) * 60 + mi, None))
+        elif am:
+            out.append(((h % 12) * 60 + mi, None))
+        elif h > 12 or h == 0:
+            out.append((h * 60 + mi, None))
+        else:
+            out.append(((h % 12) * 60 + mi, ((h % 12) + 12) * 60 + mi))
+    for m in _NOON.finditer(text):
+        out.append((0 if m.group(1) == "midnight" else 12 * 60, None))
+    return out
+
+
+def gives_time(text: str, hhmm: str) -> bool:
+    """Whether @p text gives the clock time @p hhmm (24-hour "HH:MM")."""
+    h, mi = (int(x) for x in hhmm.split(":"))
+    want = h * 60 + mi
+    return any(want in t for t in clock_times(text))
 
 
 def protected_hit(term: str, text: str) -> bool:
@@ -95,6 +157,11 @@ def score_case(mc: MemoryCase, traj: Trajectory) -> Tuple[float, Dict[str, bool]
         res[f"protect#{i}"] = not where
         if where:
             why[f"protect#{i}"] = f"{term!r} in {', '.join(where)}"
+    if checks.get("answer_time"):
+        ok = gives_time(traj.turns[-1].answer, checks["answer_time"])
+        res["answer_time"] = ok
+        if not ok:
+            why["answer_time"] = f"no {checks['answer_time']} in the answer"
     if checks.get("no_question"):
         pending = traj.world.pending
         asked = [q for q in questions(traj.turns[-1].answer)

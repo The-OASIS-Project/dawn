@@ -1427,18 +1427,19 @@ const char *bench_mp_extraction_prompt_sha256(void) {
    unsigned char digest[SHA256_DIGEST_LENGTH];
    /* What else changes what a batch stores from the same prompt keys the
     * snapshots too: the bench's real entity linking (snapshots from before it
-    * merged no entities), the consolidator, its sample count, whether entity
-    * merging is on (the lists and the link op depend on it), and the fixed
-    * text of the prompts it sends.  Left out: how each list item is written
-    * (code), and the persona half and kind words (the install's own text). */
+    * merged no entities), entity merging turned off (either path: the store's
+    * merge gate, and the consolidator's lists and link op, depend on it), the
+    * consolidator, its sample count, and the fixed text of the prompts it
+    * sends.  Left out: how each list item is written (code), and the persona
+    * half and kind words (the install's own text). */
    const bool agent = strcmp(g_config.memory.consolidator, "agent") == 0;
    const bool merging = g_config.memory.entity_merge_enabled;
    const char *const pieces[] = {
       tmpl,
       "\nstore=linked",
+      merging ? "" : "\nentity_merge=off",
       agent ? "\nconsolidator=agent" : "",
       agent && s_two_samples ? "\nsamples=2" : "",
-      agent && !merging ? "\nentity_merge=off" : "",
       agent ? MEMORY_CONSOLIDATE_LEAD : "",
       agent ? MEMORY_CONSOLIDATE_LINK_RULE MEMORY_CONSOLIDATE_LINK_OP : "",
       agent ? MEMORY_CONSOLIDATE_HEAD_C MEMORY_CONSOLIDATE_HEAD_S MEMORY_CONSOLIDATE_HEAD_R

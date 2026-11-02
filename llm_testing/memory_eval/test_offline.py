@@ -58,7 +58,8 @@ class LoaderTests(unittest.TestCase):
             self.assertTrue(c.tags and set(c.tags) <= set(cases.TAGS), c.id)
             self.assertIn(c.case.surface, ("webui-text", "webui-spoken"), c.id)
             self.assertEqual(c.case.category, c.decision)
-            self.assertTrue(set(c.case.checks) <= CHECK_KINDS | {"protect", "no_question"}, c.id)
+            self.assertTrue(set(c.case.checks) <= CHECK_KINDS | {"protect", "no_question",
+                                                                 "answer_time"}, c.id)
             self.assertEqual(c.case.judge, [cases.JUDGED[c.decision]]
                              if c.decision in cases.JUDGED else [], c.id)
             self.assertNotRegex(json.dumps(c.case.state) + json.dumps(c.case.checks),
@@ -165,6 +166,52 @@ class OutcomeTests(unittest.TestCase):
         self.assertTrue(_passes(mc, _traj(mc, ["It's Thursday at 10 AM, boss."], calls=cal)))
         self.assertFalse(_passes(mc, _traj(mc, ["Today at 2 PM."])))  # memory, not the tool
         self.assertFalse(_passes(mc, _traj(mc, ["Today at 2 PM."], calls=cal)))  # not from it
+
+    def test_answer_time_and_dates_must_be_quoted(self):
+        base = {"id": "x-1", "surface": "webui", "turns": ["When?"], "expect": "verify",
+                "because": "b", "tags": ["staleness"],
+                "memory": {"facts": [{"id": "F1", "text": "Alex's review is at 3",
+                                      "date": "2026-10-01"}]},
+                "outcome": {"tools_required": ["calendar"], "answer_time": "10:00"}}
+        cases._case(base, True)  # loads
+        for bad in [600, 0, "10:0", "24:00", "9:00"]:
+            raw = json.loads(json.dumps(base))
+            raw["outcome"]["answer_time"] = bad
+            with self.assertRaises(Exception, msg=repr(bad)):
+                cases._case(raw, True)
+        raw = json.loads(json.dumps(base))
+        raw["memory"]["facts"][0]["date"] = 20261001
+        with self.assertRaises(Exception):
+            cases._case(raw, True)
+
+    def test_clock_times_curly_dots_noon_and_night(self):
+        for text, hhmm in [("ten o\u2019clock", "10:00"), ("It's at 13.00.", "13:00"),
+                           ("1.00 pm", "13:00"), ("at noon", "12:00"), ("twelve noon", "12:00"),
+                           ("at midnight", "00:00"), ("12 at night", "00:00"),
+                           ("12 in the evening", "00:00")]:
+            self.assertTrue(score.gives_time(text, hhmm), text)
+        for text, hhmm in [("It costs 2.50", "02:50"), ("12 at night", "12:00"),
+                           ("$1.00 pm", "13:00")]:
+            self.assertFalse(score.gives_time(text, hhmm), text)
+
+    def test_case_hash_sees_a_fact_s_date(self):
+        import copy
+        mc = _case("verify-002")
+        newer = copy.deepcopy(mc)
+        newer.facts[0]["date"] = "2026-10-12"
+        self.assertNotEqual(cli.case_hash(mc), cli.case_hash(newer))
+        self.assertEqual(cli.case_hash(mc), cli.case_hash(copy.deepcopy(mc)))
+
+    def test_answer_time_is_the_clock_time_as_whole_tokens(self):
+        mc = _case("verify-003")  # the calendar says 1 PM
+        cal = [("calendar", {"action": "today"})]
+        for ok in ["No, it's at 1:00 PM.", "It moved to 1 pm.", "1 p.m., per the calendar.",
+                   "It's at 13:00.", "One in the afternoon, not three."]:
+            self.assertTrue(_passes(mc, _traj(mc, [ok], calls=cal)), ok)
+        for bad in ["It is at 11:00 PM today.", "It's at 11 pm.", "It's at 3 PM, right."]:
+            _s, res, why = score.score_case(mc, _traj(mc, [bad], calls=cal))
+            self.assertFalse(res["answer_time"], bad)
+            self.assertIn("13:00", why["answer_time"])
 
     def test_verify_text_goes_to_the_contact(self):
         mc = _case("verify-002")

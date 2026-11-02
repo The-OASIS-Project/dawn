@@ -35,10 +35,12 @@ RESULTS_VERSION = 1
 
 def case_hash(mc: cases_mod.MemoryCase) -> str:
     """A fingerprint of what a case asks, shows and checks (focus injection is a
-    run setting, recorded beside it)."""
+    run setting, recorded beside it).  The facts go in whole, as resolved at
+    the run's clock: the tool lines in the case's state carry no dates, and a
+    fact's age is part of the case."""
     blob = json.dumps({"case": quality_case_hash(mc.case), "decision": mc.decision,
-                       "because": mc.because, "forgotten": mc.forgotten, "tags": mc.tags},
-                      sort_keys=True)
+                       "because": mc.because, "facts": mc.facts, "forgotten": mc.forgotten,
+                       "tags": mc.tags}, sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 

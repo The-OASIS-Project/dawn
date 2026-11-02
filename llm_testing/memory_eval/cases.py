@@ -6,6 +6,7 @@
 # License: GPLv3, same as DAWN.
 
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -27,8 +28,9 @@ KIND_WORDS = {"told": "told", "inferred": "inferred", "imported": "imported", "n
               "remembered on request": "remembered on request", "world": "world"}
 OUTSIDE_SUFFIX = ", outside"  # OUTSIDE_MARKER_KIND_SUFFIX, include/core/outside_markers.h
 WORLD_KEYS = {"events", "devices", "inbox", "weather", "contacts", "alerts", "speaker"}
+_HHMM = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 CASE_KEYS = {"id", "surface", "memory", "turns", "expect", "because", "tags", "origin", "outcome"}
-OUTCOME_KEYS = CHECK_KINDS | {"protect"}
+OUTCOME_KEYS = CHECK_KINDS | {"protect", "answer_time"}
 # The decisions code can't check, and the judged criterion each goes to.
 JUDGED = {"ask": "asks", "quiet": "quiet"}
 
@@ -100,6 +102,9 @@ def _facts(raw: dict) -> List[dict]:
         if f.get("id") in ids:
             raise _err(raw["id"], f"duplicate fact id {f.get('id')}")
         ids.add(f.get("id"))
+        # An unquoted date is YAML's: it must be the text DAWN shows.
+        if not isinstance(f.get("date", ""), str):
+            raise _err(raw["id"], f"fact {f.get('id')}: date must be a quoted string")
         out.append({"id": f.get("id"), "num": n, "text": f["text"], "kind": kind_word(f),
                     "date": f.get("date", "")})
     return out
@@ -112,10 +117,15 @@ def _checks(raw: dict) -> Dict:
     unknown = set(outcome) - OUTCOME_KEYS
     if unknown:
         raise _err(cid, f"unknown outcome checks {sorted(unknown)}")
+    # Quoted "HH:MM": YAML reads an unquoted 10:00 as the number 600.
+    at = outcome.get("answer_time")
+    if at is not None and not (isinstance(at, str) and _HHMM.fullmatch(at)):
+        raise _err(cid, f"answer_time must be a quoted \"HH:MM\", not {at!r}")
     if decision == "verify" and not (outcome.get("tools_required") and (
-            outcome.get("answer_contains") or outcome.get("world") or outcome.get("tool_args"))):
+            outcome.get("answer_contains") or outcome.get("answer_time") or outcome.get("world")
+            or outcome.get("tool_args"))):
         raise _err(cid, "verify needs the tool that holds the truth (tools_required) and the "
-                        "answer from it (answer_contains, world or tool_args)")
+                        "answer from it (answer_contains, answer_time, world or tool_args)")
     if decision == "act":
         if not (outcome.get("world") or outcome.get("tool_args")):
             raise _err(cid, "act needs the action (world or tool_args)")
