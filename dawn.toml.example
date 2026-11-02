@@ -204,7 +204,9 @@
                                   # Env: DAWN_LLM_RATE_LIMIT_RPM
 
 [llm.cloud]
-# provider = "openai"             # "openai", "claude", "gemini", or "openrouter"
+# provider = ""                   # "openai", "claude", "gemini", or "openrouter": the one whose
+                                  # key is used.  Empty = not selected: the local LLM answers,
+                                  # whatever keys secrets.toml holds (a key never selects one).
                                   # Env: DAWN_LLM_CLOUD_PROVIDER
 # endpoint = ""                   # Custom endpoint for the provider above (empty = its default
                                   # URL). Only that provider uses it: a conversation on another

@@ -410,9 +410,19 @@ Configure LLM settings for this session only (does not affect other clients).
 }
 ```
 - All fields are optional, only provided fields are changed
+- Send a pick as one message: `type`, `provider` (for cloud) and `model` together
 - `type`: `"local"`, `"cloud"`, or `"reset"`: no selection of its own, so the session
   follows the dawn.toml default (resolved at each turn) with the default reasoning; other
-  fields in the same message apply over it
+  fields in the same message apply over it.  `"cloud"` without `provider` means the
+  session's cloud provider, else the one dawn.toml names
+- `provider`: `"openai"`, `"claude"`, `"gemini"`, `"openrouter"`; `"local"` means local;
+  `"none"` (what the server sends for a local selection) names none.  A changed provider
+  clears the model (its default), so one vendor's model never goes to another
+- `model` alone (no `type` or `provider`) moves the session to cloud only when a dawn.toml
+  cloud model list names it exactly; otherwise it stays where it is
+- A pick that can't run (its provider has no API key, an unknown provider) is refused:
+  `success` false, `error` the reason, nothing stored, and the payload carries the session's
+  current settings to resync from.  A restore (`from_restore`) is checked at its next turn
 - `from_restore`: true when the client replays a loaded conversation's settings; the server
   then doesn't save them back to the active conversation
 - The response, `llm_runtime` in `get_config_response` and a loaded conversation's
@@ -2264,10 +2274,13 @@ Proactive LLM configuration update (sent when session config changes).
       "model": "claude-sonnet-4-5",
       "openai_available": true,
       "claude_available": true,
-      "gemini_available": false
+      "gemini_available": false,
+      "openrouter_available": false
    }
 }
 ```
+- `*_available`: whether that provider has an API key, for showing which can be picked
+  (a provider without one is listed as "(no API key)"); never a choice made for the user
 
 ---
 

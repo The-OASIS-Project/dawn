@@ -256,7 +256,14 @@ export OPENAI_API_KEY="sk-your-openai-key"
 # or: export CLAUDE_API_KEY="sk-ant-..." or GEMINI_API_KEY="..."
 ```
 
-**dawn.toml** - Optional customization. Defaults work for most users. You can also adjust settings later via the Web UI.
+**dawn.toml** - Select the provider your key is for. A key alone selects nothing: with no provider
+selected, DAWN uses the local LLM (`[llm.local]`). Set it here, or later in the Web UI (Settings →
+Language Model → Cloud Provider):
+```toml
+[llm.cloud]
+provider = "openai"   # or "claude", "gemini", "openrouter"
+```
+Everything else is optional; the defaults work for most users and can be changed later in the Web UI.
 
 > **Tip**: Many settings can be changed live in the Web UI without editing files.
 

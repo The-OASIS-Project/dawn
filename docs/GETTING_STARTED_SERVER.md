@@ -377,8 +377,9 @@ claude_api_key = "sk-ant-..."
 # gemini_api_key = "..."
 ```
 
-The cloud LLM provider is auto-detected from available keys (Claude > OpenAI > Gemini).
-You can override with `[llm.cloud] provider = "claude"` in `dawn.toml`.
+A key is used only for the provider `dawn.toml` selects: set `[llm.cloud] provider = "claude"`
+(or `"openai"`, `"gemini"`, `"openrouter"`), or pick it in Settings → Language Model. With no
+provider selected, DAWN uses the local LLM (`[llm.local]`).
 
 ### dawn.toml (optional)
 
@@ -511,9 +512,10 @@ setup guide — the common ones:
 ### Cloud LLM not working
 
 - Check `secrets.toml` has the correct API key
-- Provider is auto-detected; if `dawn.toml` specifies a provider without a key, it falls
-  back to the first available provider
-- Check server logs for `Cloud provider auto-detected: Claude` (or similar)
+- `[llm.cloud] provider` must name the provider whose key you added; DAWN never picks
+  one from the keys. A provider with no key is refused, and the reply says so
+- The startup log names the LLM it will use: `Default LLM: cloud (claude)`, or the reason it
+  can't run
 
 ### Whisper slow (high RTF)
 

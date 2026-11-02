@@ -12,6 +12,42 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-11-02 — An API key is used only for the provider you selected
+
+**What changed.** DAWN no longer picks a cloud provider because its key is in `secrets.toml`, and
+never moves a conversation to another vendor. The provider is the one `[llm.cloud] provider` names
+(Settings → Language Model → Cloud Provider), or the one a conversation was switched to.
+
+- Before, with no provider set, or one set without its key, DAWN used the first provider that
+  had a key (Claude, then OpenAI, Gemini, OpenRouter). Now, with no provider selected, chat runs
+  on the local LLM (`[llm.local]`), so an install that has keys but never set a provider moves
+  from the cloud to the local LLM.
+- A selected provider with no key is now refused, and the reply says why ("OpenAI is selected,
+  but it has no API key"). Many `dawn.toml` files say `provider = "openai"` without anyone
+  choosing it: older Settings pages wrote it on every save.
+- Conversations you never picked a model for now follow the default when you change it. On the
+  first start, a stored conversation whose model equals the current default is marked that way;
+  one you set to something else keeps it.
+- The `-m`/`--llm` and `-P`/`--cloud-provider` command-line options are removed, and DAWN won't
+  start with them.
+- The cloud-to-local fallback is now the setting `[llm] local_fallback`, off by default. It had
+  stopped working for chat turns anyway.
+- `[llm.cloud] endpoint` is now used for chat turns too, but only for the provider
+  `[llm.cloud] provider` names; with no provider set, it is ignored.
+
+**What you need to do.**
+- Check Settings → Language Model → Cloud Provider: pick the provider whose key you have, or
+  "Not selected" to stay on the local LLM. If you run only a local LLM, you can also set
+  `[llm] type = "local"`.
+- Remove `-m`/`-P` from any launch line, script or service file; set the same thing in
+  `dawn.toml` or Settings.
+- If you relied on DAWN answering from your local LLM when the cloud is down, turn on
+  Settings → Language Model → Fall Back to the Local LLM (`[llm] local_fallback = true`).
+- If you set `[llm.cloud] endpoint` (a proxy, Azure), make sure `[llm.cloud] provider` is set
+  to the provider it serves.
+
+---
+
 ## 2026-10-22 — Per-turn context injection is on by default
 
 **What changed.** `[memory.focus_injection] enabled` now defaults to true: each turn
