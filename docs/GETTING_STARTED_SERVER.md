@@ -377,14 +377,14 @@ claude_api_key = "sk-ant-..."
 # gemini_api_key = "..."
 ```
 
-A key is used only for the provider `dawn.toml` selects: set `[llm.cloud] provider = "claude"`
+For chat, a key is used only for the provider `dawn.toml` selects: set `[llm.cloud] provider = "claude"`
 (or `"openai"`, `"gemini"`, `"openrouter"`), or pick it in Settings → Language Model. With no
 provider selected, DAWN uses the local LLM (`[llm.local]`).
 
-### dawn.toml (optional)
+### dawn.toml
 
-DAWN works with sensible defaults. A `dawn.toml` is only needed to customize settings.
-Key settings for server mode:
+DAWN works with sensible defaults; for a cloud LLM, `dawn.toml` (or Settings) must name the
+provider. Key settings for server mode:
 
 ```toml
 [general]
@@ -401,6 +401,9 @@ ssl_key_path = "ssl/dawn.key"
 
 [llm]
 type = "cloud"
+
+[llm.cloud]
+provider = "claude"   # the provider whose key is in secrets.toml
 
 [mqtt]
 enabled = true

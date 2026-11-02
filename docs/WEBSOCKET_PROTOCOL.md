@@ -422,7 +422,8 @@ Configure LLM settings for this session only (does not affect other clients).
   cloud model list names it exactly; otherwise it stays where it is
 - A pick that can't run (its provider has no API key, an unknown provider) is refused:
   `success` false, `error` the reason, nothing stored, and the payload carries the session's
-  current settings to resync from.  A restore (`from_restore`) is checked at its next turn
+  current settings to resync from.  A restore (`from_restore`) or a `"reset"` is checked at
+  its next turn
 - `from_restore`: true when the client replays a loaded conversation's settings; the server
   then doesn't save them back to the active conversation
 - The response, `llm_runtime` in `get_config_response` and a loaded conversation's

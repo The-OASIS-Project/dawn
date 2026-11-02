@@ -64,7 +64,7 @@ claude_models = ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"]
 gemini_models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview"]
 ```
 
-3. Run DAWN — it uses the first model in the active provider's list.
+3. Run DAWN — it uses the model at the provider's `*_default_model_idx` (the first one when unset).
 
 **Switch providers at runtime** via WebUI settings or voice command ("Switch to Claude").
 

@@ -14,20 +14,24 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ## 2026-11-02 — An API key is used only for the provider you selected
 
-**What changed.** DAWN no longer picks a cloud provider because its key is in `secrets.toml`, and
-never moves a conversation to another vendor. The provider is the one `[llm.cloud] provider` names
-(Settings → Language Model → Cloud Provider), or the one a conversation was switched to.
+**What changed.** For chat, DAWN no longer picks a cloud provider because its key is in
+`secrets.toml`, and never moves a conversation to another vendor. The provider is the one
+`[llm.cloud] provider` names (Settings → Language Model → Cloud Provider), or the one a
+conversation was switched to. (A setting that names a provider for its own job, such as
+`[memory] extraction_provider` or `[llm] compact_provider`, uses that provider's key, as before.)
 
-- Before, with no provider set, or one set without its key, DAWN used the first provider that
-  had a key (Claude, then OpenAI, Gemini, OpenRouter). Now, with no provider selected, chat runs
-  on the local LLM (`[llm.local]`), so an install that has keys but never set a provider moves
-  from the cloud to the local LLM.
+- With no provider set, or one set without its key, DAWN started on the local LLM, and still
+  does when none is set. But a conversation switched to the cloud (the WebUI picker, "switch to
+  cloud"), or one stored as cloud, ran on the first provider that had a key (Claude, then
+  OpenAI, Gemini, OpenRouter). Now it uses the provider that was selected, or is refused.
 - A selected provider with no key is now refused, and the reply says why ("OpenAI is selected,
-  but it has no API key"). Many `dawn.toml` files say `provider = "openai"` without anyone
-  choosing it: older Settings pages wrote it on every save.
+  but it has no API key"), instead of quietly running elsewhere. Many `dawn.toml` files say
+  `provider = "openai"` without anyone choosing it: older Settings pages wrote it on every save.
 - Conversations you never picked a model for now follow the default when you change it. On the
-  first start, a stored conversation whose model equals the current default is marked that way;
-  one you set to something else keeps it.
+  first start, if the default is a cloud provider, a stored conversation on exactly that provider
+  and default model is marked that way; local conversations, messaging channels and
+  conversations on another model keep their setting. This runs once: if the default is local at
+  that start, nothing is changed.
 - The `-m`/`--llm` and `-P`/`--cloud-provider` command-line options are removed, and DAWN won't
   start with them.
 - The cloud-to-local fallback is now the setting `[llm] local_fallback`, off by default. It had
