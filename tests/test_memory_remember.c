@@ -49,6 +49,8 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond);
 extern session_t *g_stub_command_context;
 extern int g_stub_defer_result;
 extern int64_t g_stub_defer_conv;
+extern const char *g_stub_turn_history;
+extern int64_t g_stub_turn_conv;
 
 static session_t s_session;
 static int s_user;
@@ -94,6 +96,8 @@ void setUp(void) {
    g_stub_command_context = &s_session;
    g_stub_defer_result = FAILURE;
    g_stub_defer_conv = 0;
+   g_stub_turn_history = NULL;
+   g_stub_turn_conv = 0;
 }
 
 void tearDown(void) {
@@ -322,6 +326,79 @@ static char *search(const char *value) {
    return memoryCallback("search", buf, &respond);
 }
 
+static int64_t fact_outside(const char *text) {
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "SELECT outside FROM memory_facts WHERE user_id = ? AND "
+                      "fact_text = ?",
+                      -1, &st, NULL);
+   sqlite3_bind_int(st, 1, s_user);
+   sqlite3_bind_text(st, 2, text, -1, SQLITE_STATIC);
+   const int64_t v = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int64(st, 0) : -1;
+   sqlite3_finalize(st);
+   return v;
+}
+
+/* A remembered fact carries what outside text its turn read, and what its
+ * conversation read before. */
+void test_remember_takes_the_turn_outside_kind(void) {
+   free(remember("Jon's locker code is 41"));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_NONE, fact_outside("Jon's locker code is 41"));
+
+   g_stub_turn_history = "[{\"role\":\"user\",\"content\":\"read my mail\"},"
+                         "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"--- EMAIL "
+                         "CONTENT ---\\nHi\\n--- END EMAIL CONTENT ---\"}]";
+   free(remember("Jon's gate code is 52"));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_EMAIL, fact_outside("Jon's gate code is 52"));
+
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Chat", &conv));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_set_last_extracted(conv, 2, 5, OUTSIDE_WEB));
+   g_stub_turn_history = NULL;
+   g_stub_turn_conv = conv;
+   free(remember("Jon's bike lock is 63"));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_WEB, fact_outside("Jon's bike lock is 63"));
+}
+
+/* A source excerpt from a conversation that read outside text says so, even
+ * under a fact that didn't come from it. */
+void test_source_excerpt_marks_an_outside_conversation(void) {
+   int64_t conv = 0, row = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Chat", &conv));
+   const conv_message_row_t said = { .role = "user", .content = "my kayak is green" };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &said, &row));
+   const memory_provenance_t prov = { .conv_id = conv, .msg_id_start = row, .msg_id_end = row };
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_create(s_user, "Jon's kayak is green",
+                                                                  0.9f, "explicit", &prov, &id));
+   char *r = search("kayak::with_source::true");
+   TEST_ASSERT_NOT_NULL(strstr(r, "[source: conv="));
+   TEST_ASSERT_NULL(strstr(r, "]" MEMORY_OUTSIDE_MARK "\n"));
+   free(r);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_set_last_extracted(conv, 1, row, OUTSIDE_WEB));
+   r = search("kayak::with_source::true");
+   TEST_ASSERT_NOT_NULL(strstr(r, "]" MEMORY_OUTSIDE_MARK "\n"));
+   free(r);
+}
+
+/* list_merged says which of the two outside text taught. */
+void test_list_merged_marks_outside_facts(void) {
+   const memory_provenance_t web = { .outside = OUTSIDE_WEB };
+   int64_t dup = 0, keep = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_create(s_user, "Jon flies Acme Air",
+                                                                  0.9f, "explicit", NULL, &dup));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_create(s_user, "Jon flies with Acme",
+                                                                  0.9f, "inferred", &web, &keep));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, s_user));
+   char buf[32] = "";
+   int respond = 0;
+   char *r = memoryCallback("list_merged", buf, &respond);
+   TEST_ASSERT_NOT_NULL(strstr(r, "Jon flies Acme Air\n"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "Jon flies with Acme" MEMORY_OUTSIDE_MARK "\n"));
+   free(r);
+}
+
 /* A preference outside text taught says so in a search, as facts do. */
 void test_search_marks_an_outside_preference(void) {
    const memory_provenance_t web = { .outside = OUTSIDE_WEB };
@@ -491,6 +568,9 @@ int main(void) {
    RUN_TEST(test_forget_reports_already_merged);
    RUN_TEST(test_search_shows_relations_only_when_asked);
    RUN_TEST(test_search_marks_an_outside_preference);
+   RUN_TEST(test_remember_takes_the_turn_outside_kind);
+   RUN_TEST(test_source_excerpt_marks_an_outside_conversation);
+   RUN_TEST(test_list_merged_marks_outside_facts);
    RUN_TEST(test_unprompted_skip_leaves_a_later_reply_unread);
    RUN_TEST(test_prompt_file_pieces_give_the_compiled_prompt);
    RUN_TEST(test_prompt_file_split);

@@ -651,6 +651,24 @@ static struct json_object *drop_unprompted(int user_id,
    return kept;
 }
 
+int memory_extraction_history_outside(int user_id,
+                                      int64_t conversation_id,
+                                      struct json_object *history,
+                                      int64_t last_msg_id) {
+   const int live = history_outside(user_id, conversation_id, history, last_msg_id);
+   /* What DAWN wrote into the stored rows past the cursor, as far as this
+    * history reaches: a history loaded from the database has no request
+    * context, and a compaction's rows aren't in the live one.  Unread (a
+    * failed query): outside text. */
+   int stored = OUTSIDE_NONE;
+   if (conversation_id > 0 && conv_db_rows_outside(conversation_id, user_id, last_msg_id,
+                                                   memory_extraction_history_max_id(history),
+                                                   &stored) != AUTH_DB_SUCCESS) {
+      stored = OUTSIDE_OTHER;
+   }
+   return outside_combine(live, stored);
+}
+
 struct json_object *memory_extraction_build_input(int user_id,
                                                   int64_t conversation_id,
                                                   struct json_object *conversation_history,
@@ -658,19 +676,8 @@ struct json_object *memory_extraction_build_input(int user_id,
                                                   int *outside_out) {
    /* Read with DAWN's request context (what it put in front of the model),
     * then extracted without it. */
-   *outside_out = history_outside(user_id, conversation_id, conversation_history, last_msg_id);
-   /* What DAWN wrote into the stored rows past the cursor, as far as this
-    * history reaches: a history loaded from the database has no request
-    * context, and a compaction's rows aren't in the live one.  Unread (a
-    * failed query): outside text. */
-   int stored = OUTSIDE_NONE;
-   if (conversation_id > 0 &&
-       conv_db_rows_outside(conversation_id, user_id, last_msg_id,
-                            memory_extraction_history_max_id(conversation_history),
-                            &stored) != AUTH_DB_SUCCESS) {
-      stored = OUTSIDE_OTHER;
-   }
-   *outside_out = outside_combine(*outside_out, stored);
+   *outside_out = memory_extraction_history_outside(user_id, conversation_id, conversation_history,
+                                                    last_msg_id);
    struct json_object *history = llm_history_strip_internal(conversation_history);
    if (!history) {
       return NULL;

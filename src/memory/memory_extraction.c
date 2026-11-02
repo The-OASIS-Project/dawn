@@ -664,6 +664,7 @@ static void process_extraction_response(int user_id,
          int dims = 0;
          int64_t repeat_id = 0;
          memory_fact_t seen = { 0 };
+         bool reused = false; /* a stored fact said again (seen: as stored) */
          if (memory_db_fact_find_exact(user_id, text, &repeat_id) == MEMORY_DB_SUCCESS) {
             /* Stored before word for word: reinforce it, as a paraphrase hit is. */
             const bool read = memory_db_fact_get(repeat_id, user_id, &seen) == MEMORY_DB_SUCCESS;
@@ -672,6 +673,7 @@ static void process_extraction_response(int user_id,
             OLOG_INFO("memory_extraction: repeat of fact_id=%lld: %s", (long long)repeat_id, text);
             fact_id = repeat_id;
             fact_id_origin = "hash_match";
+            reused = true;
          } else if (g_config.memory.paraphrase_dedup_enabled && memory_embeddings_available() &&
                     memory_embeddings_embed(text, vec, &dims) == SUCCESS && dims > 0) {
             int64_t matched_id = 0;
@@ -694,6 +696,7 @@ static void process_extraction_response(int user_id,
                          (long long)matched_id, (double)score, text);
                fact_id = matched_id;
                fact_id_origin = "paraphrase_match";
+               reused = true;
             } else {
                /* No paraphrase — create new fact + store precomputed vector. */
                memory_db_fact_create_at(user_id, text, confidence, source, prov, conv_created_at,
@@ -728,8 +731,11 @@ static void process_extraction_response(int user_id,
           * the 2026-06-05 live test surfaced).  We only ever SET from an inbound
           * date, never clear, so a durable fact keeps its state unless the AI
           * explicitly marked this inbound transient.  expires_at is a reference
-          * date; the stored cutoff adds the grace window. */
-         if (g_config.memory.expire_enabled) {
+          * date; the stored cutoff adds the grace window.  A batch that read
+          * outside text never sets it on a stored fact no such batch taught. */
+         if (g_config.memory.expire_enabled &&
+             !(reused && prov && outside_is_tainted(prov->outside) &&
+               !outside_is_tainted(seen.outside))) {
             struct json_object *exp_obj;
             if (json_object_object_get_ex(fact, "expires_at", &exp_obj)) {
                const char *exp_str = json_object_get_string(exp_obj);

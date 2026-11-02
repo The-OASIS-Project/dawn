@@ -54,6 +54,7 @@
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_extraction.h"
+#include "memory/memory_extraction_input.h"
 #include "memory/memory_fact_search.h"
 #include "memory/memory_forget.h" /* MEMORY_FORGET_WAIT_SEC */
 #include "utils/string_utils.h"
@@ -281,9 +282,17 @@ static int append_source_excerpt_from_range(int user_id,
    if (coll.filled > 1)
       qsort(coll.slots, (size_t)coll.filled, sizeof(struct top_k_slot), slot_order_cmp);
 
-   /* Header — emitted only when we have something to render under it. */
-   int hdr = strbuf_appendf(sb, "[source: conv=%lld msgs=%lld-%lld]\n", (long long)conv_id,
-                            (long long)start_id, (long long)end_id);
+   /* Header — emitted only when we have something to render under it.  It
+    * says "outside" when the conversation had read outside text (its floor):
+    * the row it backs may be clean while this range, a later mention's, isn't.
+    * Unreadable: outside. */
+   int floor = OUTSIDE_NONE;
+   if (conv_db_get_outside(conv_id, user_id, &floor) != AUTH_DB_SUCCESS) {
+      floor = OUTSIDE_OTHER;
+   }
+   int hdr = strbuf_appendf(sb, "[source: conv=%lld msgs=%lld-%lld]%s\n", (long long)conv_id,
+                            (long long)start_id, (long long)end_id,
+                            outside_is_tainted(floor) ? MEMORY_OUTSIDE_MARK : "");
    if (hdr > 0)
       *budget_remaining -= hdr;
 
@@ -834,6 +843,26 @@ static int remember_record_source(int64_t fact_id, int user_id, bool created) {
    return where;
 }
 
+/* What outside text the turn a remember runs in has read, with what its
+ * conversation read before (the floor): the fact stored carries it, as one
+ * extraction stores would.  Outside a turn, none; unreadable, OTHER. */
+static int remember_outside(int user_id) {
+   session_t *session = session_get_command_context();
+   if (!session) {
+      return OUTSIDE_NONE;
+   }
+   int64_t conv = 0;
+   struct json_object *hist = session_snapshot_turn_history(session, &conv);
+   const int read = hist ? memory_extraction_history_outside(user_id, conv, hist, 0)
+                         : OUTSIDE_OTHER;
+   json_object_put(hist);
+   int floor = OUTSIDE_NONE;
+   if (conv > 0 && conv_db_get_outside(conv, user_id, &floor) != AUTH_DB_SUCCESS) {
+      floor = OUTSIDE_OTHER;
+   }
+   return outside_combine(read, floor);
+}
+
 static char *memory_action_remember_single(int user_id,
                                            const char *fact_text,
                                            int64_t expires_ref) {
@@ -942,7 +971,8 @@ static char *memory_action_remember_single(int user_id,
     * was learned in (checked to still exist and be this user's, atomically with
     * the write), or keep it waiting for one. */
    int64_t fact_id = 0;
-   const memory_provenance_t requested = { .origin = MEMORY_ORIGIN_REQUESTED };
+   const memory_provenance_t requested = { .origin = MEMORY_ORIGIN_REQUESTED,
+                                           .outside = remember_outside(user_id) };
    int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", &requested,
                                          &fact_id);
 

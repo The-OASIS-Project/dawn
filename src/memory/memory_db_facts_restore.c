@@ -52,7 +52,8 @@ int memory_db_fact_list_superseded(int user_id,
    int rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT f.id, f.superseded_by, COALESCE(f.superseded_at, 0), "
-       "f.fact_text, COALESCE(k.fact_text, ''), f.superseded_kind FROM memory_facts f "
+       "f.fact_text, COALESCE(k.fact_text, ''), f.superseded_kind, f.outside, "
+       "COALESCE(k.outside, 0) FROM memory_facts f "
        "LEFT JOIN memory_facts k ON k.id = f.superseded_by AND k.user_id = f.user_id "
        "WHERE +f.user_id = ?1 AND f.superseded_by IS NOT NULL "
        "AND (?2 = 0 OR f.superseded_by = ?2) "
@@ -84,6 +85,8 @@ int memory_db_fact_list_superseded(int user_id,
       safe_strscpy(f->text, t ? t : "");
       safe_strscpy(f->keeper_text, k ? k : "");
       f->replaced = sqlite3_column_int(st, 5) == MEMORY_SUPERSEDED_REPLACED;
+      f->outside = sqlite3_column_int(st, 6);
+      f->keeper_outside = sqlite3_column_int(st, 7);
    }
    sqlite3_finalize(st);
    AUTH_DB_UNLOCK();

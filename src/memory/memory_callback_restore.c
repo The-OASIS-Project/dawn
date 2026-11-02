@@ -68,10 +68,13 @@ char *memory_action_list_merged(int user_id, const char *query) {
                      "brings one back):\n",
                      n, n == 1 ? "y" : "ies");
       for (int i = 0; i < n; i++) {
-         strbuf_appendf(&sb, "- [%lld] %s\n    %s [%lld] %s\n", (long long)rows[i].id, rows[i].text,
+         strbuf_appendf(&sb, "- [%lld] %s%s\n    %s [%lld] %s%s\n", (long long)rows[i].id,
+                        rows[i].text,
+                        outside_is_tainted(rows[i].outside) ? MEMORY_OUTSIDE_MARK : "",
                         rows[i].replaced ? "replaced by" : "merged into",
                         (long long)rows[i].keeper_id,
-                        rows[i].keeper_text[0] ? rows[i].keeper_text : "(gone)");
+                        rows[i].keeper_text[0] ? rows[i].keeper_text : "(gone)",
+                        outside_is_tainted(rows[i].keeper_outside) ? MEMORY_OUTSIDE_MARK : "");
       }
    }
    free(rows);

@@ -2181,6 +2181,22 @@ int64_t session_history_conversation_of(session_t *session, struct json_object *
    return conv > 0 ? conv : 0;
 }
 
+struct json_object *session_snapshot_turn_history(session_t *session, int64_t *conv_out) {
+   *conv_out = 0;
+   if (!session) {
+      return NULL;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   struct json_object *h = session->turn_history ? session->turn_history
+                                                 : session->conversation_history;
+   struct json_object *copy = h ? llm_history_copy_marked(h) : NULL;
+   const int64_t conv = session->turn_active ? session->turn_history_conv
+                                             : atomic_load(&session->history_conversation_id);
+   pthread_mutex_unlock(&session->history_mutex);
+   *conv_out = conv > 0 ? conv : 0;
+   return copy;
+}
+
 struct json_object *session_get_turn_history(session_t *session) {
    if (!session) {
       return NULL;

@@ -273,6 +273,18 @@ int session_turn_finish(session_t *session, session_turn_unsaved_t *out);
 int64_t session_turn_conversation(session_t *session);
 
 /**
+ * @brief A copy of the running turn's history (else the session history),
+ *        its request context still marked (llm_history_copy_marked), and its
+ *        conversation (session_turn_conversation), read under one lock
+ *
+ * For a tool call that judges what outside text the turn has read.
+ *
+ * @param conv_out Receives the conversation (0 = none yet)
+ * @return New array (caller owns), or NULL
+ */
+struct json_object *session_snapshot_turn_history(session_t *session, int64_t *conv_out);
+
+/**
  * @brief The conversation @p history holds
  *
  * @p history is the running turn's pinned history or the session history;

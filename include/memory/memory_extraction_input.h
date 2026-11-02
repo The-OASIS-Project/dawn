@@ -52,6 +52,21 @@ int64_t memory_extraction_history_max_id(struct json_object *history);
 int64_t memory_extraction_history_first_id(struct json_object *history);
 
 /**
+ * @brief The outside kind of the rows of @p history a batch from
+ *        @p last_msg_id reads, as memory_extraction_build_input judges them
+ *
+ * @p history as session_snapshot_history / session_snapshot_turn_history
+ * give it (request context still marked).  For a stored conversation the
+ * rows DAWN wrote past the cursor are read too (conv_db_rows_outside).
+ *
+ * @return An outside_kind_t; OTHER when what it needs can't be read
+ */
+int memory_extraction_history_outside(int user_id,
+                                      int64_t conversation_id,
+                                      struct json_object *history,
+                                      int64_t last_msg_id);
+
+/**
  * @brief The messages of @p conversation_history to send for extraction
  *
  * Messages after @p last_msg_id (plus id-less ones: compaction markers, a turn's
