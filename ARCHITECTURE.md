@@ -293,6 +293,7 @@ depends on, so every build runs them, and they fail the build when broken:
 | `messaging_send_funnel_check` | `check_messaging_send_funnel.sh` | Every messaging driver send goes through `messaging_deliver` (per-provider formatting and escaping) |
 | `tool_action_kinds_check` | `check_tool_action_kinds.sh` | Every tool's action-kinds table names its own actions, and each prepare names a listed confirm |
 | `llm_blocks_confined_check` | `check_llm_blocks_confined.sh` | Stored turn blocks (`messages.llm_blocks`) are read only to rebuild an LLM request |
+| `llm_selection_resolved_check` | `check_llm_selection_resolved.sh` | A session's LLM settings are read resolved (`session_get_llm_config`); only the writers that store them back read them raw |
 | `message_kind_confined_check` | `check_message_kind_confined.sh` | Request-context rows (a `messages.kind`) are never shown, searched, counted or extracted |
 | `user_removal_marked_check` | `check_user_removal_marked.sh` | A delete a user makes is marked as their removal, so it is withdrawn from conversations |
 | `blob_marker_sync_check` | `check_blob_marker_sync.sh` | The chat-attachment blob marker agrees across its producer, parser and orphan sweep |
@@ -467,6 +468,10 @@ Global daemon locks (src/dawn.c):
   llm_mutex              — LLM worker thread ↔ main thread buffer transfer
   tts_mutex              — TTS engine (Piper) serialization
   conversation_mutex     — conversation history list
+  g_config_rwlock        — the live dawn.toml settings.  Readers include the LLM-settings getters
+                           (session_get_llm_config, llm_resolve_config, llm_selection_problem),
+                           taken with no session lock held; a writer (a settings save) never calls
+                           into session LLM state
 
 Per-session locks (src/core/session_manager.c):
   session->history_mutex    — session conversation history

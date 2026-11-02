@@ -1742,10 +1742,13 @@ int session_set_llm_config(session_t *session, const session_llm_config_t *confi
     * the session's only when the turn runs on the session's live history, i.e.
     * on the conversation being viewed. */
    const bool on_own_copy = session_turn_on_own_history(session);
+   /* A turn runs on a concrete selection; the session's may stay unset. */
+   session_llm_config_t turn_cfg = *config;
+   llm_selection_resolve(&turn_cfg); /* takes g_config_rwlock: outside the session's mutex */
    pthread_mutex_lock(&session->llm_config_mutex);
    const bool turn_caller = is_turn_caller_locked(session);
    if (turn_caller) {
-      memcpy(&session->turn_llm_config, config, sizeof(session_llm_config_t));
+      session->turn_llm_config = turn_cfg;
    }
    if (!turn_caller || !on_own_copy) {
       memcpy(&session->llm_config, config, sizeof(session_llm_config_t));
@@ -1767,10 +1770,12 @@ int session_set_turn_llm_config(session_t *session, const session_llm_config_t *
    if (!config) {
       return 1;
    }
+   session_llm_config_t turn_cfg = *config;
+   llm_selection_resolve(&turn_cfg); /* outside the session's mutex */
    pthread_mutex_lock(&session->llm_config_mutex);
    const bool turn_caller = is_turn_caller_locked(session);
    if (turn_caller) {
-      memcpy(&session->turn_llm_config, config, sizeof(session_llm_config_t));
+      session->turn_llm_config = turn_cfg;
    }
    pthread_mutex_unlock(&session->llm_config_mutex);
    if (!turn_caller) {
@@ -1784,6 +1789,14 @@ int session_set_turn_llm_config(session_t *session, const session_llm_config_t *
 }
 
 void session_get_llm_config(session_t *session, session_llm_config_t *config) {
+   if (!session || !config) {
+      return;
+   }
+   session_get_llm_config_raw(session, config);
+   llm_selection_resolve(config); /* takes g_config_rwlock: outside the session's mutex */
+}
+
+void session_get_llm_config_raw(session_t *session, session_llm_config_t *config) {
    if (!session || !config) {
       return;
    }

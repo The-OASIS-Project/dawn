@@ -40,6 +40,7 @@
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_context_text.h"
 #include "llm/llm_history_kind.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_tool_defs.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
@@ -1027,13 +1028,29 @@ static bool try_pin_live_locked(session_t *session, int64_t conv_id, bool conv_f
 /* Turn tokens, unique across sessions (see session_turn_token()). */
 static _Atomic uint64_t s_turn_tokens;
 
+/* The session's own LLM settings, resolved (a turn runs on a concrete selection:
+ * the default one read once, when it begins). */
+static void session_llm_config_resolved(session_t *session, session_llm_config_t *out) {
+   pthread_mutex_lock(&session->llm_config_mutex);
+   *out = session->llm_config;
+   pthread_mutex_unlock(&session->llm_config_mutex);
+   llm_selection_resolve(out); /* takes g_config_rwlock: outside the session's mutex */
+}
+
 /* Set the running turn's LLM settings to @p cfg (NULL = the session's own),
- * unless a later turn began meanwhile.  Never called under history_mutex (the
- * two session locks are never held together). */
+ * resolved, unless a later turn began meanwhile.  Never called under
+ * history_mutex (the two session locks are never held together). */
 static void set_turn_llm_config(session_t *session, const session_llm_config_t *cfg) {
+   session_llm_config_t turn_cfg;
+   if (cfg) {
+      turn_cfg = *cfg;
+      llm_selection_resolve(&turn_cfg);
+   } else {
+      session_llm_config_resolved(session, &turn_cfg);
+   }
    pthread_mutex_lock(&session->llm_config_mutex);
    if (session->turn_llm_config_set && session->turn_gen == session_turn_token()) {
-      session->turn_llm_config = cfg ? *cfg : session->llm_config;
+      session->turn_llm_config = turn_cfg;
    }
    pthread_mutex_unlock(&session->llm_config_mutex);
 }
@@ -1046,9 +1063,7 @@ static struct json_object *load_conversation(session_t *session, int user_id, in
    session_llm_config_t base;
    session_llm_config_t cfg;
    bool has_cfg = false;
-   pthread_mutex_lock(&session->llm_config_mutex);
-   base = session->llm_config; /* the session's, never a previous turn load's */
-   pthread_mutex_unlock(&session->llm_config_mutex);
+   session_llm_config_resolved(session, &base); /* the session's, never a previous turn load's */
    struct json_object *loaded = (loader && user_id > 0)
                                     ? loader(user_id, conv_id, &base, &cfg, &has_cfg)
                                     : NULL;
@@ -1145,9 +1160,11 @@ void session_turn_begin(session_t *session, int64_t conv_id, int user_id) {
     * mid-turn changes the session's, never the running turn's. */
    const uint64_t outer = session_turn_token(); /* restored at the end */
    const uint64_t token = atomic_fetch_add(&s_turn_tokens, 1) + 1;
+   session_llm_config_t turn_cfg;
+   session_llm_config_resolved(session, &turn_cfg);
    pthread_mutex_lock(&session->llm_config_mutex);
    session->turn_gen = token;
-   session->turn_llm_config = session->llm_config;
+   session->turn_llm_config = turn_cfg;
    session->turn_llm_config_set = true;
    pthread_mutex_unlock(&session->llm_config_mutex);
    session_set_turn_token(token);

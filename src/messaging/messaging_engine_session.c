@@ -40,6 +40,7 @@
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
 #include "messaging/messaging_engine.h"
@@ -484,14 +485,22 @@ session_t *get_or_create_messaging_session(const channel_ref_t *ref,
     * mirror this — LLM config is per-creation/restart, not per-turn (per-turn
     * re-application would churn the Anthropic stable-prefix cache).  Safe
     * without engine locks: session_t is thread-private here, and
-    * session_set_llm_config takes only the leaf llm_config_mutex. */
+    * session_set_llm_config takes only the leaf llm_config_mutex (and
+    * g_config_rwlock to resolve an unset selection, with no lock held). */
    s->messaging_identity.conversation_id = conversation_id;
    session_bind_history_conversation(s, conversation_id);
    if (conversation_id > 0 && user_id > 0) {
       conversation_t conv;
       if (conv_db_get(conversation_id, user_id, &conv) == AUTH_DB_SUCCESS) {
          session_llm_config_t mcfg;
-         session_get_llm_config(s, &mcfg); /* seed ALL fields from the global default */
+         /* Seed every field from the session's; an unset selection stays unset
+          * unless the conversation names one. */
+         session_get_llm_config_raw(s, &mcfg);
+         if (conv.llm_type[0] || conv.cloud_provider[0] || conv.model[0]) {
+            llm_selection_resolve(&mcfg);
+         }
+         const llm_type_t seed_type = mcfg.type;
+         const cloud_provider_t seed_provider = mcfg.cloud_provider;
 
          if (conv.llm_type[0]) {
             mcfg.type = (strcmp(conv.llm_type, "local") == 0) ? LLM_LOCAL : LLM_CLOUD;
@@ -508,6 +517,8 @@ session_t *get_or_create_messaging_session(const channel_ref_t *ref,
          }
          if (conv.model[0]) {
             safe_strscpy(mcfg.model, conv.model);
+         } else if (mcfg.type != seed_type || mcfg.cloud_provider != seed_provider) {
+            mcfg.model[0] = '\0'; /* another provider: its default, not the session's model */
          }
          if (conv.thinking_mode[0]) {
             safe_strscpy(mcfg.thinking_mode, conv.thinking_mode);

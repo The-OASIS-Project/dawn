@@ -230,6 +230,15 @@ void llm_selection_apply(const llm_selection_t *sel, session_llm_config_t *cfg) 
    safe_strscpy(cfg->model, sel->model);
 }
 
+void llm_selection_resolve(session_llm_config_t *cfg) {
+   if (cfg->type != LLM_UNDEFINED) {
+      return;
+   }
+   llm_selection_t sel;
+   llm_default_selection(&sel);
+   llm_selection_apply(&sel, cfg);
+}
+
 static int refuse(char *reason, size_t reason_len, const char *text) {
    if (reason && reason_len > 0) {
       snprintf(reason, reason_len, "%s", text);

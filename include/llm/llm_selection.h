@@ -67,6 +67,15 @@ void llm_default_selection(llm_selection_t *out);
 void llm_selection_apply(const llm_selection_t *sel, session_llm_config_t *cfg);
 
 /**
+ * @brief Make a config concrete: LLM_UNDEFINED becomes the default selection.
+ *
+ * Type, provider and model come from llm_default_selection(); reasoning, endpoint
+ * and the rest are kept.  A config with a type is left as it is.  Must not be
+ * called with g_config_rwlock held.
+ */
+void llm_selection_resolve(session_llm_config_t *cfg);
+
+/**
  * @brief Whether a config can run, and if not, why.
  *
  * Local runs (whether the local server answers is found out when it's called).

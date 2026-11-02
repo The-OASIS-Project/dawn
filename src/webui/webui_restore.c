@@ -86,7 +86,12 @@ static bool conversation_llm_config(const conversation_t *conv,
       else if (strcmp(conv->cloud_provider, "openrouter") == 0)
          cfg.cloud_provider = CLOUD_PROVIDER_OPENROUTER;
    }
-   if (conv->model[0] != '\0') {
+   if (conv->model[0] == '\0') {
+      /* Another provider than the base's: its default, not the base's model. */
+      if (cfg.type != base->type || cfg.cloud_provider != base->cloud_provider) {
+         cfg.model[0] = '\0';
+      }
+   } else {
       safe_strscpy(cfg.model, conv->model);
 
       /* Infer provider from model name if not explicitly stored. OpenRouter IDs are

@@ -642,8 +642,9 @@ cloud_provider_t llm_detect_available_provider(void);
  * @brief Resolve session LLM config to final request config
  *
  * Resolves session config to final configuration with endpoints and API keys.
- * If session config specifies invalid settings (e.g., provider without API key),
- * returns error.
+ * LLM_UNDEFINED is the default selection (llm_selection_resolve()).  A config
+ * llm_selection_problem() refuses (a provider without its API key, cloud with no
+ * provider) is an error.
  *
  * @param session_config Session's LLM config
  * @param resolved Output: resolved configuration for LLM call

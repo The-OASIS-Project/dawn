@@ -1844,14 +1844,30 @@ int session_set_llm_config(session_t *session, const session_llm_config_t *confi
 int session_set_turn_llm_config(session_t *session, const session_llm_config_t *config);
 
 /**
- * @brief Get session's current LLM configuration
+ * @brief Get session's current LLM configuration, resolved
+ *
+ * The settings this thread's turn runs on (a pinned override, the running turn's
+ * own, else the session's), with an unset selection (LLM_UNDEFINED) replaced by
+ * the default one (llm_selection_resolve()).  What a turn, a status display or a
+ * check should read.
  *
  * @param session Session to query
  * @param config Output: copy of session's LLM config
  *
- * @locks session->llm_config_mutex
+ * @locks session->llm_config_mutex, then g_config_rwlock (not held together)
  */
 void session_get_llm_config(session_t *session, session_llm_config_t *config);
+
+/**
+ * @brief The same settings as session_get_llm_config(), not resolved
+ *
+ * For a read-modify-write that stores the result back: an unset selection stays
+ * unset, so it keeps following the default.  A change that names a type, provider
+ * or model resolves it first (llm_selection_resolve()).
+ *
+ * @locks session->llm_config_mutex
+ */
+void session_get_llm_config_raw(session_t *session, session_llm_config_t *config);
 
 /**
  * @brief Whether the LLM this turn would run on can run, and if not, why.

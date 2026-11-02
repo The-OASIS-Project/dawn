@@ -1207,6 +1207,15 @@ add_custom_target(llm_blocks_confined_check
     COMMENT "Checking stored-turn-blocks invariant: replay path only")
 add_dependencies(dawn llm_blocks_confined_check)
 
+# LLM-selection invariant: a session's settings are read resolved (an unset
+# selection becomes the default one); only the writers that store them back read
+# them raw.  See scripts/check_llm_selection_resolved.sh.
+add_custom_target(llm_selection_resolved_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_llm_selection_resolved.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking LLM-selection invariant: raw reads only in settings writers")
+add_dependencies(dawn llm_selection_resolved_check)
+
 # Request-context CI invariant: rows of messages with a kind (turn context,
 # memory, directives, ...) are read only to rebuild an LLM request, never shown,
 # searched, counted or extracted.  See scripts/check_message_kind_confined.sh.

@@ -1321,11 +1321,21 @@ int llm_resolve_config(const session_llm_config_t *session_config,
    /* Callers pass uninitialized stack structs: every field starts empty. */
    memset(resolved, 0, sizeof(*resolved));
 
-   // Use session config directly (sessions own their config)
-   resolved->type = session_config->type;
-   resolved->cloud_provider = session_config->cloud_provider;
+   /* An unset selection is the default one; the copy lives until model is copied
+    * into model_buf below.  endpoint still points at the caller's config (the
+    * resolve keeps it). */
+   session_llm_config_t cfg = *session_config;
+   llm_selection_resolve(&cfg);
+   char reason[LLM_SELECTION_REASON_MAX];
+   if (llm_selection_problem(&cfg, reason, sizeof(reason)) != 0) {
+      OLOG_ERROR("LLM config can't run: %s", reason);
+      return 1;
+   }
+
+   resolved->type = cfg.type;
+   resolved->cloud_provider = cfg.cloud_provider;
    resolved->endpoint = session_config->endpoint[0] != '\0' ? session_config->endpoint : NULL;
-   resolved->model = session_config->model[0] != '\0' ? session_config->model : NULL;
+   resolved->model = cfg.model[0] != '\0' ? cfg.model : NULL;
    resolved->api_key = NULL;
 
    /* Canonical bare-model remap for OpenRouter sessions — the single request choke
@@ -1346,35 +1356,29 @@ int llm_resolve_config(const session_llm_config_t *session_config,
       }
    }
 
-   // Validate and get API key for cloud providers
    if (resolved->type == LLM_CLOUD) {
-      if (resolved->cloud_provider == CLOUD_PROVIDER_OPENAI) {
-         if (!is_openai_available()) {
-            OLOG_ERROR("Session config requests OpenAI but no API key configured");
-            return 1;
-         }
-         resolved->api_key = get_openai_api_key();
-      } else if (resolved->cloud_provider == CLOUD_PROVIDER_CLAUDE) {
-         if (!is_claude_available()) {
-            OLOG_ERROR("Session config requests Claude but no API key configured");
-            return 1;
-         }
-         resolved->api_key = get_claude_api_key();
-      } else if (resolved->cloud_provider == CLOUD_PROVIDER_GEMINI) {
-         if (!is_gemini_available()) {
-            OLOG_ERROR("Session config requests Gemini but no API key configured");
-            return 1;
-         }
-         resolved->api_key = get_gemini_api_key();
-      } else if (resolved->cloud_provider == CLOUD_PROVIDER_OPENROUTER) {
-         if (!is_openrouter_available()) {
-            OLOG_ERROR("Session config requests OpenRouter but no API key configured");
-            return 1;
-         }
-         resolved->api_key = get_openrouter_api_key();
-      } else {
-         OLOG_ERROR("Session config requests cloud but no provider specified");
-         return 1;
+      switch (resolved->cloud_provider) {
+         case CLOUD_PROVIDER_OPENAI:
+            resolved->api_key = get_openai_api_key();
+            break;
+         case CLOUD_PROVIDER_CLAUDE:
+            resolved->api_key = get_claude_api_key();
+            break;
+         case CLOUD_PROVIDER_GEMINI:
+            resolved->api_key = get_gemini_api_key();
+            break;
+         case CLOUD_PROVIDER_OPENROUTER:
+            resolved->api_key = get_openrouter_api_key();
+            break;
+         case CLOUD_PROVIDER_NONE:
+         default:
+            break; /* refused above */
+      }
+      if (!resolved->api_key) {
+         OLOG_ERROR("LLM config can't run: %s has no API key",
+                    cloud_provider_display_name(resolved->cloud_provider));
+         memset(resolved, 0, sizeof(*resolved)); /* model still points into cfg */
+         return 1;                               /* the key was removed after the check */
       }
    }
 

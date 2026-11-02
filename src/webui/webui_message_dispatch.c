@@ -57,6 +57,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
 #include "llm/llm_local_provider.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "utils/string_utils.h"
@@ -562,9 +563,23 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
       } else if (payload) {
          struct json_object *type_obj, *provider_obj;
 
-         /* Get current session config as starting point */
+         /* The session's config as the starting point: an unset selection stays
+          * unset (following the default) unless this request names one. */
          session_llm_config_t config;
-         session_get_llm_config(conn->session, &config);
+         session_get_llm_config_raw(conn->session, &config);
+         {
+            static const char *const names_selection[] = { "type", "provider", "model" };
+            for (size_t i = 0; i < sizeof(names_selection) / sizeof(names_selection[0]); i++) {
+               struct json_object *v;
+               const char *str = json_object_object_get_ex(payload, names_selection[i], &v)
+                                     ? json_object_get_string(v)
+                                     : NULL;
+               if (str && str[0] != '\0') {
+                  llm_selection_resolve(&config);
+                  break;
+               }
+            }
+         }
          bool has_changes = false;
 
          /* Track old model + type for context cache invalidation */

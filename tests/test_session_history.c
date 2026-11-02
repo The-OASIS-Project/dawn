@@ -156,6 +156,15 @@ void session_set_turn_token(uint64_t token) {
 session_t *session_get_command_context(void) {
    return NULL;
 }
+/* The default selection, for a session whose selection is unset. */
+void llm_selection_resolve(session_llm_config_t *cfg) {
+   if (cfg->type == LLM_UNDEFINED) {
+      cfg->type = LLM_LOCAL;
+      cfg->cloud_provider = CLOUD_PROVIDER_NONE;
+      snprintf(cfg->model, sizeof(cfg->model), "default-model");
+   }
+}
+
 void session_get_llm_config(session_t *session, session_llm_config_t *config) {
    pthread_mutex_lock(&session->llm_config_mutex);
    if (session->turn_llm_config_set && tl_token != 0 && tl_token == session->turn_gen) {
@@ -164,6 +173,7 @@ void session_get_llm_config(session_t *session, session_llm_config_t *config) {
       *config = session->llm_config;
    }
    pthread_mutex_unlock(&session->llm_config_mutex);
+   llm_selection_resolve(config);
 }
 
 /* The model another thread sees for @p session, with @p token set on it. */
@@ -428,6 +438,22 @@ void test_turn_settings_fixed_at_begin(void) {
    session_llm_config_t cfg;
    session_get_llm_config(s, &cfg);
    TEST_ASSERT_EQUAL_STRING("viewed-model", cfg.model);
+}
+
+void test_turn_runs_on_the_default_when_unset(void) {
+   /* An unset selection is resolved once, at turn begin; the session's stays unset. */
+   load_live(3, 2);
+   pthread_mutex_lock(&s->llm_config_mutex);
+   s->llm_config.type = LLM_UNDEFINED;
+   pthread_mutex_unlock(&s->llm_config_mutex);
+   session_turn_begin(s, 3, 1);
+   session_llm_config_t cfg;
+   session_get_llm_config(s, &cfg);
+   TEST_ASSERT_EQUAL(LLM_LOCAL, cfg.type);
+   TEST_ASSERT_EQUAL_STRING("default-model", cfg.model);
+   pthread_mutex_lock(&s->llm_config_mutex);
+   TEST_ASSERT_EQUAL(LLM_UNDEFINED, s->llm_config.type);
+   pthread_mutex_unlock(&s->llm_config_mutex);
 }
 
 void test_turn_settings_follow_the_token_to_other_threads(void) {
@@ -1368,6 +1394,7 @@ int main(void) {
    RUN_TEST(test_turn_end_gives_reloaded_history_the_reply);
    RUN_TEST(test_turn_end_adopts_copy_when_live_holds_another);
    RUN_TEST(test_turn_settings_fixed_at_begin);
+   RUN_TEST(test_turn_runs_on_the_default_when_unset);
    RUN_TEST(test_turn_settings_follow_the_token_to_other_threads);
    RUN_TEST(test_load_without_stored_settings_uses_the_sessions);
    RUN_TEST(test_off_thread_conversation_tags_the_stream);
