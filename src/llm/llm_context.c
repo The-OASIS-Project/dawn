@@ -49,6 +49,7 @@
 #include "llm/llm_local_provider.h"
 #include "llm/llm_models_toml.h"
 #include "llm/llm_pricing.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
@@ -1156,22 +1157,22 @@ static bool build_compaction_config(llm_resolved_config_t *cfg) {
    if (strcmp(p, "claude") == 0) {
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_CLAUDE;
-      cfg->endpoint = CLAUDE_URL;
+      cfg->endpoint = llm_cloud_url(CLOUD_PROVIDER_CLAUDE);
       cfg->api_key = g_secrets.claude_api_key;
    } else if (strcmp(p, "openai") == 0) {
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_OPENAI;
-      cfg->endpoint = CLOUDAI_URL;
+      cfg->endpoint = llm_cloud_url(CLOUD_PROVIDER_OPENAI);
       cfg->api_key = g_secrets.openai_api_key;
    } else if (strcmp(p, "gemini") == 0) {
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_GEMINI;
-      cfg->endpoint = GEMINI_URL;
+      cfg->endpoint = llm_cloud_url(CLOUD_PROVIDER_GEMINI);
       cfg->api_key = g_secrets.gemini_api_key;
    } else if (strcmp(p, "openrouter") == 0) {
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-      cfg->endpoint = OPENROUTER_URL;
+      cfg->endpoint = llm_cloud_url(CLOUD_PROVIDER_OPENROUTER);
       cfg->api_key = g_secrets.openrouter_api_key;
    } else if (strcmp(p, "local") == 0) {
       cfg->type = LLM_LOCAL;

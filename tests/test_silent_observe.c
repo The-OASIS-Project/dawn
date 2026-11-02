@@ -94,6 +94,11 @@ const char *llm_get_default_openrouter_model(void) {
    return "anthropic/claude-3.5-haiku";
 }
 
+/* The provider's URL (llm_selection.c, not linked): the built-in one. */
+const char *llm_cloud_url(cloud_provider_t provider) {
+   return provider == CLOUD_PROVIDER_OPENROUTER ? OPENROUTER_URL : "";
+}
+
 /* Call-kind tags for the cache telemetry: not under test here. */
 int llm_cache_monitor_push_kind(llm_call_kind_t kind) {
    (void)kind;
