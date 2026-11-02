@@ -225,6 +225,34 @@ void llm_default_selection(llm_selection_t *out) {
    pthread_rwlock_unlock(&g_config_rwlock);
 }
 
+static cloud_provider_t configured_cloud_provider(void) {
+   llm_type_t type = LLM_UNDEFINED;
+   cloud_provider_t provider = CLOUD_PROVIDER_NONE;
+   pthread_rwlock_rdlock(&g_config_rwlock);
+   if (cloud_provider_from_string(g_config.llm.cloud.provider, &type, &provider) != SUCCESS ||
+       type != LLM_CLOUD) {
+      provider = CLOUD_PROVIDER_NONE;
+   }
+   pthread_rwlock_unlock(&g_config_rwlock);
+   return provider;
+}
+
+void llm_selection_set_target(session_llm_config_t *cfg,
+                              llm_type_t type,
+                              cloud_provider_t provider) {
+   if (type == LLM_CLOUD && provider == CLOUD_PROVIDER_NONE) {
+      provider = cfg->type == LLM_CLOUD ? cfg->cloud_provider : configured_cloud_provider();
+   }
+   if (type == LLM_LOCAL) {
+      provider = CLOUD_PROVIDER_NONE;
+   }
+   if (type != cfg->type || provider != cfg->cloud_provider) {
+      cfg->model[0] = '\0'; /* the new provider's default, never the old one's model */
+   }
+   cfg->type = type;
+   cfg->cloud_provider = provider;
+}
+
 void llm_selection_apply(const llm_selection_t *sel, session_llm_config_t *cfg) {
    cfg->type = sel->type;
    cfg->cloud_provider = sel->provider;
@@ -238,6 +266,35 @@ void llm_selection_resolve(session_llm_config_t *cfg) {
    llm_selection_t sel;
    llm_default_selection(&sel);
    llm_selection_apply(&sel, cfg);
+}
+
+static bool listed(const char models[][LLM_CLOUD_MODEL_NAME_MAX], int count, const char *model) {
+   for (int i = 0; i < count; i++) {
+      if (strcmp(models[i], model) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+cloud_provider_t llm_configured_model_provider(const char *model) {
+   cloud_provider_t p = CLOUD_PROVIDER_NONE;
+   if (!model || model[0] == '\0') {
+      return p;
+   }
+   const llm_cloud_config_t *c = &g_config.llm.cloud;
+   pthread_rwlock_rdlock(&g_config_rwlock);
+   if (listed(c->openai_models, c->openai_models_count, model)) {
+      p = CLOUD_PROVIDER_OPENAI;
+   } else if (listed(c->claude_models, c->claude_models_count, model)) {
+      p = CLOUD_PROVIDER_CLAUDE;
+   } else if (listed(c->gemini_models, c->gemini_models_count, model)) {
+      p = CLOUD_PROVIDER_GEMINI;
+   } else if (listed(c->openrouter_models, c->openrouter_models_count, model)) {
+      p = CLOUD_PROVIDER_OPENROUTER;
+   }
+   pthread_rwlock_unlock(&g_config_rwlock);
+   return p;
 }
 
 /* The provider a bare model id names (OpenRouter's "vendor/model" ids name none). */

@@ -498,6 +498,9 @@ Per-module locks (scoped to a single subsystem):
   utterance_dedup::s_mutex (utterance_dedup.c)    — cross-device dedup slots (leaf)
   attention::s_mutex (src/core/attention/attention_core.c) — SAGE watch cache + event queue + metrics (leaf)
   turn_queue::s_turn_queue_mutex (src/core/turn_queue.c)   — per-session turn-serialization queue (LEAF; never held across the spawn/free closures)
+  messaging_engine::s_session_slots_mutex (src/messaging/messaging_engine_session.c) — the channels' live sessions; a session's
+                                                                     ref_mutex is taken under it only to retain or release one, and its
+                                                                     LLM settings are set after it is released
   focus_source::s_registry_mutex (src/core/focus/focus_source.c) — the retrieval-adapter registry (LEAF: held only to
                                                                      register or clear an adapter; adapters register once at
                                                                      startup, so a turn's focus_compose reads the registry

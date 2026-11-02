@@ -60,6 +60,19 @@ typedef struct {
 void llm_default_selection(llm_selection_t *out);
 
 /**
+ * @brief Point a (resolved) config at a type and provider someone asked for
+ *
+ * Cloud with no provider named is the config's own cloud provider, else the one
+ * `[llm.cloud] provider` names (NONE when it names none, which then refuses).
+ * Local drops the provider.  A changed type or provider clears the model (the new
+ * provider's default), so one vendor's model id never goes to another.  Must not
+ * be called with g_config_rwlock held.
+ */
+void llm_selection_set_target(session_llm_config_t *cfg,
+                              llm_type_t type,
+                              cloud_provider_t provider);
+
+/**
  * @brief Put a selection into a session config.
  *
  * Sets type, provider and model; leaves reasoning, endpoint and the rest as they are.
@@ -107,6 +120,15 @@ void llm_selection_from_row(const char *llm_type,
  * @return 0 when it can run, 1 when it can't
  */
 int llm_selection_problem(const session_llm_config_t *cfg, char *reason, size_t reason_len);
+
+/**
+ * @brief The cloud provider whose dawn.toml model list names @p model
+ *
+ * Decides from configuration only (never the local server's list, which may not
+ * have been fetched): NONE for a model no cloud list names, such as a local
+ * server's gpt-oss.  Must not be called with g_config_rwlock held.
+ */
+cloud_provider_t llm_configured_model_provider(const char *model);
 
 /**
  * @brief Whether @p provider has an API key in secrets.toml (or the environment).

@@ -452,8 +452,8 @@ void llm_context_refresh_local(void) {
  * @brief Fetch the OpenRouter model catalog and populate the slug->context cache.
  *
  * GETs https://openrouter.ai/api/v1/models, parses data[].id + data[].context_length
- * with json-c, and fills s_state.or_models[]. The Bearer key is optional for this
- * endpoint, but we include it when configured. Graceful: on no key / curl error /
+ * with json-c, and fills s_state.or_models[]. The endpoint is public: no key is
+ * sent (it would go to OpenRouter whatever provider is selected). Graceful: on curl error /
  * parse failure, leaves the cache empty and returns FAILURE — callers then fall
  * back to the offline vendor-strip probe, so there is no regression when offline.
  *
@@ -461,10 +461,6 @@ void llm_context_refresh_local(void) {
  * only at the end to swap in the parsed results.
  */
 static int llm_context_query_openrouter_models(void) {
-   /* Key is optional for /models, but pass it if we have one. */
-   const char *api_key = g_secrets.openrouter_api_key[0] != '\0' ? g_secrets.openrouter_api_key
-                                                                 : NULL;
-
    CURL *curl = curl_easy_init();
    if (!curl) {
       OLOG_WARNING("llm_context: Failed to init CURL for OpenRouter /models query");
@@ -474,26 +470,13 @@ static int llm_context_query_openrouter_models(void) {
    curl_buffer_t response;
    curl_buffer_init_with_max(&response, LLM_CONTEXT_OPENROUTER_MAX_RESPONSE_SIZE);
 
-   struct curl_slist *headers = NULL;
-   char auth_header[CONFIG_API_KEY_MAX + 32];
-   if (api_key) {
-      snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", api_key);
-      headers = curl_slist_append(headers, auth_header);
-   }
-
    curl_easy_setopt(curl, CURLOPT_URL, LLM_CONTEXT_OPENROUTER_MODELS_URL);
-   if (headers) {
-      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-   }
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
 
    CURLcode res = curl_easy_perform(curl);
-   if (headers) {
-      curl_slist_free_all(headers);
-   }
    curl_easy_cleanup(curl);
 
    if (res != CURLE_OK) {

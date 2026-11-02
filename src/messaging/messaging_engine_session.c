@@ -85,6 +85,27 @@ void evict_session_slot(int64_t channel_id) {
    }
 }
 
+void messaging_engine_apply_conv_llm(int64_t conversation_id, const session_llm_config_t *cfg) {
+   if (conversation_id <= 0 || !cfg) {
+      return;
+   }
+   session_t *live = NULL;
+   pthread_mutex_lock(&s_session_slots_mutex);
+   for (size_t i = 0; i < MESSAGING_MAX_SESSIONS; i++) {
+      session_t *s = s_session_slots[i].session;
+      if (s && s->messaging_identity.conversation_id == conversation_id) {
+         session_retain(s);
+         live = s;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_session_slots_mutex);
+   if (live) {
+      session_set_llm_config(live, cfg); /* a running turn keeps its own */
+      session_release(live);
+   }
+}
+
 /* Query the highest msg_id present for a conversation.  Returns 0 on
  * lock failure or an empty conversation.  Used by the staleness check
  * in process_inbound to detect external writers (WebUI conversation
@@ -481,10 +502,13 @@ session_t *get_or_create_messaging_session(const channel_ref_t *ref,
     * Stash conversation_id on the session so switch_llm can persist a later
     * in-chat change back to this conversation's row.
     *
-    * Set ONCE at creation.  The channel-name fast-path refresh (~296) must NOT
-    * mirror this — LLM config is per-creation/restart, not per-turn (per-turn
-    * re-application would churn the Anthropic stable-prefix cache).  Safe
-    * without engine locks: session_t is thread-private here, and
+    * Set at creation, and again only when someone changes it (the channel panel
+    * or the picker: messaging_engine_apply_conv_llm), never per turn: the
+    * channel-name fast-path refresh (~296) must NOT mirror this (per-turn
+    * re-application would churn the Anthropic stable-prefix cache).  Here, at
+    * creation, the session is still private to this thread, so no engine lock
+    * is needed; a later change goes through messaging_engine_apply_conv_llm,
+    * which holds a reference taken under s_session_slots_mutex.
     * session_set_llm_config takes only the leaf llm_config_mutex (and
     * g_config_rwlock to read the default, with no lock held). */
    s->messaging_identity.conversation_id = conversation_id;

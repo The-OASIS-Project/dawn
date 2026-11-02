@@ -146,10 +146,12 @@
       if (typeSelect) {
          typeSelect.addEventListener('change', () => {
             const newType = typeSelect.value;
-            setSessionLlm({ type: newType });
 
-            // Request local models when switching to local mode
+            // Local: the server's local LLM; its models arrive with the list.  Cloud:
+            // one message with the provider and model below (the server checks the
+            // whole pick, so never "cloud" alone).
             if (newType === 'local') {
+               setSessionLlm({ type: 'local' });
                requestLocalModels();
             } else {
                // Switching to cloud (direct providers): restore provider dropdown and update model
@@ -183,12 +185,8 @@
                   } else if (providerSelect.options.length > 0) {
                      providerSelect.value = providerSelect.options[0].value;
                   }
-                  // Also send provider to session (only if a provider is actually selected)
-                  if (providerSelect.value) {
-                     setSessionLlm({ provider: providerSelect.value });
-                  }
                }
-               // Populate cloud models and send model to session
+               // Populate cloud models and send the pick to the session
                updateModelDropdownForCloud(true);
             }
          });
@@ -196,8 +194,7 @@
 
       if (providerSelect) {
          providerSelect.addEventListener('change', () => {
-            setSessionLlm({ provider: providerSelect.value });
-            // Update model dropdown for new provider and send model to session
+            // The new provider's models, and the pick sent as one message
             updateModelDropdownForCloud(true);
          });
       }
@@ -205,7 +202,13 @@
       if (modelSelect) {
          modelSelect.addEventListener('change', () => {
             if (modelSelect.value) {
-               setSessionLlm({ model: modelSelect.value });
+               /* The whole pick: a model name never decides local vs cloud. */
+               const pick = { type: typeSelect ? typeSelect.value : llmRuntimeState.type };
+               if (pick.type === 'cloud' && providerSelect && providerSelect.value) {
+                  pick.provider = providerSelect.value;
+               }
+               pick.model = modelSelect.value;
+               setSessionLlm(pick);
                /* Show the new model's options now; the server's reply carries
                 * the settled values. */
                renderReasoning(
@@ -802,7 +805,7 @@
             !llmRuntimeState.follows_default
          ) {
             llmRuntimeState.model = payload.current_model;
-            setSessionLlm({ model: payload.current_model, from_restore: true });
+            setSessionLlm({ type: 'local', model: payload.current_model, from_restore: true });
          }
          // Update collapsed mini bar summary
          if (typeof DAWN !== 'undefined' && DAWN.updateLlmMiniSummary) {
@@ -837,7 +840,7 @@
          modelSelect.value = payload.current_model;
          if (llmRuntimeState.model !== payload.current_model && !llmRuntimeState.follows_default) {
             llmRuntimeState.model = payload.current_model;
-            setSessionLlm({ model: payload.current_model, from_restore: true });
+            setSessionLlm({ type: 'local', model: payload.current_model, from_restore: true });
          }
       }
       modelSelect.disabled = false;
@@ -884,6 +887,10 @@
          modelSelect.disabled = true;
          modelSelect.title = 'Add models in Settings > LLM > Cloud Settings';
          setControlHint('model-hint', 'Configure in Settings');
+         if (sendToSession) {
+            // No provider to name: the server uses dawn.toml's, or says why it can't
+            setSessionLlm(provider ? { type: 'cloud', provider } : { type: 'cloud' });
+         }
          return;
       }
 
@@ -922,11 +929,10 @@
       modelSelect.title = 'Select cloud model';
       setControlHint('model-hint', null);
 
-      // Send selected model to session if requested (e.g., after provider switch)
-      // Only send if model actually changed to avoid feedback loops
-      if (sendToSession && modelSelect.value && llmRuntimeState.model !== modelSelect.value) {
+      // An active switch (type or provider changed): the whole pick, in one message
+      if (sendToSession && provider) {
          llmRuntimeState.model = modelSelect.value;
-         setSessionLlm({ model: modelSelect.value });
+         setSessionLlm({ type: 'cloud', provider, model: modelSelect.value });
       }
    }
 
@@ -1200,8 +1206,10 @@
             DawnToast.show('Failed to switch LLM: ' + (payload.error || 'Unknown error'), 'error');
          }
 
-         // Revert controls to actual state
-         if (llmRuntimeState) {
+         // Back to what the session has: the server's reply carries it
+         if (payload.type) {
+            updateLlmControls(payload);
+         } else if (llmRuntimeState) {
             updateLlmControls(llmRuntimeState);
          }
       }

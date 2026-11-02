@@ -24,16 +24,16 @@ import time
 import unittest
 import uuid
 
-from fake_llm import FakeLLM
+from fake_llm import FakeLLM, text, tool_call
 from dawn_client import Client
 from instance import ADMIN_USER, CLOUD_LLM_PORT, LOCAL_LLM_PORT, WEBUI_PORT, LiveTestCase
 
 CLOUD_URL = f"http://127.0.0.1:{CLOUD_LLM_PORT}"
 
 
-def config(provider, model="fake-cloud"):
+def config(provider, model="fake-cloud", llm_type="cloud"):
     return {
-        "llm": {"type": "cloud"},
+        "llm": {"type": llm_type},
         "llm.cloud": {"provider": provider, "endpoint": CLOUD_URL,
                       "openai_models": [model], "openai_default_model_idx": 0,
                       "openai_use_responses_api": "never"},
@@ -45,12 +45,14 @@ class SelectionCase(LiveTestCase):
     provider = ""
     secrets = ""
     model = "fake-cloud"
+    llm_type = "cloud"
 
     @classmethod
     def setUpClass(cls):
         cls.cloud = FakeLLM(CLOUD_LLM_PORT, "fake-cloud")
         cls.local = FakeLLM(LOCAL_LLM_PORT, "fake-local")
-        cls.start_instance(config(cls.provider, cls.model), cls.secrets, [cls.cloud, cls.local])
+        cls.start_instance(config(cls.provider, cls.model, cls.llm_type), cls.secrets,
+                           [cls.cloud, cls.local])
         try:
             cls.conv = cls.client.new_conversation()
         except Exception:
@@ -141,6 +143,84 @@ class TestFollowsTheDefault(SelectionCase):
         self.assertNoErrorFrames(t)
         self.assertIn("fake-cloud model answering", t.reply)
         self.assertEqual(len(self.local.chat_requests()), before)
+
+
+class TestPicksAreChecked(SelectionCase):
+    """A pick without its provider's key is refused when made; "cloud" on a local
+    default means the provider dawn.toml names."""
+
+    llm_type = "local"
+    provider = "openai"
+    secrets = '[secrets]\nopenai_api_key = "sk-live-test"\n'
+
+    def set_llm(self, payload, timeout=10):
+        self.client.send("set_session_llm", payload)
+        deadline = time.monotonic() + timeout
+        while True:
+            f = self.client._recv(deadline)
+            if f is None:
+                raise TimeoutError("no set_session_llm_response")
+            if f.get("type") == "set_session_llm_response":
+                return f["payload"]
+
+    def test_1_a_provider_without_its_key_is_refused(self):
+        reply = self.set_llm({"type": "cloud", "provider": "gemini"})
+        self.assertFalse(reply.get("success"), reply)
+        self.assertIn("Gemini is selected, but it has no API key", reply.get("error", ""))
+        nonce, t = self.ask()
+        self.assertIn("fake-local model answering", t.reply)  # nothing changed
+
+    def test_2_switch_to_cloud_uses_the_configured_provider(self):
+        self.local.script(tool_call("switch_llm", {"target": "cloud"}), text("Switched."))
+        nonce, t = self.ask("Switch to the cloud.")
+        self.assertNoErrorFrames(t)
+        nonce, t = self.ask("And now?")
+        self.assertIn("fake-cloud model answering", t.reply)
+        self.assertEqual(len(self.cloud.chat_requests(nonce)), 1)
+
+
+class TestALocalModelNamedLikeACloudOne(SelectionCase):
+    """A model no dawn.toml cloud list names stays local, whether or not the local
+    server's list was ever fetched (Ollama's gpt-oss is named like an OpenAI
+    model); a cloud vendor nobody picked never gets the conversation."""
+
+    llm_type = "local"
+    provider = "openai"
+    secrets = '[secrets]\nopenai_api_key = "sk-live-test"\n'
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.local.name = "gpt-oss-20b"  # what the local server lists
+
+    def set_llm(self, payload, timeout=10):
+        self.client.send("set_session_llm", payload)
+        deadline = time.monotonic() + timeout
+        while True:
+            f = self.client._recv(deadline)
+            if f is None:
+                raise TimeoutError("no set_session_llm_response")
+            if f.get("type") == "set_session_llm_response":
+                return f["payload"]
+
+    def assert_stays_local(self, reply):
+        self.assertTrue(reply.get("success"), reply)
+        self.assertEqual(reply.get("type"), "local", reply)
+        nonce, t = self.ask()
+        self.assertNoRequests(self.cloud)
+        self.assertEqual(len(self.local.chat_requests(nonce)), 1)
+
+    def test_picking_it_alone_keeps_the_session_local(self):
+        self.assert_stays_local(self.set_llm({"model": "gpt-oss-20b"}))
+
+    def test_restoring_it_keeps_it_local(self):
+        # A restore echoes back the provider the server sent: "none" for local
+        self.assert_stays_local(self.set_llm({"type": "local", "provider": "none",
+                                              "model": "gpt-oss-20b", "from_restore": True}))
+
+    def test_a_reasoning_change_keeps_it_local(self):
+        self.assertTrue(self.set_llm({"type": "local", "model": "gpt-oss-20b"}).get("success"))
+        self.assert_stays_local(self.set_llm({"thinking_mode": "disabled"}))
 
 
 class TestRetiredModelOnACustomEndpoint(SelectionCase):
