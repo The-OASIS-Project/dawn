@@ -1,5 +1,6 @@
 # CLI: python3 -m llm_testing.memory_audit
-#        sample|label|classify|compare|report|examples|reextract|candidates|coverage
+#        sample|label|classify|compare|report|examples|reextract|candidates|coverage|
+#        store|comebacks|world
 #
 # An audit of what memory extraction has stored for a user: which facts are worth
 # keeping and which kinds of unwanted fact extraction produces.
@@ -12,11 +13,21 @@
 #   examples   print facts of one kind (shows fact text: for the user, not for logs)
 #   reextract  run DAWN's extraction on chosen stored conversations into a scratch
 #              database, so a prompt variant can be measured on the same input
-#              (--dump-candidates: also what extraction proposed, before storing)
+#              (--dump-candidates: also what extraction proposed, before storing;
+#              --consolidator prompt|agent, --samples 1|2: how each batch is stored;
+#              --forgotten <file>: seed forgotten facts first; tokens per
+#              conversation by call kind go to reextract_<label>_usage.jsonl)
 #   candidates counts and conversation ids where memory may have gone wrong,
 #              for the owner to write memory eval cases from (prints no text)
 #   coverage   how many of run A's facts (by tier) run B also stored, judged by a
 #              model per conversation: covered / partial / missing (counts only)
+#   store      what re-extraction runs stored: live facts, near-duplicates,
+#              merged/replaced, closed relations, assistant-subject relations,
+#              facts without a relation, one-at-a-time conflicts; for a
+#              consolidator run its batches, ops and triage; tokens per batch by
+#              call kind (counts only)
+#   comebacks  how many seeded forgotten facts a run stored again (a judge)
+#   world      how many extraction candidates are world facts (a judge)
 #
 # Privacy: everything read or written lives under llm_testing/memory_audit/data/
 # (ignored by git).  Only `label` and `examples` print fact text; the others

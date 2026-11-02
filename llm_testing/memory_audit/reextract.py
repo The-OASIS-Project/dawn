@@ -15,6 +15,14 @@
 # coverage of a run's kept facts against another run's candidates splits what
 # was never proposed from what the store lost.
 #
+# --consolidator prompt|agent stores each batch with the fixed rules or the
+# consolidator (over the config's [memory] consolidator); --samples 1|2 sets
+# the consolidator's extraction samples per batch (default 1).  --forgotten
+# <file> seeds forgotten-fact records under data/ before the first batch, for
+# `comebacks`.  Each conversation's model calls and tokens are saved by call
+# kind (reextract_<label>_usage.jsonl; the consolidator's split into its
+# extraction samples and its rounds), which `store` summarizes per batch.
+#
 # Privacy: conversation text goes only to the bench binary and the extraction
 # model's API.  The bench's log lines (which can quote facts) are read and
 # dropped; this prints ids and counts only.

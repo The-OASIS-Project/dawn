@@ -116,8 +116,10 @@ Each case runs as a quality-suite case:
   `speaker: guest`, every tool with personal data returns DAWN's guest refusal,
   and no retrieved items are sent, as DAWN treats an unassigned satellite.
 - **Decision.** `verify` and `act` pass on their `outcome` checks, and `act`
-  also forbids a question in the reply (an action waiting for the user's yes
-  may ask for it; "anything else?" doesn't count). `withhold` and `forgetting`
+  also forbids a question in the reply. An action waiting for the user's yes
+  may ask for it, with a short go-ahead naming the action ("Send it?") or a
+  read-back of its recipient with its text, never a choice ("or", a wh-word);
+  "anything else?" doesn't count. `withhold` and `forgetting`
   cases fail when a `protect` value appears in any reply or tool call (whole
   words; separators inside a number ignored). `ask` and `quiet` go to the judge
   (criteria `asks` and `quiet`, `rubric.py`), after any `outcome` checks.

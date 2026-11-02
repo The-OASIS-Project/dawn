@@ -300,7 +300,7 @@ session_timeout_minutes = 15
 extraction_provider = "local"          # "local", "openai", "claude", "openrouter"
 extraction_model = "qwen2.5:7b"        # Model for extraction
 extraction_effort = "off"              # "off", "low", "medium", "high"
-consolidator = "prompt"                # "prompt" (fixed rules) or "agent" (see below)
+consolidator = "prompt"                # "prompt" (fixed rules) or "agent" (memory_consolidate.c above)
 
 [memory.embeddings]
 provider = "onnx"         # "onnx" (default), "ollama", "openai"
