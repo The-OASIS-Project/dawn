@@ -106,6 +106,16 @@ Each starts from tracked seeds in `tests/fuzz/corpus_<harness>/`, with a token d
 CI runs each for 60 seconds on every push; a crash, leak, timeout or sanitizer report fails the job and
 the input is uploaded. `tests/fuzz/run_fuzzers.sh [seconds] [harness...]` runs them locally.
 
+## Live tests
+
+`tests/live/` runs a throwaway daemon and drives it over the WebUI's WebSocket protocol, with fake
+LLM providers: real turns, checked on what a user sees (the reply, the errors, the saved rows) and on
+what each fake received. The whole run is in fresh user, network, mount and PID namespaces: only
+loopback, the real DAWN directories masked, nothing left running afterwards. So a test never touches
+your config, database, network or accounts, and needs no API keys. `ctest -L live` (or
+`tests/live/run.sh`) runs them by hand after a build; CI doesn't yet. See `tests/live/README.md` to
+write one.
+
 ## Integration scripts
 
 These need a running daemon (and, for some, credentials, a registered satellite or a local service), so

@@ -108,6 +108,14 @@ function(dawn_add_unit_test NAME)
    add_dependencies(tests-all ${NAME})
 endfunction()
 
+# Live tests (tests/live/README.md): a throwaway daemon in its own namespaces,
+# driven over the WebUI protocol with fake LLMs.  Run with `ctest -L live` after
+# building dawn and dawn-admin; not in tests-ci or tests-all, and skipped (77)
+# where unprivileged namespaces aren't available.
+add_test(NAME live COMMAND ${SRC_ROOT}/tests/live/run.sh)
+set_tests_properties(live PROPERTIES LABELS "live" SKIP_RETURN_CODE 77 TIMEOUT 900
+                     ENVIRONMENT "DAWN_LIVE_BUILD=${CMAKE_BINARY_DIR}")
+
 # =============================================================================
 # Shared source / library groups
 # =============================================================================
