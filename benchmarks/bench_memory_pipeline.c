@@ -243,9 +243,10 @@ static void dump_reply(int64_t conversation_id, const char *reply) {
 }
 
 int bench_mp_dump_candidates(const char *path) {
-   /* Owner-only from the first byte: it holds the conversations' facts. */
+   /* Owner-only from the first byte: it holds the conversations' facts.  An
+    * existing file keeps its mode through open(), so it is set here too. */
    const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-   s_candidates = fd >= 0 ? fdopen(fd, "w") : NULL;
+   s_candidates = fd >= 0 && fchmod(fd, 0600) == 0 ? fdopen(fd, "w") : NULL;
    if (!s_candidates) {
       if (fd >= 0) {
          close(fd);

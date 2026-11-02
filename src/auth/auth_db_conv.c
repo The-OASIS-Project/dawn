@@ -456,9 +456,9 @@ static int create_continuation(int user_id,
        "INSERT INTO conversations (user_id, title, created_at, updated_at, continued_from, "
        "compaction_summary, llm_type, cloud_provider, model, tools_mode, thinking_mode, "
        "reasoning_effort, anchor_date, is_private, outside) "
-       /* The parent's floor as it is now: deleting the parent (continued_from
-        * goes NULL) mustn't drop it; a later rise reaches the child through
-        * the walk in conv_db_get_outside. */
+       /* The parent's floor as it is now; a later rise reaches the child
+        * through the walk in conv_db_get_outside, and deleting the parent
+        * hands its floor down (continuations_take_floor_locked). */
        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT outside FROM conversations "
        "WHERE id = ?5))";
    rc = sqlite3_prepare_v2(s_db.db, sql_create, -1, &stmt, NULL);
@@ -1310,6 +1310,31 @@ static int clear_memory_provenance(int64_t conv_id, int user_id) {
    return AUTH_DB_SUCCESS;
 }
 
+/* Before @p conv_id goes: each conversation continuing it takes what it and
+ * the conversations it continues read (as conv_db_get_outside combines them),
+ * which its walk up continued_from no longer reaches once the delete sets
+ * that NULL; a continuation's own taint stays.  Caller holds the lock. */
+static int continuations_take_floor_locked(int64_t conv_id) {
+   static const char sql[] =
+       "WITH RECURSIVE chain(id, d) AS (SELECT ?1, 0 UNION ALL SELECT c.continued_from, "
+       "chain.d + 1 FROM chain JOIN conversations c ON c.id = chain.id WHERE c.continued_from "
+       "IS NOT NULL AND chain.d < " CONV_CONTINUATION_DEPTH_MAX_SQL "), "
+       "eff(k) AS (SELECT COALESCE((SELECT c.outside FROM chain JOIN conversations c ON c.id = "
+       "chain.id WHERE c.outside NOT IN (" OUTSIDE_UNTAINTED_SQL ") ORDER BY chain.d LIMIT 1), "
+       "(SELECT c.outside FROM chain JOIN conversations c ON c.id = chain.id WHERE c.outside != 0 "
+       "LIMIT 1), 0)) "
+       "UPDATE conversations SET outside = (SELECT k FROM eff) WHERE continued_from = ?1 AND "
+       "outside IN (" OUTSIDE_UNTAINTED_SQL ") AND (SELECT k FROM eff) != 0";
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
+      return SQLITE_ERROR;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   const int rc = sqlite3_step(st);
+   sqlite3_finalize(st);
+   return rc;
+}
+
 /* Caller holds the auth_db lock and has bound @p del.  Clears the owner's
  * (@p owner, 0 = not found or not theirs) memory provenance for the
  * conversation, then deletes it, in one transaction: a memory is never left
@@ -1333,6 +1358,9 @@ static int delete_conversation_locked(sqlite3_stmt *del,
    int rc = SQLITE_DONE;
    if (owner > 0 && clear_memory_provenance(conv_id, owner) != AUTH_DB_SUCCESS) {
       rc = SQLITE_ERROR;
+   }
+   if (rc == SQLITE_DONE && owner > 0) {
+      rc = continuations_take_floor_locked(conv_id);
    }
    /* The images it owns, before the cascade removes what names them. */
    if (rc == SQLITE_DONE &&

@@ -190,6 +190,19 @@ static void test_deleted_parent_keeps_taint(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, floor);
 }
 
+/* A parent that reads outside text after its continuation was made hands it
+ * down when it is deleted. */
+static void test_deleted_parent_hands_down_a_later_taint(void) {
+   int64_t conv = 0, cont = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(1, "Chat", &conv));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create_continuation(1, conv, "summary", &cont));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_set_last_extracted(conv, 2, 5, OUTSIDE_WEB));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_delete(conv, 1));
+   int floor = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get_outside(cont, 1, &floor));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, floor);
+}
+
 /* Forgetting a conversation moves its cursor past rows nothing checked; a
  * tool result among them raises the floor (its kind unknown, so OTHER). */
 static void test_forget_past_a_tool_row_raises_the_floor(void) {
@@ -235,6 +248,7 @@ int main(void) {
    RUN_TEST(test_floor_rises_with_the_cursor);
    RUN_TEST(test_semantic_summary_keeps_outside);
    RUN_TEST(test_deleted_parent_keeps_taint);
+   RUN_TEST(test_deleted_parent_hands_down_a_later_taint);
    RUN_TEST(test_forget_past_a_tool_row_raises_the_floor);
    RUN_TEST(test_forget_past_a_document_raises_the_floor);
    return UNITY_END();

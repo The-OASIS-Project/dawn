@@ -172,6 +172,9 @@ void test_rename_replaces_gloss_no_duplicate(void) {
    TEST_ASSERT_TRUE(gloss_text_of(second, text, sizeof(text)));
    TEST_ASSERT_NOT_NULL(strstr(text, "Dragon Con Bio"));
    TEST_ASSERT_NULL(strstr(text, "Public Bio"));
+   memory_fact_t renamed;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(second, 1, &renamed));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, renamed.outside);
 }
 
 void test_two_notes_two_distinct_glosses(void) {
@@ -381,6 +384,12 @@ void test_research_gloss_is_outside(void) {
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(gloss, 1, &f));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, f.outside);
    TEST_ASSERT_EQUAL_STRING("noted, outside", memory_fact_kind_word(&f));
+
+   /* Renamed or edited as an ordinary note, it stays one outside text made. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_note_bridge_upsert_gloss(1, 100, "Report v2"));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_find_by_note_doc_id(1, 100, &gloss));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(gloss, 1, &f));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, f.outside);
 }
 
 /* The keyword search reads its score from the column after the shared ones:
