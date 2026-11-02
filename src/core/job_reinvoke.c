@@ -261,6 +261,21 @@ static void reinvoke_notify_fallback(int user_id, const char *title, int64_t job
    job_notify_user(user_id, text, job_id, job_manager_running_count());
 }
 
+/* The parent can't be re-engaged (gone, or not this user's): each job is fired
+ * and its owner told it's done. */
+static void reinvoke_notify_all(int64_t parent_conv, int user_id) {
+   job_record_t rows[JOB_MONITOR_MAX_PER_TICK];
+   int n = 0;
+   if (conv_db_job_pending_reinvoke_for_parent(parent_conv, user_id, rows, JOB_MONITOR_MAX_PER_TICK,
+                                               &n) != AUTH_DB_SUCCESS) {
+      return;
+   }
+   for (int i = 0; i < n; i++) {
+      conv_db_job_mark_fired(rows[i].id);
+      reinvoke_notify_fallback(user_id, rows[i].title, rows[i].id);
+   }
+}
+
 /* The re-engagement was refused: its LLM can't run (@p reason, from the
  * dispatch; "" when it wasn't refused), and nothing was added or saved.  Retrying
  * would be refused the same way, so the jobs are fired and the user is told once
@@ -736,7 +751,22 @@ static void reinvoke_run(reinvoke_work_t *w) {
    /* Detached path: no connected viewer (or the live queue rejected us) — run on a
     * throwaway job-pool session bound to the parent conv and persist server-side. */
    session_t *det = NULL;
-   int rc = job_manager_begin_ex(w->user_id, w->parent_conv, job_provider_from_default(),
+   /* The parent conversation's own LLM (none of its own follows the default). */
+   session_llm_config_t llm;
+   int lrc = job_selection_load(w->parent_conv, w->user_id, &llm);
+   if (lrc != AUTH_DB_SUCCESS) {
+      /* Never the default in its place: a parent that isn't there (or isn't this
+       * user's) gets a notification; a read error is retried like a full pool. */
+      OLOG_INFO("job_reinvoke: parent %lld's model unreadable (rc=%d)", (long long)w->parent_conv,
+                lrc);
+      if (lrc == AUTH_DB_NOT_FOUND || lrc == AUTH_DB_FORBIDDEN) {
+         reinvoke_notify_all(w->parent_conv, w->user_id);
+      }
+      inflight_release(w->parent_conv);
+      job_manager_mark_dirty();
+      return;
+   }
+   int rc = job_manager_begin_ex(w->user_id, w->parent_conv, job_provider_for(&llm),
                                  /*count_against_user_cap=*/false, &det);
    if (rc != JOB_MGR_OK) {
       OLOG_INFO("job_reinvoke: parent %lld re-engage deferred (rc=%d); will retry",
@@ -745,6 +775,7 @@ static void reinvoke_run(reinvoke_work_t *w) {
       job_manager_mark_dirty();
       return;
    }
+   session_set_llm_config(det, &llm);
 
    int64_t fired_ids[JOB_MONITOR_MAX_PER_TICK];
    int n_fired = 0;

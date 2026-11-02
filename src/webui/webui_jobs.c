@@ -56,6 +56,7 @@
 #include "config/dawn_config.h"
 #include "core/job_manager.h"
 #include "core/job_worker.h"
+#include "llm/llm_selection.h" /* LLM_SELECTION_REASON_MAX */
 #include "logging.h"
 #include "utils/string_utils.h"
 #include "webui/webui_internal.h"
@@ -410,7 +411,9 @@ void webui_jobs_handle_action(ws_connection_t *conn, json_object *payload) {
        * click in an authenticated browser, so the caller is a person changing
        * their mind, and a cancelled job is resumable here.  The tool path passes
        * BY_TOOL so the model cannot undo a stop the user asked for. */
-      switch (job_worker_resume(conv_id, conn->auth_user_id, JOB_RESUME_ORIGIN_USER)) {
+      char refused[LLM_SELECTION_REASON_MAX] = "";
+      switch (job_worker_resume(conv_id, conn->auth_user_id, JOB_RESUME_ORIGIN_USER, refused,
+                                sizeof(refused))) {
          case JOB_RESUME_STARTED:
             send_action_result(conn, action, conv_id, true, "Resuming.");
             return;
@@ -426,6 +429,9 @@ void webui_jobs_handle_action(ws_connection_t *conn, json_object *payload) {
             return;
          case JOB_RESUME_FAILED:
             send_action_result(conn, action, conv_id, false, "Could not restart that job.");
+            return;
+         case JOB_RESUME_NOT_RUNNABLE:
+            send_action_result(conn, action, conv_id, false, refused);
             return;
          case JOB_RESUME_NOTHING_TO_RUN:
             send_action_result(conn, action, conv_id, false,

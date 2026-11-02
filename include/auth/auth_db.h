@@ -1376,13 +1376,24 @@ int conv_db_create_job(int user_id,
                        const char *goal,
                        int64_t *conv_id_out);
 
+/** A conversation's LLM columns, as written to its row (NULL or "": none). */
+typedef struct {
+   const char *llm_type;
+   const char *cloud_provider;
+   const char *model;
+   const char *thinking_mode;
+   const char *reasoning_effort;
+} conv_llm_columns_t;
+
 /**
  * @brief As conv_db_create_job(), but records the spawn surface in
- *        conversations.origin.
+ *        conversations.origin and the LLM the job runs on.
  *
  * @param origin Spawn surface ("voice"/"webui"/"messaging"/"satellite"); gates
  *        voice completion delivery. NULL/"" → "job". Job identity is
  *        job_status, not this field. The plain conv_db_create_job() passes "job".
+ * @param llm    The LLM the job runs on, written with the row; NULL: none (the
+ *        job follows the default).
  */
 int conv_db_create_job_ex(int user_id,
                           const char *title,
@@ -1393,6 +1404,7 @@ int conv_db_create_job_ex(int user_id,
                           int spawn_depth,
                           const char *goal,
                           const char *origin,
+                          const conv_llm_columns_t *llm,
                           int64_t *conv_id_out);
 
 /**

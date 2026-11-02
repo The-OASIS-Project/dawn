@@ -19,7 +19,7 @@
  * Shared background-job dispatch helpers (Layer 2).
  *
  * Small pieces the job worker, the reinvoke worker, and the job tool all need
- * identically — the provider-counter selector and the tool-turn persist
+ * identically — the job's LLM selection, its provider counter, and the tool-turn persist
  * callback.  Kept in their own translation unit (NOT job_manager.c) so the
  * job-pool unit test can keep bare-linking job_manager.c without stubbing the
  * LLM/conv_db surface these helpers pull in.
@@ -31,7 +31,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "core/job_manager.h" /* job_provider_class_t */
+#include "auth/auth_db.h"      /* conv_llm_columns_t */
+#include "core/job_manager.h"  /* job_provider_class_t */
+#include "llm/llm_interface.h" /* session_llm_config_t */
 
 struct session;
 
@@ -40,10 +42,34 @@ extern "C" {
 #endif
 
 /**
- * @brief Resolve which provider counter a default-config job runs against.
+ * @brief The LLM a job spawned now runs on: the spawning turn's (its session's
+ *        resolved selection), or dawn.toml's default when no session spawned it
+ *        (the admin verb).
+ */
+void job_selection_of_spawner(session_llm_config_t *out);
+
+/**
+ * @brief A job's LLM as the columns conv_db_create_job_ex writes, so its runs and
+ *        Resume use the selection it was spawned on (type, provider, model and
+ *        reasoning; the endpoint comes from dawn.toml)
+ *
+ * @p out points into @p cfg, which must outlive it.
+ */
+void job_selection_columns(const session_llm_config_t *cfg, conv_llm_columns_t *out);
+
+/**
+ * @brief A conversation's stored LLM as stored: none of its own is LLM_UNDEFINED
+ *        (follows the default), as a parent conversation's row may be
+ * @return AUTH_DB_SUCCESS or an AUTH_DB_* error
+ */
+int job_selection_load(int64_t conv_id, int user_id, session_llm_config_t *out);
+
+/**
+ * @brief Which provider counter a job on @p cfg runs against (an unset selection
+ *        counts as the default's)
  * @return JOB_PROVIDER_LOCAL for a local LLM, JOB_PROVIDER_CLOUD otherwise.
  */
-job_provider_class_t job_provider_from_default(void);
+job_provider_class_t job_provider_for(const session_llm_config_t *cfg);
 
 /**
  * @brief Resolve the three AUTHORITATIVE terminal-disposition signals for a

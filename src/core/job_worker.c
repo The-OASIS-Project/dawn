@@ -65,7 +65,16 @@ typedef struct {
 
 static void job_worker_run(job_work_t *work) {
    session_t *s = NULL;
-   int rc = job_manager_begin(work->user_id, work->conv_id, job_provider_from_default(), &s);
+   /* The LLM stored when the job was spawned, applied below for every run. */
+   session_llm_config_t llm;
+   if (job_selection_load(work->conv_id, work->user_id, &llm) != AUTH_DB_SUCCESS) {
+      job_manager_set_terminal(work->conv_id, work->user_id, "failed",
+                               "couldn't read the job's model", time(NULL), 0);
+      job_manager_mark_dirty();
+      OLOG_WARNING("job_worker: could not read conv %lld's model", (long long)work->conv_id);
+      return;
+   }
+   int rc = job_manager_begin(work->user_id, work->conv_id, job_provider_for(&llm), &s);
    if (rc != JOB_MGR_OK) {
       /* The tool checks caps before creating the row, but guard the race. */
       const char *err = (rc == JOB_MGR_CAP_GLOBAL || rc == JOB_MGR_CAP_PROVIDER ||
@@ -89,6 +98,7 @@ static void job_worker_run(job_work_t *work) {
       job_manager_end(s);
       return;
    }
+   session_set_llm_config(s, &llm);
    /* queued -> running is a state change WITHIN the active set, so it changes no
     * count — but without it a watcher's row reads 'queued' with started_at 0 for
     * the job's whole runtime, and an elapsed timer computed off that renders
@@ -409,7 +419,11 @@ static int job_worker_spawn_resume(int user_id, int64_t conv_id) {
    return job_worker_spawn_ex(user_id, conv_id, JOB_RESUME_DIRECTIVE, true);
 }
 
-job_resume_result_t job_worker_resume(int64_t conv_id, int user_id, job_resume_origin_t origin) {
+job_resume_result_t job_worker_resume(int64_t conv_id,
+                                      int user_id,
+                                      job_resume_origin_t origin,
+                                      char *reason,
+                                      size_t reason_len) {
    if (conv_id <= 0 || user_id <= 0) {
       return JOB_RESUME_NOT_FOUND;
    }
@@ -429,7 +443,11 @@ job_resume_result_t job_worker_resume(int64_t conv_id, int user_id, job_resume_o
    /* Fail before mutating.  job_manager_begin enforces the caps regardless, but
     * only by resetting the row and then immediately failing it, which reads to
     * the user as "resuming broke the job". */
-   if (job_manager_capacity(user_id, job_provider_from_default()) != JOB_MGR_OK) {
+   session_llm_config_t llm;
+   if (job_selection_load(conv_id, user_id, &llm) != AUTH_DB_SUCCESS) {
+      return JOB_RESUME_FAILED;
+   }
+   if (job_manager_capacity(user_id, job_provider_for(&llm)) != JOB_MGR_OK) {
       return JOB_RESUME_CAPACITY;
    }
 
@@ -440,6 +458,15 @@ job_resume_result_t job_worker_resume(int64_t conv_id, int user_id, job_resume_o
     * reads 'queued' with no worker until the failure path retires it. */
    if (job_manager_conv_is_live(conv_id)) {
       return JOB_RESUME_NOT_RESUMABLE;
+   }
+
+   /* Resume is a pick the user makes now: the job's LLM is checked now.  A live
+    * job says so first; a job in a state the claim refuses (done) may be told
+    * about its LLM instead, harmlessly: nothing has changed yet. */
+   session_llm_config_t resolved = llm;
+   llm_selection_resolve(&resolved);
+   if (llm_selection_problem(&resolved, reason, reason_len) != 0) {
+      return JOB_RESUME_NOT_RUNNABLE;
    }
 
    /* There must be SOMETHING to run: either a transcript to continue, or the

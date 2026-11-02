@@ -30,6 +30,7 @@
 #define JOB_WORKER_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -81,6 +82,7 @@ typedef enum {
    JOB_RESUME_NOT_RESUMABLE, /**< exists, but is done/running/queued — or cancelled
                                   when the caller is JOB_RESUME_ORIGIN_TOOL */
    JOB_RESUME_CAPACITY,      /**< job caps full; nothing was mutated */
+   JOB_RESUME_NOT_RUNNABLE,  /**< its LLM can't run (the reason is written); nothing mutated */
    JOB_RESUME_FORBIDDEN,     /**< owned by a different user */
    JOB_RESUME_NOT_FOUND,     /**< no such job */
    /* Pre-v74 job that never dispatched: no transcript to continue, and no stored
@@ -110,8 +112,14 @@ typedef enum {
  *        into the SQL predicate, nothing here can check that ORIGIN_USER really
  *        came from an authenticated browser.  The split holds because there are
  *        exactly two call sites and they are audited; a third must be too.
+ * @param[out] reason Why its LLM can't run, on JOB_RESUME_NOT_RUNNABLE (a sentence)
+ * @param reason_len  Size of @p reason
  */
-job_resume_result_t job_worker_resume(int64_t conv_id, int user_id, job_resume_origin_t origin);
+job_resume_result_t job_worker_resume(int64_t conv_id,
+                                      int user_id,
+                                      job_resume_origin_t origin,
+                                      char *reason,
+                                      size_t reason_len);
 
 #ifdef __cplusplus
 }

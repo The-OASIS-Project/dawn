@@ -44,6 +44,7 @@
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
 
@@ -113,8 +114,15 @@ static char *handle_spawn(struct json_object *details,
       deliver_to = NULL; /* ignore empty / suspicious delivery target */
    }
 
+   /* The job runs on the LLM of the turn that started it (checked when that
+    * turn began). */
+   session_llm_config_t llm;
+   job_selection_of_spawner(&llm);
+   conv_llm_columns_t llm_cols;
+   job_selection_columns(&llm, &llm_cols);
+
    /* Refuse cleanly past a running cap before creating any row. */
-   job_provider_class_t provider = job_provider_from_default();
+   job_provider_class_t provider = job_provider_for(&llm);
    int cap = job_manager_capacity(user_id, provider);
    if (cap != JOB_MGR_OK) {
       const char *why = (cap == JOB_MGR_CAP_GLOBAL) ? "the system is at its background-job limit"
@@ -136,7 +144,8 @@ static char *handle_spawn(struct json_object *details,
 
    int64_t conv_id = 0;
    if (conv_db_create_job_ex(user_id, title, parent_conv, "detached", on_complete, deliver_to, 1,
-                             goal, job_spawn_origin_string(), &conv_id) != AUTH_DB_SUCCESS) {
+                             goal, job_spawn_origin_string(), &llm_cols,
+                             &conv_id) != AUTH_DB_SUCCESS) {
       return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to create the background job.");
    }
 
@@ -285,7 +294,8 @@ static char *handle_resume(struct json_object *details, int user_id) {
                     "Error: 'job_id' is required to resume a background job.");
    }
 
-   char buf[192];
+   char buf[LLM_SELECTION_REASON_MAX + 96];
+   char refused[LLM_SELECTION_REASON_MAX] = "";
    /* Same one mutation path the WebUI uses — including the ownership check, so
     * a job_id belonging to someone else is refused here too.
     *
@@ -293,7 +303,7 @@ static char *handle_resume(struct json_object *details, int user_id) {
     * a reinvoke turn whose content came from untrusted job output, so it must
     * not be able to restart a job the user cancelled.  A person wanting that
     * clicks Resume in the panel. */
-   switch (job_worker_resume(conv_id, user_id, JOB_RESUME_ORIGIN_TOOL)) {
+   switch (job_worker_resume(conv_id, user_id, JOB_RESUME_ORIGIN_TOOL, refused, sizeof(refused))) {
       case JOB_RESUME_STARTED:
          snprintf(buf, sizeof(buf),
                   "Resuming background job #%lld — it'll pick up where it left off.",
@@ -318,6 +328,10 @@ static char *handle_resume(struct json_object *details, int user_id) {
       case JOB_RESUME_CAPACITY:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Too many jobs are running right now — try resuming it again shortly.");
+      case JOB_RESUME_NOT_RUNNABLE:
+         snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Can't resume job #%lld. %s",
+                  (long long)conv_id, refused);
+         return strdup(buf);
       case JOB_RESUME_FAILED:
          snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Couldn't restart job #%lld.",
                   (long long)conv_id);

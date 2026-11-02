@@ -20,6 +20,8 @@
 # selects.  No provider selected runs on the local LLM even with keys present;
 # a selected provider without its key is refused with the reason.
 
+import json
+import sqlite3
 import time
 import unittest
 import uuid
@@ -237,6 +239,76 @@ class TestRetiredModelOnACustomEndpoint(SelectionCase):
         reqs = self.cloud.chat_requests(nonce)
         self.assertEqual(len(reqs), 1)
         self.assertEqual(reqs[0]["body"].get("model"), "gpt-4")
+
+
+class TestAJobRunsOnItsConversationsLLM(SelectionCase):
+    """A job runs on the LLM of the conversation that started it, not on the
+    default; Resume checks that LLM again and says why it can't run."""
+
+    llm_type = "local"
+    provider = "openai"
+    secrets = '[secrets]\nopenai_api_key = "sk-live-test"\n'
+
+    def recv_type(self, kind, timeout=10):
+        deadline = time.monotonic() + timeout
+        while True:
+            f = self.client._recv(deadline)
+            if f is None:
+                raise TimeoutError(f"no {kind}")
+            if f.get("type") == kind:
+                return f["payload"]
+
+    def job_row(self):
+        rows = self.inst.db("SELECT id, job_status, llm_type, cloud_provider FROM conversations "
+                            "WHERE parent_id = ? AND job_status IS NOT NULL", (self.conv,))
+        return rows[0] if rows else None
+
+    def test_1_spawned_from_a_cloud_conversation_it_runs_there(self):
+        self.client.send("set_session_llm", {"type": "cloud", "provider": "openai",
+                                             "model": "fake-cloud"})
+        self.assertTrue(self.recv_type("set_session_llm_response").get("success"))
+        job_nonce = uuid.uuid4().hex[:12]
+        goal = {"goal": f"Count to three [{job_nonce}]", "on_complete": "none"}
+        self.cloud.script(tool_call("job", {"action": "spawn", "arguments": json.dumps(goal)}),
+                          text("Started."))
+        nonce, t = self.ask("Start a job.")
+        self.assertNoErrorFrames(t)
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not self.cloud.chat_requests(job_nonce):
+            time.sleep(0.25)
+        self.assertTrue(self.cloud.chat_requests(job_nonce), "the job's turn went to the cloud")
+        self.assertEqual(self.local.chat_requests(job_nonce), [])
+        row = self.job_row()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[2:], ("cloud", "openai"))
+
+    def test_2_resume_says_why_it_cant_run(self):
+        # The job test_1 started (tests run in name order)
+        row = self.job_row()
+        self.assertIsNotNone(row)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and self.job_row()[1] in ("queued", "running"):
+            time.sleep(0.25)
+        self.assertNotIn(self.job_row()[1], ("queued", "running"), "the job finished")
+        con = sqlite3.connect(f"{self.inst.run}/data/auth.db", timeout=10)
+        try:
+            con.execute("UPDATE conversations SET job_status = 'failed', cloud_provider = 'gemini' "
+                        "WHERE id = ?", (row[0],))
+            con.commit()
+        finally:
+            con.close()
+        # Its worker frees the job's slot just after writing its status: retry
+        # while Resume still reads it as live.
+        for _ in range(20):
+            self.client.send("job_action", {"action": "resume", "conversation_id": row[0]})
+            reply = self.recv_type("job_action_response")
+            if "can't be resumed now" not in reply.get("message", ""):
+                break
+            time.sleep(0.25)
+        self.assertFalse(reply.get("ok"), reply)
+        self.assertIn("Gemini is selected, but it has no API key", reply.get("message", ""))
+        self.assertEqual(self.job_row()[1], "failed", "nothing was claimed")
 
 
 if __name__ == "__main__":

@@ -126,7 +126,7 @@ int conv_db_create_job(int user_id,
    /* Preserves the pre-repurpose behavior (origin = "job") for every caller that
     * doesn't care about the spawn surface — chiefly the tests. */
    return conv_db_create_job_ex(user_id, title, parent_id, spawn_mode, on_complete, deliver_to,
-                                spawn_depth, goal, "job", conv_id_out);
+                                spawn_depth, goal, "job", NULL, conv_id_out);
 }
 
 int conv_db_create_job_ex(int user_id,
@@ -138,6 +138,7 @@ int conv_db_create_job_ex(int user_id,
                           int spawn_depth,
                           const char *goal,
                           const char *origin,
+                          const conv_llm_columns_t *llm,
                           int64_t *conv_id_out) {
    if (user_id <= 0 || !conv_id_out) {
       return AUTH_DB_INVALID;
@@ -203,8 +204,8 @@ int conv_db_create_job_ex(int user_id,
        "INSERT INTO conversations "
        "(user_id, title, created_at, updated_at, anchor_date, origin, "
        " parent_id, spawn_mode, on_complete, deliver_to, spawn_depth, job_goal, job_status, "
-       " is_private) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
+       " is_private, llm_type, cloud_provider, model, thinking_mode, reasoning_effort) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
        -1, &st, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("conv_db_create_job: prepare failed: %s", sqlite3_errmsg(s_db.db));
@@ -245,6 +246,12 @@ int conv_db_create_job_ex(int user_id,
       sqlite3_bind_null(st, 12);
    }
    sqlite3_bind_int(st, 13, inherited_private);
+   const char *llm_cols[] = { llm ? llm->llm_type : NULL, llm ? llm->cloud_provider : NULL,
+                              llm ? llm->model : NULL, llm ? llm->thinking_mode : NULL,
+                              llm ? llm->reasoning_effort : NULL };
+   for (int i = 0; i < 5; i++) {
+      sqlite3_bind_text(st, 14 + i, llm_cols[i] ? llm_cols[i] : "", -1, SQLITE_TRANSIENT);
+   }
 
    rc = sqlite3_step(st);
    sqlite3_finalize(st);
