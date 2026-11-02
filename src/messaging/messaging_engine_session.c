@@ -486,52 +486,17 @@ session_t *get_or_create_messaging_session(const channel_ref_t *ref,
     * re-application would churn the Anthropic stable-prefix cache).  Safe
     * without engine locks: session_t is thread-private here, and
     * session_set_llm_config takes only the leaf llm_config_mutex (and
-    * g_config_rwlock to resolve an unset selection, with no lock held). */
+    * g_config_rwlock to read the default, with no lock held). */
    s->messaging_identity.conversation_id = conversation_id;
    session_bind_history_conversation(s, conversation_id);
    if (conversation_id > 0 && user_id > 0) {
       conversation_t conv;
       if (conv_db_get(conversation_id, user_id, &conv) == AUTH_DB_SUCCESS) {
+         /* The conversation's own selection, or the default it follows. */
          session_llm_config_t mcfg;
-         /* Seed every field from the session's; an unset selection stays unset
-          * unless the conversation names one. */
-         session_get_llm_config_raw(s, &mcfg);
-         if (conv.llm_type[0] || conv.cloud_provider[0] || conv.model[0]) {
-            llm_selection_resolve(&mcfg);
-         }
-         const llm_type_t seed_type = mcfg.type;
-         const cloud_provider_t seed_provider = mcfg.cloud_provider;
-
-         if (conv.llm_type[0]) {
-            mcfg.type = (strcmp(conv.llm_type, "local") == 0) ? LLM_LOCAL : LLM_CLOUD;
-         }
-         if (conv.cloud_provider[0]) {
-            /* type already set from conv.llm_type above; we only need the
-             * provider enum here, so t is intentionally discarded. */
-            llm_type_t t;
-            cloud_provider_t cp;
-            if (cloud_provider_from_string(conv.cloud_provider, &t, &cp) == SUCCESS) {
-               (void)t;
-               mcfg.cloud_provider = cp;
-            }
-         }
-         if (conv.model[0]) {
-            safe_strscpy(mcfg.model, conv.model);
-         } else if (mcfg.type != seed_type || mcfg.cloud_provider != seed_provider) {
-            mcfg.model[0] = '\0'; /* another provider: its default, not the session's model */
-         }
-         if (conv.thinking_mode[0]) {
-            safe_strscpy(mcfg.thinking_mode, conv.thinking_mode);
-         }
-         if (conv.reasoning_effort[0]) {
-            safe_strscpy(mcfg.reasoning_effort, conv.reasoning_effort);
-         }
-
-         if (session_set_llm_config(s, &mcfg) != SUCCESS) {
-            OLOG_WARNING(
-                "messaging: conv %lld LLM settings rejected; session %u uses global default",
-                (long long)conversation_id, s->session_id);
-         }
+         llm_selection_from_row(conv.llm_type, conv.cloud_provider, conv.model, conv.thinking_mode,
+                                conv.reasoning_effort, &mcfg);
+         session_set_llm_config(s, &mcfg);
          conv_free(&conv);
       }
    }

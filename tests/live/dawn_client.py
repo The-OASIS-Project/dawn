@@ -114,6 +114,18 @@ class Client:
             if f.get("type") == "new_conversation_response":
                 return f["payload"]["conversation_id"]
 
+    def load_conversation(self, conv_id, timeout=10):
+        """Open a stored conversation, as clicking it in the sidebar does; returns
+        the response payload (its llm_settings among it)."""
+        self.send("load_conversation", {"conversation_id": conv_id})
+        deadline = time.monotonic() + timeout
+        while True:
+            f = self._recv(deadline)
+            if f is None:
+                raise TimeoutError("no load_conversation_response")
+            if f.get("type") == "load_conversation_response":
+                return f["payload"]
+
     def turn(self, text, timeout=60):
         """Send @p text as a typed message and wait for its turn to end."""
         self._ref += 1

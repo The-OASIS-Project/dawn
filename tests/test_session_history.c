@@ -63,20 +63,16 @@ static char s_conv_model[100][32];
 
 static struct json_object *fake_loader(int user_id,
                                        int64_t conv_id,
-                                       const session_llm_config_t *base,
-                                       session_llm_config_t *cfg_out,
-                                       bool *has_cfg_out) {
+                                       session_llm_config_t *cfg_out) {
    (void)user_id;
-   *has_cfg_out = false;
    s_loader_calls++;
    if (s_loader_fail || conv_id <= 0 || conv_id >= 100) {
       return NULL;
    }
-   if (s_conv_model[conv_id][0]) {
-      *cfg_out = *base;
-      snprintf(cfg_out->model, sizeof(cfg_out->model), "%s", s_conv_model[conv_id]);
-      *has_cfg_out = true;
-   }
+   /* A stored model is a selection of its own; none follows the default. */
+   memset(cfg_out, 0, sizeof(*cfg_out));
+   cfg_out->type = s_conv_model[conv_id][0] ? LLM_LOCAL : LLM_UNDEFINED;
+   snprintf(cfg_out->model, sizeof(cfg_out->model), "%s", s_conv_model[conv_id]);
    return make_history(conv_id, s_stored[conv_id]);
 }
 
@@ -466,8 +462,9 @@ void test_turn_settings_follow_the_token_to_other_threads(void) {
    TEST_ASSERT_EQUAL_STRING("viewed-model", model_seen_with(0));
 }
 
-void test_load_without_stored_settings_uses_the_sessions(void) {
-   /* Moving from 5 (stored model) to 6 (none) must not keep 5's model. */
+void test_load_without_stored_settings_follows_the_default(void) {
+   /* Moving from 5 (stored model) to 6 (none) must not keep 5's model, nor take
+    * the viewed conversation's: 6 follows the default. */
    load_live(3, 2);
    s_stored[5] = 1;
    s_stored[6] = 1;
@@ -480,7 +477,7 @@ void test_load_without_stored_settings_uses_the_sessions(void) {
    session_turn_set_conversation(s, 6, true);
    session_llm_config_t cfg;
    session_get_llm_config(s, &cfg);
-   TEST_ASSERT_EQUAL_STRING("viewed-model", cfg.model);
+   TEST_ASSERT_EQUAL_STRING("default-model", cfg.model);
 }
 
 void test_off_thread_conversation_tags_the_stream(void) {
@@ -1396,7 +1393,7 @@ int main(void) {
    RUN_TEST(test_turn_settings_fixed_at_begin);
    RUN_TEST(test_turn_runs_on_the_default_when_unset);
    RUN_TEST(test_turn_settings_follow_the_token_to_other_threads);
-   RUN_TEST(test_load_without_stored_settings_uses_the_sessions);
+   RUN_TEST(test_load_without_stored_settings_follows_the_default);
    RUN_TEST(test_off_thread_conversation_tags_the_stream);
    RUN_TEST(test_attached_email_belongs_to_its_turn);
    RUN_TEST(test_adopt_only_a_waiting_turn);

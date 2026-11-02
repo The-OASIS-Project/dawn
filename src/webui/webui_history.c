@@ -836,11 +836,9 @@ static int load_msg_callback(const conversation_message_t *msg, void *context) {
 /**
  * @brief Build the per-conversation llm_settings JSON object.
  *
- * Substitutes the effective global defaults for any column left empty — legacy
- * conversations created before settings were stamped at creation. Without this a
- * NULL column reaches the client as "" and the UI leaves its LLM controls showing
- * the previously-viewed conversation's values. Shared by load + export so both stay
- * consistent (and both carry reasoning_effort).
+ * A conversation with no selection of its own shows the default it follows, with
+ * follows_default true (the client then restores it with a reset).  Shared by load
+ * + export so both stay consistent (and both carry reasoning_effort).
  *
  * thinking_mode / reasoning_effort then report what the conversation's model is
  * actually sent (the stored pick resolved against the model), and
@@ -849,93 +847,65 @@ static int load_msg_callback(const conversation_message_t *msg, void *context) {
  * The WebUI restores and locks with the pick.
  */
 static json_object *build_conv_llm_settings_json(const conversation_t *conv) {
-   session_llm_config_t def_sc;
-   llm_get_default_config(&def_sc);
-   llm_selection_resolve(&def_sc); /* the conversation's columns go over a concrete default */
-   llm_resolved_config_t def_r = { 0 };
-   llm_resolve_config(&def_sc, &def_r);
-
-   const char *def_type = def_r.type == LLM_LOCAL ? "local" : "cloud";
-   const char *def_provider = cloud_provider_to_string(def_r.cloud_provider);
-   const char *def_model = webui_effective_model_name(&def_r);
+   /* The conversation's selection, or the default it follows, as it runs. */
+   session_llm_config_t row;
+   llm_selection_from_row(conv->llm_type, conv->cloud_provider, conv->model, conv->thinking_mode,
+                          conv->reasoning_effort, &row);
+   llm_resolved_config_t r = { 0 };
+   llm_resolve_config(&row, &r); /* refused: still what is selected */
+   const char *model = webui_effective_model_name(&r);
 
    json_object *llm = json_object_new_object();
+   json_object_object_add(llm, "follows_default",
+                          json_object_new_boolean(row.type == LLM_UNDEFINED));
    json_object_object_add(llm, "llm_type",
-                          json_object_new_string(conv->llm_type[0] ? conv->llm_type : def_type));
+                          json_object_new_string(r.type == LLM_LOCAL ? "local" : "cloud"));
    json_object_object_add(llm, "cloud_provider",
-                          json_object_new_string(conv->cloud_provider[0]
-                                                     ? conv->cloud_provider
-                                                     : (def_provider ? def_provider : "")));
-   json_object_object_add(llm, "model",
-                          json_object_new_string(conv->model[0] ? conv->model
-                                                                : (def_model ? def_model : "")));
+                          json_object_new_string(cloud_provider_to_string(r.cloud_provider)));
+   json_object_object_add(llm, "model", json_object_new_string(model ? model : ""));
    /* tools_mode is a retired dead column — no longer surfaced to the client. */
-   json_object_object_add(llm, "thinking_mode",
-                          json_object_new_string(conv->thinking_mode[0] ? conv->thinking_mode
-                                                                        : def_r.thinking_mode));
-   json_object_object_add(llm, "reasoning_effort",
-                          json_object_new_string(conv->reasoning_effort[0]
-                                                     ? conv->reasoning_effort
-                                                     : def_r.reasoning_effort));
+   json_object_object_add(llm, "thinking_mode", json_object_new_string(row.thinking_mode));
+   json_object_object_add(llm, "reasoning_effort", json_object_new_string(row.reasoning_effort));
 
    /* Then what this conversation's model is actually sent, with its
     * capabilities (overwrites thinking_mode / reasoning_effort). */
-   session_llm_config_t cfg = def_sc;
-   if (conv->llm_type[0]) {
-      cfg.type = strcmp(conv->llm_type, "local") == 0 ? LLM_LOCAL : LLM_CLOUD;
-   }
-   llm_type_t parsed_type;
-   cloud_provider_t parsed_provider;
-   if (conv->cloud_provider[0] &&
-       cloud_provider_from_string(conv->cloud_provider, &parsed_type, &parsed_provider) ==
-           SUCCESS &&
-       parsed_type == LLM_CLOUD) {
-      cfg.cloud_provider = parsed_provider;
-   }
-   if (conv->model[0]) {
-      safe_strscpy(cfg.model, conv->model);
-   }
-   if (conv->thinking_mode[0]) {
-      safe_strscpy(cfg.thinking_mode, conv->thinking_mode);
-   }
-   if (conv->reasoning_effort[0]) {
-      safe_strscpy(cfg.reasoning_effort, conv->reasoning_effort);
-   }
-   webui_reasoning_stamp(llm, &cfg);
+   webui_reasoning_stamp(llm, &row);
    return llm;
 }
 
 /**
- * @brief Stamp a conversation with the session's resolved LLM settings at creation.
+ * @brief Stamp a conversation with the session's LLM settings at creation.
  *
- * Fills only the columns still NULL/empty, so a fresh chat records the model and
- * reasoning it actually runs with — without clobbering a continuation's inherited
- * parent settings or a value the user already chose. Uses the race-proof
- * fill-if-empty primitive (no message_count gate) so a concurrent first-turn
- * persist can't defeat it. This deliberately FREEZES settings at creation; the
- * messaging stamp (messaging_engine_channels.c) makes the opposite choice (writes
- * NULLs to keep inheriting the global default) — do not "align" them.
+ * Fills only the columns still NULL/empty, so a fresh chat records the selection
+ * the session made (none when it follows the default, so the conversation keeps
+ * following it) and the reasoning it runs with, without clobbering a
+ * continuation's inherited parent settings or a value the user already chose.
+ * Uses the race-proof fill-if-empty primitive (no message_count gate) so a
+ * concurrent first-turn persist can't defeat it.
  */
 void webui_conv_stamp_llm_settings(session_t *session, int64_t conv_id, int user_id) {
    if (!session || conv_id <= 0) {
       return;
    }
+   /* A session with no selection of its own stores none, so the conversation
+    * keeps following the default; its reasoning is stored either way. */
+   const bool follows = session_llm_follows_default(session);
    session_llm_config_t sc;
    session_get_llm_config(session, &sc);
    llm_resolved_config_t r = { 0 };
-   if (llm_resolve_config(&sc, &r) != 0) {
+   if (llm_resolve_config(&sc, &r) != 0 && !follows) {
       return; /* Unconfigured provider: leave columns for read-side defaults. */
    }
 
    /* Copy the effective model immediately — resolved.model may alias volatile
     * state, and the helper can return a provider-default pointer. */
    char model[LLM_MODEL_NAME_MAX];
-   snprintf(model, sizeof(model), "%s", webui_effective_model_name(&r));
+   snprintf(model, sizeof(model), "%s", follows ? "" : webui_effective_model_name(&r));
 
-   const char *type_str = r.type == LLM_LOCAL ? "local" : "cloud";
+   const char *type_str = follows ? "" : r.type == LLM_LOCAL ? "local" : "cloud";
+   const char *provider_str = follows ? "" : cloud_provider_to_string(r.cloud_provider);
    /* tools_mode column is retired (dead) — pass empty. */
-   conv_db_fill_llm_settings_if_empty(conv_id, user_id, type_str,
-                                      cloud_provider_to_string(r.cloud_provider), model, "",
+   conv_db_fill_llm_settings_if_empty(conv_id, user_id, type_str, provider_str, model, "",
                                       r.thinking_mode, r.reasoning_effort);
 }
 
@@ -1163,8 +1133,8 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
             json_object_object_add(resp_payload, "context_max",
                                    json_object_new_int(conv.context_max));
 
-            /* Per-conversation LLM settings (effective defaults substituted for
-             * legacy NULL columns — see build_conv_llm_settings_json). */
+            /* Per-conversation LLM settings (the default, with follows_default, for
+             * one with no selection of its own: build_conv_llm_settings_json). */
             json_object_object_add(resp_payload, "llm_settings",
                                    build_conv_llm_settings_json(&conv));
 

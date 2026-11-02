@@ -23,6 +23,7 @@
 
 #include "llm/llm_selection.h"
 
+#include <ctype.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -237,6 +238,71 @@ void llm_selection_resolve(session_llm_config_t *cfg) {
    llm_selection_t sel;
    llm_default_selection(&sel);
    llm_selection_apply(&sel, cfg);
+}
+
+/* The provider a bare model id names (OpenRouter's "vendor/model" ids name none). */
+static cloud_provider_t provider_from_model(const char *model) {
+   if (strncmp(model, "gpt-", 4) == 0 || strncmp(model, "o1-", 3) == 0 ||
+       strncmp(model, "o3-", 3) == 0) {
+      return CLOUD_PROVIDER_OPENAI;
+   }
+   if (strncmp(model, "claude-", 7) == 0) {
+      return CLOUD_PROVIDER_CLAUDE;
+   }
+   if (strncmp(model, "gemini-", 7) == 0) {
+      return CLOUD_PROVIDER_GEMINI;
+   }
+   return CLOUD_PROVIDER_NONE;
+}
+
+void llm_selection_from_row(const char *llm_type,
+                            const char *provider,
+                            const char *model,
+                            const char *thinking_mode,
+                            const char *reasoning_effort,
+                            session_llm_config_t *out) {
+   memset(out, 0, sizeof(*out));
+   out->type = LLM_UNDEFINED;
+   out->cloud_provider = CLOUD_PROVIDER_NONE;
+
+   pthread_rwlock_rdlock(&g_config_rwlock);
+   safe_strscpy(out->thinking_mode, g_config.llm.thinking.mode[0] ? g_config.llm.thinking.mode
+                                                                  : LLM_THINKING_MODE_DEFAULT);
+   safe_strscpy(out->reasoning_effort, g_config.llm.thinking.reasoning_effort[0]
+                                           ? g_config.llm.thinking.reasoning_effort
+                                           : LLM_REASONING_EFFORT_DEFAULT);
+   pthread_rwlock_unlock(&g_config_rwlock);
+   if (thinking_mode && thinking_mode[0]) {
+      safe_strscpy(out->thinking_mode, thinking_mode);
+   }
+   if (reasoning_effort && reasoning_effort[0]) {
+      safe_strscpy(out->reasoning_effort, reasoning_effort);
+   }
+
+   model = model ? model : "";
+   if (llm_type && strcmp(llm_type, "local") == 0) {
+      out->type = LLM_LOCAL;
+      safe_strscpy(out->model, model);
+      return;
+   }
+   if (!llm_type || strcmp(llm_type, "cloud") != 0) {
+      return; /* no selection of its own: follows the default */
+   }
+   llm_type_t t = LLM_UNDEFINED;
+   cloud_provider_t p = CLOUD_PROVIDER_NONE;
+   char name[16] = ""; /* older clients stored display names ("OpenRouter") */
+   for (size_t i = 0; provider && provider[i] && i + 1 < sizeof(name); i++) {
+      name[i] = (char)tolower((unsigned char)provider[i]);
+   }
+   if (cloud_provider_from_string(name, &t, &p) != SUCCESS || t != LLM_CLOUD) {
+      p = provider_from_model(model); /* a row stored before the provider column */
+   }
+   if (p == CLOUD_PROVIDER_NONE) {
+      return; /* cloud with no provider it names: follows the default, its model dropped */
+   }
+   out->type = LLM_CLOUD;
+   out->cloud_provider = p;
+   safe_strscpy(out->model, model);
 }
 
 static int refuse(char *reason, size_t reason_len, const char *text) {

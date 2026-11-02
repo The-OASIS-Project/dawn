@@ -252,6 +252,38 @@ static void test_has_key_per_provider(void) {
    TEST_ASSERT_FALSE(llm_provider_has_key(CLOUD_PROVIDER_NONE));
 }
 
+/* A conversation row: none of its own follows the default; a stored one is kept. */
+static void test_row_reader(void) {
+   session_llm_config_t c;
+   llm_selection_from_row("", "", "", "", "", &c);
+   TEST_ASSERT_EQUAL(LLM_UNDEFINED, c.type);
+   TEST_ASSERT_EQUAL_STRING("", c.model);
+   TEST_ASSERT_TRUE(c.thinking_mode[0] != '\0'); /* the configured default's */
+
+   llm_selection_from_row(NULL, NULL, NULL, "enabled", "high", &c);
+   TEST_ASSERT_EQUAL(LLM_UNDEFINED, c.type);
+   TEST_ASSERT_EQUAL_STRING("enabled", c.thinking_mode);
+   TEST_ASSERT_EQUAL_STRING("high", c.reasoning_effort);
+
+   llm_selection_from_row("cloud", "claude", "claude-x", "", "", &c);
+   TEST_ASSERT_EQUAL(LLM_CLOUD, c.type);
+   TEST_ASSERT_EQUAL(CLOUD_PROVIDER_CLAUDE, c.cloud_provider);
+   TEST_ASSERT_EQUAL_STRING("claude-x", c.model);
+
+   llm_selection_from_row("local", "none", "qwen", "", "", &c);
+   TEST_ASSERT_EQUAL(LLM_LOCAL, c.type);
+   TEST_ASSERT_EQUAL_STRING("qwen", c.model);
+
+   /* Legacy cloud rows: the provider from the model's prefix, else none of its own. */
+   llm_selection_from_row("cloud", "", "gpt-5", "", "", &c);
+   TEST_ASSERT_EQUAL(CLOUD_PROVIDER_OPENAI, c.cloud_provider);
+   llm_selection_from_row("cloud", "OpenRouter", "anthropic/claude-x", "", "", &c);
+   TEST_ASSERT_EQUAL(CLOUD_PROVIDER_OPENROUTER, c.cloud_provider);
+   llm_selection_from_row("cloud", "none", "mystery", "", "", &c);
+   TEST_ASSERT_EQUAL(LLM_UNDEFINED, c.type);
+   TEST_ASSERT_EQUAL_STRING("", c.model);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_local_type_is_local);
@@ -271,5 +303,6 @@ int main(void) {
    RUN_TEST(test_no_config_is_refused);
    RUN_TEST(test_has_key_per_provider);
    RUN_TEST(test_cloud_url_endpoint_belongs_to_its_provider);
+   RUN_TEST(test_row_reader);
    return UNITY_END();
 }

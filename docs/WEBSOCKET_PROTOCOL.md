@@ -410,7 +410,14 @@ Configure LLM settings for this session only (does not affect other clients).
 }
 ```
 - All fields are optional, only provided fields are changed
-- `type`: `"local"`, `"cloud"`, or `"reset"` (revert to defaults)
+- `type`: `"local"`, `"cloud"`, or `"reset"`: no selection of its own, so the session
+  follows the dawn.toml default (resolved at each turn) with the default reasoning; other
+  fields in the same message apply over it
+- `from_restore`: true when the client replays a loaded conversation's settings; the server
+  then doesn't save them back to the active conversation
+- The response, `llm_runtime` in `get_config_response` and a loaded conversation's
+  `llm_settings` carry `follows_default` (true: no selection of its own; the values shown
+  are the default's). A client restores such a conversation with `"reset"`.
 - `thinking_mode`: `"disabled"`, `"auto"`, or `"enabled"`
 - `reasoning_effort`: `"low"`, `"medium"`, or `"high"`
 - Response: `set_session_llm_response`
@@ -819,19 +826,25 @@ Update context token counts for a conversation in the database.
 No response (fire-and-forget).
 
 #### `lock_conversation_llm`
-Lock a conversation to a specific LLM provider/model.
+Store a new conversation's LLM settings with its first message (only while it has none).
 ```json
 {
    "type": "lock_conversation_llm",
    "payload": {
       "conversation_id": 42,
-      "llm_type": "cloud",
-      "llm_provider": "claude",
-      "llm_model": "claude-sonnet-4-5"
+      "llm_settings": {
+         "llm_type": "cloud",
+         "cloud_provider": "claude",
+         "model": "claude-sonnet-4-5",
+         "thinking_mode": "enabled",
+         "reasoning_effort": "medium"
+      }
    }
 }
 ```
-Response: `lock_conversation_llm_response`
+- Empty `llm_type`, `cloud_provider` and `model`: the conversation has no selection of
+  its own and follows the default (`follows_default`); only its reasoning is stored.
+- Response: `lock_conversation_llm_response`
 
 #### `continue_conversation`
 Continue a conversation after context compaction (create new DB entry linked to old).

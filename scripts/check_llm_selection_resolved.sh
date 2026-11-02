@@ -23,7 +23,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-ALLOW='src/core/session_manager\.c|include/core/session_manager\.h|src/webui/webui_message_dispatch\.c|src/messaging/messaging_engine_session\.c'
+ALLOW='src/core/session_manager\.c|include/core/session_manager\.h|src/webui/webui_message_dispatch\.c'
 FIELD_ALLOW='src/core/session_manager\.c|src/core/session_history\.c'
 
 # find <regex> <allowlist regex over repo paths>: the hits outside the allowlist

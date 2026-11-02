@@ -232,6 +232,9 @@ void handle_get_config(ws_connection_t *conn) {
                                : resolved.cloud_provider == CLOUD_PROVIDER_OPENROUTER ? "OpenRouter"
                                                                                       : "None";
    json_object_object_add(llm_runtime, "provider", json_object_new_string(provider_name));
+   /* No selection of its own: the session follows the dawn.toml default. */
+   json_object_object_add(llm_runtime, "follows_default",
+                          json_object_new_boolean(session_llm_follows_default(conn->session)));
    /* Actual model name in use (session override, else provider/type default). */
    const char *model_name = webui_effective_model_name(&resolved);
    json_object_object_add(llm_runtime, "model",

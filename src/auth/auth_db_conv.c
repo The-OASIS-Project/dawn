@@ -1626,6 +1626,88 @@ int conv_db_fill_llm_settings_if_empty(int64_t conv_id,
    return (changes > 0) ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
+int conv_db_unpin_default_llm(const char *llm_type,
+                              const char *cloud_provider,
+                              const char *model,
+                              int *changed_out) {
+   if (changed_out) {
+      *changed_out = 0;
+   }
+   if (!llm_type || !cloud_provider || !model) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   if (sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   int result = AUTH_DB_SUCCESS;
+   sqlite3_stmt *stmt = NULL;
+   /* Once: a marker in system_metadata. */
+   bool done = false;
+   if (sqlite3_prepare_v2(s_db.db, "SELECT 1 FROM system_metadata WHERE key = ?1", -1, &stmt,
+                          NULL) == SQLITE_OK) {
+      sqlite3_bind_text(stmt, 1, CONV_DB_UNPIN_MARKER, -1, SQLITE_STATIC);
+      done = sqlite3_step(stmt) == SQLITE_ROW;
+   } else {
+      result = AUTH_DB_FAILURE;
+   }
+   sqlite3_finalize(stmt);
+   stmt = NULL;
+
+   /* Cloud rows stored with exactly the default.  A local row stays local: it
+    * may have been kept off the cloud on purpose, and following a default that
+    * later moves to a cloud provider would send its history there.  Messaging
+    * rows store a selection only when one was made. */
+   const char *sql = "UPDATE conversations SET llm_type = '', cloud_provider = '', model = '' "
+                     "WHERE ?1 = 'cloud' AND llm_type = 'cloud' AND LOWER(cloud_provider) = ?2 "
+                     "AND COALESCE(model, '') = ?3 "
+                     "AND COALESCE(origin, '') NOT LIKE 'messaging:%'";
+   if (result == AUTH_DB_SUCCESS && !done) {
+      if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+         sqlite3_bind_text(stmt, 1, llm_type, -1, SQLITE_STATIC);
+         sqlite3_bind_text(stmt, 2, cloud_provider, -1, SQLITE_STATIC);
+         sqlite3_bind_text(stmt, 3, model, -1, SQLITE_STATIC);
+         if (sqlite3_step(stmt) != SQLITE_DONE) {
+            result = AUTH_DB_FAILURE;
+         } else if (changed_out) {
+            *changed_out = sqlite3_changes(s_db.db);
+         }
+      } else {
+         result = AUTH_DB_FAILURE;
+      }
+      sqlite3_finalize(stmt);
+      stmt = NULL;
+      if (result == AUTH_DB_SUCCESS &&
+          sqlite3_prepare_v2(s_db.db,
+                             "INSERT INTO system_metadata (key, value) VALUES (?1, "
+                             "strftime('%s','now'))",
+                             -1, &stmt, NULL) == SQLITE_OK) {
+         sqlite3_bind_text(stmt, 1, CONV_DB_UNPIN_MARKER, -1, SQLITE_STATIC);
+         if (sqlite3_step(stmt) != SQLITE_DONE) {
+            result = AUTH_DB_FAILURE;
+         }
+      } else if (result == AUTH_DB_SUCCESS) {
+         result = AUTH_DB_FAILURE;
+      }
+      sqlite3_finalize(stmt);
+   }
+   if (result == AUTH_DB_SUCCESS) {
+      if (sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+         result = AUTH_DB_FAILURE;
+      }
+   }
+   if (result != AUTH_DB_SUCCESS) {
+      OLOG_ERROR("auth_db: unpin_default_llm failed: %s", sqlite3_errmsg(s_db.db));
+      sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
+      if (changed_out) {
+         *changed_out = 0;
+      }
+   }
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
 int conv_db_update_llm_settings(int64_t conv_id,
                                 int user_id,
                                 const char *llm_type,

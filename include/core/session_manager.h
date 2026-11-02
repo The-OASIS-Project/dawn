@@ -1860,6 +1860,14 @@ int session_set_turn_llm_config(session_t *session, const session_llm_config_t *
 void session_get_llm_config(session_t *session, session_llm_config_t *config);
 
 /**
+ * @brief Whether the session has no LLM selection of its own (it follows the
+ *        dawn.toml default), so what is stored for it stores none either
+ *
+ * True for NULL.  @locks session->llm_config_mutex
+ */
+bool session_llm_follows_default(session_t *session);
+
+/**
  * @brief The same settings as session_get_llm_config(), not resolved
  *
  * For a read-modify-write that stores the result back: an unset selection stays

@@ -1056,23 +1056,18 @@ static void set_turn_llm_config(session_t *session, const session_llm_config_t *
 }
 
 /* The conversation's own history, detached from the session (NULL on failure).
- * Also sets the turn's LLM settings for it: the conversation's stored ones over
- * the session's, or the session's when it stores none or can't be loaded. */
+ * Also sets the turn's LLM settings for it: the conversation's stored ones (the
+ * default when it has none of its own), or the session's when it can't be loaded. */
 static struct json_object *load_conversation(session_t *session, int user_id, int64_t conv_id) {
    session_history_loader_fn loader = atomic_load(&s_history_loader);
-   session_llm_config_t base;
    session_llm_config_t cfg;
-   bool has_cfg = false;
-   session_llm_config_resolved(session, &base); /* the session's, never a previous turn load's */
-   struct json_object *loaded = (loader && user_id > 0)
-                                    ? loader(user_id, conv_id, &base, &cfg, &has_cfg)
-                                    : NULL;
+   struct json_object *loaded = (loader && user_id > 0) ? loader(user_id, conv_id, &cfg) : NULL;
    if (!loaded) {
       OLOG_WARNING("Session %u: could not load conversation %lld for this turn; running it "
                    "without prior context",
                    session->session_id, (long long)conv_id);
    }
-   set_turn_llm_config(session, loaded && has_cfg ? &cfg : NULL);
+   set_turn_llm_config(session, loaded ? &cfg : NULL);
    return loaded;
 }
 

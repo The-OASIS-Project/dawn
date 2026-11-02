@@ -25,7 +25,8 @@ import unittest
 import uuid
 
 from fake_llm import FakeLLM
-from instance import CLOUD_LLM_PORT, LOCAL_LLM_PORT, LiveTestCase
+from dawn_client import Client
+from instance import ADMIN_USER, CLOUD_LLM_PORT, LOCAL_LLM_PORT, WEBUI_PORT, LiveTestCase
 
 CLOUD_URL = f"http://127.0.0.1:{CLOUD_LLM_PORT}"
 
@@ -93,8 +94,8 @@ class TestProviderWithoutKey(SelectionCase):
 
 
 class TestFollowsTheDefault(SelectionCase):
-    """The live session of a conversation with no selection of its own moves when the
-    default does (a reloaded conversation: with the conversation rows)."""
+    """A conversation with no selection of its own moves when the default does:
+    its open session at the next turn, and when it's opened again later."""
 
     secrets = '[secrets]\nopenai_api_key = "sk-live-test"\n'
 
@@ -108,7 +109,7 @@ class TestFollowsTheDefault(SelectionCase):
             if f.get("type") == "set_config_response":
                 return f["payload"]
 
-    def test_a_settings_save_moves_the_next_turn(self):
+    def test_1_a_settings_save_moves_the_next_turn(self):
         nonce, t = self.ask()
         self.assertIn("fake-local model answering", t.reply)
         self.assertNoRequests(self.cloud)
@@ -121,6 +122,24 @@ class TestFollowsTheDefault(SelectionCase):
         self.assertIn("fake-cloud model answering", t.reply)
         self.assertEqual(len(self.cloud.chat_requests(nonce)), 1)
         self.assertNoRequests(self.local)
+
+    def test_2_reopened_it_runs_on_the_new_default(self):
+        rows = self.inst.db("SELECT llm_type, cloud_provider, model FROM conversations "
+                            "WHERE id = ?", (self.conv,))
+        self.assertEqual(rows, [("", "", "")], "no selection stored for it")
+
+        other = Client(WEBUI_PORT, ADMIN_USER, self.inst.password)
+        self.addCleanup(other.close)
+        loaded = other.load_conversation(self.conv)
+        self.assertTrue(loaded["llm_settings"]["follows_default"], loaded.get("llm_settings"))
+
+        # Created on local, opened again after the default moved to the cloud.
+        nonce = uuid.uuid4().hex[:12]
+        before = len(self.local.chat_requests())
+        t = other.turn(f"Reopened? [{nonce}]")
+        self.assertNoErrorFrames(t)
+        self.assertIn("fake-cloud model answering", t.reply)
+        self.assertEqual(len(self.local.chat_requests()), before)
 
 
 if __name__ == "__main__":

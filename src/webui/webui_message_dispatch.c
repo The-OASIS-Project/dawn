@@ -485,10 +485,12 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          }
          bool has_changes = false;
 
-         /* Track old model + type for context cache invalidation */
+         /* Track old model + type for context cache invalidation (what ran) */
+         session_llm_config_t before = config;
+         llm_selection_resolve(&before);
          char old_model[LLM_MODEL_NAME_MAX];
-         safe_strscpy(old_model, config.model);
-         int old_type = config.type;
+         safe_strscpy(old_model, before.model);
+         int old_type = before.type;
 
          /* Parse type (local/cloud) */
          bool type_explicitly_set = false;
@@ -666,8 +668,10 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
           * whether the user's own change was adjusted, never for a restore. */
          if (has_changes) {
             int rc = session_set_llm_config(conn->session, &config);
+            /* What the session stored (unset: it follows the default), then what
+             * it runs on. */
+            const bool follows = session_llm_follows_default(conn->session);
             if (rc == 0) {
-               /* What the session got: a provider without a key falls back. */
                session_get_llm_config(conn->session, &config);
             }
             if (rc == 0 && !from_restore) {
@@ -675,7 +679,7 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
             }
             if (rc != 0) {
                success = 0;
-               error_msg = "API key not configured for requested provider";
+               error_msg = "No session";
             } else {
                OLOG_INFO("WebUI: Session %u LLM config updated (type=%d, provider=%d)",
                          conn->session->session_id, config.type, config.cloud_provider);
@@ -697,13 +701,17 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
                 * cascade would then silently overwrite that conv with the
                 * previous conv's values. */
                if (!from_restore && conn->active_conversation_id > 0) {
-                  const char *type_str = config.type == LLM_LOCAL ? "local" : "cloud";
+                  /* A session following the default stores no selection, so the
+                   * conversation keeps following it; its reasoning is stored. */
+                  const char *type_str = follows                    ? ""
+                                         : config.type == LLM_LOCAL ? "local"
+                                                                    : "cloud";
                   /* tools_mode column is retired (dead) — pass empty. */
-                  conv_db_update_llm_settings(conn->active_conversation_id, conn->auth_user_id,
-                                              type_str,
-                                              cloud_provider_to_string(config.cloud_provider),
-                                              config.model, "", config.thinking_mode,
-                                              config.reasoning_effort);
+                  conv_db_update_llm_settings(
+                      conn->active_conversation_id, conn->auth_user_id, type_str,
+                      follows ? "" : cloud_provider_to_string(config.cloud_provider),
+                      follows ? "" : config.model, "", config.thinking_mode,
+                      config.reasoning_effort);
                }
             }
          }
@@ -739,6 +747,9 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          webui_reasoning_stamp(resp_payload, &current);
          json_object_object_add(resp_payload, "reasoning_adjusted",
                                 json_object_new_boolean(reasoning_adjusted));
+         json_object_object_add(resp_payload, "follows_default",
+                                json_object_new_boolean(
+                                    session_llm_follows_default(conn->session)));
       }
 
       /* Include API key availability */

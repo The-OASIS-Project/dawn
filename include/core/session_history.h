@@ -161,16 +161,14 @@ void session_replace_history(session_t *session, struct json_object *history, in
  *
  * Registered by the WebUI layer (which owns the canonical restore: image
  * rehydration, compaction watermark).  Must not touch any session.  Also
- * reports the conversation's stored LLM settings (applied over @p base) in
- * @p cfg_out, setting *@p has_cfg_out when it has any.
+ * reports, when it returns a history, the conversation's stored LLM settings in
+ * @p cfg_out (LLM_UNDEFINED, following the default, when it has none of its own).
  *
  * @return New history array (caller owns), or NULL on failure
  */
 typedef struct json_object *(*session_history_loader_fn)(int user_id,
                                                          int64_t conv_id,
-                                                         const session_llm_config_t *base,
-                                                         session_llm_config_t *cfg_out,
-                                                         bool *has_cfg_out);
+                                                         session_llm_config_t *cfg_out);
 
 /** Register the loader session_turn_begin() uses (NULL to unregister). */
 void session_set_history_loader(session_history_loader_fn loader);

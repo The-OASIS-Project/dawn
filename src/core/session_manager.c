@@ -1764,6 +1764,15 @@ void session_get_llm_config_raw(session_t *session, session_llm_config_t *config
    pthread_mutex_unlock(&session->llm_config_mutex);
 }
 
+bool session_llm_follows_default(session_t *session) {
+   if (!session) {
+      return true;
+   }
+   session_llm_config_t cfg;
+   session_get_llm_config_raw(session, &cfg);
+   return cfg.type == LLM_UNDEFINED;
+}
+
 int session_turn_selection_problem(session_t *session, char *reason, size_t reason_len) {
    session_llm_config_t cfg;
    session_get_llm_config(session, &cfg);

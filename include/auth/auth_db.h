@@ -2248,6 +2248,30 @@ int conv_db_update_llm_settings(int64_t conv_id,
                                 const char *thinking_mode,
                                 const char *reasoning_effort);
 
+/** system_metadata key marking conv_db_unpin_default_llm() done. */
+#define CONV_DB_UNPIN_MARKER "llm_rows_follow_default"
+
+/**
+ * @brief Once per database: conversations stored with the default selection
+ *        follow the default from now on
+ *
+ * Until this version, every WebUI conversation stored the LLM it was created on,
+ * so each looked like a choice the user made.  Clears llm_type, cloud_provider
+ * and model (reasoning kept) on cloud rows equal to a cloud default; rows that
+ * differ, local rows and messaging rows keep their selection.  Runs once (a
+ * system_metadata marker, set whatever the default); later calls do nothing.
+ *
+ * @param llm_type       "local" or "cloud"
+ * @param cloud_provider The default's provider name ("none" for local)
+ * @param model          The default's model ("" for a local server's own)
+ * @param[out] changed_out Rows cleared (0 when already done); may be NULL
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int conv_db_unpin_default_llm(const char *llm_type,
+                              const char *cloud_provider,
+                              const char *model,
+                              int *changed_out);
+
 /**
  * @brief Fill only the LLM-settings columns that are currently NULL/empty.
  *

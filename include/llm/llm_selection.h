@@ -76,6 +76,21 @@ void llm_selection_apply(const llm_selection_t *sel, session_llm_config_t *cfg);
 void llm_selection_resolve(session_llm_config_t *cfg);
 
 /**
+ * @brief A conversation's stored LLM columns as a session config.
+ *
+ * No type stored (or cloud with no provider it names, nor a model naming one) is
+ * no selection of its own: LLM_UNDEFINED, which follows the default.  The
+ * conversation's reasoning is kept either way, else the configured default's.
+ * Arguments may be NULL or empty.  Takes g_config_rwlock (read).
+ */
+void llm_selection_from_row(const char *llm_type,
+                            const char *provider,
+                            const char *model,
+                            const char *thinking_mode,
+                            const char *reasoning_effort,
+                            session_llm_config_t *out);
+
+/**
  * @brief Whether a config can run, and if not, why.
  *
  * Local runs (whether the local server answers is found out when it's called).

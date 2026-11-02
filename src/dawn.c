@@ -2088,6 +2088,18 @@ int main(int argc, char *argv[]) {
    // Initialize LLM system early - must happen before prompt is built
    // so llm_tools_enabled() returns correct value for native tool calling
    llm_init();
+   if (auth_db_ready) {
+      /* Once: conversations stored on the default follow it from now on. */
+      llm_selection_t def;
+      llm_default_selection(&def);
+      int unpinned = 0;
+      if (conv_db_unpin_default_llm(def.type == LLM_LOCAL ? "local" : "cloud",
+                                    cloud_provider_to_string(def.provider), def.model,
+                                    &unpinned) == AUTH_DB_SUCCESS &&
+          unpinned > 0) {
+         OLOG_INFO("Conversations now following the default LLM: %d", unpinned);
+      }
+   }
 
    // Initialize context management (token tracking, auto-summarization)
    llm_context_init();

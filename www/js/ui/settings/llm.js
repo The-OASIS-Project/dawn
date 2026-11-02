@@ -587,12 +587,18 @@
          llmRuntimeState.model = sessionReset.model;
       }
 
-      // Send reset to session. Mark as from_restore so the server's
+      // The session follows the default again: the server applies dawn.toml's
+      // (the controls above only show it).  Mark as from_restore so the server's
       // active-conversation persistence cascade is skipped — the new-conversation
       // reset fires BEFORE clear_session, and without the flag it would silently
       // overwrite the locked settings of the conversation the user just left.
-      sessionReset.from_restore = true;
-      setSessionLlm(sessionReset);
+      llmRuntimeState.follows_default = true; /* the server's reply confirms it */
+      setSessionLlm({
+         type: 'reset',
+         thinking_mode: sessionReset.thinking_mode,
+         reasoning_effort: sessionReset.reasoning_effort,
+         from_restore: true,
+      });
    }
 
    /**
@@ -620,10 +626,17 @@
          // session keeps whichever defaults were sent by applyGlobalDefaultsToControls
          // at page load — the UI shows the conversation's value but the server
          // uses the global default for the next request.
+         // A conversation with no selection of its own follows the default:
+         // reset, never pin the default's values onto it.
          const sessionPayload = {};
-         if (settings.llm_type) sessionPayload.type = settings.llm_type;
-         if (settings.cloud_provider) sessionPayload.provider = settings.cloud_provider;
-         if (settings.model) sessionPayload.model = settings.model;
+         llmRuntimeState.follows_default = !!settings.follows_default;
+         if (settings.follows_default) {
+            sessionPayload.type = 'reset';
+         } else {
+            if (settings.llm_type) sessionPayload.type = settings.llm_type;
+            if (settings.cloud_provider) sessionPayload.provider = settings.cloud_provider;
+            if (settings.model) sessionPayload.model = settings.model;
+         }
          /* The pick, not the effective value: the session stores what was picked. */
          sessionPayload.thinking_mode = conversationLlmState.thinking_mode;
          sessionPayload.reasoning_effort = conversationLlmState.reasoning_effort;
@@ -662,10 +675,13 @@
     * @returns {Object} Current LLM settings
     */
    function getConversationLlmSettings() {
+      // Following the default: no selection is stored, so the conversation
+      // keeps following it.
+      const follows = !!llmRuntimeState.follows_default;
       return {
-         llm_type: llmRuntimeState.type,
-         cloud_provider: llmRuntimeState.provider,
-         model: llmRuntimeState.model,
+         llm_type: follows ? '' : llmRuntimeState.type,
+         cloud_provider: follows ? '' : llmRuntimeState.provider,
+         model: follows ? '' : llmRuntimeState.model,
          thinking_mode: conversationLlmState.thinking_mode,
          reasoning_effort: conversationLlmState.reasoning_effort,
       };
@@ -779,7 +795,12 @@
          // from_restore: server-side cascade must NOT persist this auto-detected model
          // onto the active conversation's DB row — the user didn't choose this; the
          // local provider just told us what's loaded.
-         if (payload.current_model && llmRuntimeState.model !== payload.current_model) {
+         // A session following the default isn't pinned to what's loaded.
+         if (
+            payload.current_model &&
+            llmRuntimeState.model !== payload.current_model &&
+            !llmRuntimeState.follows_default
+         ) {
             llmRuntimeState.model = payload.current_model;
             setSessionLlm({ model: payload.current_model, from_restore: true });
          }
@@ -814,7 +835,7 @@
       // sync, not a user-initiated change, must not cascade to the conv DB row.
       if (payload.current_model) {
          modelSelect.value = payload.current_model;
-         if (llmRuntimeState.model !== payload.current_model) {
+         if (llmRuntimeState.model !== payload.current_model && !llmRuntimeState.follows_default) {
             llmRuntimeState.model = payload.current_model;
             setSessionLlm({ model: payload.current_model, from_restore: true });
          }
@@ -1137,6 +1158,12 @@
       if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) {
          console.error('WebSocket not connected');
          return;
+      }
+      // A pick of its own, from now (the server's reply confirms it)
+      const picked =
+         (changes.type && changes.type !== 'reset') || changes.provider || changes.model;
+      if (picked && !changes.from_restore) {
+         llmRuntimeState.follows_default = false;
       }
 
       DawnWS.send({
