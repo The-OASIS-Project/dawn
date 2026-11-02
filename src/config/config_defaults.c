@@ -148,7 +148,7 @@ void config_set_defaults(dawn_config_t *config) {
    /* Default Gemini model list (first entry is default) */
    config->llm.cloud.gemini_models_count = 2;
    safe_strscpy(config->llm.cloud.gemini_models[0],
-                LLM_DEFAULT_GEMINI_MODEL); /* gemini-3.7-flash */
+                LLM_DEFAULT_GEMINI_MODEL); /* gemini-3.8-flash */
    safe_strscpy(config->llm.cloud.gemini_models[1], "gemini-3.1-pro-preview");
    config->llm.cloud.gemini_default_model_idx = 0;
 
@@ -169,7 +169,7 @@ void config_set_defaults(dawn_config_t *config) {
    safe_strscpy(config->llm.cloud.openrouter_models[7], "openai/gpt-5.5");
    safe_strscpy(config->llm.cloud.openrouter_models[8], "openai/gpt-5.4-mini");
    safe_strscpy(config->llm.cloud.openrouter_models[9], "openai/gpt-5.4-nano");
-   safe_strscpy(config->llm.cloud.openrouter_models[10], "google/gemini-3.7-flash");
+   safe_strscpy(config->llm.cloud.openrouter_models[10], "google/gemini-3.8-flash");
    safe_strscpy(config->llm.cloud.openrouter_models[11], "google/gemini-3.1-pro-preview");
    config->llm.cloud.openrouter_default_model_idx = 0;
 

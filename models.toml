@@ -354,6 +354,9 @@ local = { count = 16, bytes = 64000000 }
 "gpt-3.5-turbo-16k" = { by = "gpt-5.6-terra" }
 
 [retired.gemini]
+# Deprecated; Google already routes these to their replacement.
+"gemini-3.7-flash" = { by = "gemini-3.8-flash" }
+"gemini-3.5-flash" = { by = "gemini-3.6-flash" }
 "gemini-3.1-flash-lite" = { by = "gemini-3.5-flash-lite", on = "2027-05-07" }
 "gemini-3-pro-preview" = { by = "gemini-3.1-pro-preview" }
 "gemini-2.0-flash" = { by = "gemini-3.6-flash" }
