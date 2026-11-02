@@ -65,20 +65,20 @@ int memory_db_entity_link_candidates(int user_id,
    if (matched_stage == 1 && winner_id > 0 && winner_id != entity_id) {
       out_ids[n++] = winner_id;
    }
+   /* A scored winner is always in scored: every candidate the cascade scores
+    * is listed there (it keeps at most STAGE5_MAX, the array's size), after
+    * stage 3 dropped the vetoed ones. */
    const float review = (float)g_config.memory.entity_merge_review_threshold;
    for (int i = 0; i < scored_count && n < max; i++) {
       if (scored[i].evidence.composite_score < review) {
          break; /* sorted best first */
       }
-      if (scored[i].entity_id == entity_id || scored[i].entity_id == winner_id ||
-          scored[i].evidence.type_veto_fired || scored[i].evidence.name_veto_fired) {
+      /* A stage-1 winner is already first. */
+      if (scored[i].entity_id == entity_id ||
+          (matched_stage == 1 && scored[i].entity_id == winner_id)) {
          continue;
       }
       out_ids[n++] = scored[i].entity_id;
-   }
-   if (n == 0 && matched_stage != 1 && winner_id > 0 && winner_id != entity_id &&
-       ev.composite_score >= review) {
-      out_ids[n++] = winner_id;
    }
    *count_out = n;
    return MEMORY_DB_SUCCESS;
@@ -95,7 +95,8 @@ int memory_db_entity_consider_nominated_merge(int user_id,
    memset(out_eval, 0, sizeof(*out_eval));
    out_eval->source_entity_id = source_id;
    out_eval->target_entity_id = target_id;
-   if (source_id == target_id) {
+   /* [memory.entity_merge] enabled = false: nothing is linked or proposed. */
+   if (source_id == target_id || !g_config.memory.entity_merge_enabled) {
       out_eval->outcome = MEMORY_ALIAS_OUTCOME_NO_CANDIDATES;
       return MEMORY_DB_SUCCESS;
    }

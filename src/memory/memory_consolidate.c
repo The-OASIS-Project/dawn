@@ -456,6 +456,9 @@ static void triage(mc_batch_t *b) {
 /* The entities this batch created and those the merge cascade finds they may
  * be: the pairs a link can name. */
 static void entity_pairs(mc_batch_t *b) {
+   if (!g_config.memory.entity_merge_enabled) {
+      return; /* nothing for a link to name */
+   }
    const int64_t *fresh = NULL;
    const int n = memory_store_fresh_entities(b->st, &fresh);
    for (int i = 0; i < n && b->n_e < MC_MAX_ENTITIES; i++) {
@@ -603,7 +606,10 @@ static char *step_message(mc_batch_t *b) {
                                       have ? settings.persona_values_mode : NULL);
    strbuf_t sb;
    strbuf_init(&sb, 8192);
-   strbuf_appendf(&sb, MEMORY_CONSOLIDATE_LEAD, values ? values : values_base);
+   const bool links = g_config.memory.entity_merge_enabled;
+   strbuf_appendf(&sb, MEMORY_CONSOLIDATE_LEAD, values ? values : values_base,
+                  links ? MEMORY_CONSOLIDATE_LINK_RULE : "",
+                  links ? MEMORY_CONSOLIDATE_LINK_OP : "");
    free(values);
 
    char id[16];
@@ -637,7 +643,7 @@ static char *step_message(mc_batch_t *b) {
          }
       }
    }
-   if (b->n_e > 0) {
+   if (b->n_e > 0 && links) { /* E is what a link names */
       strbuf_append(&sb, MEMORY_CONSOLIDATE_HEAD_E);
       const int64_t *fresh = NULL;
       const int n_fresh = memory_store_fresh_entities(b->st, &fresh);

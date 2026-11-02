@@ -355,7 +355,7 @@ static void check_add(mc_batch_t *b, mc_op_t *op, int at) {
    const mc_slot_t s = slot_of(b, op->a);
    const char *text = slot_cand(s)->text;
    if (op->has_text) {
-      if (op->a.kind != MC_REF_C) {
+      if (!s.mc) {
          reject(op, "only a C's text may be shortened");
          return;
       }
@@ -383,9 +383,8 @@ static void check_add(mc_batch_t *b, mc_op_t *op, int at) {
       return;
    }
    if (op->has_text) {
-      mc_cand_t *mc = s.mc;
-      safe_strscpy(mc->text, op->text);
-      mc->shortened = true;
+      safe_strscpy(s.mc->text, op->text);
+      s.mc->shortened = true;
    }
 }
 
@@ -595,6 +594,10 @@ static void read_op(mc_batch_t *b, struct json_object *j, mc_op_t *op) {
          op->valid_to = str_of(j, "valid_to") ? iso8601_parse_date_utc(str_of(j, "valid_to")) : 0;
          break;
       case MC_OP_LINK:
+         if (!g_config.memory.entity_merge_enabled) {
+            reject(op, "entity merging is off"); /* no E is shown then */
+            return;
+         }
          op->a = ref_parse(b, str_of(j, "e"));
          op->b = ref_parse(b, str_of(j, "same_as"));
          break;

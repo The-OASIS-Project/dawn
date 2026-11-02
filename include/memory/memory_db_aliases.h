@@ -322,6 +322,8 @@ int memory_db_entity_link_candidates(int user_id,
  * a composite at or above `auto_threshold`, links them (the longer name stays
  * canonical); differing types or names refuse it; anything else is proposed
  * for the user.  @p propose_only (outside text nominated it) never links.
+ * With entity merging off ([memory.entity_merge] enabled = false) nothing is
+ * linked or proposed (outcome NO_CANDIDATES).
  * Both must be canonicals of their classes.
  *
  * @param out_eval Outcome, the link or proposal id, the direction taken

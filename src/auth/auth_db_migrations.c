@@ -3526,13 +3526,13 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
    if (current_version < 113) {
       v113_ok = auth_db_migrations_v113(s_db.db) == AUTH_DB_SUCCESS;
    }
-   /* An index added to the v113 tables after v113 shipped: a database already
-    * there gets it here (no new version; IF NOT EXISTS makes it a no-op). */
+   /* Indexes added to the v113 tables after v113 shipped: a database already
+    * there gets them here (no new version; IF NOT EXISTS makes it a no-op). */
    if (v113_ok) {
       char *err = NULL;
-      if (sqlite3_exec(s_db.db, MEMORY_CONSOLIDATION_REL_INDEX_SQL, NULL, NULL, &err) !=
+      if (sqlite3_exec(s_db.db, MEMORY_CONSOLIDATION_LATER_INDEXES_SQL, NULL, NULL, &err) !=
           SQLITE_OK) {
-         OLOG_WARNING("auth_db: consolidation relation index: %s", err ? err : "?");
+         OLOG_WARNING("auth_db: consolidation record indexes: %s", err ? err : "?");
       }
       sqlite3_free(err);
    }

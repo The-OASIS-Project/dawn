@@ -1824,6 +1824,21 @@ static void test_alias_link_to_an_alias(void) {
    TEST_ASSERT_EQUAL_INT64(root, ids[0]);
 }
 
+/* Two scored candidates over the review threshold: both are link candidates,
+ * the cascade's winner (the best match) included. */
+static void test_link_candidates_keep_the_winner(void) {
+   g_config.memory.entity_merge_review_threshold = 0.0f;
+   const int64_t a = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   const int64_t b = insert_entity_typed(g_test_user_id, "Jon Smith", "person");
+   const int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan R Smith", "person");
+   int64_t ids[4] = { 0 };
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_link_candidates(g_test_user_id, inbound, ids, 4, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_TRUE((ids[0] == a && ids[1] == b) || (ids[0] == b && ids[1] == a));
+}
+
 /* The abstract "user" alias isn't a name: it never names the user. */
 static void test_alias_names_leave_out_user_placeholder(void) {
    int64_t self = insert_entity_typed(g_test_user_id, "Pat Example", "person");
@@ -3740,6 +3755,20 @@ static void test_relation_list_class_aware_mention_count_surfaces(void) {
  * Main
  * ============================================================================ */
 
+/* Entity merging off: a nominated pair is neither linked nor proposed. */
+static void test_nominated_merge_honors_merging_off(void) {
+   g_config.memory.entity_merge_enabled = false;
+   const int64_t a = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   const int64_t b = insert_entity_typed(g_test_user_id, "Jonathan Smith Jr", "person");
+   memory_alias_evaluate_t eval;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_entity_consider_nominated_merge(
+                                                g_test_user_id, b, a, false, &eval));
+   TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_NO_CANDIDATES, eval.outcome);
+   TEST_ASSERT_EQUAL_INT(0, count_db_rows("SELECT COUNT(*) FROM memory_entities WHERE "
+                                          "canonical_id IS NOT NULL"));
+   TEST_ASSERT_EQUAL_INT(0, count_db_rows("SELECT COUNT(*) FROM memory_entity_merge_proposals"));
+}
+
 int main(void) {
    UNITY_BEGIN();
 
@@ -3821,6 +3850,8 @@ int main(void) {
    RUN_TEST(test_entity_merge_into_own_alias);
    RUN_TEST(test_entity_merge_into_an_alias);
    RUN_TEST(test_alias_names_leave_out_user_placeholder);
+   RUN_TEST(test_link_candidates_keep_the_winner);
+   RUN_TEST(test_nominated_merge_honors_merging_off);
    RUN_TEST(test_fact_ids_for_subject);
    RUN_TEST(test_entity_class_members_scoped);
    RUN_TEST(test_class_lookups_by_alias);

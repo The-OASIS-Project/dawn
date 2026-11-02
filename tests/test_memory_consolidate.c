@@ -1139,6 +1139,26 @@ void test_a_repeated_candidate_with_forgotten_words_is_recorded_without_them(voi
    one_disposition_each(res.batch_id, 2);
 }
 
+/* Entity merging off: a planned link is rejected at the check (and named in
+ * the repair), never counted toward the loss cap; the lead offers no link. */
+void test_a_link_with_merging_off_is_rejected_and_not_counted(void) {
+   g_config.memory.entity_merge_enabled = false;
+   stored("Jonathan Smith lives in Portland", "explicit", 0);
+   stored("Jonathan Smith lives in Portland, Oregon", "explicit", 0);
+   script("{\"ops\": [{\"op\": \"replace\", \"old\": \"S1\", \"by\": \"C1\"}, {\"op\": "
+          "\"merge\", \"from\": \"S2\", \"into\": \"C1\"}, {\"op\": \"link\", \"e\": \"E1\", "
+          "\"same_as\": \"E2\"}]}",
+          "{\"ops\": [{\"op\": \"replace\", \"old\": \"S1\", \"by\": \"C1\"}], \"finish\": true}");
+   const memory_consolidate_result_t res = run(ONE_FACT("Jonathan Smith lives in Springfield"), 0,
+                                               0);
+   TEST_ASSERT_NOT_NULL(strstr(s_last_user, "entity merging is off"));
+   TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATE_FINISHED, res.stop);
+   TEST_ASSERT_FALSE(res.partial); /* two destructive ops: within the cap */
+   TEST_ASSERT_EQUAL_INT(1, res.rejected);
+   TEST_ASSERT_EQUAL_INT(0, rows(res.batch_id, "linked", NULL));
+   TEST_ASSERT_TRUE(current("Jonathan Smith lives in Springfield") > 0);
+}
+
 /* Last: the stop can't be undone in the process. */
 void test_cancelled_at_shutdown_stores_additions(void) {
    stored("Jonathan Smith lives in Portland", "explicit", 0);
@@ -1204,6 +1224,7 @@ int main(void) {
    RUN_TEST(test_a_deferred_candidate_set_aside_again_keeps_its_row);
    RUN_TEST(test_a_repeated_candidate_text_is_recorded);
    RUN_TEST(test_a_repeated_candidate_with_forgotten_words_is_recorded_without_them);
+   RUN_TEST(test_a_link_with_merging_off_is_rejected_and_not_counted);
    RUN_TEST(test_cancelled_at_shutdown_stores_additions);
    return UNITY_END();
 }

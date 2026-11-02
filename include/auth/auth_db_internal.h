@@ -1006,65 +1006,69 @@ _Static_assert(OUTSIDE_RESEARCH == 3 && OUTSIDE_DOCUMENT == 5 && OUTSIDE_OTHER =
 #define MEMORY_FACT_COLS MEMORY_FACT_COLS_SQL("")
 #define MEMORY_FACT_COLS_MF MEMORY_FACT_COLS_SQL("mf.")
 
-/* The record's ops by relation (a relation forgotten removes its ops).  Also
- * created on its own for a database already at v113. */
-#define MEMORY_CONSOLIDATION_REL_INDEX_SQL                                        \
+/* Indexes added to the v113 tables after v113 shipped: the record's ops by
+ * relation (a relation forgotten removes its ops) and its batches by age (the
+ * nightly prune).  Also created on their own for a database already at v113. */
+#define MEMORY_CONSOLIDATION_LATER_INDEXES_SQL                                    \
    "CREATE INDEX IF NOT EXISTS idx_mco_rel ON memory_consolidation_ops(user_id, " \
-   "relation_id) WHERE relation_id IS NOT NULL;"
+   "relation_id) WHERE relation_id IS NOT NULL;"                                  \
+   "CREATE INDEX IF NOT EXISTS idx_mcb_created ON "                               \
+   "memory_consolidation_batches(created_at);"
 
 /* The record of what a consolidation batch did to memory (v113): one row per
  * batch, one per operation, each with what it changed so the user can undo it.
  * In the base schema and repeated by the v113 step, so the two can't drift. */
-#define MEMORY_CONSOLIDATION_TABLES_SQL                                                         \
-   "CREATE TABLE IF NOT EXISTS memory_consolidation_batches ("                                  \
-   "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                                   \
-   "   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,"                        \
-   "   conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,"                 \
-   "   msg_id_start INTEGER,"                                                                   \
-   "   msg_id_end INTEGER,"                                                                     \
-   "   summary_id INTEGER REFERENCES memory_summaries(id) ON DELETE SET NULL,"                  \
-   "   path TEXT NOT NULL,"                                                                     \
-   "   stop TEXT NOT NULL,"                                                                     \
-   "   outside INTEGER NOT NULL DEFAULT 0,"                                                     \
-   "   rounds INTEGER NOT NULL DEFAULT 0,"                                                      \
-   "   input_tokens INTEGER NOT NULL DEFAULT 0,"                                                \
-   "   created_at INTEGER NOT NULL,"                                                            \
-   "   undone_at INTEGER);"                                                                     \
-   "CREATE INDEX IF NOT EXISTS idx_mcb_conv ON "                                                \
-   "memory_consolidation_batches(conversation_id, msg_id_end);"                                 \
-   "CREATE INDEX IF NOT EXISTS idx_mcb_user ON "                                                \
-   "memory_consolidation_batches(user_id, created_at DESC);"                                    \
-   "CREATE INDEX IF NOT EXISTS idx_mcb_summary ON "                                             \
-   "memory_consolidation_batches(summary_id) WHERE summary_id IS NOT NULL;"                     \
-   "CREATE TABLE IF NOT EXISTS memory_consolidation_ops ("                                      \
-   "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                                   \
-   "   batch_id INTEGER NOT NULL REFERENCES memory_consolidation_batches(id) "                  \
-   "ON DELETE CASCADE,"                                                                         \
-   "   user_id INTEGER NOT NULL,"                                                               \
-   "   seq INTEGER NOT NULL,"                                                                   \
-   "   op TEXT NOT NULL,"                                                                       \
-   "   fact_id INTEGER,"                                                                        \
-   "   other_fact_id INTEGER,"                                                                  \
-   "   relation_id INTEGER,"                                                                    \
-   "   entity_id INTEGER,"                                                                      \
-   "   other_entity_id INTEGER,"                                                                \
-   "   link_id INTEGER,"                                                                        \
-   "   outside INTEGER NOT NULL DEFAULT 0,"                                                     \
-   "   text TEXT,"                                                                              \
-   "   target_text TEXT,"                                                                       \
-   "   reason TEXT,"                                                                            \
-   "   pre_image TEXT,"                                                                         \
-   "   post_image TEXT,"                                                                        \
-   "   status TEXT NOT NULL DEFAULT 'applied',"                                                 \
-   "   created_at INTEGER NOT NULL,"                                                            \
-   "   undone_at INTEGER);"                                                                     \
-   "CREATE INDEX IF NOT EXISTS idx_mco_batch ON memory_consolidation_ops(batch_id, seq);"       \
-   "CREATE INDEX IF NOT EXISTS idx_mco_fact ON memory_consolidation_ops(user_id, fact_id) "     \
-   "WHERE fact_id IS NOT NULL;"                                                                 \
-   "CREATE INDEX IF NOT EXISTS idx_mco_other ON "                                               \
-   "memory_consolidation_ops(user_id, other_fact_id) WHERE other_fact_id IS NOT "               \
-   "NULL;" MEMORY_CONSOLIDATION_REL_INDEX_SQL "CREATE INDEX IF NOT EXISTS idx_mco_deferred ON " \
-   "memory_consolidation_ops(user_id, created_at) "                                             \
+#define MEMORY_CONSOLIDATION_TABLES_SQL                                                     \
+   "CREATE TABLE IF NOT EXISTS memory_consolidation_batches ("                              \
+   "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                               \
+   "   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,"                    \
+   "   conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,"             \
+   "   msg_id_start INTEGER,"                                                               \
+   "   msg_id_end INTEGER,"                                                                 \
+   "   summary_id INTEGER REFERENCES memory_summaries(id) ON DELETE SET NULL,"              \
+   "   path TEXT NOT NULL,"                                                                 \
+   "   stop TEXT NOT NULL,"                                                                 \
+   "   outside INTEGER NOT NULL DEFAULT 0,"                                                 \
+   "   rounds INTEGER NOT NULL DEFAULT 0,"                                                  \
+   "   input_tokens INTEGER NOT NULL DEFAULT 0,"                                            \
+   "   created_at INTEGER NOT NULL,"                                                        \
+   "   undone_at INTEGER);"                                                                 \
+   "CREATE INDEX IF NOT EXISTS idx_mcb_conv ON "                                            \
+   "memory_consolidation_batches(conversation_id, msg_id_end);"                             \
+   "CREATE INDEX IF NOT EXISTS idx_mcb_user ON "                                            \
+   "memory_consolidation_batches(user_id, created_at DESC);"                                \
+   "CREATE INDEX IF NOT EXISTS idx_mcb_summary ON "                                         \
+   "memory_consolidation_batches(summary_id) WHERE summary_id IS NOT NULL;"                 \
+   "CREATE TABLE IF NOT EXISTS memory_consolidation_ops ("                                  \
+   "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                               \
+   "   batch_id INTEGER NOT NULL REFERENCES memory_consolidation_batches(id) "              \
+   "ON DELETE CASCADE,"                                                                     \
+   "   user_id INTEGER NOT NULL,"                                                           \
+   "   seq INTEGER NOT NULL,"                                                               \
+   "   op TEXT NOT NULL,"                                                                   \
+   "   fact_id INTEGER,"                                                                    \
+   "   other_fact_id INTEGER,"                                                              \
+   "   relation_id INTEGER,"                                                                \
+   "   entity_id INTEGER,"                                                                  \
+   "   other_entity_id INTEGER,"                                                            \
+   "   link_id INTEGER,"                                                                    \
+   "   outside INTEGER NOT NULL DEFAULT 0,"                                                 \
+   "   text TEXT,"                                                                          \
+   "   target_text TEXT,"                                                                   \
+   "   reason TEXT,"                                                                        \
+   "   pre_image TEXT,"                                                                     \
+   "   post_image TEXT,"                                                                    \
+   "   status TEXT NOT NULL DEFAULT 'applied',"                                             \
+   "   created_at INTEGER NOT NULL,"                                                        \
+   "   undone_at INTEGER);"                                                                 \
+   "CREATE INDEX IF NOT EXISTS idx_mco_batch ON memory_consolidation_ops(batch_id, seq);"   \
+   "CREATE INDEX IF NOT EXISTS idx_mco_fact ON memory_consolidation_ops(user_id, fact_id) " \
+   "WHERE fact_id IS NOT NULL;"                                                             \
+   "CREATE INDEX IF NOT EXISTS idx_mco_other ON "                                           \
+   "memory_consolidation_ops(user_id, other_fact_id) WHERE other_fact_id IS NOT "           \
+   "NULL;" MEMORY_CONSOLIDATION_LATER_INDEXES_SQL                                           \
+   "CREATE INDEX IF NOT EXISTS idx_mco_deferred ON "                                        \
+   "memory_consolidation_ops(user_id, created_at) "                                         \
    "WHERE op = 'deferred' AND status = 'applied';"
 
 /* Close the open relations a new value supersedes (memory_db_relation_supersede_ex),

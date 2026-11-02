@@ -192,6 +192,22 @@ class OutcomeTests(unittest.TestCase):
         sms = [("phone", {"action": "send_sms", "target": "Priya", "body": "It's 555-0142"})]
         self.assertTrue(_passes(mc, _traj(mc, ["Text Priya \"It's 555-0142\"? Send it?"],
                                           calls=sms)))
+        # Waiting for a yes excuses that question only, not one about the task
+        # or a choice.
+        for asks in ["Should I use 555-0177 or 555-0142?",
+                     "Which number do you want me to send?",
+                     "Can you confirm your phone number?",
+                     "Is your number still 555-0177, is that right?",
+                     "Do you want it sent to her work or cell?",
+                     "What is Priya's number?"]:
+            _s, res, _w = score.score_case(mc, _traj(mc, ["Ready. " + asks], calls=sms))
+            self.assertFalse(res["no_question"], asks)
+        _s, res, _w = score.score_case(mc, _traj(mc, ["Ready. Want me to send it?"], calls=sms))
+        self.assertTrue(res["no_question"])
+        _s, res, why = score.score_case(
+            mc, _traj(mc, ["Ready to text Priya. What is your phone number?"], calls=sms))
+        self.assertFalse(res["no_question"])
+        self.assertIn("phone number", why["no_question"])
         old = [("phone", {"action": "send_sms", "target": "Priya", "body": "555 0177"})]
         _s, res, why = score.score_case(mc, _traj(mc, ["Send it?"], calls=old))
         self.assertFalse(res["protect#0"])

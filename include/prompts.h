@@ -767,9 +767,10 @@
    "forgotten part>\"}}"
 
 /* The consolidator's message after the extraction reply (memory_consolidate.c):
- * the user's effective values half (the %s), then how to decide; the lists of
- * what to decide on follow it, built by code under the MEMORY_CONSOLIDATE_*
- * headers below. */
+ * the user's effective values half (the first %s), then how to decide; the
+ * lists of what to decide on follow it, built by code under the
+ * MEMORY_CONSOLIDATE_* headers below.  The other two %s are
+ * MEMORY_CONSOLIDATE_LINK_RULE and _LINK_OP, or "" with entity merging off. */
 #define MEMORY_CONSOLIDATE_LEAD                                                                    \
    "%s\n\n"                                                                                        \
    "You keep your own long-term memory of the user. A conversation just ended; above is what "     \
@@ -783,8 +784,8 @@
    "value is history only when the conversation makes it false or says it changed; recency "       \
    "alone is not a contradiction; when unsure, keep both. Some relations hold one value at a "     \
    "time (married_to, born_in, born_on, favorite_color, favorite_food, primary_language): a "      \
-   "new current value closes the old one with close_relation, dated when it changed. Link "        \
-   "two E that are the same entity. Never keep anything an F says, reworded or not. You and "      \
+   "new current value closes the old one with close_relation, dated when it changed. %s"           \
+   "Never keep anything an F says, reworded or not. You and "                                      \
    "the assistant are not sources: nothing whose subject is you. A D may be added or "             \
    "dropped; one you leave stays set aside. Name only ids shown here; you may shorten a C's "      \
    "text by deleting words, never by writing new ones. forget only suggests; the user "            \
@@ -799,10 +800,14 @@
    "folded into it)\n"                                                                             \
    "{\"op\": \"replace\", \"old\": \"S3\", \"by\": \"C1\"} or \"by\": \"S4\"\n"                    \
    "{\"op\": \"close_relation\", \"r\": \"R1\", \"valid_to\": \"YYYY-MM-DD\", \"by\": \"C1\"}\n"   \
-   "{\"op\": \"link\", \"e\": \"E1\", \"same_as\": \"E2\"}\n"                                      \
+   "%s"                                                                                            \
    "{\"op\": \"defer\", \"c\": \"C4\"}, {\"op\": \"drop\", \"c\": \"C5\"} (also for a D)\n"        \
    "{\"op\": \"forget\", \"s\": \"S5\"}\n"                                                         \
    "Reply with JSON only: {\"ops\": [...], \"finish\": true}\n"
+
+/* The lead's link rule and op, with entity merging on. */
+#define MEMORY_CONSOLIDATE_LINK_RULE "Link two E that are the same entity. "
+#define MEMORY_CONSOLIDATE_LINK_OP "{\"op\": \"link\", \"e\": \"E1\", \"same_as\": \"E2\"}\n"
 
 /* The consolidator's lists (each header, then one line per item). */
 #define MEMORY_CONSOLIDATE_HEAD_C "\nC (decide each):\n"
