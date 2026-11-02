@@ -63,6 +63,8 @@
 session_t *g_stub_command_context = NULL;
 int g_stub_defer_result = 1; /* FAILURE */
 int64_t g_stub_defer_conv = 0;
+const char *g_stub_turn_history = NULL; /* the turn's history, as JSON (NULL: none) */
+int64_t g_stub_turn_conv = 0;
 
 /* No live conversations here: nothing to withdraw a forgotten memory from. */
 int session_withdraw_forgotten(int user_id, bool memory_bodies) {
@@ -391,6 +393,11 @@ uint64_t session_turn_token(void) {
 int64_t session_turn_conversation(session_t *session) {
    (void)session;
    return 0;
+}
+struct json_object *session_snapshot_turn_history(session_t *session, int64_t *conv_out) {
+   (void)session;
+   *conv_out = g_stub_turn_conv;
+   return json_tokener_parse(g_stub_turn_history ? g_stub_turn_history : "[]");
 }
 bool session_turn_is_caller(session_t *session) {
    (void)session;

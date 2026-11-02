@@ -919,6 +919,9 @@ static void print_usage(const char *prog) {
            "                                   floor (baseline = pre-2026-05-13 behavior);\n"
            "                                   0.30 is the natural kw_weight boundary.\n"
            "                                   Use to sweep the floor without rebuilding.\n"
+           "  --dump-candidates <path>         Memory-pipeline mode: write each batch's raw\n"
+           "                                   extraction facts to <path> as facts-JSONL\n"
+           "                                   (what extraction proposed, before storing).\n"
            "  --help                           Show this help\n",
            prog);
 }
@@ -953,6 +956,7 @@ int main(int argc, char *argv[]) {
       { "extraction-model", required_argument, 0, 'Y' },
       { "extraction-effort", required_argument, 0, 'Z' },
       { "search-score-floor", required_argument, 0, 'F' },
+      { "dump-candidates", required_argument, 0, 'D' },
       { "help", no_argument, 0, 'h' },
       { 0, 0, 0, 0 },
    };
@@ -963,13 +967,14 @@ int main(int argc, char *argv[]) {
    const char *extraction_provider_override = NULL;
    const char *extraction_model_override = NULL;
    const char *extraction_effort_override = NULL;
+   const char *dump_candidates_path = NULL;
    /* search_score_floor override: sentinel < 0 means "leave g_config alone";
     * any >= 0 value (including 0.0) means "override g_config after load".
     * The 0.0 override is meaningful — it represents the pre-2026-05-13
     * baseline (no floor) for ablation against the new default. */
    float search_score_floor_override = -1.0f;
    int opt;
-   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:C:X:Y:Z:F:MSrh", long_options,
+   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:C:X:Y:Z:F:D:MSrh", long_options,
                              NULL)) != -1) {
       switch (opt) {
          case 'p':
@@ -1022,6 +1027,9 @@ int main(int argc, char *argv[]) {
             break;
          case 'Z':
             extraction_effort_override = optarg;
+            break;
+         case 'D':
+            dump_candidates_path = optarg;
             break;
          case 'F':
             search_score_floor_override = (float)atof(optarg);
@@ -1096,10 +1104,10 @@ int main(int argc, char *argv[]) {
    } else {
       memset(&g_config, 0, sizeof(g_config));
       memset(&g_secrets, 0, sizeof(g_secrets));
-      if (extraction_provider_override || extraction_model_override || extraction_effort_override) {
-         fprintf(stderr,
-                 "bench: --extraction-provider/--extraction-model/--extraction-effort require "
-                 "--memory-pipeline; ignored in default mode\n");
+      if (extraction_provider_override || extraction_model_override || extraction_effort_override ||
+          dump_candidates_path) {
+         fprintf(stderr, "bench: --extraction-provider/--extraction-model/--extraction-effort/"
+                         "--dump-candidates require --memory-pipeline; ignored in default mode\n");
       }
    }
 
@@ -1124,6 +1132,8 @@ int main(int argc, char *argv[]) {
        * the way the daemon's do; without it every Claude model gets the
        * fallback rules, which Haiku 4.5 rejects. */
       if (llm_context_init() != 0)
+         return 1;
+      if (dump_candidates_path && bench_mp_dump_candidates(dump_candidates_path) != 0)
          return 1;
       if (bench_mp_init() != 0)
          return 1;

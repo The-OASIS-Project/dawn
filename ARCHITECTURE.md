@@ -171,6 +171,11 @@ Layer 1 (Core infrastructure) — deps: Layer 0
 ├── src/core/tz.c               Clock times in a named zone (libical), never the process's TZ.  tz_lookup only
 │                               returns zones libical lists (it never makes libical load a name, which appends to
 │                               a list other threads read); only tz_daemon_init, at startup, loads other names
+├── include/core/outside_kind.h What outside text a memory row's batch or a conversation read (stored values:
+│                               append only); tainted vs clean vs UNKNOWN, read by memory, llm and tools alike
+├── include/core/outside_markers.h The bytes DAWN writes around outside text in a message (an attached document,
+│                               a job's result, a device's data, an outside focus item); stored, so append only;
+│                               the live extraction scan and the SQL over stored rows match the same definitions
 ├── include/core/turn_origin.h  Where a pending action was made; a confirm carries it out only in the same
 │                               session, on the next turn, and never in a turn carrying an email the user
 │                               attached

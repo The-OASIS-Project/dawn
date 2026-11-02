@@ -12,7 +12,7 @@ import sqlite3
 import tempfile
 import unittest
 
-from . import candidates, coverage, models, rubric, storage
+from . import candidates, coverage, models, reextract, rubric, storage
 from .__main__ import kappa, main, stratified
 
 
@@ -284,6 +284,29 @@ class Coverage(unittest.TestCase):
                '{"id": 7, "v": "missing"}]'
         self.assertEqual(coverage.parse_verdicts(text, {1, 2}), {1: "covered"})
         self.assertEqual(coverage.parse_verdicts("[{bad", {1}), {})
+
+
+class Reextract(unittest.TestCase):
+    def test_bench_command_dumps_candidates_when_asked(self):
+        plain = reextract.bench_command("b", "claude", "m", "medium")
+        self.assertNotIn("--dump-candidates", plain)
+        cmd = reextract.bench_command("b", "claude", "m", "medium", candidates="c.jsonl")
+        i = cmd.index("--dump-candidates")
+        self.assertEqual(cmd[i + 1], os.path.abspath("c.jsonl"))
+
+    def test_candidates_file_is_a_coverage_set(self):
+        """The bench's candidate lines carry what coverage reads of a B set."""
+        path = storage.data_path("_test_candidates.jsonl")
+        try:
+            with storage.private_open(path) as f:
+                for i, conv in [(1, 10), (2, 10), (3, 12)]:
+                    f.write(json.dumps({"id": i, "text": f"t{i}", "conversation": conv,
+                                        "kind": "fact", "source": "explicit"}) + "\n")
+            self.assertEqual(reextract.count_candidates(path), (3, 2))
+            rows = coverage._read(path)
+            self.assertTrue(all({"text", "conversation"} <= set(r) for r in rows))
+        finally:
+            os.unlink(path)
 
 
 if __name__ == "__main__":

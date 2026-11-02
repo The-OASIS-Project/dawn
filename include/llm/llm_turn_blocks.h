@@ -290,6 +290,16 @@ struct json_object *llm_history_wire_copy(struct json_object *history);
 struct json_object *llm_history_wire_copy_object(struct json_object *obj);
 
 /**
+ * @brief A deep copy of @p history keeping which messages and parts are
+ *        request context (llm_history_kind.h), without DAWN's other keys
+ *
+ * For a reader that must see what DAWN put in front of the model (what
+ * outside text a batch read) before it strips that too.  Caller owns it; NULL
+ * on failure.
+ */
+struct json_object *llm_history_copy_marked(struct json_object *history);
+
+/**
  * @brief A deep copy of @p history without DAWN's own keys
  *
  * For anything that isn't a replay to the same vendor: memory extraction, a

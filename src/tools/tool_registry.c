@@ -1480,6 +1480,15 @@ const char *tool_third_party_frame(const tool_metadata_t *meta, const char *acti
    return e && e->third_party ? e->third_party : meta->third_party;
 }
 
+bool tool_results_own(const tool_metadata_t *meta, const char *action) {
+   if (!meta) {
+      return false;
+   }
+   const tool_action_kind_entry_t *e = action && action[0] ? find_action_kind(meta, action) : NULL;
+   const tool_results_t r = e && e->results != TOOL_RESULTS_UNDECIDED ? e->results : meta->results;
+   return r == TOOL_RESULTS_OWN;
+}
+
 const char *tool_third_party_frame_any(const tool_metadata_t *meta) {
    if (!meta) {
       return NULL;

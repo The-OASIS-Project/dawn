@@ -430,6 +430,7 @@ static const tool_action_kind_entry_t s_doc_manage_action_kinds[] = {
 
 static const tool_metadata_t doc_manage_metadata = {
    .name = "document_manage",
+   .results = TOOL_RESULTS_OUTSIDE,
    .describe_call = doc_manage_describe_call,
    .action_kinds = s_doc_manage_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_doc_manage_action_kinds),

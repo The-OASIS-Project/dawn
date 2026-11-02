@@ -747,6 +747,10 @@ static void drop_reasoning_parts(struct json_object *history) {
    }
 }
 
+struct json_object *llm_history_copy_marked(struct json_object *history) {
+   return copy_history(history, true, true);
+}
+
 struct json_object *llm_history_strip_internal(struct json_object *history) {
    /* The kind marks are kept long enough to find the request context, which
     * goes, and then removed. */

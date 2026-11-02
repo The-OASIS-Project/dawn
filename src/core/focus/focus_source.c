@@ -33,6 +33,7 @@
 #include "core/focus/focus_dominant_token.h"
 #include "core/focus/focus_source_internal.h"
 #include "core/memory_filter.h"
+#include "core/outside_markers.h"
 #include "dawn_error.h"
 #include "logging.h"
 
@@ -387,7 +388,7 @@ int focus_compose_ex(int user_id,
          pool[pool_count].source_type = a->source_type;
          /* Text others may have written (an invitation, a document) says so. */
          if (a->source_type != FOCUS_SOURCE_INTERNAL)
-            pool[pool_count].kind = "outside";
+            pool[pool_count].kind = OUTSIDE_MARKER_ITEM_KIND;
          pool_weights[pool_count] = adapter_weight;
          /* Adapter buffer no longer owns text/item_id; zero so a stray
           * later free won't double-free. */

@@ -149,6 +149,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v108.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v111.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v112.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v113.c
     ${SRC_ROOT}/src/core/tz.c
     ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
@@ -1801,14 +1802,18 @@ dawn_add_unit_test(test_calendar_pick
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_extraction_input
-   SOURCES test_memory_extraction_input.c
+   SOURCES test_memory_extraction_input.c test_tool_registry_stub.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+           ${SRC_ROOT}/src/core/hash_util.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/core/prompt_sections.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
-   LIBS    dawn_common unity json-c
+   LIBS    dawn_common unity pthread json-c
    LABEL   ci)
 
 # The dawn-admin cache stats table.
@@ -1912,6 +1917,28 @@ dawn_add_unit_test(test_memory_note_guard
 dawn_add_unit_test(test_memory_note_bridge
    SOURCES test_memory_note_bridge.c
            ${SRC_ROOT}/src/memory/memory_note_bridge.c
+           ${SRC_ROOT}/src/core/memory_filter.c
+           ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_summaries.c
+           ${SRC_ROOT}/src/memory/memory_db_prefs.c
+           ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_relations.c
+           ${SRC_ROOT}/src/memory/memory_db_provenance.c
+           ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
+           ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
+           ${SRC_ROOT}/src/memory/memory_db_forget.c
+           ${SRC_ROOT}/src/memory/memory_similarity.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# The session-start memory block leaves out summaries of batches that read
+# outside text.
+dawn_add_unit_test(test_memory_context
+   SOURCES test_memory_context.c
+           ${SRC_ROOT}/src/memory/memory_context.c
+           ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c
@@ -2054,6 +2081,14 @@ dawn_add_unit_test(test_auth_db_migrations_v73
            ${SRC_ROOT}/src/auth/auth_db_migrations_v72.c
            ${SRC_ROOT}/src/auth/auth_db_migrations_v73.c
    LIBS    dawn_common unity sqlite3 pthread
+   LABEL   ci)
+
+# v113 on a v112 database: origin and outside filled in, the record tables, the
+# category index gone, a migrated schema matching a new one.
+dawn_add_unit_test(test_auth_db_migrations_v113
+   SOURCES test_auth_db_migrations_v113.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_auth_db_migrations_v75
@@ -2214,6 +2249,31 @@ dawn_add_unit_test(test_research_run
 dawn_add_unit_test(test_research_allowlist
    SOURCES test_research_allowlist.c
    LIBS    unity
+   LABEL   ci)
+
+# Extraction's outside kind over stored rows, on the real loader and schema.
+dawn_add_unit_test(test_memory_extraction_stored
+   SOURCES test_memory_extraction_stored.c test_tool_registry_stub.c
+           ${SRC_ROOT}/src/memory/memory_extraction_input.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
+           ${SRC_ROOT}/src/llm/llm_third_party.c
+           ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/core/prefix_message.c
+           ${SRC_ROOT}/src/core/image_rehydrate.c
+           ${SRC_ROOT}/src/core/ocp_helpers.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/image_store.c
+           ${SRC_ROOT}/src/blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # A compaction point recorded inside a tool exchange reloads cleanly (real

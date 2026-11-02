@@ -692,7 +692,10 @@
 
    function renderKind(word) {
       const shown = word || 'unknown';
-      const title = KIND_TITLES[shown] ? ` title="${KIND_TITLES[shown]}"` : '';
+      /* ", outside": learned while reading text someone else wrote. */
+      const base = shown.replace(/, outside$/, '');
+      const outside = base !== shown ? ' (while reading outside text)' : '';
+      const title = KIND_TITLES[base] ? ` title="${KIND_TITLES[base]}${outside}"` : '';
       return `<span class="memory-item-source"${title}>${escapeHtml(shown)}</span>`;
    }
 
@@ -718,7 +721,7 @@
             <div class="memory-item-value">${escapeHtml(pref.value)}</div>
             <div class="memory-item-meta">
                <span class="memory-item-confidence ${confidenceClass}">${confidencePercent}%</span>
-               ${renderKind(KIND_WORDS[pref.source] || pref.source)}
+               ${renderKind((KIND_WORDS[pref.source] || pref.source) + (pref.outside ? ', outside' : ''))}
                <span class="memory-item-date">${dateStr}</span>
                ${pref.reinforcement_count > 1 ? `<span>${pref.reinforcement_count}x</span>` : ''}
             </div>

@@ -37,6 +37,17 @@ struct json_object;
 int bench_mp_init(void);
 
 /**
+ * Write each batch's raw extraction facts (and corrections' new facts) to
+ * @p path, one JSON object per line ({"id", "text", "conversation", "source",
+ * "confidence", "kind"}), before anything in them is stored: the facts
+ * file `memory_audit coverage` reads, so what extraction proposed can be told
+ * from what the store kept.  Call before bench_mp_init.
+ *
+ * Returns 0 on success, 1 when @p path can't be opened.
+ */
+int bench_mp_dump_candidates(const char *path);
+
+/**
  * Close the in-memory database.
  */
 void bench_mp_teardown(void);

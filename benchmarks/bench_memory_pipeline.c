@@ -84,6 +84,8 @@
 #include "memory/memory_history_loader.h"
 #include "memory/memory_types.h"
 #include "prompts.h"
+#include "tools/tool_own_results.h"
+#include "tools/tool_registry.h"
 
 #ifdef DAWN_DAEMON_BUILD
 #error "bench_memory_pipeline.c is a benchmark harness — do NOT link into the dawn daemon. \
@@ -179,8 +181,136 @@ static int load_prompt_override(void) {
    return 0;
 }
 
+/* --dump-candidates: each batch's raw extraction facts, as facts-JSONL. */
+static FILE *s_candidates;
+static int64_t s_candidate_id;
+static pthread_mutex_t s_candidates_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* One candidate line: @p text from conversation @p conv, its @p kind ("fact"
+ * or "correction"), and the source and confidence the model gave a fact. */
+static void write_candidate(int64_t conv,
+                            const char *text,
+                            struct json_object *fact,
+                            const char *kind) {
+   if (!text || !text[0]) {
+      return;
+   }
+   struct json_object *line = json_object_new_object(), *v = NULL;
+   json_object_object_add(line, "id", json_object_new_int64(++s_candidate_id));
+   json_object_object_add(line, "text", json_object_new_string(text));
+   json_object_object_add(line, "conversation", json_object_new_int64(conv));
+   json_object_object_add(line, "kind", json_object_new_string(kind));
+   if (fact && json_object_object_get_ex(fact, "source", &v)) {
+      json_object_object_add(line, "source", json_object_get(v));
+   }
+   if (fact && json_object_object_get_ex(fact, "confidence", &v)) {
+      json_object_object_add(line, "confidence", json_object_get(v));
+   }
+   fprintf(s_candidates, "%s\n", json_object_to_json_string_ext(line, JSON_C_TO_STRING_PLAIN));
+   json_object_put(line);
+}
+
+static void dump_reply(int64_t conversation_id, const char *reply) {
+   struct json_object *root = memory_extraction_parse_json(reply), *arr = NULL, *text = NULL;
+   if (!root) {
+      return;
+   }
+   pthread_mutex_lock(&s_candidates_mutex);
+   if (!s_candidates) {
+      pthread_mutex_unlock(&s_candidates_mutex);
+      json_object_put(root);
+      return;
+   }
+   if (json_object_object_get_ex(root, "facts", &arr)) {
+      for (size_t i = 0; i < json_object_array_length(arr); i++) {
+         struct json_object *fact = json_object_array_get_idx(arr, i);
+         if (json_object_object_get_ex(fact, "text", &text)) {
+            write_candidate(conversation_id, json_object_get_string(text), fact, "fact");
+         }
+      }
+   }
+   if (json_object_object_get_ex(root, "corrections", &arr)) {
+      for (size_t i = 0; i < json_object_array_length(arr); i++) {
+         struct json_object *corr = json_object_array_get_idx(arr, i);
+         if (json_object_object_get_ex(corr, "new_fact", &text)) {
+            write_candidate(conversation_id, json_object_get_string(text), NULL, "correction");
+         }
+      }
+   }
+   fflush(s_candidates);
+   pthread_mutex_unlock(&s_candidates_mutex);
+   json_object_put(root);
+}
+
+int bench_mp_dump_candidates(const char *path) {
+   /* Owner-only from the first byte: it holds the conversations' facts.  An
+    * existing file keeps its mode through open(), so it is set here too. */
+   const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+   s_candidates = fd >= 0 && fchmod(fd, 0600) == 0 ? fdopen(fd, "w") : NULL;
+   if (!s_candidates) {
+      if (fd >= 0) {
+         close(fd);
+      }
+      fprintf(stderr, "bench: cannot open %s for --dump-candidates\n", path);
+      return 1;
+   }
+   memory_extraction_set_reply_hook(dump_reply);
+   return 0;
+}
+
+/* The daemon's tools aren't registered here, but extraction asks the registry
+ * whose text a stored tool result is: stand-ins for DAWN's own tools
+ * (tools/tool_own_results.h), so a replayed conversation reads as the daemon
+ * reads it.  Any other tool is unknown, so outside, as there. */
+static char *bench_no_call(const char *action, char *value, int *should_respond) {
+   (void)action;
+   (void)value;
+   (void)should_respond;
+   return NULL;
+}
+static const char *const s_own_tools[] = { TOOL_OWN_RESULTS_NAMES };
+static tool_metadata_t s_own_meta[sizeof(s_own_tools) / sizeof(s_own_tools[0])];
+static const treg_param_t s_except_params[] = {
+   {
+       .name = "action",
+       .description = "action",
+       .type = TOOL_PARAM_TYPE_ENUM,
+       .maps_to = TOOL_MAPS_TO_ACTION,
+       .enum_values = { TOOL_OWN_RESULTS_EXCEPT_ACTION },
+       .enum_count = 1,
+   },
+};
+static const tool_action_kind_entry_t s_except_kinds[] = {
+   { TOOL_OWN_RESULTS_EXCEPT_ACTION, TOOL_KIND_READ, NULL, NULL, TOOL_RESULTS_OUTSIDE },
+};
+
+static int register_own_tools(void) {
+   tool_registry_init();
+   for (size_t i = 0; i < sizeof(s_own_tools) / sizeof(s_own_tools[0]); i++) {
+      tool_metadata_t *m = &s_own_meta[i];
+      memset(m, 0, sizeof(*m));
+      m->name = m->device_string = m->description = s_own_tools[i];
+      m->results = TOOL_RESULTS_OWN;
+      m->callback = bench_no_call;
+      m->device_type = TOOL_DEVICE_TYPE_GETTER;
+      if (strcmp(s_own_tools[i], TOOL_OWN_RESULTS_EXCEPT_TOOL) == 0) {
+         m->params = s_except_params;
+         m->param_count = 1;
+         m->action_kinds = s_except_kinds;
+         m->action_kind_count = TOOL_KIND_COUNT(s_except_kinds);
+      }
+      if (tool_registry_register(m) != 0) {
+         fprintf(stderr, "bench_mp_init: can't register stand-in tool %s\n", s_own_tools[i]);
+         return 1;
+      }
+   }
+   return 0;
+}
+
 int bench_mp_init(void) {
    if (load_prompt_override() != 0)
+      return 1;
+   if (register_own_tools() != 0)
       return 1;
 
    /* mkstemp gives us a unique writable path; close the fd immediately so
@@ -230,6 +360,14 @@ void bench_mp_teardown(void) {
    if (s_bench_db_path[0])
       unlink(s_bench_db_path);
    memory_extraction_set_template_pieces(NULL);
+   memory_extraction_set_reply_hook(NULL);
+   tool_registry_shutdown();
+   pthread_mutex_lock(&s_candidates_mutex);
+   if (s_candidates) {
+      fclose(s_candidates);
+      s_candidates = NULL;
+   }
+   pthread_mutex_unlock(&s_candidates_mutex);
    free(s_prompt_pieces);
    s_prompt_pieces = NULL;
    free(s_prompt_text);

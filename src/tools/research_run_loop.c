@@ -43,6 +43,7 @@
 #include "core/conv_event.h"
 #include "core/event_payload.h"
 #include "core/memory_filter.h" /* memory_filter_check_injection_commands (critic gap gate) */
+#include "core/outside_kind.h"
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
 #include "core/user_tz.h"
@@ -226,7 +227,8 @@ static void research_persist_report_note(int user_id,
    bool is_private = true;
    if (conv_db_is_private(conversation_id, user_id, &is_private) == AUTH_DB_SUCCESS &&
        !is_private) {
-      (void)memory_note_bridge_upsert_gloss(user_id, res.doc_id, label);
+      /* The report is made from what the research read. */
+      (void)memory_note_bridge_upsert_gloss_from(user_id, res.doc_id, label, OUTSIDE_RESEARCH);
    }
    OLOG_INFO("research: run %lld report saved as note %lld (%s)", (long long)run_id,
              (long long)res.doc_id, label);

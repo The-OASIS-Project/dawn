@@ -36,6 +36,9 @@
 #include <string.h>
 #include <time.h>
 
+#include "core/outside_kind.h"
+#include "core/outside_markers.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -77,17 +80,29 @@ extern "C" {
  *
  * Coarse source linkage: every item produced by a single extraction call
  * shares the same (conv_id, msg_id_start, msg_id_end) triple.  conv_id == 0
- * means "no provenance" (voice-only path, import, or explicit remember).
+ * means "no source range" (voice-only path, import, or explicit remember).
+ * origin says how a fact came to be stored and outside what outside text its
+ * batch read; zero (a conversation, none) for most callers.
  *
  * Lives here (not in memory_db.h) so the entity / embedding sub-headers and
  * memory_db_provenance.h can declare provenance-aware function prototypes
  * without depending on the memory_db.h umbrella.
  * ============================================================================= */
 
+/** How a fact came to be stored (memory_facts.origin). */
+typedef enum {
+   MEMORY_ORIGIN_CONVERSATION = 0, /**< extracted from a conversation */
+   MEMORY_ORIGIN_REQUESTED = 1,    /**< the user asked to remember it */
+   MEMORY_ORIGIN_IMPORT = 2,       /**< imported from a file */
+   MEMORY_ORIGIN_NOTE = 3,         /**< a saved note's gloss */
+} memory_origin_t;
+
 typedef struct {
-   int64_t conv_id; /* 0 = no provenance */
+   int64_t conv_id; /* 0 = no source range */
    int64_t msg_id_start;
    int64_t msg_id_end;
+   int origin;  /* memory_origin_t; facts only */
+   int outside; /* outside_kind_t of the batch: every row it stores */
 } memory_provenance_t;
 
 /* =============================================================================
@@ -148,35 +163,58 @@ typedef struct {
                            * Only populated by the by-id fetch (memory_db_fact_get); the
                            * keyword/list retrieval statements filter expired rows in SQL,
                            * so their results default this to 0. */
+   int origin;            /* memory_origin_t */
+   int outside;           /* outside_kind_t of the batch it came from */
 } memory_fact_t;
 
 /**
  * @brief The word that says how a fact was learned, as surfaces show it.
  *
- * "told" (the user said it), "inferred", "imported", or "noted" for a
- * memory→note gloss (whatever its source).  NULL for any other source: show
- * nothing.  The returned string is static.
+ * "noted" for a memory→note gloss, "imported", "remembered on request",
+ * "world" (a claim about the outside world), "told" (the user said it) or
+ * "inferred", in that order; ", outside" follows when the batch it came from
+ * read outside text.  NULL for any other source: show nothing.  The returned
+ * string is static.
  *
- * @param fact The fact (its source and note_doc_id); NULL returns NULL
+ * @param fact The fact (its source, origin, outside and note_doc_id); NULL returns NULL
  * @return A static word, or NULL
  */
+/** What a relation or summary line adds when its batch read outside text
+ *  (a fact's kind word says ", outside" instead). */
+#define MEMORY_OUTSIDE_MARK OUTSIDE_MARKER_MEMORY_MARK
+
+/** The longest word memory_fact_kind_word returns (focus lines size for it). */
+#define MEMORY_FACT_KIND_WORD_LONGEST "remembered on request" OUTSIDE_MARKER_KIND_SUFFIX
+
 static inline const char *memory_fact_kind_word(const memory_fact_t *fact) {
+   static const char *const words[][2] = {
+      { "noted", "noted" OUTSIDE_MARKER_KIND_SUFFIX },
+      { "imported", "imported" OUTSIDE_MARKER_KIND_SUFFIX },
+      { "remembered on request", MEMORY_FACT_KIND_WORD_LONGEST },
+      { "world", "world" OUTSIDE_MARKER_KIND_SUFFIX },
+      { "told", "told" OUTSIDE_MARKER_KIND_SUFFIX },
+      { "inferred", "inferred" OUTSIDE_MARKER_KIND_SUFFIX },
+   };
    if (!fact) {
       return NULL;
    }
-   if (fact->note_doc_id > 0) {
-      return "noted";
+   int w;
+   if (fact->note_doc_id > 0 || fact->origin == MEMORY_ORIGIN_NOTE) {
+      w = 0;
+   } else if (fact->origin == MEMORY_ORIGIN_IMPORT) {
+      w = 1;
+   } else if (fact->origin == MEMORY_ORIGIN_REQUESTED) {
+      w = 2;
+   } else if (strcmp(fact->source, "world") == 0) {
+      w = 3;
+   } else if (strcmp(fact->source, "explicit") == 0) {
+      w = 4;
+   } else if (strcmp(fact->source, "inferred") == 0) {
+      w = 5;
+   } else {
+      return NULL;
    }
-   if (strcmp(fact->source, "explicit") == 0) {
-      return "told";
-   }
-   if (strcmp(fact->source, "inferred") == 0) {
-      return "inferred";
-   }
-   if (strcmp(fact->source, "import") == 0) {
-      return "imported";
-   }
-   return NULL;
+   return words[w][outside_is_tainted(fact->outside) ? 1 : 0];
 }
 
 /* =============================================================================
@@ -202,6 +240,7 @@ typedef struct {
    time_t created_at;
    time_t updated_at;
    int reinforcement_count;
+   int outside; /* outside_kind_t of the batch that set its value */
 } memory_preference_t;
 
 /* =============================================================================
@@ -225,6 +264,7 @@ typedef struct {
    int message_count;
    int duration_seconds;
    bool consolidated; /* True if rolled up into a larger summary */
+   int outside;       /* outside_kind_t of the batch it summarizes (v113) */
 } memory_summary_t;
 
 /* =============================================================================
@@ -296,6 +336,7 @@ typedef struct {
     * while valid_to IS NULL.  >= 1.  See partial UNIQUE index
     * idx_memory_relations_unique_open. */
    int mention_count;
+   int outside; /* outside_kind_t of the batch that stored it (v113) */
 } memory_relation_t;
 
 #ifdef __cplusplus

@@ -62,6 +62,8 @@
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_recency.h"
 #include "core/focus/focus_source.h"
+#include "core/outside_markers.h"
+#include "core/prompt_parts.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_db.h"
@@ -73,6 +75,10 @@
 #include "memory/memory_implied.h"
 #include "memory/memory_types.h"
 #include "utils/string_utils.h"
+
+/* A fact's kind word fits the room a focus line keeps for it. */
+_Static_assert(sizeof(" " MEMORY_FACT_KIND_WORD_LONGEST) <= PROMPT_FOCUS_KIND_LEN,
+               "PROMPT_FOCUS_KIND_LEN must fit the longest fact kind word");
 
 /* =============================================================================
  * Constants
@@ -823,6 +829,9 @@ static int relation_adapter_query(int user_id,
             focus_adapter_failure_cleanup(out, produced, out_candidates, out_count);
             return FAILURE;
          }
+         if (outside_is_tainted(rels[i].outside)) {
+            out[produced].kind = OUTSIDE_MARKER_ITEM_KIND;
+         }
          if (produced < prod_id_cap)
             produced_relation_ids[produced] = rels[i].id;
          produced++;
@@ -1057,6 +1066,9 @@ static int summary_adapter_query(int user_id,
       out[produced].provenance.conv_id = conv_ids[i];
       out[produced].provenance.msg_id_start = starts[i];
       out[produced].provenance.msg_id_end = ends[i];
+      if (outside_is_tainted(merged[i].summary.outside)) {
+         out[produced].kind = OUTSIDE_MARKER_ITEM_KIND;
+      }
       produced++;
    }
 

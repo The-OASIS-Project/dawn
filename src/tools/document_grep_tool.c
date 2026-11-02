@@ -111,6 +111,7 @@ static const treg_param_t doc_grep_params[] = {
 
 static const tool_metadata_t doc_grep_metadata = {
    .name = "document_grep",
+   .results = TOOL_RESULTS_OUTSIDE,
    .default_kind = TOOL_KIND_READ,
    .device_string = "document grep",
    .description = "Find an EXACT string in the user's saved documents and notes and return each "

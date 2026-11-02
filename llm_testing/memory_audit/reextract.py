@@ -10,6 +10,11 @@
 # facts stored from the ones before it (dedup, supersede), as production does.
 # Runs compare fairly only over the same set: pick once, reuse the ids file.
 #
+# --dump-candidates also saves each batch's raw extraction facts, before the
+# store checks, merges or drops anything (reextract_<label>_candidates.jsonl):
+# coverage of a run's kept facts against another run's candidates splits what
+# was never proposed from what the store lost.
+#
 # Privacy: conversation text goes only to the bench binary and the extraction
 # model's API.  The bench's log lines (which can quote facts) are read and
 # dropped; this prints ids and counts only.
@@ -55,17 +60,33 @@ def pick_conversations(db, user_id, n, since, min_messages):
     return sorted(chosen)
 
 
+def bench_command(binary, provider, model, effort, config="", candidates=""):
+    """The bench's command line.  candidates: where it writes each batch's raw
+    extraction facts (--dump-candidates), or none."""
+    # The bench runs from run_dir: resolve relative paths here.
+    cmd = [os.path.abspath(binary), "--memory-pipeline", "--extraction-provider", provider,
+           "--extraction-model", model]
+    if effort:
+        cmd += ["--extraction-effort", effort]
+    if config:
+        cmd += ["--config", os.path.abspath(config)]
+    if candidates:
+        cmd += ["--dump-candidates", os.path.abspath(candidates)]
+    return cmd
+
+
+def count_candidates(path):
+    """(candidates, conversations) in a --dump-candidates file."""
+    with open(path) as f:
+        rows = [json.loads(line) for line in f if line.strip()]
+    return len(rows), len({r["conversation"] for r in rows})
+
+
 class Bench:
     """One bench_retrieval --memory-pipeline process, spoken to over JSON lines."""
 
-    def __init__(self, binary, run_dir, provider, model, effort, config=""):
-        # The bench runs from run_dir: resolve a relative binary path here.
-        cmd = [os.path.abspath(binary), "--memory-pipeline", "--extraction-provider", provider,
-               "--extraction-model", model]
-        if effort:
-            cmd += ["--extraction-effort", effort]
-        if config:
-            cmd += ["--config", os.path.abspath(config)]
+    def __init__(self, binary, run_dir, provider, model, effort, config="", candidates=""):
+        cmd = bench_command(binary, provider, model, effort, config, candidates)
         # umask 077: the scratch DB and the saved snapshot hold copied
         # conversations, so nothing the bench creates is readable by others.
         self.proc = subprocess.Popen(cmd, cwd=run_dir, stdin=subprocess.PIPE,
@@ -162,7 +183,13 @@ def run(a, data):
     if not convs:
         raise SystemExit("no conversations to extract")
 
-    bench = Bench(a.binary, a.run_dir, a.provider, a.model, a.effort, a.config)
+    # What extraction proposed, before the store: written while the run's name
+    # (from the bench's prompt hash) is still unknown, then renamed to it.
+    cand_tmp = ""
+    if a.dump_candidates:
+        cand_tmp = data(f"reextract_candidates_{os.getpid()}.part.jsonl")
+        private_open(cand_tmp).close()
+    bench = Bench(a.binary, a.run_dir, a.provider, a.model, a.effort, a.config, cand_tmp)
     ready = bench.ready
     sha = ready.get("extraction_prompt_sha256", "")[:8]
     model, effort = ready.get("extraction_model", "?"), ready.get("extraction_effort") or "off"
@@ -206,6 +233,11 @@ def run(a, data):
         raise SystemExit(f"snapshot failed: {r.get('message')}")
     for p in (db_out, map_out):
         os.chmod(p, 0o600)
+    if cand_tmp:
+        cand_out = data(f"reextract_{label}_candidates.jsonl")
+        os.replace(cand_tmp, cand_out)
+        n, convs_with = count_candidates(cand_out)
+        print(f"{n} candidate facts from {convs_with} conversations -> {cand_out}")
 
     facts = scratch_facts(db_out)
     facts_out = data(f"reextract_{label}_facts.jsonl")

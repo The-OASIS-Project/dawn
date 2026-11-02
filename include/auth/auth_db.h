@@ -2045,6 +2045,24 @@ int conv_db_set_pinned(int64_t conv_id, int user_id, bool is_pinned);
  */
 int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out);
 
+/**
+ * @brief A conversation's outside floor: the first outside text it, or one
+ *        it continues (closest first), is known to have read
+ *        (conversations.outside, core/outside_kind.h); UNKNOWN when none did
+ *        and one of their pasts can't be judged
+ *
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
+ */
+int conv_db_get_outside(int64_t conv_id, int user_id, int *outside_out);
+
+/**
+ * @brief Raise a conversation's outside floor to @p outside when that is
+ *        tainted and the floor isn't yet (the first taint sticks)
+ *
+ * @return AUTH_DB_SUCCESS (also when nothing changed), or AUTH_DB_FAILURE
+ */
+int conv_db_raise_outside(int64_t conv_id, int user_id, int outside);
+
 /** Which conversations a set of message rows belongs to (conv_db_messages_ownership). */
 typedef struct {
    int matched;        /**< rows found among the given ids, owned by the user */
@@ -2088,6 +2106,28 @@ int conv_db_messages_unprompted(int user_id,
                                 int64_t *ids_out,
                                 int max,
                                 int *count_out);
+
+/**
+ * @brief The first outside text a conversation's stored rows carry in DAWN's
+ *        own writing past a cursor
+ *
+ * By CONV_ROW_OUTSIDE_KIND_SQL: DAWN's posts, a turn context's outside items,
+ * a job's result, an attached document, a device's data, request-context
+ * rows included (the history loaders leave those out).  Tool results aren't
+ * judged here (the live scan judges them).
+ *
+ * @param conv_id  Conversation (owned by @p user_id)
+ * @param user_id  Owner
+ * @param after_id Rows with a larger id are read
+ * @param upto_id  ... up to this id (0 = no bound)
+ * @param kind_out Receives the outside kind, OUTSIDE_NONE when none
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int conv_db_rows_outside(int64_t conv_id,
+                         int user_id,
+                         int64_t after_id,
+                         int64_t upto_id,
+                         int *kind_out);
 
 /**
  * Sentinel value for "no anchor recorded" on conversations.anchor_date.

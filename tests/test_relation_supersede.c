@@ -31,6 +31,7 @@
 #include <time.h>
 
 #include "auth/auth_db_internal.h"
+#include "core/outside_kind.h"
 #include "memory/memory_db.h"
 #include "unity.h"
 
@@ -56,7 +57,8 @@ static const char *DDL = "CREATE TABLE IF NOT EXISTS memory_facts ("
                          "  embedding BLOB DEFAULT NULL,"
                          "  embedding_norm REAL DEFAULT NULL,"
                          "  source_conversation_id INTEGER DEFAULT NULL,"
-                         "  origin_unsourced INTEGER NOT NULL DEFAULT 0"
+                         "  origin_unsourced INTEGER NOT NULL DEFAULT 0,"
+                         "  outside INTEGER NOT NULL DEFAULT 0"
                          ");"
                          "CREATE TABLE IF NOT EXISTS memory_entities ("
                          "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -97,7 +99,8 @@ static const char *DDL = "CREATE TABLE IF NOT EXISTS memory_facts ("
                          "  source_conversation_id INTEGER DEFAULT NULL,"
                          "  source_msg_id_start    INTEGER DEFAULT NULL,"
                          "  source_msg_id_end      INTEGER DEFAULT NULL,"
-                         "  mention_count INTEGER NOT NULL DEFAULT 1"
+                         "  mention_count INTEGER NOT NULL DEFAULT 1,"
+                         "  outside INTEGER NOT NULL DEFAULT 0"
                          ");"
                          /* v49 partial UNIQUE — MUST exist before stmt_memory_relation_create
                           * prepare, otherwise the ON CONFLICT clause has no matching
@@ -133,8 +136,10 @@ static void setup_db(void) {
                            "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
                            "object_entity_id, object_value, fact_id, confidence, created_at, "
                            "valid_from, valid_to, "
-                           "source_conversation_id, source_msg_id_start, source_msg_id_end) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?) "
+                           "source_conversation_id, source_msg_id_start, source_msg_id_end, "
+                           "outside) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?, ?, ?, ?, "
+                           "?13) "
                            "ON CONFLICT(user_id, subject_entity_id, relation, "
                            "            COALESCE(object_entity_id, 0), COALESCE(object_value, '')) "
                            "WHERE valid_to IS NULL DO UPDATE SET "
@@ -871,6 +876,72 @@ static void test_fact_supersede_no_cross_user_pointer(void) {
    TEST_ASSERT_EQUAL_INT(1, count_active_facts(1));          /* still in recall */
 }
 
+/* A value from a batch that read outside text closes no open value that
+ * didn't come from such a batch: the new one stands beside it (its fact not
+ * superseded); one that did come from one it replaces as usual. */
+static void test_tainted_batch_replaces_only_tainted(void) {
+   int user_id = 9;
+   int64_t fact_a = insert_fact(user_id, "Alice works at Google");
+   int64_t alice = insert_entity(user_id, "alice", "person");
+   int64_t google = insert_entity(user_id, "google", "org");
+   int64_t acme = insert_entity(user_id, "acme", "org");
+   int64_t initech = insert_entity(user_id, "initech", "org");
+   memory_db_relation_supersede(user_id, alice, "works_at", google, NULL, fact_a, 0.9f, 0, 0, NULL,
+                                NULL);
+
+   const memory_provenance_t web = { .outside = OUTSIDE_WEB };
+   int64_t fact_b = insert_fact(user_id, "Alice works at Acme");
+   int64_t old_fact_id = -1;
+   TEST_ASSERT_EQUAL_INT(
+       MEMORY_DB_SUCCESS,
+       memory_db_relation_supersede_ex(user_id, alice, "works_at", acme, NULL, fact_b, 0.9f, 0, 0,
+                                       MEMORY_RELATION_REPLACES_UNKNOWN, &web, &old_fact_id));
+   TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
+   TEST_ASSERT_EQUAL_INT64(0, get_fact_superseded_by(fact_a));
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, alice, "works_at", google, NULL));
+
+   /* Acme came from outside text: a later outside value may replace it. */
+   int64_t fact_c = insert_fact(user_id, "Alice works at Initech");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_relation_supersede_ex(user_id, alice, "works_at", initech, NULL,
+                                                         fact_c, 0.9f, 0, 0, "acme", &web,
+                                                         &old_fact_id));
+   TEST_ASSERT_EQUAL_INT(0, count_open_rows(user_id, alice, "works_at", acme, NULL));
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, alice, "works_at", google, NULL));
+}
+
+/* The contradictory close keeps the same guard: outside text closes only an
+ * opposite that came from outside text too. */
+static void test_tainted_batch_contradicts_only_tainted(void) {
+   int user_id = 10;
+   int64_t gina = insert_entity(user_id, "gina", "person");
+   int64_t cats = insert_entity(user_id, "cats", "thing");
+   int64_t dogs = insert_entity(user_id, "dogs", "thing");
+   const memory_provenance_t web = { .outside = OUTSIDE_WEB };
+   int64_t old_fact_id = -1;
+
+   int64_t likes_cats = insert_fact(user_id, "Gina likes cats");
+   memory_db_relation_supersede(user_id, gina, "likes", cats, NULL, likes_cats, 0.8f, 0, 0, NULL,
+                                NULL);
+   int64_t dislikes_cats = insert_fact(user_id, "Gina dislikes cats");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_relation_supersede_ex(user_id, gina, "dislikes", cats, NULL,
+                                                         dislikes_cats, 0.8f, 0, 0, NULL, &web,
+                                                         &old_fact_id));
+   TEST_ASSERT_EQUAL_INT64(0, old_fact_id);
+   TEST_ASSERT_EQUAL_INT(1, count_open_rows(user_id, gina, "likes", cats, NULL));
+
+   int64_t likes_dogs = insert_fact(user_id, "Gina likes dogs");
+   memory_db_relation_supersede_ex(user_id, gina, "likes", dogs, NULL, likes_dogs, 0.8f, 0, 0, NULL,
+                                   &web, NULL);
+   int64_t dislikes_dogs = insert_fact(user_id, "Gina dislikes dogs");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_relation_supersede_ex(user_id, gina, "dislikes", dogs, NULL,
+                                                         dislikes_dogs, 0.8f, 0, 0, NULL, &web,
+                                                         &old_fact_id));
+   TEST_ASSERT_EQUAL_INT(0, count_open_rows(user_id, gina, "likes", dogs, NULL));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_replacing_supersede_returns_old_fact_id);
@@ -883,6 +954,8 @@ int main(void) {
    RUN_TEST(test_merged_fact_keeps_its_keeper);
    RUN_TEST(test_contradictory_close_supersedes_its_fact);
    RUN_TEST(test_no_fact_id_on_old_relation);
+   RUN_TEST(test_tainted_batch_replaces_only_tainted);
+   RUN_TEST(test_tainted_batch_contradicts_only_tainted);
    RUN_TEST(test_non_exclusive_skips);
    RUN_TEST(test_null_out_param);
    RUN_TEST(test_same_object_idempotent);

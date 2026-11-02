@@ -27,8 +27,11 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "core/outside_kind.h"
+#include "llm/llm_third_party.h"
 #include "memory/memory_extraction_input.h"
 #include "memory/memory_note_guard.h"
+#include "tools/tool_registry.h"
 #include "unity.h"
 
 /* The note guard isn't under test: nothing is redacted. */
@@ -45,6 +48,30 @@ void memory_note_guard_free(memory_note_guard_t *guard) {
    (void)guard;
 }
 
+/* The database the stored-rows reads would go to isn't here: no stored
+ * conversation, and nothing outside in its rows (test_memory_extraction_stored
+ * covers both on a real schema). */
+struct json_object *memory_history_load_from_db(int64_t conv_id,
+                                                int user_id,
+                                                size_t *text_len_out) {
+   (void)conv_id;
+   (void)user_id;
+   (void)text_len_out;
+   return NULL;
+}
+int conv_db_rows_outside(int64_t conv_id,
+                         int user_id,
+                         int64_t after_id,
+                         int64_t upto_id,
+                         int *kind_out) {
+   (void)conv_id;
+   (void)user_id;
+   (void)after_id;
+   (void)upto_id;
+   *kind_out = OUTSIDE_NONE;
+   return AUTH_DB_SUCCESS;
+}
+
 /* Every row the test names is the user's, in conversation 1699. */
 int conv_db_messages_ownership(int user_id, const char *ids_json, conv_msg_ownership_t *out) {
    (void)user_id;
@@ -59,6 +86,7 @@ int conv_db_messages_ownership(int user_id, const char *ids_json, conv_msg_owner
 /* The row the unprompted lookup reports as DAWN's own post (0 = none); the
  * lookup failing when g_unprompted_fails. */
 static int64_t g_unprompted_id = 0;
+static int g_outside = -1; /* the last input's outside kind */
 static bool g_unprompted_fails = false;
 
 int conv_db_messages_unprompted(int user_id,
@@ -79,12 +107,71 @@ int conv_db_messages_unprompted(int user_id,
    return AUTH_DB_SUCCESS;
 }
 
+/* The registry the scan asks whose text a result is: DAWN's own weather and
+ * memory, stocks (its own but for transactions), and search (outside). */
+static char *no_call(const char *action, char *value, int *should_respond) {
+   (void)action;
+   (void)value;
+   (void)should_respond;
+   return NULL;
+}
+static const treg_param_t k_stocks_params[] = {
+   {
+       .name = "action",
+       .description = "What to read",
+       .type = TOOL_PARAM_TYPE_ENUM,
+       .required = true,
+       .maps_to = TOOL_MAPS_TO_ACTION,
+       .enum_values = { "quote", "transactions" },
+       .enum_count = 2,
+   },
+};
+static const tool_action_kind_entry_t k_stocks_kinds[] = {
+   { "quote", TOOL_KIND_READ, NULL },
+   { "transactions", TOOL_KIND_READ, NULL, NULL, TOOL_RESULTS_OUTSIDE },
+};
+static const tool_metadata_t k_tools[] = {
+   { .name = "weather",
+     .results = TOOL_RESULTS_OWN,
+     .device_string = "weather",
+     .description = "w",
+     .callback = no_call,
+     .device_type = TOOL_DEVICE_TYPE_GETTER },
+   { .name = "memory",
+     .results = TOOL_RESULTS_OWN,
+     .device_string = "memory",
+     .description = "m",
+     .callback = no_call,
+     .device_type = TOOL_DEVICE_TYPE_GETTER },
+   { .name = "search",
+     .results = TOOL_RESULTS_OUTSIDE,
+     .device_string = "search",
+     .description = "s",
+     .callback = no_call,
+     .device_type = TOOL_DEVICE_TYPE_GETTER },
+   { .name = "stocks",
+     .results = TOOL_RESULTS_OWN,
+     .device_string = "stocks",
+     .description = "q",
+     .callback = no_call,
+     .device_type = TOOL_DEVICE_TYPE_GETTER,
+     .params = k_stocks_params,
+     .param_count = 1,
+     .action_kinds = k_stocks_kinds,
+     .action_kind_count = TOOL_KIND_COUNT(k_stocks_kinds) },
+};
+
 void setUp(void) {
    g_unprompted_id = 0;
    g_unprompted_fails = false;
+   tool_registry_init();
+   for (size_t i = 0; i < sizeof(k_tools) / sizeof(k_tools[0]); i++) {
+      TEST_ASSERT_EQUAL_INT(0, tool_registry_register(&k_tools[i]));
+   }
 }
 
 void tearDown(void) {
+   tool_registry_shutdown();
 }
 
 /* A live Claude history after a tool call: the batch's results are a user
@@ -100,7 +187,7 @@ static const char *HISTORY =
 
 static void test_tool_results_need_no_id(void) {
    struct json_object *hist = json_tokener_parse(HISTORY);
-   struct json_object *input = memory_extraction_build_input(1, 1699, hist, 0);
+   struct json_object *input = memory_extraction_build_input(1, 1699, hist, 0, &g_outside);
    TEST_ASSERT_NOT_NULL(input);
    TEST_ASSERT_EQUAL_INT(4, (int)json_object_array_length(input)); /* all but the system */
    json_object_put(input);
@@ -122,7 +209,7 @@ static void test_third_party_results_are_stubbed(void) {
        "{\"role\":\"assistant\",\"content\":\"It says x@y.\",\"id\":12}]";
    struct json_object *hist = json_tokener_parse(hist_json);
    TEST_ASSERT_NOT_NULL(hist);
-   struct json_object *input = memory_extraction_build_input(1, 1699, hist, 0);
+   struct json_object *input = memory_extraction_build_input(1, 1699, hist, 0, &g_outside);
    TEST_ASSERT_NOT_NULL(input);
    const char *all = json_object_to_json_string(input);
    TEST_ASSERT_NULL(strstr(all, "accountant"));
@@ -142,7 +229,7 @@ static void test_third_party_results_are_stubbed(void) {
 static void test_unprompted_rows_are_left_out(void) {
    struct json_object *hist = json_tokener_parse(HISTORY);
    g_unprompted_id = 12; /* the assistant's "Worth $5,245." */
-   struct json_object *input = memory_extraction_build_input(1, 1699, hist, 0);
+   struct json_object *input = memory_extraction_build_input(1, 1699, hist, 0, &g_outside);
    TEST_ASSERT_NOT_NULL(input);
    TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(input));
    for (size_t i = 0; i < json_object_array_length(input); i++) {
@@ -154,14 +241,14 @@ static void test_unprompted_rows_are_left_out(void) {
    json_object_put(input);
 
    g_unprompted_fails = true;
-   TEST_ASSERT_NULL(memory_extraction_build_input(1, 1699, hist, 0));
+   TEST_ASSERT_NULL(memory_extraction_build_input(1, 1699, hist, 0, &g_outside));
    json_object_put(hist);
 }
 
 /* An input holds a question only when the user said something in it. */
 static void test_input_has_question(void) {
    struct json_object *hist = json_tokener_parse(HISTORY);
-   struct json_object *input = memory_extraction_build_input(1, 1699, hist, 0);
+   struct json_object *input = memory_extraction_build_input(1, 1699, hist, 0, &g_outside);
    TEST_ASSERT_TRUE(memory_extraction_input_has_question(input));
    json_object_put(input);
    struct json_object *only_reply = json_tokener_parse(
@@ -185,8 +272,142 @@ static void test_history_max_id(void) {
 static void test_unstamped_question_refused(void) {
    struct json_object *hist = json_tokener_parse(HISTORY);
    json_object_object_del(json_object_array_get_idx(hist, 1), "id");
-   TEST_ASSERT_NULL(memory_extraction_build_input(1, 1699, hist, 0));
+   TEST_ASSERT_NULL(memory_extraction_build_input(1, 1699, hist, 0, &g_outside));
    json_object_put(hist);
+}
+
+/* The outside kind of @p hist_json, extracted from @p last_msg_id on. */
+static int outside_of(const char *hist_json, int64_t last_msg_id) {
+   struct json_object *hist = json_tokener_parse(hist_json);
+   TEST_ASSERT_NOT_NULL(hist);
+   g_outside = -1;
+   json_object_put(memory_extraction_build_input(1, 1699, hist, last_msg_id, &g_outside));
+   json_object_put(hist);
+   return g_outside;
+}
+
+/* A framed result reads as its frame's kind; a tool whose results aren't
+ * DAWN's own, or one not registered, as OTHER; DAWN's own tools (both
+ * providers' shapes) leave the batch clean.  stocks is DAWN's own but for
+ * its transactions, whose memos others write. */
+static void test_outside_kind_of_tool_results(void) {
+   const char *framed =
+       "[{\"role\":\"user\",\"content\":\"Read it\",\"id\":10},"
+       "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\","
+       "\"content\":\"--- EMAIL CONTENT ---\\nHi\\n--- END EMAIL CONTENT ---\\n\"}]}]";
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, outside_of(framed, 0));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_of(HISTORY, 0)); /* stocks, no action */
+   const char *own =
+       "[{\"role\":\"user\",\"content\":\"Weather?\",\"id\":10},"
+       "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":"
+       "\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{}\"}}]},"
+       "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"Sunny\"},"
+       "{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t2\",\"name\":"
+       "\"memory\",\"input\":{}}]},"
+       "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t2\","
+       "\"content\":\"- [ID:4] (told) Jon likes tea\"}]},"
+       "{\"role\":\"assistant\",\"content\":\"Sunny.\",\"id\":12}]";
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_of(own, 0));
+   const char *call =
+       "[{\"role\":\"user\",\"content\":\"x\",\"id\":10},"
+       "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":"
+       "\"function\",\"function\":{\"name\":\"%s\",\"arguments\":\"%s\"}}]},"
+       "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"%s\"}]";
+   char buf[1024];
+   snprintf(buf, sizeof(buf), call, "stocks", "{\\\"action\\\":\\\"quote\\\"}", "$5");
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_of(buf, 0));
+   snprintf(buf, sizeof(buf), call, "stocks", "{\\\"action\\\":\\\"transactions\\\"}", "memo");
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_of(buf, 0));
+   snprintf(buf, sizeof(buf), call, "search", "{}", "a result");
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_of(buf, 0));
+   snprintf(buf, sizeof(buf), call, "no_such_tool", "{}", "text");
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_of(buf, 0));
+   /* The memory store returning a fact learned from outside text. */
+   snprintf(buf, sizeof(buf), call, "memory", "{}", "- [ID:4] (inferred, outside) A memo");
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_of(buf, 0));
+   snprintf(buf, sizeof(buf), call, "memory", "{}", "  works_at: Acme (outside)");
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_of(buf, 0));
+}
+
+/* Every frame DAWN puts outside text in reads as a tainted kind. */
+static void test_every_frame_is_tainted(void) {
+   static const char *const frames[] = TOOL_FRAMES_ALL;
+   for (size_t i = 0; i < sizeof(frames) / sizeof(frames[0]); i++) {
+      TEST_ASSERT_TRUE(outside_is_tainted(llm_third_party_outside_kind(frames[i])));
+   }
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, llm_third_party_outside_kind("NOT A FRAME"));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, llm_third_party_outside_kind(NULL));
+}
+
+/* Rows before the cursor are the conversation's floor (the caller's), not
+ * this batch's. */
+static void test_rows_before_the_cursor_are_the_floors(void) {
+   const char *hist =
+       "[{\"role\":\"user\",\"content\":\"Find it\",\"id\":10},"
+       "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"--- WEB CONTENT ---\\nPage\\n"
+       "--- END WEB CONTENT ---\\n\",\"id\":11},"
+       "{\"role\":\"assistant\",\"content\":\"Found.\",\"id\":12},"
+       "{\"role\":\"user\",\"content\":\"Thanks\",\"id\":20}]";
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_of(hist, 12));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, outside_of(hist, 10));
+}
+
+/* A document attached to the user's message (as text or a text part). */
+static void test_attached_document_is_outside(void) {
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT,
+                         outside_of("[{\"role\":\"user\",\"content\":\"See [ATTACHED DOCUMENT: "
+                                    "a.pdf]\\nText\",\"id\":10}]",
+                                    0));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT,
+                         outside_of("[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":"
+                                    "\"[ATTACHED DOCUMENT: a.pdf]\"}],\"id\":10}]",
+                                    0));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE,
+                         outside_of("[{\"role\":\"user\",\"content\":\"Hello\",\"id\":10}]", 0));
+}
+
+/* DAWN's own input that carries outside text: a background job's result (an
+ * envelope row), a device's relayed data, a turn context's outside items. */
+static void test_dawn_input_with_outside_text(void) {
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH,
+                         outside_of("[{\"role\":\"user\",\"_kind\":\"envelope\",\"content\":"
+                                    "\"[automated background-job update] The answer\"},"
+                                    "{\"role\":\"user\",\"content\":\"ok\",\"id\":10}]",
+                                    0));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER,
+                         outside_of("[{\"role\":\"user\",\"content\":\"[DEVICE DATA] Speak this "
+                                    "information naturally to the user: 20 C\",\"id\":10}]",
+                                    0));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT,
+                         outside_of("[{\"role\":\"user\",\"content\":[{\"type\":\"text\","
+                                    "\"_kind\":\"turn_context\",\"text\":\"[M3 document_chunk "
+                                    "outside 2026-10-01] A page\"},{\"type\":\"text\",\"text\":"
+                                    "\"Hi\"}],\"id\":10}]",
+                                    0));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER,
+                         outside_of("[{\"role\":\"user\",\"_kind\":\"turn_context\",\"content\":"
+                                    "\"[M4 memory_fact told, outside 2026-10-01] A memo\"},"
+                                    "{\"role\":\"user\",\"content\":\"Hi\",\"id\":10}]",
+                                    0));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT,
+                         outside_of("[{\"role\":\"user\",\"_kind\":\"turn_context\",\"content\":"
+                                    "\"[document_chunk outside 2026-10-01] A page\"},"
+                                    "{\"role\":\"user\",\"content\":\"Hi\",\"id\":10}]",
+                                    0));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE,
+                         outside_of("[{\"role\":\"user\",\"_kind\":\"turn_context\",\"content\":"
+                                    "\"[M1 memory_fact told 2026-10-01] Jon likes tea\"},"
+                                    "{\"role\":\"user\",\"content\":\"Hi\",\"id\":10}]",
+                                    0));
+}
+
+/* DAWN's posts in the batch (a briefing, a digest) retell outside content. */
+static void test_posts_are_outside(void) {
+   g_unprompted_id = 12;
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER,
+                         outside_of("[{\"role\":\"user\",\"content\":\"hi\",\"id\":10},"
+                                    "{\"role\":\"assistant\",\"content\":\"Briefing.\",\"id\":12}]",
+                                    0));
 }
 
 int main(void) {
@@ -197,5 +418,11 @@ int main(void) {
    RUN_TEST(test_unprompted_rows_are_left_out);
    RUN_TEST(test_input_has_question);
    RUN_TEST(test_history_max_id);
+   RUN_TEST(test_outside_kind_of_tool_results);
+   RUN_TEST(test_every_frame_is_tainted);
+   RUN_TEST(test_rows_before_the_cursor_are_the_floors);
+   RUN_TEST(test_attached_document_is_outside);
+   RUN_TEST(test_dawn_input_with_outside_text);
+   RUN_TEST(test_posts_are_outside);
    return UNITY_END();
 }

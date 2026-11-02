@@ -95,6 +95,7 @@
 #ifndef DAWN_PROMPTS_H
 #define DAWN_PROMPTS_H
 
+#include "core/outside_markers.h" /* OUTSIDE_MARKER_DEVICE_DATA */
 #include "core/text_filter.h"     /* CITED_TAG_EXAMPLE, CITED_TAG_ID_EXAMPLE, SURFACED_ID_HINT */
 #include "llm/llm_context_text.h" /* LLM_CONTEXT_TAG_PLACEHOLDER */
 
@@ -794,6 +795,10 @@
  * becomes in the extraction input (memory_extraction_input.c): the extraction
  * model learns no fact from it. */
 #define MEMORY_EXTRACTION_THIRD_PARTY_STUB "[Email or web content: not used for memory.]"
+
+/* The opening of a device's relayed data (mosquitto_comms.c): its turn's input
+ * is the device's text, not the user's (memory extraction marks it outside). */
+#define MQTT_DEVICE_DATA_PREFIX OUTSIDE_MARKER_DEVICE_DATA
 
 /* =============================================================================
  * THIRD-PARTY CONTENT

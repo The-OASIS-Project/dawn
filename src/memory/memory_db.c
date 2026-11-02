@@ -303,16 +303,18 @@ int memory_db_get_last_extracted(int64_t conversation_id, int *count_out) {
    return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_set_last_extracted(int64_t conversation_id, int message_count, int64_t last_msg_id) {
+int memory_db_set_last_extracted(int64_t conversation_id,
+                                 int message_count,
+                                 int64_t last_msg_id,
+                                 int outside) {
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
 
    sqlite3_stmt *stmt = s_db.stmt_conv_set_last_extracted;
    sqlite3_reset(stmt);
-   /* Params: message_count, last_msg_id (x2 for CASE), conversation_id */
    sqlite3_bind_int(stmt, 1, message_count);
    sqlite3_bind_int64(stmt, 2, last_msg_id);
-   sqlite3_bind_int64(stmt, 3, last_msg_id);
-   sqlite3_bind_int64(stmt, 4, conversation_id);
+   sqlite3_bind_int64(stmt, 3, conversation_id);
+   sqlite3_bind_int(stmt, 4, outside);
 
    int rc = sqlite3_step(stmt);
    sqlite3_reset(stmt);

@@ -461,6 +461,8 @@ typedef struct {
    int64_t keeper_id;
    time_t superseded_at; /* 0 when unknown (superseded before v95) */
    bool replaced;        /* replaced by a newer value (else merged as a duplicate) */
+   int outside;          /* outside_kind_t of each (core/outside_kind.h) */
+   int keeper_outside;
    char text[MEMORY_FACT_TEXT_MAX];
    char keeper_text[MEMORY_FACT_TEXT_MAX];
 } memory_superseded_fact_t;
@@ -510,7 +512,7 @@ int memory_db_fact_restore(int user_id, int64_t fact_id, memory_restore_result_t
  *
  * @param user_id User ID
  * @param fact_text Text to search for
- * @param out_facts Output: array of similar facts
+ * @param out_facts Output: array of similar facts (id, text, confidence and outside only)
  * @param max_facts Maximum facts to return
  * @param count_out Output: number of similar facts found
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
@@ -810,6 +812,17 @@ int memory_db_pref_list(int user_id,
                         int *count_out);
 
 /**
+ * @brief List a user's preferences fit for the session-start block: none whose
+ *        value came from a batch that read outside text
+ *        (memory_preferences.outside tainted)
+ */
+int memory_db_pref_list_untainted(int user_id,
+                                  memory_preference_t *out_prefs,
+                                  int max_prefs,
+                                  int offset,
+                                  int *count_out);
+
+/**
  * @brief Search preferences by keyword (LIKE on category and value)
  *
  * @param user_id User ID
@@ -886,9 +899,11 @@ int memory_db_summary_create_at(int user_id,
                                 int64_t *id_out);
 
 /**
- * @brief List recent summaries for a user
+ * @brief List a user's recent summaries fit for the session-start block
  *
- * Only returns non-consolidated summaries.
+ * Non-consolidated, newest first, and none of a batch that read outside text
+ * (memory_summaries.outside tainted): the block sits in each conversation's
+ * frozen prefix.
  *
  * @param user_id User ID
  * @param out_summaries Output: array of summaries
@@ -897,16 +912,15 @@ int memory_db_summary_create_at(int user_id,
  * @param count_out Output: number of summaries
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_summary_list(int user_id,
-                           memory_summary_t *out_summaries,
-                           int max_summaries,
-                           int offset,
-                           int *count_out);
+int memory_db_summary_list_untainted(int user_id,
+                                     memory_summary_t *out_summaries,
+                                     int max_summaries,
+                                     int offset,
+                                     int *count_out);
 
 /**
  * @brief List recent (non-consolidated) summaries with an explicit sort order.
  *
- * memory_db_summary_list() is the DEFAULT-order (created_at DESC) delegator of this.
  * Facts-only orders (there is no confidence) collapse to DEFAULT; only CREATED_ASC
  * changes the order (oldest first).
  *
@@ -1108,15 +1122,21 @@ int memory_db_get_last_extracted(int64_t conversation_id, int *count_out);
  * Atomically clears the recovery counters (`extraction_attempts = 0`,
  * `extraction_last_attempt_at = 0`) and advances `last_extracted_msg_id`
  * to the caller-supplied value (0 = leave unchanged, used on early-skip paths).
- * Passing the cursor value captured *before* LLM inference avoids the TOCTOU
- * race of re-querying MAX(id) at commit time.
+ * Pass the highest row the batch's history held, so a row saved meanwhile is
+ * read next time.  In the same statement, the conversation's outside floor is
+ * raised to @p outside when that is tainted and the floor isn't yet: the rows
+ * the cursor passes are never read again.
  *
  * @param conversation_id Conversation ID
  * @param message_count Message count to record (legacy count-based cursor)
  * @param last_msg_id Highest message ID processed; 0 = do not advance cursor
+ * @param outside What the rows passed read (outside_kind_t; OUTSIDE_NONE: nothing)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_set_last_extracted(int64_t conversation_id, int message_count, int64_t last_msg_id);
+int memory_db_set_last_extracted(int64_t conversation_id,
+                                 int message_count,
+                                 int64_t last_msg_id,
+                                 int outside);
 
 /**
  * @brief Roll back an extraction_attempts stamp for a conversation.
