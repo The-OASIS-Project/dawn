@@ -61,6 +61,8 @@
  *     MEMORY_EXTRACTION_PROMPT_TEMPLATE
  *     MEMORY_EXTRACTION_EXPIRY_BLOCK
  *     MEMORY_FORGOTTEN_CHECK_PROMPT
+ *     MEMORY_CONSOLIDATE_LEAD
+ *     MEMORY_CONSOLIDATE_REPAIR_TEMPLATE
  *     MEMORY_CONTEXT_DATA_LEAD
  *     MEMORY_EXTRACTION_THIRD_PARTY_STUB
  *   THIRD-PARTY CONTENT
@@ -763,6 +765,58 @@
    "FORGOTTEN:\n%s\nNEW:\n%s\nReply with JSON only: {\"same\": [the numbers of the NEW "     \
    "facts that are the same], \"rewrite\": {\"<number>\": \"<the fact without the "          \
    "forgotten part>\"}}"
+
+/* The consolidator's message after the extraction reply (memory_consolidate.c):
+ * the user's effective values half (the %s), then how to decide; the lists of
+ * what to decide on follow it, built by code under the MEMORY_CONSOLIDATE_*
+ * headers below. */
+#define MEMORY_CONSOLIDATE_LEAD                                                                    \
+   "%s\n\n"                                                                                        \
+   "You keep your own long-term memory of the user. A conversation just ended; above is what "     \
+   "you extracted from it. Below, C is what you extracted that needs a decision, S what "          \
+   "memory already holds near it (R its open relations, E the entities they name), F what "        \
+   "the user asked you to forget, and D what you set aside earlier. Keep what would change "       \
+   "how you'd help them six months from now; let the rest go.\n\n"                                 \
+   "Give every C exactly one disposition: add it; merge it into the S, or the other C, that "      \
+   "says the same; replace an S it makes false; defer it; or drop it. Merge two S that say "       \
+   "the same; when a C says more than the S it matches, merge the S into the C. A stored "         \
+   "value is history only when the conversation makes it false or says it changed; recency "       \
+   "alone is not a contradiction; when unsure, keep both. Some relations hold one value at a "     \
+   "time (married_to, born_in, born_on, favorite_color, favorite_food, primary_language): a "      \
+   "new current value closes the old one with close_relation, dated when it changed. Link "        \
+   "two E that are the same entity. Never keep anything an F says, reworded or not. You and "      \
+   "the assistant are not sources: nothing whose subject is you. A D may be added or "             \
+   "dropped; one you leave stays set aside. Name only ids shown here; you may shorten a C's "      \
+   "text by deleting words, never by writing new ones. forget only suggests; the user "            \
+   "decides.\n\n"                                                                                  \
+   "Ops (each may carry a one-line \"reason\"):\n"                                                 \
+   "{\"op\": \"add\", \"c\": \"C1\"}, optionally with \"text\": the C shortened by deleting "      \
+   "words\n"                                                                                       \
+   "{\"op\": \"merge\", \"c\": \"C2\", \"into\": \"S1\"}: C2 says what S1 says\n"                  \
+   "{\"op\": \"merge\", \"c\": \"C3\", \"into\": \"C2\"}: C3 says what C2 says (C2 still needs "   \
+   "its own disposition)\n"                                                                        \
+   "{\"op\": \"merge\", \"from\": \"S2\", \"into\": \"S1\"} or \"into\": \"C1\" (C1 is added, S2 " \
+   "folded into it)\n"                                                                             \
+   "{\"op\": \"replace\", \"old\": \"S3\", \"by\": \"C1\"} or \"by\": \"S4\"\n"                    \
+   "{\"op\": \"close_relation\", \"r\": \"R1\", \"valid_to\": \"YYYY-MM-DD\", \"by\": \"C1\"}\n"   \
+   "{\"op\": \"link\", \"e\": \"E1\", \"same_as\": \"E2\"}\n"                                      \
+   "{\"op\": \"defer\", \"c\": \"C4\"}, {\"op\": \"drop\", \"c\": \"C5\"} (also for a D)\n"        \
+   "{\"op\": \"forget\", \"s\": \"S5\"}\n"                                                         \
+   "Reply with JSON only: {\"ops\": [...], \"finish\": true}\n"
+
+/* The consolidator's lists (each header, then one line per item). */
+#define MEMORY_CONSOLIDATE_HEAD_C "\nC (decide each):\n"
+#define MEMORY_CONSOLIDATE_HEAD_S "\nS (stored facts):\n"
+#define MEMORY_CONSOLIDATE_HEAD_R "\nR (open relations):\n"
+#define MEMORY_CONSOLIDATE_HEAD_E "\nE (entities):\n"
+#define MEMORY_CONSOLIDATE_HEAD_F "\nF (the user asked you to forget):\n"
+#define MEMORY_CONSOLIDATE_HEAD_D "\nD (set aside earlier):\n"
+
+/* The one repair round: what of the plan can't be applied (%s, one line each). */
+#define MEMORY_CONSOLIDATE_REPAIR_TEMPLATE                                               \
+   "Part of that plan can't be applied:\n%s\n"                                           \
+   "Reply with JSON only: {\"ops\": [...], \"finish\": true}, with ops in place of the " \
+   "ones listed and the dispositions still missing. The rest of the plan stands.\n"
 
 /* The FACT EXPIRY block: the template's last "%s" when [memory] expire_enabled, else "".
  * Its "expires_at" field is read by process_extraction_response(). */

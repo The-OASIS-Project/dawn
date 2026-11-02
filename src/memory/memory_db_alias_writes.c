@@ -242,9 +242,9 @@ static bool entity_has_canonical_dependents(int user_id, int64_t entity_id) {
  * calls.  Don't "optimize" them into a single critical section — minimizing
  * the cascade lock window matters more than saving two acquire/release
  * pairs at a path that only fires on AUTO. */
-static bool should_swap_for_longer_canonical(int user_id,
-                                             const memory_entity_t *inbound,
-                                             int64_t winner_id) {
+bool memory_alias_internal_should_swap(int user_id,
+                                       const memory_entity_t *inbound,
+                                       int64_t winner_id) {
    if (!inbound || winner_id <= 0)
       return false;
    if (!entity_type_prefers_longer_canonical(inbound->entity_type))
@@ -361,7 +361,7 @@ int memory_db_entity_consider_auto_merge(int user_id,
    if (ev.composite_score >= auto_thresh) {
       int64_t link_src = entity_id;
       int64_t link_tgt = winner_id;
-      if (should_swap_for_longer_canonical(user_id, &inbound, winner_id)) {
+      if (memory_alias_internal_should_swap(user_id, &inbound, winner_id)) {
          link_src = winner_id;
          link_tgt = entity_id;
          OLOG_INFO("memory_db_alias: auto-merge direction swapped "
@@ -416,7 +416,7 @@ int memory_db_entity_consider_auto_merge(int user_id,
        * Smith → Jon" before clicking approve. */
       int64_t prop_src = entity_id;
       int64_t prop_tgt = scored[i].entity_id;
-      if (should_swap_for_longer_canonical(user_id, &inbound, scored[i].entity_id)) {
+      if (memory_alias_internal_should_swap(user_id, &inbound, scored[i].entity_id)) {
          prop_src = scored[i].entity_id;
          prop_tgt = entity_id;
       }
@@ -2307,7 +2307,7 @@ int memory_alias_link_user_self_run(int user_id,
              * review, so a swap suggestion is honest. */
             int64_t prop_src = eid;
             int64_t prop_tgt = self_id;
-            if (should_swap_for_longer_canonical(user_id, &cand, self_id)) {
+            if (memory_alias_internal_should_swap(user_id, &cand, self_id)) {
                prop_src = self_id;
                prop_tgt = eid;
             }

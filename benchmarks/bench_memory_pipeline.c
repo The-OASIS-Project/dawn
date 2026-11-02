@@ -186,9 +186,11 @@ static FILE *s_candidates;
 static int64_t s_candidate_id;
 static pthread_mutex_t s_candidates_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* One candidate line: @p text from conversation @p conv, its @p kind ("fact"
- * or "correction"), and the source and confidence the model gave a fact. */
+/* One candidate line: @p text from conversation @p conv's extraction
+ * @p sample, its @p kind ("fact" or "correction"), and the source and
+ * confidence the model gave a fact. */
 static void write_candidate(int64_t conv,
+                            int sample,
                             const char *text,
                             struct json_object *fact,
                             const char *kind) {
@@ -200,6 +202,7 @@ static void write_candidate(int64_t conv,
    json_object_object_add(line, "text", json_object_new_string(text));
    json_object_object_add(line, "conversation", json_object_new_int64(conv));
    json_object_object_add(line, "kind", json_object_new_string(kind));
+   json_object_object_add(line, "sample", json_object_new_int(sample));
    if (fact && json_object_object_get_ex(fact, "source", &v)) {
       json_object_object_add(line, "source", json_object_get(v));
    }
@@ -210,7 +213,7 @@ static void write_candidate(int64_t conv,
    json_object_put(line);
 }
 
-static void dump_reply(int64_t conversation_id, const char *reply) {
+static void dump_reply(int64_t conversation_id, const char *reply, int sample) {
    struct json_object *root = memory_extraction_parse_json(reply), *arr = NULL, *text = NULL;
    if (!root) {
       return;
@@ -225,7 +228,7 @@ static void dump_reply(int64_t conversation_id, const char *reply) {
       for (size_t i = 0; i < json_object_array_length(arr); i++) {
          struct json_object *fact = json_object_array_get_idx(arr, i);
          if (json_object_object_get_ex(fact, "text", &text)) {
-            write_candidate(conversation_id, json_object_get_string(text), fact, "fact");
+            write_candidate(conversation_id, sample, json_object_get_string(text), fact, "fact");
          }
       }
    }
@@ -233,7 +236,8 @@ static void dump_reply(int64_t conversation_id, const char *reply) {
       for (size_t i = 0; i < json_object_array_length(arr); i++) {
          struct json_object *corr = json_object_array_get_idx(arr, i);
          if (json_object_object_get_ex(corr, "new_fact", &text)) {
-            write_candidate(conversation_id, json_object_get_string(text), NULL, "correction");
+            write_candidate(conversation_id, sample, json_object_get_string(text), NULL,
+                            "correction");
          }
       }
    }

@@ -302,6 +302,38 @@ int memory_db_entity_consider_auto_merge(int user_id,
                                          memory_alias_evaluate_t *out_eval);
 
 /**
+ * @brief Entities @p entity_id may be the same as: the extraction gate's
+ *        cascade, with no write: the same canonical name, then candidates at
+ *        or above `review_threshold` with no type or name veto, best first
+ * @param out_ids   Caller array of @p max
+ * @return MEMORY_DB_SUCCESS (none for an alias), MEMORY_DB_NOT_FOUND, MEMORY_DB_FAILURE
+ */
+int memory_db_entity_link_candidates(int user_id,
+                                     int64_t entity_id,
+                                     int64_t *out_ids,
+                                     int max,
+                                     int *count_out);
+
+/**
+ * @brief Decide one pair of entities someone nominated as the same (the
+ *        consolidator's link)
+ *
+ * The extraction gate's ladder on this pair only: the same canonical name, or
+ * a composite at or above `auto_threshold`, links them (the longer name stays
+ * canonical); differing types or names refuse it; anything else is proposed
+ * for the user.  @p propose_only (outside text nominated it) never links.
+ * Both must be canonicals of their classes.
+ *
+ * @param out_eval Outcome, the link or proposal id, the direction taken
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_consider_nominated_merge(int user_id,
+                                              int64_t source_id,
+                                              int64_t target_id,
+                                              bool propose_only,
+                                              memory_alias_evaluate_t *out_eval);
+
+/**
  * @brief Soft-link source entity to target entity (canonical_id update +
  * audit row).
  *

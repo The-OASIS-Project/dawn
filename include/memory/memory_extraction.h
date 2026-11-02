@@ -140,6 +140,9 @@ void memory_extraction_unqueue_user(int user_id);
  *  picks those conversations up on the next start). */
 void memory_extraction_stop_queue(void);
 
+/** Whether memory_extraction_stop_queue ran: the daemon is stopping. */
+bool memory_extraction_stopping(void);
+
 /** Users whose extraction can be held at once (memory_extraction_hold_user). */
 #define MEMORY_EXTRACTION_MAX_HOLDS 64
 
@@ -249,8 +252,12 @@ size_t memory_extraction_get_template_size_chars(void);
 void memory_extraction_set_template_pieces(
     const char *const pieces[MEMORY_EXTRACTION_TEMPLATE_PIECES]);
 
-/** A benchmark's view of each batch's extraction reply (see below). */
-typedef void (*memory_extraction_reply_hook_t)(int64_t conversation_id, const char *reply);
+/** A benchmark's view of each batch's extraction reply (see below); sample is
+ *  0 for the extraction, 1 for a second sample the consolidator takes when a
+ *  benchmark asks for one. */
+typedef void (*memory_extraction_reply_hook_t)(int64_t conversation_id,
+                                               const char *reply,
+                                               int sample);
 
 /**
  * @brief Benchmarks only: be handed each batch's extraction reply as the model
@@ -259,7 +266,7 @@ typedef void (*memory_extraction_reply_hook_t)(int64_t conversation_id, const ch
  *        proposed can be measured apart from what was kept.  Runs on the
  *        extraction thread.  NULL removes it.  The daemon never calls this.
  *
- * @param hook Called with the conversation id and the reply, or NULL
+ * @param hook Called with the conversation id, the reply and its sample, or NULL
  */
 void memory_extraction_set_reply_hook(memory_extraction_reply_hook_t hook);
 

@@ -32,6 +32,7 @@
 #include "config/dawn_config.h"
 #include "logging.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_consolidation.h"
 
 /* Maximum users to process in one run */
 #define MAX_USERS 64
@@ -120,6 +121,15 @@ void memory_run_nightly_decay(void) {
 
       /* Courtesy yield between users */
       usleep(1000);
+   }
+
+   /* The consolidation record keeps a batch (its ops, and a candidate set aside
+    * in it) MEMORY_CONSOLIDATE_RECORD_DAYS. */
+   int batches = 0;
+   memory_db_consolidation_prune((int64_t)now - (int64_t)MEMORY_CONSOLIDATE_RECORD_DAYS * 86400,
+                                 &batches);
+   if (batches > 0) {
+      OLOG_INFO("memory_decay: %d consolidation batches past their record time removed", batches);
    }
 
    last_run = now;

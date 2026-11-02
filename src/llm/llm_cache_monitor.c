@@ -108,6 +108,9 @@ _Static_assert(sizeof(s_state_names) / sizeof(s_state_names[0]) == LLM_CACHE_STA
 static __thread int t_kind = -1;
 static __thread int t_iteration = -1;
 static __thread bool t_local_mic = false;
+/* What the calling thread's calls used since llm_cache_monitor_take_usage. */
+static __thread int t_used_prompt;
+static __thread int t_used_output;
 static __thread struct {
    bool valid;
    llm_cache_prefix_t prefix;
@@ -207,6 +210,17 @@ bool llm_cache_monitor_one_off_call(void) {
    /* A compaction's summary; memory extraction and its backfilled summaries:
     * each request is built for one conversation or batch and sent once. */
    return t_kind == LLM_CALL_COMPACTION || t_kind == LLM_CALL_EXTRACTION;
+}
+
+void llm_cache_monitor_take_usage(int *prompt_out, int *output_out) {
+   if (prompt_out) {
+      *prompt_out = t_used_prompt;
+   }
+   if (output_out) {
+      *output_out = t_used_output;
+   }
+   t_used_prompt = 0;
+   t_used_output = 0;
 }
 
 void llm_cache_monitor_set_iteration(int iteration) {
@@ -763,6 +777,8 @@ void llm_cache_monitor_record(uint32_t session_id,
    if (rec.uncached < 0) {
       rec.uncached = 0;
    }
+   t_used_prompt += rec.prompt;
+   t_used_output = rec.output > t_used_output ? rec.output : t_used_output;
 
    session_t *session = session_get_command_context();
    rec.kind = call_kind(session);

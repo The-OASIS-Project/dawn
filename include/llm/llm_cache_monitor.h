@@ -143,6 +143,13 @@ bool llm_cache_monitor_in_side_call(void);
 bool llm_cache_monitor_one_off_call(void);
 
 /**
+ * @brief What the calling thread's calls used since the last take: their
+ *        whole prompts summed (cached included) and the largest output, then
+ *        both start again from zero
+ */
+void llm_cache_monitor_take_usage(int *prompt_out, int *output_out);
+
+/**
  * @brief The tool-loop iteration the calling thread's next call belongs to
  *
  * 0 for a turn's first call; -1 outside a tool loop.

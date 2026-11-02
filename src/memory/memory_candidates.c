@@ -30,6 +30,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/buf_printf.h"
 #include "core/iso8601.h"
 #include "dawn_error.h"
 #include "logging.h"
@@ -291,6 +292,62 @@ int memory_candidates_parse(struct json_object *root, int user_id, memory_candid
    return SUCCESS;
 }
 
+/* Whether @p name is the assistant's (its name, or "assistant"). */
+static bool is_assistant(const char *name, const char *ai_canonical) {
+   if (!name || !*name) {
+      return false;
+   }
+   char canonical[MEMORY_ENTITY_NAME_MAX];
+   memory_make_canonical_name(name, canonical, sizeof(canonical));
+   if (strcmp(canonical, "dawn") == 0) {
+      return false;
+   }
+   return strcmp(canonical, "assistant") == 0 || strcmp(canonical, "the assistant") == 0 ||
+          (ai_canonical[0] && strcmp(canonical, ai_canonical) == 0);
+}
+
+bool memory_candidates_about_assistant(const memory_candidates_t *c, int idx, const char *ai_name) {
+   if (!c || idx < 0 || idx >= c->count) {
+      return false;
+   }
+   char ai_canonical[MEMORY_ENTITY_NAME_MAX] = { 0 };
+   if (ai_name) {
+      memory_make_canonical_name(ai_name, ai_canonical, sizeof(ai_canonical));
+   }
+   return is_assistant(c->items[idx].subject, ai_canonical);
+}
+
+int memory_candidates_drop_assistant(memory_candidates_t *c, const char *ai_name) {
+   if (!c) {
+      return 0;
+   }
+   char ai_canonical[MEMORY_ENTITY_NAME_MAX] = { 0 };
+   if (ai_name) {
+      memory_make_canonical_name(ai_name, ai_canonical, sizeof(ai_canonical));
+   }
+   int dropped = 0;
+   for (int r = 0; r < c->n_rels; r++) {
+      if (!c->rels[r].dropped && is_assistant(c->rels[r].subject, ai_canonical)) {
+         c->rels[r].dropped = true;
+         dropped++;
+      }
+   }
+   int kept = 0;
+   for (int i = 0; i < c->count; i++) {
+      if (is_assistant(c->items[i].subject, ai_canonical)) {
+         dropped++;
+         continue;
+      }
+      c->items[kept++] = c->items[i];
+   }
+   c->count = kept;
+   if (dropped > 0) {
+      OLOG_INFO("memory_extraction: %d fact(s)/relation(s) about the assistant itself not stored",
+                dropped);
+   }
+   return dropped;
+}
+
 void memory_candidates_free(memory_candidates_t *c) {
    if (!c) {
       return;
@@ -366,6 +423,11 @@ memory_store_t *memory_store_open(int user_id,
                               MEMORY_DB_SUCCESS &&
                           self_id > 0;
    return st;
+}
+
+int memory_store_fresh_entities(const memory_store_t *st, const int64_t **ids) {
+   *ids = st ? st->fresh : NULL;
+   return st ? st->fresh_count : 0;
 }
 
 int64_t memory_store_created_at(const memory_store_t *st) {
@@ -483,9 +545,15 @@ static int64_t resolve_subject(memory_store_t *st, const char *name) {
    return id;
 }
 
-void memory_store_reinforce(memory_store_t *st, int64_t fact_id, bool now_told) {
+void memory_store_reinforce(memory_store_t *st,
+                            int64_t fact_id,
+                            bool now_told,
+                            const memory_provenance_t *prov) {
    if (!st || fact_id <= 0) {
       return;
+   }
+   if (!prov) {
+      prov = st->prov;
    }
    memory_fact_t existing;
    const bool read = memory_db_fact_get(fact_id, st->user_id, &existing) == MEMORY_DB_SUCCESS;
@@ -493,7 +561,6 @@ void memory_store_reinforce(memory_store_t *st, int64_t fact_id, bool now_told) 
    const float new_conf = read ? existing.confidence + 0.1f : 0.8f;
    memory_db_fact_update_confidence(fact_id, st->user_id, new_conf > 1.0f ? 1.0f : new_conf);
    /* Outside text can't make a fact the user's own word. */
-   const memory_provenance_t *prov = st->prov;
    if (now_told && read && strcmp(existing.source, "explicit") != 0 &&
        !(prov && outside_is_tainted(prov->outside))) {
       memory_db_fact_mark_explicit(fact_id, st->user_id);
@@ -575,25 +642,36 @@ static const char *store_fact_row(memory_store_t *st,
                                   const char *text,
                                   const memory_candidate_t *c,
                                   const memory_provenance_t *prov,
+                                  const memory_store_opts_t *opts,
                                   memory_fact_t *seen,
                                   memory_store_result_t *out) {
    const char *source = c->told ? "explicit" : "inferred";
    int64_t repeat_id = 0;
    if (memory_db_fact_find_exact(st->user_id, text, &repeat_id) == MEMORY_DB_SUCCESS) {
-      /* Stored before word for word: reinforce it, as a paraphrase hit is. */
+      /* Stored before word for word: reinforce it, as a paraphrase hit is
+       * (unless the caller reinforces it itself). */
       if (memory_db_fact_get(repeat_id, st->user_id, seen) != MEMORY_DB_SUCCESS) {
          memset(seen, 0, sizeof(*seen));
       }
-      memory_store_reinforce(st, repeat_id, c->told);
-      OLOG_INFO("memory_extraction: repeat of fact_id=%lld: %s", (long long)repeat_id, text);
       out->fact_id = repeat_id;
       out->reused = true;
+      if (opts && opts->keep_exact) {
+         return "hash_match";
+      }
+      memory_store_reinforce(st, repeat_id, c->told, prov);
+      OLOG_INFO("memory_extraction: repeat of fact_id=%lld: %s", (long long)repeat_id, text);
       return "hash_match";
    }
-   float vec[MAX_EMBEDDING_DIMS];
-   int dims = 0;
-   if (!st->agent && g_config.memory.paraphrase_dedup_enabled && memory_embeddings_available() &&
-       memory_embeddings_embed(text, vec, &dims) == SUCCESS && dims > 0) {
+   float own[MAX_EMBEDDING_DIMS];
+   const float *vec = opts && opts->vec && opts->dims > 0 && !opts->text ? opts->vec : NULL;
+   int dims = vec ? opts->dims : 0;
+   const bool check = (!st->agent && g_config.memory.paraphrase_dedup_enabled) ||
+                      (opts && opts->paraphrase);
+   if (!vec && check && memory_embeddings_available() &&
+       memory_embeddings_embed(text, own, &dims) == SUCCESS && dims > 0) {
+      vec = own;
+   }
+   if (check && vec) {
       int64_t matched_id = 0;
       float score = 0.0f;
       memory_embeddings_nearest_fact(st->user_id, vec, dims,
@@ -606,7 +684,9 @@ static const char *store_fact_row(memory_store_t *st,
          matched_id = 0;
       }
       if (matched_id > 0) {
-         memory_store_reinforce(st, matched_id, false);
+         if (!(opts && opts->keep_exact)) {
+            memory_store_reinforce(st, matched_id, false, prov);
+         }
          OLOG_INFO("memory_extraction: paraphrase merged into fact_id=%lld "
                    "score=%.3f: %s",
                    (long long)matched_id, (double)score, text);
@@ -627,7 +707,9 @@ static const char *store_fact_row(memory_store_t *st,
    memory_db_fact_create_at(st->user_id, text, c->confidence, source, prov, st->created_at,
                             &out->fact_id);
    OLOG_INFO("memory_extraction: stored fact: %s", text);
-   if (out->fact_id > 0 && memory_embeddings_available()) {
+   if (out->fact_id > 0 && vec) {
+      memory_embeddings_store_precomputed(st->user_id, out->fact_id, vec, dims);
+   } else if (out->fact_id > 0 && memory_embeddings_available()) {
       memory_embeddings_embed_and_store(st->user_id, out->fact_id, text);
    }
    return "create";
@@ -648,21 +730,14 @@ int memory_store_candidate(memory_store_t *st,
    }
    const memory_candidate_t *cand = &c->items[idx];
    const char *text = (opts && opts->text) ? opts->text : cand->text;
-   memory_provenance_t tagged;
-   const memory_provenance_t *prov = st->prov;
-   if (opts && opts->use_outside) {
-      tagged = prov ? *prov : (memory_provenance_t){ 0 };
-      tagged.outside = opts->outside;
-      prov = &tagged;
-   }
+   const memory_provenance_t *prov = opts && opts->prov ? opts->prov : st->prov;
 
    memory_fact_t seen = { 0 }; /* a stored fact said again, as stored */
-   const char *origin = store_fact_row(st, text, cand, prov, &seen, out);
+   const char *origin = store_fact_row(st, text, cand, prov, opts, &seen, out);
    if (out->fact_id <= 0) {
       out->reused = false;
       return FAILURE; /* fact insert/match failed */
    }
-
    /* Expiry the extraction model attached, for a new fact and a stored one
     * said again alike (a transient fact is often stored first by `remember`
     * and then restated): only ever set, never cleared.  A batch that read
@@ -701,7 +776,9 @@ int memory_store_candidate(memory_store_t *st,
 
    if (!(opts && opts->no_relations)) {
       for (int r = 0; r < cand->n_rels; r++) {
-         store_relation(st, &c->rels[cand->first_rel + r], out->fact_id, origin, text, prov);
+         if (!c->rels[cand->first_rel + r].dropped) {
+            store_relation(st, &c->rels[cand->first_rel + r], out->fact_id, origin, text, prov);
+         }
       }
    }
    return SUCCESS;
@@ -766,4 +843,80 @@ void memory_store_close(memory_store_t *st) {
       memory_embeddings_invalidate_entity_cache_for_user(st->user_id);
    }
    free(st);
+}
+
+int64_t memory_extraction_store_summary(int user_id,
+                                        int64_t conversation_id,
+                                        const char *session_id,
+                                        struct json_object *root,
+                                        int message_count,
+                                        int duration_seconds,
+                                        const memory_provenance_t *prov,
+                                        int64_t created_at) {
+   int64_t summary_id = 0;
+   if (!root) {
+      return 0;
+   }
+   /* Process summary */
+   struct json_object *summary_obj, *topics_arr;
+   if (json_object_object_get_ex(root, "summary", &summary_obj)) {
+      const char *summary = json_object_get_string(summary_obj);
+
+      /* Build topics string */
+      char topics[MEMORY_TOPICS_MAX] = { 0 };
+      if (json_object_object_get_ex(root, "topics", &topics_arr)) {
+         int count = json_object_array_length(topics_arr);
+         size_t toff = 0;
+         size_t trem = MEMORY_TOPICS_MAX;
+         for (int i = 0; i < count && trem > 1; i++) {
+            const char *topic = json_object_get_string(json_object_array_get_idx(topics_arr, i));
+            /* No substring filter — LLM-emitted topic string. */
+            if (topic && topic[0] != '\0') {
+               if (toff > 0) {
+                  BUF_PRINTF(topics, toff, trem, ", ");
+               }
+               BUF_PRINTF(topics, toff, trem, "%s", topic);
+            }
+         }
+      }
+
+      /* No substring filter on summary — LLM-paraphrased timeline of the
+       * conversation.  See trust-tier rationale in atlas
+       * INJECTION_FILTER.md §"Filtering at the trust boundary, not after
+       * paraphrase". */
+      {
+         int crc = memory_db_summary_create_at(user_id, session_id, summary, topics, "neutral",
+                                               message_count, duration_seconds, prov, created_at,
+                                               &summary_id);
+         if (crc == MEMORY_DB_SUCCESS && summary_id > 0) {
+            /* Embed-at-create so the semantic summary adapter sees this
+             * row immediately.  Failure is silent — the recompute worker
+             * picks up unembedded rows on next boot. */
+            (void)memory_embeddings_embed_and_store_summary(user_id, summary_id, summary);
+         }
+         OLOG_INFO("memory_extraction: stored summary for session %s", session_id);
+      }
+   }
+
+   /* Process title — auto-rename conversation if not locked (atomic check-and-set) */
+   struct json_object *title_obj;
+   if (json_object_object_get_ex(root, "title", &title_obj)) {
+      const char *title = json_object_get_string(title_obj);
+      if (title && title[0] != '\0' && conversation_id > 0) {
+         char safe_title[48];
+         safe_strscpy(safe_title, title);
+         utf8_truncate(safe_title, 40);
+
+         int rc = conv_db_auto_title(conversation_id, user_id, safe_title);
+         if (rc == AUTH_DB_SUCCESS) {
+#ifdef ENABLE_WEBUI
+            webui_broadcast_conversation_renamed(user_id, conversation_id, safe_title);
+#endif
+            OLOG_INFO("memory_extraction: auto-titled conversation %lld: %s",
+                      (long long)conversation_id, safe_title);
+         }
+      }
+   }
+
+   return summary_id;
 }

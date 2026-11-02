@@ -38,6 +38,7 @@
 #include "memory/memory_db.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_extraction.h"
+#include "memory/memory_similarity.h"
 #include "prompts.h"
 #include "utils/string_utils.h"
 
@@ -125,38 +126,9 @@ void memory_forgotten_free(memory_forgotten_list_t *list) {
    list->count = 0;
 }
 
-/* @p text with ASCII case and runs of spacing folded, trailing spacing and
- * full stops trimmed: the same words as written, not a bag of words (so "not"
- * and word order still count).  Heap; NULL on allocation failure. */
-static char *fold(const char *text) {
-   const size_t len = strlen(text);
-   char *out = malloc(len + 1);
-   if (!out) {
-      return NULL;
-   }
-   size_t n = 0;
-   bool space = false;
-   for (const char *c = text; *c; c++) {
-      if (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r') {
-         space = n > 0;
-         continue;
-      }
-      if (space) {
-         out[n++] = ' ';
-         space = false;
-      }
-      out[n++] = (*c >= 'A' && *c <= 'Z') ? (char)(*c - 'A' + 'a') : *c;
-   }
-   while (n > 0 && (out[n - 1] == '.' || out[n - 1] == ' ')) {
-      n--;
-   }
-   out[n] = '\0';
-   return out;
-}
-
 static bool same_text(const char *a, const char *b) {
-   char *fa = fold(a);
-   char *fb = fold(b);
+   char *fa = memory_text_fold(a);
+   char *fb = memory_text_fold(b);
    const bool same = fa && fb && strcmp(fa, fb) == 0;
    free(fa);
    free(fb);
@@ -165,7 +137,7 @@ static bool same_text(const char *a, const char *b) {
 
 /* Where @p text (folded) is in @p set, or -1. */
 static int texts_find(const memory_forgotten_texts_t *set, const char *text) {
-   char *folded = text ? fold(text) : NULL;
+   char *folded = text ? memory_text_fold(text) : NULL;
    int at = -1;
    for (int i = 0; folded && i < set->count && at < 0; i++) {
       if (strcmp(set->from[i], folded) == 0) {
@@ -194,7 +166,7 @@ static int texts_add(memory_forgotten_texts_t *set, const char *text, const char
       set->to = too;
       set->cap = grown;
    }
-   char *f = fold(text);
+   char *f = memory_text_fold(text);
    char *t = to ? strdup(to) : NULL;
    if (!f || (to && !t)) {
       free(f);
@@ -220,7 +192,7 @@ static bool names_forgotten(const memory_forgotten_list_t *list, const char *tex
  * Nothing left of it, a rewording too long to store, or one that is a forgotten
  * fact itself: not stored at all. */
 static int rewrite_add(memory_forgotten_list_t *list, const char *text, const char *to) {
-   char *folded_to = fold(to);
+   char *folded_to = memory_text_fold(to);
    const bool empty = folded_to && !folded_to[0];
    free(folded_to);
    if (empty || strlen(to) >= MEMORY_FACT_TEXT_MAX || names_forgotten(list, to)) {
@@ -444,21 +416,10 @@ static int ask_same(memory_forgotten_list_t *list,
    return rc;
 }
 
-int memory_forgotten_screen(memory_forgotten_list_t *list,
-                            const char *response,
-                            const llm_resolved_config_t *cfg) {
-   if (!list || list->count == 0 || !response) {
-      return SUCCESS;
-   }
-   struct json_object *root = memory_extraction_parse_json(response);
-   if (!root) {
-      return SUCCESS; /* nothing will be stored from it either */
-   }
-   texts_free(&list->drop);
-   texts_free(&list->rewrite);
+void memory_forgotten_prepare(memory_forgotten_list_t *list) {
    /* One copy of a fact deleted while another is kept: still known, so what
     * says it isn't dropped. */
-   for (int i = 0; i < list->count; i++) {
+   for (int i = 0; list && i < list->count; i++) {
       memory_forgotten_t *f = &list->items[i];
       f->asked = false;
       if (!f->embedded && memory_embeddings_available()) {
@@ -472,6 +433,25 @@ int memory_forgotten_screen(memory_forgotten_list_t *list,
          f->known = live > 0;
       }
    }
+}
+
+bool memory_forgotten_near(memory_forgotten_list_t *list, const char *text) {
+   return list && text && list->count > 0 && is_candidate(list, text);
+}
+
+int memory_forgotten_screen(memory_forgotten_list_t *list,
+                            const char *response,
+                            const llm_resolved_config_t *cfg) {
+   if (!list || list->count == 0 || !response) {
+      return SUCCESS;
+   }
+   struct json_object *root = memory_extraction_parse_json(response);
+   if (!root) {
+      return SUCCESS; /* nothing will be stored from it either */
+   }
+   texts_free(&list->drop);
+   texts_free(&list->rewrite);
+   memory_forgotten_prepare(list);
    const size_t room = returned_room(root);
    const char **texts = room ? malloc(room * sizeof(*texts)) : NULL;
    const char **ask = room ? malloc(room * sizeof(*ask)) : NULL;

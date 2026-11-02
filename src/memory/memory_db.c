@@ -195,6 +195,8 @@ int memory_db_delete_user_memories(int user_id) {
     * forgotten-fact records go with the rest.  One transaction: all of it, or
     * none (a delete whose marks failed would come back). */
    static const char *const k_steps[] = {
+      "DELETE FROM memory_consolidation_batches WHERE user_id = ?",
+      "DELETE FROM memory_consolidation_ops WHERE user_id = ?",
       "DELETE FROM memory_relations WHERE user_id = ?",
       "DELETE FROM memory_entities WHERE user_id = ?",
       "DELETE FROM memory_facts WHERE user_id = ?",

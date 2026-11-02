@@ -51,6 +51,7 @@
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_candidates.h"
+#include "memory/memory_consolidate.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
@@ -223,6 +224,7 @@ static void process_extraction_response(int user_id,
       return;
    }
    const int64_t conv_created_at = memory_store_created_at(st);
+   memory_candidates_drop_assistant(&cands, g_config.general.ai_name);
 
    /* Entities first: each fact names its subject, resolved against them. */
    memory_store_entities(st, &cands);
@@ -358,69 +360,81 @@ static void process_extraction_response(int user_id,
    memory_store_close(st);
    memory_candidates_free(&cands);
 
-   /* Process summary */
-   struct json_object *summary_obj, *topics_arr;
-   if (json_object_object_get_ex(root, "summary", &summary_obj)) {
-      const char *summary = json_object_get_string(summary_obj);
-
-      /* Build topics string */
-      char topics[MEMORY_TOPICS_MAX] = { 0 };
-      if (json_object_object_get_ex(root, "topics", &topics_arr)) {
-         int count = json_object_array_length(topics_arr);
-         size_t toff = 0;
-         size_t trem = MEMORY_TOPICS_MAX;
-         for (int i = 0; i < count && trem > 1; i++) {
-            const char *topic = json_object_get_string(json_object_array_get_idx(topics_arr, i));
-            /* No substring filter — LLM-emitted topic string. */
-            if (topic && topic[0] != '\0') {
-               if (toff > 0) {
-                  BUF_PRINTF(topics, toff, trem, ", ");
-               }
-               BUF_PRINTF(topics, toff, trem, "%s", topic);
-            }
-         }
-      }
-
-      /* No substring filter on summary — LLM-paraphrased timeline of the
-       * conversation.  See trust-tier rationale in atlas
-       * INJECTION_FILTER.md §"Filtering at the trust boundary, not after
-       * paraphrase". */
-      {
-         int64_t summary_id = 0;
-         int crc = memory_db_summary_create_at(user_id, session_id, summary, topics, "neutral",
-                                               message_count, duration_seconds, prov,
-                                               conv_created_at, &summary_id);
-         if (crc == MEMORY_DB_SUCCESS && summary_id > 0) {
-            /* Embed-at-create so the semantic summary adapter sees this
-             * row immediately.  Failure is silent — the recompute worker
-             * picks up unembedded rows on next boot. */
-            (void)memory_embeddings_embed_and_store_summary(user_id, summary_id, summary);
-         }
-         OLOG_INFO("memory_extraction: stored summary for session %s", session_id);
-      }
-   }
-
-   /* Process title — auto-rename conversation if not locked (atomic check-and-set) */
-   struct json_object *title_obj;
-   if (json_object_object_get_ex(root, "title", &title_obj)) {
-      const char *title = json_object_get_string(title_obj);
-      if (title && title[0] != '\0' && conversation_id > 0) {
-         char safe_title[48];
-         safe_strscpy(safe_title, title);
-         utf8_truncate(safe_title, 40);
-
-         int rc = conv_db_auto_title(conversation_id, user_id, safe_title);
-         if (rc == AUTH_DB_SUCCESS) {
-#ifdef ENABLE_WEBUI
-            webui_broadcast_conversation_renamed(user_id, conversation_id, safe_title);
-#endif
-            OLOG_INFO("memory_extraction: auto-titled conversation %lld: %s",
-                      (long long)conversation_id, safe_title);
-         }
-      }
-   }
+   memory_extraction_store_summary(user_id, conversation_id, session_id, root, message_count,
+                                   duration_seconds, prov, conv_created_at);
 
    json_object_put(root);
+}
+
+/* =============================================================================
+ * Storing a batch's reply
+ * ============================================================================= */
+
+/* What the model returned for a batch, and what it was asked with. */
+typedef struct {
+   const char *response;
+   const memory_provenance_t *prov;
+   memory_forgotten_list_t *forgotten;
+   const llm_resolved_config_t *cfg; /* the model that answered */
+   struct json_object *history;      /* the extraction request */
+   int input_tokens;                 /* its input */
+} extraction_reply_t;
+
+/* Whether the conversation may still be learned from: not deleted, not made
+ * private.  Unreadable counts as no. */
+static bool conversation_allowed(int user_id, int64_t conversation_id) {
+#ifdef ENABLE_AUTH
+   if (conversation_id <= 0) {
+      return true;
+   }
+   bool now_private = false;
+   return conv_db_is_private(conversation_id, user_id, &now_private) == AUTH_DB_SUCCESS &&
+          !now_private;
+#else
+   (void)user_id;
+   (void)conversation_id;
+   return true;
+#endif
+}
+
+/* Store a batch's reply: through the consolidator, or as extraction proposed
+ * it.  MEMORY_CONSOLIDATE_REVOKED: the conversation was made private while the
+ * consolidator worked (nothing stored). */
+static int store_batch(const extraction_context_t *ctx,
+                       bool agent,
+                       const extraction_reply_t *reply) {
+   if (!agent) {
+      process_extraction_response(ctx->user_id, ctx->conversation_id, ctx->session_id,
+                                  reply->response, ctx->new_message_count, ctx->duration_seconds,
+                                  reply->prov, reply->forgotten);
+      return SUCCESS;
+   }
+   const memory_consolidate_input_t in = {
+      .user_id = ctx->user_id,
+      .conversation_id = ctx->conversation_id,
+      .session_id = ctx->session_id,
+      .message_count = ctx->new_message_count,
+      .duration_seconds = ctx->duration_seconds,
+      .prov = reply->prov,
+      .first_msg_id = ctx->first_msg_id,
+      .forgotten = reply->forgotten,
+      .cfg = reply->cfg,
+      .history = reply->history,
+      .reply = reply->response,
+      .input_tokens = reply->input_tokens,
+      .on_reply = s_reply_hook,
+      .allowed = conversation_allowed,
+   };
+   const int rc = memory_consolidate_batch(&in, NULL);
+   if (rc == MEMORY_CONSOLIDATE_REVOKED) {
+      OLOG_INFO("memory_extraction: conv %lld: consolidation stopped, conversation made private "
+                "or deleted",
+                (long long)ctx->conversation_id);
+   } else if (rc != SUCCESS) {
+      OLOG_WARNING("memory_extraction: conv %lld: consolidation stored nothing",
+                   (long long)ctx->conversation_id);
+   }
+   return rc;
 }
 
 /* =============================================================================
@@ -537,8 +551,19 @@ static void *extraction_thread(void *arg) {
    /* Use the configured LLM for extraction.  Extraction runs over untrusted
     * conversation content, so bracket the call with the config-independent
     * tools-off guard (belt-and-suspenders alongside suppress_tools). */
+   /* The consolidator reads this request back (its next reply continues it), so
+    * its prefix is cached; on the prompt path it is sent once. */
+   const bool agent = strcmp(g_config.memory.consolidator, "agent") == 0;
    llm_tools_suppress_push();
-   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_EXTRACTION);
+   const int kind_prev = llm_cache_monitor_push_kind(agent ? LLM_CALL_CONSOLIDATION
+                                                           : LLM_CALL_EXTRACTION);
+   llm_cache_monitor_take_usage(NULL, NULL);
+   /* The consolidator's calls are told apart by iteration: 0 for an
+    * extraction sample, then its rounds. */
+   const int iter_prev = llm_cache_monitor_get_iteration();
+   if (agent) {
+      llm_cache_monitor_set_iteration(0);
+   }
    response = llm_chat_completion_with_config(extraction_history, prompt, &extraction_config);
    llm_tools_suppress_pop();
 
@@ -600,8 +625,10 @@ static void *extraction_thread(void *arg) {
       }
    }
 
+   llm_cache_monitor_set_iteration(iter_prev);
    llm_cache_monitor_pop_kind(kind_prev); /* primary and fallback both tagged */
-   json_object_put(extraction_history);
+   int round0_input = 0;
+   llm_cache_monitor_take_usage(&round0_input, NULL);
 
 #ifdef ENABLE_WEBUI
    /* Recovery-triggered extractions process old, idle conversations the user
@@ -642,7 +669,9 @@ static void *extraction_thread(void *arg) {
    /* What it returned that states a forgotten fact again isn't stored (out of
     * memory: nothing is now; the cursor stays, and recovery tries again).
     * Before the privacy re-check below: the check is another model call. */
-   if (response &&
+   /* The consolidator decides against the forgotten facts itself (it is shown
+    * them, and code keeps the exact and near checks). */
+   if (response && !agent &&
        memory_forgotten_screen(forgotten, response,
                                used_fallback ? &fallback_config : &extraction_config) != SUCCESS) {
       OLOG_WARNING("memory_extraction: conv %lld: not stored now (forgotten-fact check failed)",
@@ -667,16 +696,29 @@ static void *extraction_thread(void *arg) {
    }
 #endif
 
-   if (revoked) {
-      /* nothing written; see above */
-   } else if (response) {
+   /* The model answered: store what it found.  A conversation made private
+    * while the consolidator worked stops it before its next write (REVOKED);
+    * the cursor stays, as above. */
+   bool answered = false;
+   if (!revoked && response) {
+      answered = true;
       if (s_reply_hook) {
-         s_reply_hook(ctx->conversation_id, response);
+         s_reply_hook(ctx->conversation_id, response, 0);
       }
-      process_extraction_response(ctx->user_id, ctx->conversation_id, ctx->session_id, response,
-                                  ctx->new_message_count, ctx->duration_seconds, &prov, forgotten);
+      const extraction_reply_t reply = { .response = response,
+                                         .prov = &prov,
+                                         .forgotten = forgotten,
+                                         .cfg = used_fallback ? &fallback_config
+                                                              : &extraction_config,
+                                         .history = extraction_history,
+                                         .input_tokens = round0_input };
+      revoked = store_batch(ctx, agent, &reply) == MEMORY_CONSOLIDATE_REVOKED;
       free(response);
-
+      response = NULL;
+   }
+   if (revoked) {
+      /* nothing more written; the cursor stays */
+   } else if (answered) {
       /* Notify user if we had to fall back */
       if (used_fallback) {
          char notice[256];
@@ -767,6 +809,7 @@ static void *extraction_thread(void *arg) {
    }
 
    free(prompt);
+   json_object_put(extraction_history);
 
 cleanup:
    memory_forgotten_free(forgotten);

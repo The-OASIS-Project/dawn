@@ -84,6 +84,14 @@ int memory_normalize_text(const char *text, char *out_normalized, size_t max_len
 uint32_t memory_hash_text(const char *normalized_text);
 
 /**
+ * @brief @p text as the exact-text checks compare it: ASCII case and runs of
+ *        spacing folded, leading and trailing spacing and trailing full stops
+ *        trimmed (the same words in the same order, so "not" and word order
+ *        still count).  Heap; NULL for NULL or on allocation failure.
+ */
+char *memory_text_fold(const char *text);
+
+/**
  * @brief Normalize text and compute hash in one step
  *
  * Convenience function that normalizes internally and returns hash.

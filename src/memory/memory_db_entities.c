@@ -835,3 +835,35 @@ int memory_db_entity_get_embeddings(int user_id,
       *count_out = count;
    return MEMORY_DB_SUCCESS;
 }
+
+int memory_db_entity_get_with_aliases(int user_id, int64_t entity_id, memory_entity_names_t *out) {
+   if (!out || user_id <= 0 || entity_id <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+   memset(out, 0, sizeof(*out));
+   int64_t ids[MEMORY_ENTITY_CLASS_MAX];
+   int n = 0;
+   if (memory_db_entity_class_members(user_id, entity_id, ids, MEMORY_ENTITY_CLASS_MAX, &n) !=
+       MEMORY_DB_SUCCESS) {
+      return MEMORY_DB_FAILURE;
+   }
+   if (n == 0) {
+      return MEMORY_DB_NOT_FOUND;
+   }
+   memory_entity_t rows[MEMORY_ENTITY_CLASS_MAX];
+   int got = 0;
+   if (memory_db_entities_get_by_ids(user_id, ids, n, rows, &got) != MEMORY_DB_SUCCESS) {
+      return MEMORY_DB_FAILURE;
+   }
+   bool found = false;
+   for (int i = 0; i < got; i++) {
+      if (rows[i].id == ids[0]) {
+         out->entity = rows[i];
+         found = true;
+      } else if (out->n_names < MEMORY_ENTITY_CLASS_MAX) {
+         safe_strscpy(out->names[out->n_names], rows[i].name);
+         out->n_names++;
+      }
+   }
+   return found ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}

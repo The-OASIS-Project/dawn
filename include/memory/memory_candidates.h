@@ -58,6 +58,7 @@ typedef struct {
    /* "replaces": the old value the user said this replaced, MEMORY_RELATION_REPLACES_UNKNOWN
     * when they couldn't say which, or NULL */
    const char *replaces;
+   bool dropped; /* not stored (its subject is the assistant) */
 } memory_candidate_rel_t;
 
 /** One proposed fact.  Strings are borrowed from the reply. */
@@ -102,6 +103,19 @@ typedef struct {
  */
 int memory_candidates_parse(struct json_object *root, int user_id, memory_candidates_t *out);
 
+/**
+ * @brief Drop what states the assistant as its subject: a fact whose subject
+ *        is the assistant (by @p ai_name, or "assistant"), and any relation
+ *        whose subject is.  "dawn" stays (DAWN the project is a subject its
+ *        developer talks about).
+ * @return How many facts and relations were dropped
+ */
+int memory_candidates_drop_assistant(memory_candidates_t *c, const char *ai_name);
+
+/** Whether candidate @p idx's subject is the assistant (as
+ *  memory_candidates_drop_assistant decides). */
+bool memory_candidates_about_assistant(const memory_candidates_t *c, int idx, const char *ai_name);
+
 /** Release @p c's arrays (not the JSON they borrow from). */
 void memory_candidates_free(memory_candidates_t *c);
 
@@ -129,8 +143,14 @@ void memory_store_entities(memory_store_t *st, const memory_candidates_t *c);
 typedef struct {
    const char *text;  /* store this text instead of the candidate's (NULL: its own) */
    bool no_relations; /* store none of its relations */
-   bool use_outside;  /* outside, not the batch's, is what the fact is tagged with */
-   int outside;
+   /* The fact's provenance (NULL: the batch's): a candidate an earlier batch set
+    * aside keeps that batch's conversation, range and outside text. */
+   const memory_provenance_t *prov;
+   bool keep_exact;  /* a stored fact it says again: not reinforced (the caller does it);
+                      * its subject, expiry and relations are stored as for a new one */
+   bool paraphrase;  /* a stored fact at paraphrase_dedup_threshold: reinforce it instead */
+   const float *vec; /* the text's embedding, when already made (stored with the fact) */
+   int dims;
 } memory_store_opts_t;
 
 /** What memory_store_candidate() did. */
@@ -155,11 +175,18 @@ int memory_store_candidate(memory_store_t *st,
                            memory_store_result_t *out);
 
 /**
- * @brief A stored fact said again in this batch: raise its confidence and add
- *        the batch's conversation to its sources; @p now_told makes a fact not
- *        yet told told, unless the batch read outside text
+ * @brief A stored fact said again: raise its confidence and add @p prov's
+ *        conversation to its sources; @p now_told makes a fact not yet told
+ *        told, unless @p prov read outside text
+ * @param prov The provenance it was said again with (NULL: the batch's)
  */
-void memory_store_reinforce(memory_store_t *st, int64_t fact_id, bool now_told);
+void memory_store_reinforce(memory_store_t *st,
+                            int64_t fact_id,
+                            bool now_told,
+                            const memory_provenance_t *prov);
+
+/** The entities the batch created so far (@p ids points into the store). */
+int memory_store_fresh_entities(const memory_store_t *st, const int64_t **ids);
 
 /** The time the batch's rows are stored with (its conversation's creation; 0: now). */
 int64_t memory_store_created_at(const memory_store_t *st);
@@ -169,6 +196,22 @@ int64_t memory_store_created_at(const memory_store_t *st);
  *        entities it created, the caches its writes made stale, then free @p st
  */
 void memory_store_close(memory_store_t *st);
+
+/**
+ * @brief Store a batch's summary (embedded) and the conversation's title from
+ *        its extraction reply, as both ways of storing a batch do
+ * @param root       The extraction reply's JSON
+ * @param created_at What the summary is stored with (0: now)
+ * @return The summary's id, or 0 when none was stored
+ */
+int64_t memory_extraction_store_summary(int user_id,
+                                        int64_t conversation_id,
+                                        const char *session_id,
+                                        struct json_object *root,
+                                        int message_count,
+                                        int duration_seconds,
+                                        const memory_provenance_t *prov,
+                                        int64_t created_at);
 
 #ifdef __cplusplus
 }
