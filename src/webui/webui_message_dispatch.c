@@ -1252,6 +1252,16 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
       }
    } else if (strcmp(type, "list_memory_superseded") == 0) {
       handle_list_memory_superseded(conn, payload);
+   } else if (strcmp(type, "list_memory_batches") == 0) {
+      handle_list_memory_batches(conn, payload);
+   } else if (strcmp(type, "undo_memory_batch") == 0) {
+      if (payload) {
+         handle_undo_memory_batch(conn, payload);
+      }
+   } else if (strcmp(type, "keep_memory_op") == 0) {
+      if (payload) {
+         handle_keep_memory_op(conn, payload);
+      }
    } else if (strcmp(type, "restore_memory_fact") == 0) {
       if (payload) {
          handle_restore_memory_fact(conn, payload);

@@ -3080,6 +3080,19 @@ dawn_add_unit_test(test_memory_consolidation_db
            unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# The memory batches frames: the batch object, keyset pages, one "Not found"
+# for missing and foreign ids, the undo and keep replies.
+dawn_add_unit_test(test_webui_memory_batches
+   SOURCES test_webui_memory_batches.c test_memory_consolidate_stub.c
+           ${MEMORY_CONSOLIDATE_TEST_SOURCES}
+           ${SRC_ROOT}/src/memory/memory_db_consolidation_undo.c
+           ${SRC_ROOT}/src/memory/memory_consolidation_undo.c
+           ${SRC_ROOT}/src/memory/memory_consolidation_view.c
+           ${SRC_ROOT}/src/webui/webui_memory_batches.c
+   LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
+           unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(bench_contradiction
    NO_TEST
    SOURCES ${SRC_ROOT}/benchmarks/bench_contradiction.c
@@ -3171,4 +3184,5 @@ add_dependencies(test_memory_remember models_toml_builtin)
 add_dependencies(test_memory_supersede_kinds models_toml_builtin)
 add_dependencies(test_memory_consolidate models_toml_builtin)
 add_dependencies(test_memory_consolidation_db models_toml_builtin)
+add_dependencies(test_webui_memory_batches models_toml_builtin)
 add_dependencies(test_llm_models_toml models_toml_builtin)

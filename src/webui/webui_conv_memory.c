@@ -38,6 +38,8 @@
 #include "core/session_prefix.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "memory/memory_consolidate.h"
+#include "memory/memory_db_consolidation.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_forget.h"
 #include "webui/webui_internal.h"
@@ -49,6 +51,9 @@ typedef enum {
    CONV_MEMORY_FORGET_ALL,  /* delete every memory of the user */
    CONV_MEMORY_FORGET_FACT, /* delete one fact (conv_id is the fact's id) */
 } conv_memory_op_t;
+
+/* Batches told when a fact a consolidation recorded is forgotten (the newest). */
+#define FORGET_BATCHES_MAX 16
 
 typedef struct {
    uint32_t session_id; /* looked up again to reply: no reference held while waiting */
@@ -182,9 +187,22 @@ static void send_frame(uint32_t session_id, const char *type, json_object *paylo
  * replaced, current again, in "restored". */
 static void forget_fact(const conv_memory_job_t *job, json_object *payload) {
    memory_forget_result_t fr;
+   /* The batches whose record names it: the forget changes them (their rows
+    * about it go), so their tabs are told. */
+   int64_t batches[FORGET_BATCHES_MAX];
+   int n_batches = 0;
+   if (memory_db_consolidation_batches_naming(job->user_id, job->conv_id, batches,
+                                              FORGET_BATCHES_MAX,
+                                              &n_batches) != MEMORY_DB_SUCCESS) {
+      n_batches = 0;
+   }
    conv_db_withdraw_intent_begin(job->user_id); /* the user removing it */
    const int rc = memory_forget_fact(job->user_id, job->conv_id, &fr);
    conv_db_withdraw_intent_end();
+   for (int i = 0; rc == SUCCESS && i < n_batches; i++) {
+      memory_consolidation_batch_notify(job->user_id, 0, batches[i]);
+   }
+   json_object_object_add(payload, "fact_id", json_object_new_int64(job->conv_id));
    json_object_object_add(payload, "success", json_object_new_boolean(rc == SUCCESS));
    if (rc == SUCCESS) {
       json_object_object_add(payload, "message", json_object_new_string("Fact deleted"));
@@ -489,9 +507,21 @@ void handle_forget_conversation_memories(ws_connection_t *conn, struct json_obje
 void webui_forget_memory_fact(ws_connection_t *conn, int64_t fact_id) {
    const conv_memory_start_t st = start_conv_memory_job(conn, fact_id, CONV_MEMORY_FORGET_FACT);
    if (st != CONV_MEMORY_STARTED) {
-      send_error(conn, "delete_memory_fact_response", 0,
-                 st == CONV_MEMORY_BUSY ? "Memory is busy with another change; try again shortly"
-                                        : "Failed to delete fact");
+      /* The fact asked for, as the worker's reply carries it. */
+      json_object *response = json_object_new_object();
+      json_object *payload = json_object_new_object();
+      json_object_object_add(response, "type",
+                             json_object_new_string("delete_memory_fact_response"));
+      json_object_object_add(payload, "fact_id", json_object_new_int64(fact_id));
+      json_object_object_add(payload, "success", json_object_new_boolean(0));
+      json_object_object_add(payload, "error",
+                             json_object_new_string(
+                                 st == CONV_MEMORY_BUSY
+                                     ? "Memory is busy with another change; try again shortly"
+                                     : "Failed to delete fact"));
+      json_object_object_add(response, "payload", payload);
+      send_json_response(conn, response);
+      json_object_put(response);
    }
 }
 

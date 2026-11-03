@@ -788,6 +788,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_restore.c
         src/webui/webui_memory.c
         src/webui/webui_memory_merged.c
+        src/webui/webui_memory_batches.c
         src/webui/webui_config.c
         src/webui/webui_reasoning.c
         src/webui/webui_session.c
@@ -1087,6 +1088,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_consolidate.c
     src/memory/memory_consolidate_ops.c
     src/memory/memory_consolidation_undo.c
+    src/memory/memory_consolidation_view.c
     src/memory/memory_extraction_queue.c
     src/memory/memory_extraction_slots.c
     src/memory/memory_extraction_input.c
