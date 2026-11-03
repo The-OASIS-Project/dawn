@@ -1006,6 +1006,28 @@ _Static_assert(OUTSIDE_RESEARCH == 3 && OUTSIDE_DOCUMENT == 5 && OUTSIDE_OTHER =
 #define MEMORY_FACT_COLS MEMORY_FACT_COLS_SQL("")
 #define MEMORY_FACT_COLS_MF MEMORY_FACT_COLS_SQL("mf.")
 
+/* A column added to the v113 ops table after v113 shipped: the conversation a
+ * row quotes when it isn't the batch's (a set-aside candidate taken up later).
+ * In the table and added on its own (guarded) for a database already at v113. */
+#define MEMORY_CONSOLIDATION_OPS_SOURCE_COL \
+   "source_conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE"
+
+/* Indexes added to the v113 tables after v113 shipped: the record's ops by
+ * relation (a relation forgotten removes its ops) and its batches by age (the
+ * nightly prune).  Also created on their own for a database already at v113. */
+#define MEMORY_CONSOLIDATION_LATER_INDEXES_SQL                                    \
+   "CREATE INDEX IF NOT EXISTS idx_mco_rel ON memory_consolidation_ops(user_id, " \
+   "relation_id) WHERE relation_id IS NOT NULL;"                                  \
+   "CREATE INDEX IF NOT EXISTS idx_mcb_created ON "                               \
+   "memory_consolidation_batches(created_at);"
+
+/* The ops by the conversation they quote.  Created only after the column is
+ * there (never in the base schema: a database at v113 lacks the column until
+ * the step after v113 adds it). */
+#define MEMORY_CONSOLIDATION_SOURCE_INDEX_SQL                               \
+   "CREATE INDEX IF NOT EXISTS idx_mco_source ON memory_consolidation_ops(" \
+   "user_id, source_conversation_id) WHERE source_conversation_id IS NOT NULL;"
+
 /* The record of what a consolidation batch did to memory (v113): one row per
  * batch, one per operation, each with what it changed so the user can undo it.
  * In the base schema and repeated by the v113 step, so the two can't drift. */
@@ -1051,12 +1073,14 @@ _Static_assert(OUTSIDE_RESEARCH == 3 && OUTSIDE_DOCUMENT == 5 && OUTSIDE_OTHER =
    "   post_image TEXT,"                                                                    \
    "   status TEXT NOT NULL DEFAULT 'applied',"                                             \
    "   created_at INTEGER NOT NULL,"                                                        \
-   "   undone_at INTEGER);"                                                                 \
+   "   undone_at INTEGER,"                                                                  \
+   "   " MEMORY_CONSOLIDATION_OPS_SOURCE_COL ");"                                           \
    "CREATE INDEX IF NOT EXISTS idx_mco_batch ON memory_consolidation_ops(batch_id, seq);"   \
    "CREATE INDEX IF NOT EXISTS idx_mco_fact ON memory_consolidation_ops(user_id, fact_id) " \
    "WHERE fact_id IS NOT NULL;"                                                             \
    "CREATE INDEX IF NOT EXISTS idx_mco_other ON "                                           \
-   "memory_consolidation_ops(user_id, other_fact_id) WHERE other_fact_id IS NOT NULL;"      \
+   "memory_consolidation_ops(user_id, other_fact_id) WHERE other_fact_id IS NOT "           \
+   "NULL;" MEMORY_CONSOLIDATION_LATER_INDEXES_SQL                                           \
    "CREATE INDEX IF NOT EXISTS idx_mco_deferred ON "                                        \
    "memory_consolidation_ops(user_id, created_at) "                                         \
    "WHERE op = 'deferred' AND status = 'applied';"

@@ -409,6 +409,12 @@ static void open_db(void) {
       sqlite3_free(err);
       exit(1);
    }
+   /* The consolidation record (a forget scrubs it). */
+   if (sqlite3_exec(s_db.db, MEMORY_CONSOLIDATION_TABLES_SQL, NULL, NULL, &err) != SQLITE_OK) {
+      fprintf(stderr, "record tables failed: %s\n", err ? err : "?");
+      sqlite3_free(err);
+      exit(1);
+   }
    /* Forgotten-fact records and the extraction floor (the real migration). */
    if (auth_db_migrations_v110(s_db.db) != AUTH_DB_SUCCESS) {
       fprintf(stderr, "v110 failed\n");

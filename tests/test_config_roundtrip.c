@@ -350,6 +350,25 @@ static void test_memory_extraction_effort_clamps(void) {
    TEST_ASSERT_EQUAL_STRING("off", g_written.memory.extraction_effort);
 }
 
+/* --- [memory] consolidator ------------------------------------------------ */
+
+static void test_memory_consolidator_roundtrip(void) {
+   /* Default is "prompt"; a dropped key would silently switch the store back
+    * to the prompt path on the next WebUI settings save. */
+   snprintf(g_written.memory.consolidator, sizeof(g_written.memory.consolidator), "agent");
+
+   round_trip();
+
+   TEST_ASSERT_EQUAL_STRING("agent", g_read.memory.consolidator);
+}
+
+/* An unknown value falls back to "prompt" (the file and the WebUI share the clamp). */
+static void test_memory_consolidator_clamps(void) {
+   snprintf(g_written.memory.consolidator, sizeof(g_written.memory.consolidator), "llm");
+   config_clamp_memory(&g_written.memory);
+   TEST_ASSERT_EQUAL_STRING("prompt", g_written.memory.consolidator);
+}
+
 static void test_focus_document_min_relevance_roundtrip(void) {
    /* A non-default value must survive: a dropped key would silently revert to the
     * default on the next WebUI settings save. */
@@ -687,6 +706,8 @@ int main(void) {
    RUN_TEST(test_jobs_roundtrip);
    RUN_TEST(test_memory_extraction_effort_roundtrip);
    RUN_TEST(test_memory_extraction_effort_clamps);
+   RUN_TEST(test_memory_consolidator_roundtrip);
+   RUN_TEST(test_memory_consolidator_clamps);
    RUN_TEST(test_asr_roundtrip);
    RUN_TEST(test_vad_roundtrip);
    RUN_TEST(test_research_roundtrip);

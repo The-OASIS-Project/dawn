@@ -671,6 +671,8 @@ typedef struct {
    int extraction_timeout_ms;    /* LLM timeout for fact extraction (default 120s) */
    char extraction_effort[8];    /* Reasoning for fact extraction: "off" (the model's cheapest
                                     setting), "low", "medium" or "high" */
+   char consolidator[8];         /* How a batch's extracted facts are stored: "prompt" (code's
+                                    rules) or "agent" (a follow-on model reply decides each one) */
 
    /* Pruning settings */
    bool pruning_enabled;             /* Enable automatic fact pruning */

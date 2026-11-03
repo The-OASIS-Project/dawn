@@ -31,6 +31,7 @@
 #include <stdbool.h>
 
 #include "llm/llm_interface.h"
+#include "memory/memory_candidates.h"
 #include "memory/memory_types.h"
 
 #ifdef __cplusplus
@@ -139,6 +140,9 @@ void memory_extraction_unqueue_user(int user_id);
  *  picks those conversations up on the next start). */
 void memory_extraction_stop_queue(void);
 
+/** Whether memory_extraction_stop_queue ran: the daemon is stopping. */
+bool memory_extraction_stopping(void);
+
 /** Users whose extraction can be held at once (memory_extraction_hold_user). */
 #define MEMORY_EXTRACTION_MAX_HOLDS 64
 
@@ -178,17 +182,6 @@ void memory_extraction_release_user(int user_id);
  *         failure; false otherwise.  The flag is cleared by this call.
  */
 bool memory_extraction_consume_last_transient(int user_id);
-
-/**
- * @brief Parse a JSON response from an LLM, handling common formatting variants.
- *
- * Tries direct parse, markdown code block extraction, and brace/bracket fallback.
- * Caller owns the returned object and must call json_object_put().
- *
- * @param response Raw LLM response text
- * @return Parsed json_object, or NULL on failure
- */
-struct json_object *memory_extraction_parse_json(const char *response);
 
 /**
  * @brief Resolve memory.extraction_provider/extraction_model into an llm_resolved_config_t.
@@ -259,8 +252,12 @@ size_t memory_extraction_get_template_size_chars(void);
 void memory_extraction_set_template_pieces(
     const char *const pieces[MEMORY_EXTRACTION_TEMPLATE_PIECES]);
 
-/** A benchmark's view of each batch's extraction reply (see below). */
-typedef void (*memory_extraction_reply_hook_t)(int64_t conversation_id, const char *reply);
+/** A benchmark's view of each batch's extraction reply (see below); sample is
+ *  0 for the extraction, 1 for a second sample the consolidator takes when a
+ *  benchmark asks for one. */
+typedef void (*memory_extraction_reply_hook_t)(int64_t conversation_id,
+                                               const char *reply,
+                                               int sample);
 
 /**
  * @brief Benchmarks only: be handed each batch's extraction reply as the model
@@ -269,7 +266,7 @@ typedef void (*memory_extraction_reply_hook_t)(int64_t conversation_id, const ch
  *        proposed can be measured apart from what was kept.  Runs on the
  *        extraction thread.  NULL removes it.  The daemon never calls this.
  *
- * @param hook Called with the conversation id and the reply, or NULL
+ * @param hook Called with the conversation id, the reply and its sample, or NULL
  */
 void memory_extraction_set_reply_hook(memory_extraction_reply_hook_t hook);
 

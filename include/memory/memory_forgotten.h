@@ -147,6 +147,20 @@ const char *memory_forgotten_rewritten(const memory_forgotten_list_t *list, cons
 bool memory_forgotten_names(const memory_forgotten_list_t *list, const char *text);
 
 /**
+ * @brief Make @p list ready for memory_forgotten_near: each forgotten fact
+ *        embedded once, and one a live fact still says (another copy kept,
+ *        at MEMORY_FORGOTTEN_STILL_KNOWN) set aside as still known
+ */
+void memory_forgotten_prepare(memory_forgotten_list_t *list);
+
+/**
+ * @brief Whether @p text is close to a forgotten fact not still known: at
+ *        MEMORY_FORGOTTEN_CANDIDATE cosine, or any one without embeddings.
+ *        Marks those it is close to as asked about.
+ */
+bool memory_forgotten_near(memory_forgotten_list_t *list, const char *text);
+
+/**
  * @brief A voice session's conversation @p conv_id was just saved: the user's
  *        forgets since it began (@p since, epoch s) were made after what it
  *        says, so they move past its rows and its extraction is checked

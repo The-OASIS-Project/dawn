@@ -53,8 +53,10 @@ class Trajectory:
 
 
 def run_case(template: Capture, turns: List[str], world: World, now: datetime,
-             keys: Dict[str, str]) -> Trajectory:
-    """Run @p turns through the model in @p template, against @p world."""
+             keys: Dict[str, str], items: Optional[str] = None) -> Trajectory:
+    """Run @p turns through the model in @p template, against @p world.  @p items
+    is the first turn's retrieved-items block (later turns' items are already
+    in the conversation, so DAWN doesn't send them again)."""
     traj = Trajectory(world=world)
     body = None
     tag = None  # the conversation's tag, read once from the request
@@ -63,7 +65,7 @@ def run_case(template: Capture, turns: List[str], world: World, now: datetime,
         traj.turns.append(tr)
         world.turn = i
         if i == 0:
-            body = instantiate(template, text, now)
+            body = instantiate(template, text, now, items)
         else:
             shape = template.followup or template
             providers.append_user(template, body, user_message(shape, text, now))

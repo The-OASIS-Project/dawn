@@ -48,6 +48,13 @@ int bench_mp_init(void);
 int bench_mp_dump_candidates(const char *path);
 
 /**
+ * @brief [memory] consolidator = "agent": extraction samples per batch (1, the
+ *        daemon's, or 2; anything else is 1).  Keys the snapshot hash.  Call before
+ *        bench_mp_init.
+ */
+void bench_mp_set_samples(int n);
+
+/**
  * Close the in-memory database.
  */
 void bench_mp_teardown(void);

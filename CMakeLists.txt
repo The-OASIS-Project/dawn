@@ -1057,8 +1057,10 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_db_alias_scorer.c
     src/memory/memory_db_alias_cascade.c
     src/memory/memory_db_alias_writes.c
+    src/memory/memory_db_alias_nominate.c
     src/memory/memory_db_provenance.c
     src/memory/memory_db_forget.c
+    src/memory/memory_db_consolidation.c
     src/core/focus/focus_source.c
     src/core/focus/focus_recency.c
     src/core/focus/focus_candidate_helpers.c
@@ -1080,6 +1082,9 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_callback_restore.c
     src/memory/memory_callback_forget.c
     src/memory/memory_extraction.c
+    src/memory/memory_candidates.c
+    src/memory/memory_consolidate.c
+    src/memory/memory_consolidate_ops.c
     src/memory/memory_extraction_queue.c
     src/memory/memory_extraction_slots.c
     src/memory/memory_extraction_input.c

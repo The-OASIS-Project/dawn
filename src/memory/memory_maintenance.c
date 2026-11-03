@@ -32,6 +32,7 @@
 #include "config/dawn_config.h"
 #include "logging.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_consolidation.h"
 
 /* Maximum users to process in one run */
 #define MAX_USERS 64
@@ -39,12 +40,20 @@
 /* Minimum gap between runs (20 hours) to prevent double-execution */
 #define MIN_RUN_GAP_SECONDS (20 * 3600)
 
-void memory_run_nightly_decay(void) {
-   /* Check if memory and decay are enabled */
-   if (!g_config.memory.enabled || !g_config.memory.decay_enabled) {
-      return;
+/* The consolidation record keeps a batch (its ops, and a candidate set aside
+ * in it) MEMORY_CONSOLIDATE_RECORD_DAYS, whatever decay is set to: it holds
+ * conversation text. */
+static void prune_consolidation_record(time_t now) {
+   int batches = 0;
+   if (memory_db_consolidation_prune((int64_t)now - (int64_t)MEMORY_CONSOLIDATE_RECORD_DAYS * 86400,
+                                     &batches) != MEMORY_DB_SUCCESS) {
+      OLOG_WARNING("memory_decay: pruning the consolidation record failed; it runs again tomorrow");
+   } else if (batches > 0) {
+      OLOG_INFO("memory_decay: %d consolidation batches past their record time removed", batches);
    }
+}
 
+void memory_run_nightly_decay(void) {
    /* Check if current hour matches configured decay hour */
    time_t now = time(NULL);
    struct tm local_time;
@@ -58,6 +67,13 @@ void memory_run_nightly_decay(void) {
     * Note: single-caller assumption — only called from auth_maintenance thread. */
    static time_t last_run = 0;
    if (last_run > 0 && (now - last_run) < MIN_RUN_GAP_SECONDS) {
+      return;
+   }
+   prune_consolidation_record(now);
+
+   /* Check if memory and decay are enabled */
+   if (!g_config.memory.enabled || !g_config.memory.decay_enabled) {
+      last_run = now;
       return;
    }
 

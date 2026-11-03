@@ -256,6 +256,33 @@ int memory_db_relation_supersede_ex(int user_id,
                                     int64_t *out_old_fact_id);
 
 /**
+ * @brief Close one open relation: it held until @p valid_to
+ *
+ * Refused (MEMORY_DB_NOT_FOUND) when the relation isn't the user's, isn't
+ * open, began after @p valid_to, or @p valid_to is more than a day ahead.
+ * Nothing is deleted; a restore of @p closed_by_fact_id's forget reopens it.
+ *
+ * @param closed_by_fact_id The fact whose new value ended it (0: none)
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
+ */
+int memory_db_relation_close(int user_id,
+                             int64_t relation_id,
+                             int64_t valid_to,
+                             int64_t closed_by_fact_id);
+
+/**
+ * @brief The open relations of one entity (not its aliases) with one
+ *        predicate, newest first
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_relation_list_open(int user_id,
+                                 int64_t subject_entity_id,
+                                 const char *relation,
+                                 memory_relation_t *out,
+                                 int max,
+                                 int *count_out);
+
+/**
  * @brief List relations where entity is subject (outgoing).  Returns ALL
  * relations regardless of validity period — use _list_by_subject_at for
  * temporal filtering.
@@ -550,6 +577,20 @@ int memory_db_entities_get_by_ids(int user_id,
                                   int n,
                                   memory_entity_t *out,
                                   int *count_out);
+
+/** An entity's canonical and the other names of its class. */
+typedef struct {
+   memory_entity_t entity; /* the canonical */
+   int n_names;            /* the aliases' names */
+   char names[MEMORY_ENTITY_CLASS_MAX][MEMORY_ENTITY_NAME_MAX];
+} memory_entity_names_t;
+
+/**
+ * @brief An entity's canonical (itself, or the entity it is an alias of) with
+ *        the names of its aliases
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (not the user's), or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_get_with_aliases(int user_id, int64_t entity_id, memory_entity_names_t *out);
 
 /** An alias's name and the canonical entity it stands for. */
 typedef struct {

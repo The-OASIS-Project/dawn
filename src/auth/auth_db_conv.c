@@ -825,6 +825,26 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
                                     "user_id = ?1 AND is_private = 1)",
                                     (int64_t)user_id);
    }
+   if (rc == SQLITE_DONE && changes > 0 && is_private) {
+      /* What memory recorded of them goes too (it quotes what was learned):
+       * their batches, and the rows other batches made quoting a candidate
+       * they set aside. */
+      static const char *const k_sql[] = {
+         "DELETE FROM memory_consolidation_batches WHERE user_id = ?1 AND conversation_id IN "
+         "(SELECT id FROM conversations WHERE user_id = ?1 AND is_private = 1)",
+         "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND source_conversation_id IN "
+         "(SELECT id FROM conversations WHERE user_id = ?1 AND is_private = 1)",
+      };
+      for (size_t i = 0; i < sizeof(k_sql) / sizeof(k_sql[0]) && rc == SQLITE_DONE; i++) {
+         sqlite3_stmt *st = NULL;
+         rc = sqlite3_prepare_v2(s_db.db, k_sql[i], -1, &st, NULL);
+         if (rc == SQLITE_OK) {
+            sqlite3_bind_int(st, 1, user_id);
+            rc = sqlite3_step(st);
+         }
+         sqlite3_finalize(st);
+      }
+   }
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("conv_db_set_private: update failed: %s", sqlite3_errmsg(s_db.db));
    }

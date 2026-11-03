@@ -34,6 +34,10 @@ CRITERIA = {
                "Grade whether the reply's voice and character match that.",
 }
 CRITERION_NEEDS = {"concise": "length", "clarifies": "ask", "persona": "persona"}
+# Criteria another suite defines from the row itself rather than from the
+# capture's instructions (the memory eval's) are passed in as row_criteria:
+# name -> (fn(row) -> definition or None, the prompt it is judged with).
+# Labelled and validated like the rest.
 SPOKEN_LINE = "\nThe reply was spoken, and the assistant was also told: \"{spoken}\""
 
 JUDGE_PROMPT = """You grade an assistant's reply against one instruction it was given.
@@ -88,9 +92,11 @@ def untag_rows(results: dict) -> None:
             row.pop("_instructions", None)
 
 
-def definition(row: dict, criterion: str) -> Optional[str]:
+def definition(row: dict, criterion: str, row_criteria: Optional[dict] = None) -> Optional[str]:
     """@p criterion for @p row's run, quoting its instructions; None when the
     run's request gave none on it."""
+    if row_criteria and criterion in row_criteria:
+        return row_criteria[criterion][0](row)
     instr = row.get("_instructions") or {}
     if not instr.get(CRITERION_NEEDS[criterion]):
         return None
@@ -111,11 +117,20 @@ def transcript(row: dict) -> str:
     return "\n".join(lines)
 
 
-def _key(row: dict, criterion: str, judge_model: str) -> str:
+def prompt_for(criterion: str, row_criteria: Optional[dict] = None) -> str:
+    """The prompt @p criterion is judged with."""
+    if row_criteria and criterion in row_criteria:
+        return row_criteria[criterion][1]
+    return JUDGE_PROMPT
+
+
+def _key(row: dict, criterion: str, judge_model: str, row_criteria: Optional[dict] = None) -> str:
     # The criterion's text and the prompt are in the key: editing either
     # re-judges, even if RUBRIC_VERSION wasn't bumped.
     h = hashlib.sha256(f"{row['case']}\x1f{transcript(row)}\x1f{criterion}\x1f"
-                       f"{definition(row, criterion)}\x1f{JUDGE_PROMPT}\x1f{judge_model}\x1f"
+                       f"{definition(row, criterion, row_criteria)}\x1f"
+                       f"{prompt_for(criterion, row_criteria)}\x1f"
+                       f"{judge_model}\x1f"
                        f"{RUBRIC_VERSION}".encode()).hexdigest()
     return h[:32]
 
@@ -157,8 +172,10 @@ def _ask(judge_model: str, prompt: str, keys: Dict[str, str]) -> Optional[dict]:
 JUDGE_WORKERS = 8
 
 
-def judge_results(path: str, judge_model: str, keys: Dict[str, str], out: Optional[str] = None):
-    """Add a "judge" entry to every judged row of results file @p path."""
+def judge_results(path: str, judge_model: str, keys: Dict[str, str], out: Optional[str] = None,
+                  row_criteria: Optional[dict] = None):
+    """Add a "judge" entry to every judged row of results file @p path
+    (@p row_criteria: another suite's criteria, see above)."""
     from concurrent.futures import ThreadPoolExecutor
     results = json.load(open(path))
     tag_rows(results)
@@ -171,8 +188,9 @@ def judge_results(path: str, judge_model: str, keys: Dict[str, str], out: Option
                 continue
             row["judge"] = {}
             for c in crits:
-                if definition(row, c) is not None:  # not told anything on it: not graded
-                    todo.append((row, c, _key(row, c, judge_model)))
+                # Not told anything on it: not graded.
+                if definition(row, c, row_criteria) is not None:
+                    todo.append((row, c, _key(row, c, judge_model, row_criteria)))
     missing = {k: (row, c) for row, c, k in todo if k not in cache}
     key = "gemini_api_key" if judge_model.startswith("gemini") else "openrouter_api_key"
     if missing and not keys.get(key):
@@ -183,8 +201,9 @@ def judge_results(path: str, judge_model: str, keys: Dict[str, str], out: Option
     def ask(item):
         k, (row, c) = item
         try:
-            return k, _ask(judge_model, JUDGE_PROMPT.format(name=c, definition=definition(row, c),
-                                                           transcript=transcript(row)), keys)
+            prompt = prompt_for(c, row_criteria).format(
+                name=c, definition=definition(row, c, row_criteria), transcript=transcript(row))
+            return k, _ask(judge_model, prompt, keys)
         except RuntimeError as e:
             failures.append(str(e))
             return k, None
@@ -214,7 +233,8 @@ def judge_results(path: str, judge_model: str, keys: Dict[str, str], out: Option
 
 # --- validation against human labels ---------------------------------------------
 
-def label(path: str, labels_path: str, per_criterion: int = 20, seed: int = 7):
+def label(path: str, labels_path: str, per_criterion: int = 20, seed: int = 7,
+          row_criteria: Optional[dict] = None):
     """Ask a human to score a sample of judged replies, stratified across the
     judge's scores (failures included), and append them to @p labels_path."""
     results = json.load(open(path))
@@ -235,17 +255,18 @@ def label(path: str, labels_path: str, per_criterion: int = 20, seed: int = 7):
             rng.shuffle(rows)
             n = 0
             for row in rows:  # one label per distinct reply: repeats would weigh twice
-                k = _key(row, c, results.get("judge_model", ""))
+                k = _key(row, c, results.get("judge_model", ""), row_criteria)
                 if k in seen or n >= -(-per_criterion // 3):
                     continue
                 seen.add(k)
                 picked.append(row)
                 n += 1
         for row in picked:
-            k = _key(row, c, results.get("judge_model", ""))
+            k = _key(row, c, results.get("judge_model", ""), row_criteria)
             if (k, c) in done:
                 continue
-            print("\n" + "=" * 70 + f"\nCriterion: {c}\n{definition(row, c)}\n" + "-" * 70)
+            print("\n" + "=" * 70 + f"\nCriterion: {c}\n{definition(row, c, row_criteria)}\n"
+                  + "-" * 70)
             print(transcript(row))
             while True:
                 ans = input("Your score (0/1/2, s=skip, q=quit): ").strip().lower()
