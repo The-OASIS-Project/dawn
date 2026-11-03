@@ -2,6 +2,6 @@
 # Runs as the gateway user: start Claude Code as the agent user.  The SDK's
 # variables are kept; nothing else crosses (sudo resets the environment).
 KEEP=CLAUDE_CODE_ENTRYPOINT,CLAUDE_AGENT_SDK_VERSION,CLAUDE_CODE_SDK_READS_SESSION_STATE
-KEEP=$KEEP,CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING,DAWN_AGENT_AUTH
+KEEP=$KEEP,CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING,DAWN_AGENT_AUTH,DAWN_AGENT_CLAUDE
 exec sudo -n -u dawn-agent -H --preserve-env="$KEEP" \
    /usr/local/lib/agent-gateway/claude-agent-exec "$@"

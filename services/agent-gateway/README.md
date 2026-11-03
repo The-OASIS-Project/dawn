@@ -75,8 +75,34 @@ List the repos the agent may work in under `[[repos]]` in
 To publish, put a fine-grained GitHub token (those repos: Contents and Pull requests,
 read/write) in `AGENT_GATEWAY_GITHUB_TOKEN` in `/usr/local/etc/agent-gateway/env`.
 
-To update Claude Code, raise the `claude-agent-sdk` pin in `requirements.txt` and re-run the
-installer.
+## Keeping Claude Code current
+
+Claude Code ships inside the `claude-agent-sdk` package and its own self-updater is off: the
+agent must not be able to replace the program that sandboxes it, and a CLI that updates past its
+SDK breaks the gateway. Instead `agent-gateway-update.timer` runs daily (around 04:30) as root,
+as a standard-library script on the installed interpreter: root never runs code from PyPI.
+
+1. Is there a newer `claude-agent-sdk` with the same major version (for 0.x, the same minor)?
+   A bigger jump is reported and left for you.
+2. Build it into `/usr/local/lib/agent-gateway/venvs/<version>`, beside the running one, from
+   wheels only. Every other package stays at the version running now; a new SDK that needs a
+   newer `mcp` (say) is reported as an error until the pin in `requirements.txt` moves.
+3. Run the gateway's tests on it, then a live check (`agent_gateway/canary.py`): one real task
+   on a throwaway repo built to misbehave, run as the gateway user. It must fix, test and commit
+   with no prompts; a blocked host must stop the run as a request; and the agent must show the
+   sandbox refusing loopback, its own credentials and a write outside its clone (an error it
+   reports, not just a missing answer); the repo's hook and MCP server must never run. It costs
+   one small task (about $0.20) and runs only when there is a new version.
+4. If both pass and no task is running, point `current` at it and restart the gateway; if the
+   gateway doesn't come back, point back. A version that fails a check, or that the gateway
+   didn't come back on, isn't tried again. One that arrives while a task runs, or whose live
+   check couldn't finish (an outage, a usage limit), is tried the next day.
+
+Each outcome (updated, failed, rolled back, needs review) becomes one `update` event. By hand:
+`sudo systemctl start agent-gateway-update`, then `journalctl -u agent-gateway-update`. The
+previous version stays in `venvs/` for going back (`ln -sfn venvs/<old> current`, restart).
+Raising the pin in `requirements.txt` and re-running the installer also moves forward; it never
+moves back.
 
 ## Tools (MCP, stateless streamable HTTP at `/mcp`)
 
@@ -85,7 +111,7 @@ task names the user it acts for (`dawn_user_id`); a task is visible only to its 
 
 | Tool | Does |
 |---|---|
-| `agents_list` | agents, repos (`name`, `url`, `base`), tasks running and the limit |
+| `agents_list` | agents, Claude Code and SDK versions, repos (`name`, `url`, `base`), tasks running and the limit |
 | `task_start {dawn_user_id, repo, task, budget_usd?, client_ref?}` | new branch `agent/<id>-<slug>` and clone, starts the agent; a repeated `client_ref` returns the task it already started |
 | `task_events {after_seq, wait_s}` | every task's events after `after_seq`, waiting up to 25 s |
 | `task_list {dawn_user_id, task_id?}` | a task with its pending requests, or the user's recent tasks |
@@ -119,6 +145,7 @@ agent's words, never as instructions.
 | `failed` | `error`, `cost_usd` |
 | `cancelled` | (none) |
 | `published` | `pushed` (`owner/repo:branch`), `pr_url` when a PR was opened |
+| `update` | a system event (`task_id` empty, no user): `result` (`updated`, `failed`, `rolled_back`, `needs_review`, `error`), `from`, `to`, `detail`, `time` |
 
 ## Looking at the work yourself
 

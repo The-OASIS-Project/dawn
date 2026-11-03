@@ -1,8 +1,16 @@
 #!/bin/sh
 # Runs as the agent user: pick the credential, then exec Claude Code.  The
-# binary is the one the gateway's Python SDK ships, root-owned, so the agent
-# can't replace the program that sets up its own sandbox.  An
-# ANTHROPIC_API_KEY overrides a `claude login`, so exactly one is used.
+# binary is one the gateway's Python SDK ships, root-owned, so the agent can't
+# replace the program that sets up its own sandbox.  DAWN_AGENT_CLAUDE picks an
+# installed version (the updater's check runs the new one before switching);
+# only binaries under the gateway's venvs are accepted.  An ANTHROPIC_API_KEY
+# overrides a `claude login`, so exactly one credential is used.
+LIB=/usr/local/lib/agent-gateway
+BIN="$(readlink -f "${DAWN_AGENT_CLAUDE:-$LIB/claude}")"
+case "$BIN" in
+   "$LIB"/venvs/*/claude_agent_sdk/_bundled/claude) ;;
+   *) echo "refusing to run $BIN" >&2; exit 1 ;;
+esac
 unset ANTHROPIC_API_KEY
 if [ "$DAWN_AGENT_AUTH" = "api_key" ]; then
    [ -r "$HOME/.config/anthropic.env" ] || { echo "no $HOME/.config/anthropic.env" >&2; exit 1; }
@@ -10,4 +18,4 @@ if [ "$DAWN_AGENT_AUTH" = "api_key" ]; then
    export ANTHROPIC_API_KEY
 fi
 export DISABLE_AUTOUPDATER=1
-exec /usr/local/lib/agent-gateway/claude "$@"
+exec "$BIN" "$@"

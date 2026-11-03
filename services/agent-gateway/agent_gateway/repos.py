@@ -38,12 +38,16 @@ import re
 import tempfile
 import urllib.request
 
-# Mount points the Claude Code sandbox puts over protected paths.  They exist
-# only inside the sandbox, but `git add -A` there would stage them.
-SANDBOX_PLACEHOLDERS = [".bashrc", ".bash_profile", ".zshrc", ".profile", ".gitconfig",
-                        ".mcp.json", ".claude/agents", ".claude/commands", ".claude/hooks",
+# Mount points the Claude Code sandbox puts over protected paths (seen with
+# 2.1.317).  They exist only inside the sandbox, but `git add -A` there would
+# stage them.  A path that is in the repo is unaffected.
+SANDBOX_PLACEHOLDERS = [".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile",
+                        ".gitconfig", ".gitmodules", ".ripgreprc", ".mcp.json", ".idea",
+                        ".vscode", ".claude/agents", ".claude/commands", ".claude/hooks",
                         ".claude/launch.json", ".claude/loop.md", ".claude/output-styles",
-                        ".claude/routines", ".claude/scheduled", ".claude/.cc-writes"]
+                        ".claude/routines", ".claude/scheduled", ".claude/scheduled_tasks.json",
+                        ".claude/settings.local.json", ".claude/skills", ".claude/workflows",
+                        ".claude/.cc-writes"]
 
 SUBJECT_CAP = 200
 

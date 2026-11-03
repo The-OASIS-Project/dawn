@@ -11,7 +11,7 @@ UMask=0077
 WorkingDirectory=/var/lib/dawn-gateway
 Environment="HOME=/var/lib/dawn-gateway"
 EnvironmentFile=/usr/local/etc/agent-gateway/env
-ExecStart=/usr/local/lib/agent-gateway/venv/bin/python -m agent_gateway \
+ExecStart=/usr/local/lib/agent-gateway/current/bin/python -m agent_gateway \
    --config /usr/local/etc/agent-gateway/agent-gateway.toml
 KillMode=control-group
 Restart=on-failure

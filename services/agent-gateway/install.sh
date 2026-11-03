@@ -6,12 +6,13 @@
 #   sudo UV=$(command -v uv) ./install.sh
 #
 # Installs:
-#   /usr/local/lib/agent-gateway/{venv,python,claude,claude-as-agent,claude-agent-exec,
-#                                 agent-gitconfig}
+#   /usr/local/lib/agent-gateway/{venvs/<version>,current,python,bin/python3,uv,
+#                                 update.py,claude,tests,claude-as-agent,
+#                                 claude-agent-exec,agent-gitconfig}
 #   /usr/local/etc/agent-gateway/{agent-gateway.toml,env}   (kept if they exist)
 #   /etc/claude-code/managed-settings.json                  (the agent's fixed rules)
 #   /etc/sudoers.d/agent-gateway                            (dawn may run as dawn-agent)
-#   /etc/systemd/system/agent-gateway.service
+#   /etc/systemd/system/agent-gateway.service, agent-gateway-update.{service,timer}
 #
 # Users: the gateway runs as `dawn` (shared with cbm-mcp); the agent runs as
 # `dawn-agent`, which can't read the gateway's token or DAWN's data.
@@ -69,22 +70,44 @@ install -d -o dawn -g dawn -m 711 "$STATE_DIR"
 install -d -o dawn -g dawn-agent -m 2750 "$STATE_DIR/mirrors"
 
 # --- python + gateway ---------------------------------------------------
-log "Python ${PYTHON_VERSION} venv in ${LIB_DIR}/venv"
-install -d -m 755 "$LIB_DIR"
+# Each Claude Code version (= claude-agent-sdk release) gets its own venv in
+# venvs/<version>; `current` points at the one that runs.  The updater moves
+# it forward after its checks; this installer never moves it back.
+log "Python ${PYTHON_VERSION} and the gateway in ${LIB_DIR}"
+install -d -m 755 "$LIB_DIR" "$LIB_DIR/venvs"
+install -m 755 "$UV" "$LIB_DIR/uv"   # the updater's own copy
 export UV_PYTHON_INSTALL_DIR="$LIB_DIR/python"
-"$UV" python install "$PYTHON_VERSION"
-[ -d "$LIB_DIR/venv" ] || "$UV" venv --python "$PYTHON_VERSION" "$LIB_DIR/venv"
-"$UV" pip install --python "$LIB_DIR/venv/bin/python" -r "$SCRIPT_DIR/requirements.txt"
-SITE="$("$LIB_DIR/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-rm -rf "$SITE/agent_gateway"
+"$LIB_DIR/uv" python install "$PYTHON_VERSION"
+# The updater runs as root on this interpreter alone (no venv, no PyPI code).
+install -d -m 755 "$LIB_DIR/bin"
+ln -sfn "$("$LIB_DIR/uv" python find --managed-python "$PYTHON_VERSION")" "$LIB_DIR/bin/python3"
+PIN="$(sed -n 's/^claude-agent-sdk==//p' "$SCRIPT_DIR/requirements.txt")"
+VER="$PIN"
+if [ -L "$LIB_DIR/current" ]; then
+   CUR="$(basename "$(readlink -f "$LIB_DIR/current")")"
+   [ "$(printf '%s\n%s\n' "$CUR" "$PIN" | sort -V | tail -1)" = "$CUR" ] && VER="$CUR"
+fi
+VENV="$LIB_DIR/venvs/$VER"
+[ -x "$VENV/bin/python" ] || "$LIB_DIR/uv" venv -q --python "$PYTHON_VERSION" "$VENV"
+grep -v -e '^claude-agent-sdk' -e '^#' "$SCRIPT_DIR/requirements.txt" > "$LIB_DIR/.reqs"
+"$LIB_DIR/uv" pip install -q --python "$VENV/bin/python" -r "$LIB_DIR/.reqs" \
+   "claude-agent-sdk==$VER" pytest==9.2.0 httpx==0.28.1
+rm -f "$LIB_DIR/.reqs"
+SITE="$("$VENV/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+rm -rf "$SITE/agent_gateway" "$LIB_DIR/tests"
 cp -r "$SCRIPT_DIR/agent_gateway" "$SITE/"
-find "$SITE/agent_gateway" -name __pycache__ -prune -exec rm -rf {} +
-chmod -R a+rX "$LIB_DIR"
+cp -r "$SCRIPT_DIR/tests" "$LIB_DIR/tests"   # the updater runs them on each new version
+find "$SITE/agent_gateway" "$LIB_DIR/tests" -name __pycache__ -prune -exec rm -rf {} +
+install -m 644 "$SCRIPT_DIR/requirements.txt" "$SCRIPT_DIR/agent-gitconfig" \
+   "$SCRIPT_DIR/agent_gateway/update.py" "$LIB_DIR/"
 install -m 755 "$SCRIPT_DIR/claude-as-agent" "$SCRIPT_DIR/claude-agent-exec" "$LIB_DIR/"
-install -m 644 "$SCRIPT_DIR/agent-gitconfig" "$LIB_DIR/"
-# Claude Code as the SDK ships it: pinned with the SDK, root-owned.
-ln -sf "$SITE/claude_agent_sdk/_bundled/claude" "$LIB_DIR/claude"
+chmod -R a+rX "$LIB_DIR"
+ln -sfn "venvs/$VER" "$LIB_DIR/current"
+# Claude Code as the SDK ships it, root-owned; through `current`, so a switch
+# moves it too.
+ln -sfn "current/${SITE#"$VENV"/}/claude_agent_sdk/_bundled/claude" "$LIB_DIR/claude"
 "$LIB_DIR/claude" --version >/dev/null || error "the SDK's bundled claude doesn't run"
+log "Claude Code $("$LIB_DIR/claude" --version | cut -d' ' -f1) (claude-agent-sdk $VER)"
 
 # --- the agent's fixed rules ---------------------------------------------
 install -d -m 755 /etc/claude-code
@@ -120,9 +143,11 @@ if [ ! -f "$ETC_DIR/env" ]; then
 fi
 
 # --- service ---------------------------------------------------------------
-install -m 644 "$SCRIPT_DIR/agent-gateway.service" /etc/systemd/system/
+install -m 644 "$SCRIPT_DIR/agent-gateway.service" "$SCRIPT_DIR/agent-gateway-update.service" \
+   "$SCRIPT_DIR/agent-gateway-update.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable agent-gateway.service >/dev/null
+systemctl enable --now agent-gateway-update.timer >/dev/null
 
 if [ ! -f "$AGENT_HOME/.claude/.credentials.json" ] && \
    [ ! -f "$AGENT_HOME/.config/anthropic.env" ]; then

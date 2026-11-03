@@ -24,6 +24,11 @@ import functools
 import hmac
 import json
 
+import os
+
+from importlib.metadata import version as package_version
+
+from claude_agent_sdk._cli_version import __cli_version__
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
@@ -32,6 +37,7 @@ from starlette.responses import JSONResponse
 from .repos import GitError
 
 MAX_WAIT_S = 25
+UPDATE_STATUS = "update-status.json"
 
 
 def public(t: dict) -> dict:
@@ -59,12 +65,27 @@ def build(runner, cfg) -> MCPServer:
    mcp = MCPServer("agent-gateway", instructions=(
       "Runs coding agents for DAWN.  Every call names the DAWN user it acts for."))
    store = runner.store
+
+   def report_update() -> None:
+      """The updater (root, from its timer) leaves its result in a file; each
+      new result becomes one system event."""
+      path = os.path.join(cfg.state_dir, UPDATE_STATUS)
+      try:
+         with open(path) as f:
+            raw = f.read()
+         status = json.loads(raw)
+      except (OSError, ValueError):
+         return
+      if store.meta("update_reported") != raw:
+         store.set_meta("update_reported", raw)
+         store.add_event("", "update", **{k: str(v)[:500] for k, v in status.items()})
    tool = lambda fn: mcp.tool()(explained(fn))  # noqa: E731
 
    @tool
    async def agents_list() -> dict:
       """Agents this gateway runs and the repos it may work in (name, url, base)."""
-      return {"agents": ["claude"],
+      return {"agents": ["claude"], "claude_code": __cli_version__,
+              "sdk": package_version("claude-agent-sdk"),
               "repos": [{"name": n, **r} for n, r in sorted(cfg.repos.items())],
               "running": len(runner.running), "max_concurrent": cfg.max_concurrent_tasks}
 
@@ -80,7 +101,9 @@ def build(runner, cfg) -> MCPServer:
 
    @tool
    async def task_events(after_seq: int = 0, wait_s: float = 20) -> dict:
-      """Events after `after_seq`, every task; waits up to `wait_s` (max 25) for one."""
+      """Events after `after_seq`, every task, plus system events (no task_id); waits up
+      to `wait_s` (max 25) for one."""
+      report_update()
       events = await store.wait_events(after_seq, min(max(wait_s, 0), MAX_WAIT_S))
       return {"events": events, "last_seq": events[-1]["seq"] if events else after_seq}
 

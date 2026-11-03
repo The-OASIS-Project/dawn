@@ -37,6 +37,7 @@ class Config:
    work_dir: str = "/var/lib/dawn-agent/work"
    claude_cli: str = f"{LIB}/claude-as-agent"
    agent_gitconfig: str = f"{LIB}/agent-gitconfig"
+   claude_bin: str | None = None  # an installed version to run; None = current
    run_as: list[str] = field(default_factory=lambda: ["sudo", "-n", "-u", "dawn-agent", "-H"])
    auth: str = "subscription"  # or "api_key"
    model: str | None = None

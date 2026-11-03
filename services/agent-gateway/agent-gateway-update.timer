@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily check for a new Claude Code for agent-gateway
+
+[Timer]
+OnCalendar=*-*-* 04:30
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

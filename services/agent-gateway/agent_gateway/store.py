@@ -77,6 +77,10 @@ CREATE TABLE IF NOT EXISTS grants (
    created REAL NOT NULL,
    revoked REAL
 );
+CREATE TABLE IF NOT EXISTS meta (
+   key TEXT PRIMARY KEY,
+   value TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_events_kind_ts ON events(kind, ts);
 """
 
@@ -174,9 +178,10 @@ class Store:
       return cur.lastrowid
 
    def events_after(self, after_seq: int, limit: int = 200) -> list[dict]:
+      # System events (task_id '') have no user.
       rows = self.db.execute(
          "SELECT e.seq, e.task_id, e.ts, e.kind, e.data, t.dawn_user_id FROM events e "
-         "JOIN tasks t ON t.id = e.task_id WHERE e.seq > ? ORDER BY e.seq LIMIT ?",
+         "LEFT JOIN tasks t ON t.id = e.task_id WHERE e.seq > ? ORDER BY e.seq LIMIT ?",
          (after_seq, limit))
       return [{**dict(r), "data": json.loads(r["data"])} for r in rows]
 
@@ -192,6 +197,14 @@ class Store:
             await asyncio.wait_for(self.new_event.wait(), left)
          except TimeoutError:
             pass
+
+   def meta(self, key: str) -> str | None:
+      row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+      return row["value"] if row else None
+
+   def set_meta(self, key: str, value: str) -> None:
+      self.db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+      self.db.commit()
 
    # --- requests ----------------------------------------------------------
 

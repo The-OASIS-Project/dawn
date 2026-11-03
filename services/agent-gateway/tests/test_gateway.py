@@ -20,6 +20,7 @@
 # delivery, git preparation, and the HTTP auth.  Run: pytest tests/
 
 import asyncio
+import json
 import os
 import subprocess
 
@@ -377,3 +378,79 @@ def test_cancel_marks_first_and_is_final(store):
    asyncio.run(r.finish("t1", None))                      # a run ending late
    assert store.task("t1")["status"] == st.CANCELLED
    assert [e["kind"] for e in store.events_after(0)].count("cancelled") == 1
+
+
+def test_update_version_rules():
+   from agent_gateway import update as up
+   assert up.newer("0.2.178", "0.2.177") and not up.newer("0.2.177", "0.2.177")
+   assert up.newer("0.2.1000", "0.2.999")
+   assert up.same_major("0.2.178", "0.2.177")
+   assert not up.same_major("0.3.0", "0.2.177")      # 0.x: a minor bump may break the API
+   assert up.same_major("1.4.0", "1.0.2") and not up.same_major("2.0.0", "1.9.9")
+
+
+def test_update_reports_each_outcome_once(tmp_path, monkeypatch, capsys):
+   from agent_gateway import update as up
+   monkeypatch.setattr(up, "STATE", str(tmp_path))
+   monkeypatch.setattr(up.os, "geteuid", lambda: 0)
+   outcome = {"from": "0.2.177", "to": "0.3.0", "result": "needs_review", "detail": "x"}
+   monkeypatch.setattr(up, "update", lambda: dict(outcome))
+   status = tmp_path / "update-status.json"
+   for _ in range(2):
+      with pytest.raises(SystemExit):
+         up.main()
+   first = status.stat().st_mtime_ns
+   with pytest.raises(SystemExit):
+      up.main()
+   assert status.stat().st_mtime_ns == first          # same outcome: not re-reported
+   monkeypatch.setattr(up, "update", lambda: {"result": "current"})
+   with pytest.raises(SystemExit) as e:
+      up.main()
+   assert e.value.code == 0 and json.loads(status.read_text())["result"] == "needs_review"
+
+
+def test_system_events_have_no_user(store):
+   add_task(store)
+   store.add_event("", "update", result="updated", to="0.2.178")
+   store.add_event("t1", "progress", text="x")
+   ev = store.events_after(0)
+   assert ev[0]["kind"] == "update" and ev[0]["dawn_user_id"] is None
+   assert ev[1]["dawn_user_id"] == 1
+
+
+def test_update_status_write_ignores_planted_links(tmp_path):
+   from agent_gateway import update as up
+   victim = tmp_path / "victim"
+   victim.write_text("keep")
+   status = tmp_path / "update-status.json"
+   for planted in (tmp_path / "update-status.json.new", tmp_path / ".update-status-x"):
+      planted.symlink_to(victim)
+   up.write_status(str(status), {"result": "updated"})
+   assert victim.read_text() == "keep" and not status.is_symlink()
+   assert (status.stat().st_mode & 0o777) == 0o644
+   status.unlink()
+   status.symlink_to(victim)                              # a link is never read
+   assert up.read_status(str(status)) == {}
+   status.unlink()
+   os.mkfifo(status)                                      # nor does a FIFO block it
+   assert up.read_status(str(status)) == {}
+
+
+def test_update_reads_installed_versions_without_running_python(tmp_path):
+   from agent_gateway import update as up
+   site = tmp_path / "v/lib/python3.12/site-packages"
+   (site / "mcp-2.3.0.dist-info").mkdir(parents=True)
+   (site / "claude_agent_sdk-0.2.177.dist-info").mkdir()
+   assert up.site_packages(str(tmp_path / "v")) == str(site)
+   assert up.installed(str(tmp_path / "v")) == ["claude_agent_sdk==0.2.177", "mcp==2.3.0"]
+
+
+def test_canary_needs_positive_refusals():
+   from agent_gateway import canary
+   probe = ("1) curl example\n000\n2) curl loopback\ncurl: (7) Failed to connect\n"
+            "3. creds\nhead: Permission denied\n4) touch\ntouch: Read-only file system\n")
+   for n, (name, words) in zip((2, 3, 4), canary.REFUSED.items()):
+      assert any(w in canary.section(probe, n) for w in words), name
+   assert canary.section("2) skipped, not run\n", 2) == " skipped, not run\n"
+   assert not any(w in canary.section("2) skipped\n", 2)
+                  for w in canary.REFUSED["no loopback"])

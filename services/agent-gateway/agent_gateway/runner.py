@@ -31,6 +31,7 @@ import logging
 import os
 import secrets
 import time
+import warnings
 
 from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient,
                               PermissionResultAllow, PermissionResultDeny, ResultMessage,
@@ -40,6 +41,10 @@ from . import policy, store as st
 from .repos import Repos, slug
 
 log = logging.getLogger("agent-gateway")
+
+# The code-graph read tools are allowed outright on purpose; the SDK warns that
+# the permission callback won't see them.
+warnings.filterwarnings("ignore", message="can_use_tool will not be invoked")
 
 TEXT_CAP = 2000
 PAYLOAD_CAP = 4000
@@ -266,7 +271,8 @@ class Runner:
          max_budget_usd=task["budget_usd"],
          can_use_tool=self.permission_handler(task, granted_tools),
          system_prompt={"type": "preset", "preset": "claude_code", "append": system},
-         env={"DAWN_AGENT_AUTH": self.cfg.auth},
+         env={"DAWN_AGENT_AUTH": self.cfg.auth,
+              **({"DAWN_AGENT_CLAUDE": self.cfg.claude_bin} if self.cfg.claude_bin else {})},
          stderr=lambda line: log.debug("claude[%s]: %s", task["id"], line))
 
    async def run(self, task_id: str, prompt: str) -> None:
