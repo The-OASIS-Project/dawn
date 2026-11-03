@@ -97,7 +97,8 @@ typedef struct {
    char alias[MCP_SERVER_ALIAS_MAX];
    mcp_client_t *client;
    bool in_use;
-   bool interrupted; /* mcp_bridge_interrupt(): no more calls until shutdown */
+   bool interrupted;   /* mcp_bridge_interrupt(): no more calls until shutdown */
+   bool agent_gateway; /* its tools/list was an agent gateway's (kept until shutdown) */
 } mcp_server_entry_t;
 
 static mcp_server_entry_t s_servers[MCP_SERVERS_MAX];
@@ -231,6 +232,8 @@ static char *mcp_bridge_dispatch(mcp_slot_t *slot,
       }
       args = json_object_new_object();
    }
+   /* Who the caller is comes from DAWN, never from a model's arguments. */
+   json_object_object_del(args, "dawn_user_id");
 
 #ifdef DAWN_ENABLE_CODE_PROJECTS
    /* Auto-fill `project` from the session's active project for cbm tools when the
@@ -429,21 +432,57 @@ static bool is_hidden_tool(const char *alias, const char *upstream_name) {
    return false;
 }
 
-/* Register every tool from a connected server's cached tools/list result. */
-static void register_server_tools(const char *alias, mcp_client_t *client) {
-   const char *tools_json = mcp_client_tools_json(client);
+/* The `tools` array of a connected server's tools/list, parsed (caller puts
+ * *root_out), or NULL. */
+static struct json_object *server_tools(mcp_client_t *client, struct json_object **root_out) {
+   *root_out = NULL;
+   char *tools_json = mcp_client_tools_json_dup(client);
    if (tools_json == NULL) {
-      OLOG_WARNING("MCP bridge: server '%s' returned no tools", alias);
-      return;
+      return NULL;
    }
    struct json_object *root = json_tokener_parse(tools_json);
+   free(tools_json);
    struct json_object *tools = NULL;
    if (root == NULL || !json_object_object_get_ex(root, "tools", &tools) ||
        !json_object_is_type(tools, json_type_array)) {
-      OLOG_WARNING("MCP bridge: server '%s' tools/list payload not understood", alias);
       if (root != NULL) {
          json_object_put(root);
       }
+      return NULL;
+   }
+   *root_out = root;
+   return tools;
+}
+
+/* Latch the agent-gateway mark once a connect shows the server is one. */
+static void note_agent_gateway(const char *alias, struct json_object *tools) {
+   if (!mcp_schema_is_agent_gateway(tools)) {
+      return;
+   }
+   pthread_mutex_lock(&s_slots_mutex);
+   for (int i = 0; i < s_server_count; i++) {
+      if (s_servers[i].in_use && strcmp(s_servers[i].alias, alias) == 0) {
+         s_servers[i].agent_gateway = true;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_slots_mutex);
+}
+
+/* Register every tool from a connected server's cached tools/list result. An
+ * agent gateway's tools are used by DAWN's coding-agent code only. */
+static void register_server_tools(const char *alias, mcp_client_t *client) {
+   struct json_object *root = NULL;
+   struct json_object *tools = server_tools(client, &root);
+   if (tools == NULL) {
+      OLOG_WARNING("MCP bridge: server '%s' tools/list missing or not understood", alias);
+      return;
+   }
+   if (mcp_schema_is_agent_gateway(tools)) {
+      note_agent_gateway(alias, tools);
+      OLOG_INFO("MCP bridge: server '%s' is an agent gateway; none of its tools go to the model",
+                alias);
+      json_object_put(root);
       return;
    }
 
@@ -470,6 +509,10 @@ static void register_server_tools(const char *alias, mcp_client_t *client) {
                                     : "";
       struct json_object *schema = NULL;
       json_object_object_get_ex(tool, "inputSchema", &schema);
+      if (mcp_schema_takes_user_id(schema)) {
+         OLOG_WARNING("MCP bridge: not offering '%s/%s' (it takes dawn_user_id)", alias, upstream);
+         continue;
+      }
 
       mcp_param_set_t params = { 0 };
       if (mcp_schema_translate(schema, upstream, &params) != SUCCESS) {
@@ -666,8 +709,8 @@ int mcp_bridge_status_text(char *out, size_t out_len, int *bytes_written_out) {
                state = "connecting";
                break;
          }
-         off += snprintf(out + off, out_len - off, "%s: %s, %d tool(s)\n", s_servers[i].alias,
-                         state, tools);
+         off += snprintf(out + off, out_len - off, "%s: %s, %d tool(s)%s\n", s_servers[i].alias,
+                         state, tools, s_servers[i].agent_gateway ? " (agent gateway)" : "");
       }
    }
    pthread_mutex_unlock(&s_slots_mutex);
@@ -846,4 +889,33 @@ int mcp_bridge_call_tool(const char *server_alias,
                             NULL, result_out);
    json_object_put(p);
    return rc == SUCCESS ? SUCCESS : FAILURE;
+}
+
+bool mcp_bridge_is_agent_gateway(const char *server_alias) {
+   if (server_alias == NULL) {
+      return false;
+   }
+   bool gateway = false;
+   mcp_client_t *client = NULL;
+   pthread_mutex_lock(&s_slots_mutex);
+   for (int i = 0; i < s_server_count; i++) {
+      if (s_servers[i].in_use && strcmp(s_servers[i].alias, server_alias) == 0) {
+         gateway = s_servers[i].agent_gateway;
+         client = s_servers[i].client;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_slots_mutex);
+   /* Not marked yet: whichever path connected it (startup, a call's lazy
+    * reconnect, `mcp reset`), its tools/list is in the client now. */
+   if (!gateway && client != NULL && mcp_client_state(client) == MCP_STATE_CONNECTED) {
+      struct json_object *root = NULL;
+      struct json_object *tools = server_tools(client, &root);
+      if (tools != NULL) {
+         gateway = mcp_schema_is_agent_gateway(tools);
+         note_agent_gateway(server_alias, tools);
+         json_object_put(root);
+      }
+   }
+   return gateway;
 }

@@ -366,7 +366,10 @@ static void test_client_handshake_and_call(void) {
    atomic_store(&s_mode, REPLY_SERVER);
    mcp_client_t *c = client();
    TEST_ASSERT_EQUAL(SUCCESS, mcp_client_connect(c));
-   TEST_ASSERT_NOT_NULL(strstr(mcp_client_tools_json(c), "ping"));
+   char *tools = mcp_client_tools_json_dup(c);
+   TEST_ASSERT_NOT_NULL(tools);
+   TEST_ASSERT_NOT_NULL(strstr(tools, "ping"));
+   free(tools);
    char *out = NULL;
    TEST_ASSERT_EQUAL(SUCCESS,
                      mcp_client_call(c, "tools/call", "{\"name\":\"ping\"}", 0, NULL, NULL, &out));

@@ -710,8 +710,14 @@ int mcp_client_call(mcp_client_t *c,
    return rc;
 }
 
-const char *mcp_client_tools_json(mcp_client_t *c) {
-   return c != NULL ? c->tools_json : NULL;
+char *mcp_client_tools_json_dup(mcp_client_t *c) {
+   if (c == NULL) {
+      return NULL;
+   }
+   pthread_mutex_lock(&c->state_mtx);
+   char *copy = c->tools_json != NULL ? strdup(c->tools_json) : NULL;
+   pthread_mutex_unlock(&c->state_mtx);
+   return copy;
 }
 
 /* --------------------------------------------------------------------------

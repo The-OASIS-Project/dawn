@@ -444,6 +444,8 @@ def test_http_requires_bearer():
       ok = c.post("/mcp", json=body, headers={**hdr, "Authorization": "Bearer " + "s" * 32})
       assert ok.status_code == 200, ok.text
       names = {t["name"] for t in ok.json()["result"]["tools"]}
+      # DAWN knows a gateway by task_start + task_events (mcp_schema_is_agent_gateway) and
+      # then offers none of its tools to a model: renaming either one breaks that.
       assert {"task_start", "task_events", "task_reply", "task_publish", "grant_revoke"} <= names
       auth = {**hdr, "Authorization": "Bearer " + "s" * 32}
       for args in ({"dawn_user_id": 1, "client_ref": "job:9"}, {"dawn_user_id": 1}):

@@ -144,11 +144,10 @@ int mcp_client_call(mcp_client_t *c,
                     char **result_out);
 
 /**
- * @brief Cached tools/list result (JSON array string), or NULL.
- *
- * Valid while the client is CONNECTED. The returned pointer is owned by the
- * client; copy it if it must outlive a reconnect.
+ * @brief A copy of the cached tools/list result, safe against a reconnect on
+ *        another thread replacing it.
+ * @return malloc'd JSON (caller frees), or NULL if none is cached.
  */
-const char *mcp_client_tools_json(mcp_client_t *c);
+char *mcp_client_tools_json_dup(mcp_client_t *c);
 
 #endif /* MCP_CLIENT_H */

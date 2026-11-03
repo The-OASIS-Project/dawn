@@ -72,4 +72,24 @@ void mcp_param_set_free(mcp_param_set_t *out);
  */
 char *mcp_schema_wrap_description(const char *server_alias, const char *raw_description);
 
+/**
+ * @brief Whether a tools/list result is an agent gateway's (services/agent-gateway).
+ *
+ * A gateway lists both `task_start` and `task_events`. Its tools are driven by
+ * DAWN's own coding-agent code and are never offered to a model.
+ *
+ * @param tools The `tools` array of a tools/list result (may be NULL).
+ */
+bool mcp_schema_is_agent_gateway(struct json_object *tools);
+
+/**
+ * @brief Whether a tool's input schema takes `dawn_user_id`.
+ *
+ * Who the caller is comes from DAWN, never from a model, so such a tool is
+ * never offered to a model, whichever server lists it.
+ *
+ * @param input_schema The tool's inputSchema (may be NULL).
+ */
+bool mcp_schema_takes_user_id(struct json_object *input_schema);
+
 #endif /* MCP_BRIDGE_SCHEMA_H */

@@ -179,4 +179,18 @@ int mcp_bridge_ensure_connected(const char *server_alias);
  */
 int mcp_bridge_interrupt(const char *server_alias);
 
+/**
+ * @brief Whether a server is an agent gateway: its tools/list names
+ *        `task_start` and `task_events`.
+ *
+ * Doesn't connect: a server that has never connected reads false (call
+ * mcp_bridge_ensure_connected() first). Once true, it stays true until
+ * shutdown. A server that was a gateway at startup has none of its tools
+ * registered for the model.
+ *
+ * @param server_alias Configured server alias.
+ * @return true if it is a gateway; false if not, never connected, or no such server.
+ */
+bool mcp_bridge_is_agent_gateway(const char *server_alias);
+
 #endif /* MCP_BRIDGE_H */
