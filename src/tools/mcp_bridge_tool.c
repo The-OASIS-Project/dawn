@@ -492,6 +492,16 @@ static void register_server_tools(const char *alias, mcp_client_t *client) {
    OLOG_INFO("MCP bridge: registered %d tool(s) from server '%s'", registered, alias);
 }
 
+/** A server's bearer token from secrets.toml [secrets.mcp], by name, or NULL. */
+static const char *mcp_secret(const char *name) {
+   for (int i = 0; i < g_secrets.mcp_count && i < MCP_SECRETS_MAX; i++) {
+      if (strcmp(g_secrets.mcp[i].name, name) == 0 && g_secrets.mcp[i].token[0] != '\0') {
+         return g_secrets.mcp[i].token;
+      }
+   }
+   return NULL;
+}
+
 int mcp_bridge_init(void) {
    const dawn_config_t *cfg = config_get();
    if (cfg == NULL || !cfg->mcp.enabled) {
@@ -512,8 +522,25 @@ int mcp_bridge_init(void) {
          break;
       }
 
-      /* Bearer token from the env var named in config (Phase 1 source). */
-      const char *token = (srv->auth_bearer_env[0] != '\0') ? getenv(srv->auth_bearer_env) : NULL;
+      /* Bearer token: the env var named in config if it has a value, else the
+       * [secrets.mcp] entry. A configured source that yields nothing is said. */
+      const char *token = NULL;
+      if (srv->auth_bearer_env[0] != '\0') {
+         token = getenv(srv->auth_bearer_env);
+         if (token != NULL && token[0] == '\0') {
+            token = NULL;
+         }
+         if (token == NULL) {
+            OLOG_WARNING("MCP %s: env %s is not set", srv->alias, srv->auth_bearer_env);
+         }
+      }
+      if (token == NULL && srv->auth_bearer_token_secret[0] != '\0') {
+         token = mcp_secret(srv->auth_bearer_token_secret);
+         if (token == NULL) {
+            OLOG_WARNING("MCP %s: no token '%s' in [secrets.mcp] of secrets.toml", srv->alias,
+                         srv->auth_bearer_token_secret);
+         }
+      }
 
       mcp_client_opts_t opts = {
          .name = srv->alias,

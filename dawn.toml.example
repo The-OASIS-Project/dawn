@@ -1243,8 +1243,8 @@ citation_reinforcement_boost = 0.05
 # request_timeout_seconds = 30
 # idle_close_seconds = 600
 # tls_verify = true                  # false requires [mcp] dev_mode = true
-# auth_bearer_env = "CBM_TOKEN"      # env var holding the bearer token (Phase 1 source)
-# # auth_bearer_token_secret = "cbm_token"  # reserved: secrets.toml named-key (not yet wired)
+# auth_bearer_env = "CBM_TOKEN"      # an env var holding the token; when it has no value:
+# auth_bearer_token_secret = "agents"  # the token in secrets.toml [secrets.mcp], by this name
 
 # =============================================================================
 # Code Projects (coding harness) — [code_projects]

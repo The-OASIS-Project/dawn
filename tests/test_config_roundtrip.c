@@ -33,6 +33,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "config/config_env.h"
 #include "config/config_parser.h"
@@ -40,6 +41,7 @@
 #include "test_config_roundtrip_stub.h"
 #include "test_tmp.h"
 #include "unity.h"
+#include "utils/string_utils.h"
 
 static char RT_PATH[TEST_TMP_PATH_MAX];
 
@@ -678,6 +680,58 @@ static void test_control_characters_survive_the_round_trip(void) {
    TEST_ASSERT_EQUAL_STRING(g_written.general.room, g_read.general.room);
 }
 
+/* secrets.toml is rewritten from the struct by a WebUI settings save too: an
+ * entry the writer leaves out is deleted from the user's file.  [secrets.mcp]
+ * holds the tokens the MCP bridge sends, so it must survive the round trip,
+ * and the file stays private even if it was looser before. */
+static void test_mcp_secrets_survive_and_file_stays_private(void) {
+   static secrets_config_t w, r;
+   memset(&w, 0, sizeof(w));
+   memset(&r, 0, sizeof(r));
+   safe_strscpy(w.claude_api_key, "sk-ant-x");
+   w.mcp_count = 2;
+   safe_strscpy(w.mcp[0].name, "agents");
+   safe_strscpy(w.mcp[0].token, "tok-\"quoted\"-1");
+   safe_strscpy(w.mcp[1].name, "agents-lab");
+   safe_strscpy(w.mcp[1].token, "tok2");
+
+   char path[TEST_TMP_PATH_MAX];
+   test_tmp_path(path, sizeof(path), "secrets_rt.toml");
+   FILE *f = fopen(path, "w");
+   fclose(f);
+   chmod(path, 0644);
+   TEST_ASSERT_EQUAL_INT(0, secrets_write_toml(&w, path));
+   struct stat st;
+   TEST_ASSERT_EQUAL_INT(0, stat(path, &st));
+   TEST_ASSERT_EQUAL_INT(0600, st.st_mode & 0777);
+
+   TEST_ASSERT_EQUAL_INT(0, config_parse_secrets(path, &r));
+   TEST_ASSERT_EQUAL_STRING("sk-ant-x", r.claude_api_key);
+   TEST_ASSERT_EQUAL_INT(2, r.mcp_count);
+   TEST_ASSERT_EQUAL_STRING("agents", r.mcp[0].name);
+   TEST_ASSERT_EQUAL_STRING("tok-\"quoted\"-1", r.mcp[0].token);
+   TEST_ASSERT_EQUAL_STRING("agents-lab", r.mcp[1].name);
+   TEST_ASSERT_EQUAL_STRING("tok2", r.mcp[1].token);
+   remove(path);
+}
+
+/* A name that isn't a bare key would be written back as a broken line, and
+ * secrets.toml (every key in it) would then fail to load: such names are
+ * dropped when read. */
+static void test_mcp_secret_names_that_cannot_be_written_are_dropped(void) {
+   static secrets_config_t r;
+   memset(&r, 0, sizeof(r));
+   char path[TEST_TMP_PATH_MAX];
+   test_tmp_path(path, sizeof(path), "secrets_names.toml");
+   FILE *f = fopen(path, "w");
+   fprintf(f, "[secrets.mcp]\n\"\" = \"a\"\n\"x y\" = \"b\"\nok = \"c\"\nn = 3\n");
+   fclose(f);
+   TEST_ASSERT_EQUAL_INT(0, config_parse_secrets(path, &r));
+   TEST_ASSERT_EQUAL_INT(1, r.mcp_count);
+   TEST_ASSERT_EQUAL_STRING("ok", r.mcp[0].name);
+   remove(path);
+}
+
 int main(void) {
    test_tmp_path(RT_PATH, sizeof(RT_PATH), "test_config_roundtrip.toml");
    UNITY_BEGIN();
@@ -707,5 +761,7 @@ int main(void) {
    RUN_TEST(test_written_file_reparses);
    RUN_TEST(test_string_values_cannot_forge_toml);
    RUN_TEST(test_control_characters_survive_the_round_trip);
+   RUN_TEST(test_mcp_secrets_survive_and_file_stays_private);
+   RUN_TEST(test_mcp_secret_names_that_cannot_be_written_are_dropped);
    return UNITY_END();
 }
