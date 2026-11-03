@@ -101,6 +101,15 @@ def bundled_claude(venv: str) -> str:
    return f"{site_packages(venv)}/claude_agent_sdk/_bundled/claude"
 
 
+def tool_result(reply: dict) -> dict:
+   """The value a gateway tool returned: JSON in the result's text content (the
+   MCP library sets structuredContent only for some return types)."""
+   result = reply["result"]
+   if result.get("structuredContent") is not None:
+      return result["structuredContent"]
+   return json.loads(result["content"][0]["text"])
+
+
 def gateway_call(tool: str) -> dict | None:
    """One MCP call to the running gateway, or None if it doesn't answer."""
    try:
@@ -114,16 +123,19 @@ def gateway_call(tool: str) -> dict | None:
          "Authorization": f"Bearer {env['AGENT_GATEWAY_TOKEN'].strip()}",
          "Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
       with urllib.request.urlopen(req, timeout=10) as r:
-         return json.load(r)["result"]["structuredContent"]
+         return tool_result(json.load(r))
    except Exception:
       return None
 
 
 def gateway_idle() -> bool:
+   """True if no task is running; raises if the gateway is up but doesn't answer."""
    if sh("systemctl", "is-active", "--quiet", "agent-gateway").returncode != 0:
       return True
    info = gateway_call("agents_list")
-   return info is not None and info["running"] == 0
+   if info is None:
+      raise RuntimeError("the gateway is running but didn't answer agents_list")
+   return info["running"] == 0
 
 
 def as_gateway_user(*argv: str) -> subprocess.CompletedProcess:

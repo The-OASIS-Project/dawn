@@ -350,6 +350,11 @@ def test_http_requires_bearer():
               "params": {"name": "task_cancel", "arguments": {"dawn_user_id": 1, "task_id": "x"}}}
       res = c.post("/mcp", json=call, headers={**hdr, "Authorization": "Bearer " + "s" * 32})
       assert res.json()["result"]["isError"] and "no such task" in res.text
+      from agent_gateway import update as up
+      listed = up.tool_result(c.post("/mcp", json=body | {"method": "tools/call", "params": {
+         "name": "agents_list", "arguments": {}}}, headers={**hdr, "Authorization": "Bearer "
+                                                            + "s" * 32}).json())
+      assert listed["running"] == 0 and "sdk" in listed    # what the updater reads
       evil = {**hdr, "Authorization": "Bearer " + "s" * 32, "Host": "evil.example"}
       assert c.post("/mcp", json=body, headers=evil).status_code in (400, 403, 421)
 
@@ -454,3 +459,27 @@ def test_canary_needs_positive_refusals():
    assert canary.section("2) skipped, not run\n", 2) == " skipped, not run\n"
    assert not any(w in canary.section("2) skipped\n", 2)
                   for w in canary.REFUSED["no loopback"])
+
+
+def test_every_run_carries_the_whole_floor():
+   from agent_gateway.runner import floor_settings
+   s = json.loads(floor_settings("/var/lib/dawn-agent", "/var/lib/dawn-agent/work",
+                                 "/var/lib/dawn-agent/work/aaaa0001", ["api.anthropic.com"]))
+   fs = s["sandbox"]["filesystem"]
+   assert "/var/lib/dawn-agent/.claude/.credentials.json" in fs["denyRead"]
+   assert "/var/lib/dawn-agent/work" in fs["denyRead"]
+   assert fs["allowRead"] == ["/var/lib/dawn-agent/work/aaaa0001"]
+   assert s["disableAllHooks"] and not s["enableAllProjectMcpServers"]
+   assert s["sandbox"]["allowUnsandboxedCommands"] is False
+   assert "Read(//var/lib/dawn-agent/.claude/.credentials.json)" in s["permissions"]["deny"]
+   assert "Read(//home/**)" in s["permissions"]["deny"]
+   assert "~" not in json.dumps(s)
+
+
+def test_canary_credentials_probe_counts_bytes():
+   from agent_gateway.canary import refused
+   assert refused("no credentials", " wc -c\n0\n[exit=0]\n")            # /dev/null over it
+   assert refused("no credentials", "bash: permission denied\n")
+   assert not refused("no credentials", " wc -c\n412\n[exit=0]\n")     # the real file
+   assert not refused("no credentials", " not run\n")
+   assert not refused("no loopback", " curl: (52) empty reply\n")

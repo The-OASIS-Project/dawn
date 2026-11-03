@@ -57,6 +57,7 @@ something is denied or you need the operator, say so in one line and end your tu
 will be resumed with the answer."""
 
 TEMPLATE = os.path.join(os.path.dirname(__file__), "CLAUDE.template.md")
+FLOOR = os.path.join(os.path.dirname(__file__), "floor.json")
 
 CBM_READ_TOOLS = ("search_graph", "query_graph", "get_architecture", "get_code_snippet",
                   "search_code", "trace_path", "get_graph_schema", "list_projects")
@@ -69,6 +70,25 @@ class Blocked(ValueError):
 
 def clip(text: str, cap: int = TEXT_CAP) -> str:
    return text if len(text) <= cap else text[:cap] + " [...]"
+
+
+def floor_settings(agent_home: str, work_dir: str, worktree: str, domains: list[str]) -> str:
+   """The agent's fixed rules plus this run's pieces, passed with every run.
+   Command-line settings outrank a repo's own and can't be changed by the
+   agent, and a run's sandbox settings would otherwise replace these (seen: a
+   per-run `filesystem` block made the credentials readable again).  `~` is
+   written out so nothing depends on how it is expanded."""
+   home = agent_home.rstrip("/") + "/"
+   with open(FLOOR) as f:
+      s = json.load(f)
+   # A permission rule's absolute path starts with //; a sandbox path is plain.
+   s["permissions"]["deny"] = [r.replace("(~/", "(/" + home) for r in s["permissions"]["deny"]]
+   s["sandbox"]["network"]["allowedDomains"] = domains
+   fs = s["sandbox"]["filesystem"]
+   fs["denyRead"] = [p.replace("~/", home, 1) if p.startswith("~/") else p
+                     for p in fs["denyRead"]] + [work_dir]  # and other tasks' clones
+   fs["allowRead"] = [worktree]
+   return json.dumps(s)
 
 
 def brief(tool: str, ti: dict) -> str:
@@ -262,10 +282,8 @@ class Runner:
          setting_sources=["user", "project"], strict_mcp_config=True, mcp_servers=mcp,
          allowed_tools=[f"mcp__cbm__{t}" for t in CBM_READ_TOOLS] + granted_tools,
          disallowed_tools=[f"mcp__cbm__{t}" for t in CBM_WRITE_TOOLS],
-         settings=json.dumps({"sandbox": {
-            "network": {"allowedDomains": domains},
-            # Hide other tasks' clones from sandboxed commands.
-            "filesystem": {"denyRead": [self.cfg.work_dir], "allowRead": [task["worktree"]]}}}),
+         settings=floor_settings(self.cfg.agent_home, self.cfg.work_dir, task["worktree"],
+                                 domains),
          # The CLI restores a session's running cost on resume, so its budget
          # check is against the whole task: give it the whole budget.
          max_budget_usd=task["budget_usd"],

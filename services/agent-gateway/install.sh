@@ -111,11 +111,12 @@ log "Claude Code $("$LIB_DIR/claude" --version | cut -d' ' -f1) (claude-agent-sd
 
 # --- the agent's fixed rules ---------------------------------------------
 install -d -m 755 /etc/claude-code
-if [ -f "$MANAGED" ] && ! cmp -s "$MANAGED" "$SCRIPT_DIR/managed-settings.json"; then
+# The same rules the gateway passes with every run, as a second layer.
+if [ -f "$MANAGED" ] && ! cmp -s "$MANAGED" "$SCRIPT_DIR/agent_gateway/floor.json"; then
    cp "$MANAGED" "$MANAGED.bak.$(date +%Y%m%d%H%M%S)"
    warn "Replaced $MANAGED (previous copy kept beside it)"
 fi
-install -m 644 "$SCRIPT_DIR/managed-settings.json" "$MANAGED"
+install -m 644 "$SCRIPT_DIR/agent_gateway/floor.json" "$MANAGED"
 
 log "sudoers: dawn may run commands as dawn-agent"
 install -m 440 "$SCRIPT_DIR/agent-gateway.sudoers" /etc/sudoers.d/agent-gateway

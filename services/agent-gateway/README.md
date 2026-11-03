@@ -25,8 +25,10 @@ client (DAWN)  --MCP + bearer token-->  agent-gateway (user dawn, 127.0.0.1:9760
   allowed hosts reachable (no host services, no gateway), and writes only inside the task's
   clone. Read and edit tools are held to the same places by permission rules. Claude Code itself
   is the copy the gateway's Python SDK ships, root-owned, with self-update off.
-- **Fixed rules** live in `/etc/claude-code/managed-settings.json` (root-owned): a repo's own
-  `.claude/` settings can't run hooks, start MCP servers, or turn on bypass mode. A repo's
+- **Fixed rules** (`agent_gateway/floor.json`) are passed by the gateway with every run, which
+  outranks a repo's own settings, and installed as `/etc/claude-code/managed-settings.json` as a
+  second layer: a repo's `.claude/` settings can't run hooks, start MCP servers, or turn on
+  bypass mode, and the sandbox hides the agent's credentials and other tasks' clones. A repo's
   `CLAUDE.md` still applies; a repo without one gets `agent_gateway/CLAUDE.template.md`.
 - **Git the agent can't steer.** A repo's config can make git run programs, and the agent controls
   its clone's config. So the gateway runs git only in its own mirror; the agent's work comes back
@@ -120,8 +122,10 @@ task names the user it acts for (`dawn_user_id`); a task is visible only to its 
 | `task_publish {dawn_user_id, task_id, open_pr?, title?}` | push the branch, open a PR; a second call returns the first result |
 | `grants_list {dawn_user_id}` / `grant_revoke {dawn_user_id, grant_id}` | standing grants |
 
-Task statuses: `working`, `input_required`, `completed`, `failed`, `cancelled`. A refused call
-returns an MCP error whose text says why.
+A tool's answer is a JSON object in the result's first text content
+(`result.content[0].text`); `structuredContent` is not set. A refused call returns
+`isError: true` with the reason as that text. Task statuses: `working`, `input_required`,
+`completed`, `failed`, `cancelled`.
 
 ### Events
 
