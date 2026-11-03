@@ -80,6 +80,26 @@ List the repos the agent may work in under `[[repos]]` in
 To publish, put a fine-grained GitHub token (those repos: Contents and Pull requests,
 read/write) in `AGENT_GATEWAY_GITHUB_TOKEN` in `/usr/local/etc/agent-gateway/env`.
 
+To connect DAWN, add the gateway to `dawn.toml` and its token (`AGENT_GATEWAY_TOKEN` in
+`/usr/local/etc/agent-gateway/env`) to `secrets.toml`, then restart DAWN:
+
+```toml
+# dawn.toml
+[[mcp.server]]
+alias = "agents"
+url = "http://127.0.0.1:9760/mcp"
+transport = "http"
+request_timeout_seconds = 60
+auth_bearer_token_secret = "agents"
+role = "agent_gateway"   # DAWN hands coding tasks only to a server declared so
+
+# secrets.toml
+[secrets.mcp]
+agents = "..."
+```
+
+None of the gateway's tools are offered to the model; DAWN's own code drives them.
+
 ## Keeping Claude Code current
 
 Claude Code ships inside the `claude-agent-sdk` package and its own self-updater is off: the

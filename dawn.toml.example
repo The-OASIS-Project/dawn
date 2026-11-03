@@ -1237,6 +1237,9 @@ citation_reinforcement_boost = 0.05
 # url = "http://127.0.0.1:9760/mcp"
 # transport = "http"
 # request_timeout_seconds = 60
+# role = "agent_gateway"             # services/agent-gateway: Friday hands it coding tasks.
+#                                    # Only a server declared so gets them; none of its
+#                                    # tools are offered to the model.
 # (a bearer token is sent to another host only over https with tls_verify)
 #
 # Settings for either kind:

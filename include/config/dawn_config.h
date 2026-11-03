@@ -1140,6 +1140,7 @@ typedef struct {
  * ============================================================================= */
 #define MCP_SERVERS_MAX 16
 #define MCP_SERVER_ALIAS_MAX 64
+#define MCP_SERVER_ROLE_MAX 24
 
 typedef struct {
    char alias[MCP_SERVER_ALIAS_MAX]; /* server id, used as a tool-name prefix */
@@ -1154,6 +1155,9 @@ typedef struct {
     * [secrets.mcp] entry named by auth_bearer_token_secret. */
    char auth_bearer_env[CONFIG_NAME_MAX];
    char auth_bearer_token_secret[CONFIG_NAME_MAX];
+   /* "" | "agent_gateway": the operator says this server is a coding-agent
+    * gateway, the only kind DAWN sends users' coding tasks to. */
+   char role[MCP_SERVER_ROLE_MAX];
 } mcp_server_config_t;
 
 typedef struct {

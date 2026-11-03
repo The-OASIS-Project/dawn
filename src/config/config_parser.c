@@ -2132,6 +2132,7 @@ static void parse_mcp_server(toml_table_t *table, mcp_server_config_t *server) {
                                              "tls_verify",
                                              "auth_bearer_env",
                                              "auth_bearer_token_secret",
+                                             "role",
                                              NULL };
    warn_unknown_keys(table, "mcp.server", known_keys);
 
@@ -2145,6 +2146,7 @@ static void parse_mcp_server(toml_table_t *table, mcp_server_config_t *server) {
    PARSE_BOOL(table, "tls_verify", server->tls_verify);
    PARSE_STRING(table, "auth_bearer_env", server->auth_bearer_env);
    PARSE_STRING(table, "auth_bearer_token_secret", server->auth_bearer_token_secret);
+   PARSE_STRING(table, "role", server->role);
 }
 
 static void parse_mcp(toml_table_t *table, mcp_config_t *config) {

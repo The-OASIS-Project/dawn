@@ -184,6 +184,43 @@ static void test_jobs_roundtrip(void) {
    TEST_ASSERT_EQUAL_INT(17, g_read.jobs.event_retention_days);
 }
 
+/* --- [[mcp.server]] -------------------------------------------------------- */
+
+static void test_mcp_server_roundtrip(void) {
+   g_written.mcp.server_count = 2;
+   mcp_server_config_t *gw = &g_written.mcp.servers[0];
+   memset(gw, 0, sizeof(*gw));
+   safe_strscpy(gw->alias, "agents");
+   safe_strscpy(gw->url, "http://127.0.0.1:9760/mcp");
+   safe_strscpy(gw->transport, "http");
+   safe_strscpy(gw->capabilities, "read_only");
+   safe_strscpy(gw->auth_bearer_token_secret, "agents");
+   safe_strscpy(gw->role, "agent_gateway");
+   gw->enabled = true;
+   gw->tls_verify = true;
+   gw->request_timeout_seconds = 60;
+   mcp_server_config_t *cbm = &g_written.mcp.servers[1];
+   memset(cbm, 0, sizeof(*cbm));
+   safe_strscpy(cbm->alias, "cbm");
+   safe_strscpy(cbm->url, "http://127.0.0.1:9750/sse");
+   safe_strscpy(cbm->transport, "http+sse");
+   safe_strscpy(cbm->capabilities, "read_only");
+   cbm->enabled = true;
+   cbm->tls_verify = true;
+
+   round_trip();
+
+   TEST_ASSERT_EQUAL_INT(2, g_read.mcp.server_count);
+   TEST_ASSERT_EQUAL_STRING("agents", g_read.mcp.servers[0].alias);
+   TEST_ASSERT_EQUAL_STRING("http", g_read.mcp.servers[0].transport);
+   TEST_ASSERT_EQUAL_STRING("agents", g_read.mcp.servers[0].auth_bearer_token_secret);
+   TEST_ASSERT_EQUAL_STRING("agent_gateway", g_read.mcp.servers[0].role);
+   TEST_ASSERT_EQUAL_INT(60, g_read.mcp.servers[0].request_timeout_seconds);
+   TEST_ASSERT_EQUAL_STRING("cbm", g_read.mcp.servers[1].alias);
+   TEST_ASSERT_EQUAL_STRING("", g_read.mcp.servers[1].role);
+   g_written.mcp.server_count = 0;
+}
+
 /* --- [asr] ----------------------------------------------------------------- */
 
 static void test_asr_roundtrip(void) {
@@ -739,6 +776,7 @@ int main(void) {
    RUN_TEST(test_persona_apostrophe_runs_round_trip);
    RUN_TEST(test_persona_cut_keeps_whole_characters);
    RUN_TEST(test_jobs_roundtrip);
+   RUN_TEST(test_mcp_server_roundtrip);
    RUN_TEST(test_memory_extraction_effort_roundtrip);
    RUN_TEST(test_memory_extraction_effort_clamps);
    RUN_TEST(test_asr_roundtrip);

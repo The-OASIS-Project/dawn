@@ -481,6 +481,11 @@ int config_validate(const dawn_config_t *config,
                    "server '%s' capabilities must be 'dangerous' or 'read_only' (got '%s')",
                    srv->alias, srv->capabilities);
       }
+      if (srv->role[0] != '\0' && strcmp(srv->role, "agent_gateway") != 0) {
+         ADD_ERROR("mcp.server.role",
+                   "server '%s' role must be 'agent_gateway' or unset (got '%s')", srv->alias,
+                   srv->role);
+      }
       /* 0 = use the built-in default (30s request, no idle close). */
       VALIDATE_RANGE_INT("mcp.server.request_timeout_seconds", srv->request_timeout_seconds, 0,
                          3600);

@@ -347,6 +347,27 @@ static void test_mcp_transport_values(void) {
    TEST_ASSERT_TRUE(has_error(n, "mcp.server.transport"));
 }
 
+static void test_mcp_role_values(void) {
+   s_config.mcp.server_count = 1;
+   mcp_server_config_t *srv = &s_config.mcp.servers[0];
+   memset(srv, 0, sizeof(*srv));
+   safe_strscpy(srv->alias, "agents");
+   safe_strscpy(srv->url, "http://127.0.0.1:9760/mcp");
+   safe_strscpy(srv->transport, "http");
+   safe_strscpy(srv->capabilities, "read_only");
+   srv->enabled = true;
+   srv->tls_verify = true;
+   const char *ok[] = { "", "agent_gateway" };
+   for (size_t i = 0; i < 2; i++) {
+      safe_strscpy(srv->role, ok[i]);
+      int n = config_validate(&s_config, NULL, s_errors, MAX_ERRORS);
+      TEST_ASSERT_FALSE_MESSAGE(has_error(n, "mcp.server.role"), ok[i]);
+   }
+   safe_strscpy(srv->role, "gateway");
+   int n = config_validate(&s_config, NULL, s_errors, MAX_ERRORS);
+   TEST_ASSERT_TRUE(has_error(n, "mcp.server.role"));
+}
+
 static void test_local_endpoint_no_http(void) {
    strncpy(s_config.llm.local.endpoint, "ftp://host:8080", sizeof(s_config.llm.local.endpoint) - 1);
    int n = config_validate(&s_config, NULL, s_errors, MAX_ERRORS);
@@ -413,6 +434,7 @@ int main(void) {
 
    RUN_TEST(test_local_endpoint_no_http);
    RUN_TEST(test_mcp_transport_values);
+   RUN_TEST(test_mcp_role_values);
    RUN_TEST(test_local_endpoint_ssrf);
 
    RUN_TEST(test_null_config_returns_zero);

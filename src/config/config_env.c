@@ -1393,6 +1393,7 @@ json_object *config_to_json(const dawn_config_t *config) {
       json_object_object_add(s, "auth_bearer_env", json_object_new_string(srv->auth_bearer_env));
       json_object_object_add(s, "auth_bearer_token_secret",
                              json_object_new_string(srv->auth_bearer_token_secret));
+      json_object_object_add(s, "role", json_object_new_string(srv->role));
       json_object_array_add(mcp_servers, s);
    }
    json_object_object_add(mcp, "servers", mcp_servers);
@@ -2817,6 +2818,9 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       write_toml_string(fp, "auth_bearer_env", srv->auth_bearer_env);
       if (srv->auth_bearer_token_secret[0] != '\0') {
          write_toml_string(fp, "auth_bearer_token_secret", srv->auth_bearer_token_secret);
+      }
+      if (srv->role[0] != '\0') {
+         write_toml_string(fp, "role", srv->role);
       }
    }
 

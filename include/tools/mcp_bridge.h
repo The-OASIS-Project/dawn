@@ -180,16 +180,19 @@ int mcp_bridge_ensure_connected(const char *server_alias);
 int mcp_bridge_interrupt(const char *server_alias);
 
 /**
- * @brief Whether a server is an agent gateway: its tools/list names
- *        `task_start` and `task_events`.
+ * @brief Whether a server is an agent gateway DAWN may hand coding tasks to.
  *
- * Doesn't connect: a server that has never connected reads false (call
- * mcp_bridge_ensure_connected() first). Once true, it stays true until
- * shutdown. A server that was a gateway at startup has none of its tools
- * registered for the model.
+ * True only for a server the operator declared (`role = "agent_gateway"`)
+ * whose tools/list names `task_start` and `task_events`. A server listing them
+ * undeclared never qualifies; one that lists them at startup has none of its
+ * tools registered for the model either. Doesn't connect: a server that has
+ * never connected reads false (call mcp_bridge_ensure_connected() first). Once
+ * true, it stays true until shutdown; while false for a declared, connected
+ * server, each call parses its tools/list again, so a polling caller should
+ * keep its answer until the server reconnects.
  *
  * @param server_alias Configured server alias.
- * @return true if it is a gateway; false if not, never connected, or no such server.
+ * @return true if it is one; false if not, never connected, or no such server.
  */
 bool mcp_bridge_is_agent_gateway(const char *server_alias);
 

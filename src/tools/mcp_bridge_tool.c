@@ -97,8 +97,10 @@ typedef struct {
    char alias[MCP_SERVER_ALIAS_MAX];
    mcp_client_t *client;
    bool in_use;
-   bool interrupted;   /* mcp_bridge_interrupt(): no more calls until shutdown */
-   bool agent_gateway; /* its tools/list was an agent gateway's (kept until shutdown) */
+   bool interrupted;      /* mcp_bridge_interrupt(): no more calls until shutdown */
+   bool declared_gateway; /* config role = "agent_gateway" */
+   bool agent_gateway;    /* declared, and its tools/list was a gateway's (kept) */
+   bool mismatch_warned;  /* declared, but a tools/list wasn't a gateway's: said once */
 } mcp_server_entry_t;
 
 static mcp_server_entry_t s_servers[MCP_SERVERS_MAX];
@@ -454,34 +456,51 @@ static struct json_object *server_tools(mcp_client_t *client, struct json_object
    return tools;
 }
 
-/* Latch the agent-gateway mark once a connect shows the server is one. */
-static void note_agent_gateway(const char *alias, struct json_object *tools) {
-   if (!mcp_schema_is_agent_gateway(tools)) {
-      return;
+/* A server declared a gateway whose tools/list is a gateway's is marked one
+ * (kept until shutdown); a declared server listing other tools is said. */
+static bool note_agent_gateway(const char *alias, bool declared, struct json_object *tools) {
+   if (!declared) {
+      return false;
    }
+   const bool gateway = mcp_schema_is_agent_gateway(tools);
+   bool warn = false;
    pthread_mutex_lock(&s_slots_mutex);
    for (int i = 0; i < s_server_count; i++) {
       if (s_servers[i].in_use && strcmp(s_servers[i].alias, alias) == 0) {
-         s_servers[i].agent_gateway = true;
+         if (gateway) {
+            s_servers[i].agent_gateway = true;
+         } else {
+            warn = !s_servers[i].mismatch_warned;
+            s_servers[i].mismatch_warned = true;
+         }
          break;
       }
    }
    pthread_mutex_unlock(&s_slots_mutex);
+   if (warn) {
+      OLOG_WARNING("MCP bridge: server '%s' is declared an agent gateway but doesn't list "
+                   "task_start and task_events",
+                   alias);
+   }
+   return gateway;
 }
 
-/* Register every tool from a connected server's cached tools/list result. An
- * agent gateway's tools are used by DAWN's coding-agent code only. */
-static void register_server_tools(const char *alias, mcp_client_t *client) {
+/* Register every tool from a connected server's cached tools/list result. A
+ * server that is or looks like an agent gateway has none registered: its tools
+ * are for DAWN's coding-agent code only. */
+static void register_server_tools(const char *alias, bool declared_gateway, mcp_client_t *client) {
    struct json_object *root = NULL;
    struct json_object *tools = server_tools(client, &root);
    if (tools == NULL) {
       OLOG_WARNING("MCP bridge: server '%s' tools/list missing or not understood", alias);
       return;
    }
-   if (mcp_schema_is_agent_gateway(tools)) {
-      note_agent_gateway(alias, tools);
-      OLOG_INFO("MCP bridge: server '%s' is an agent gateway; none of its tools go to the model",
-                alias);
+   if (declared_gateway || mcp_schema_is_agent_gateway(tools)) {
+      const bool gateway = note_agent_gateway(alias, declared_gateway, tools);
+      OLOG_INFO("MCP bridge: server '%s' %s; none of its tools go to the model", alias,
+                gateway            ? "is an agent gateway"
+                : declared_gateway ? "is declared an agent gateway"
+                                   : "looks like an agent gateway but isn't declared one");
       json_object_put(root);
       return;
    }
@@ -614,13 +633,14 @@ int mcp_bridge_init(void) {
       snprintf(s_servers[idx].alias, sizeof(s_servers[idx].alias), "%s", srv->alias);
       s_servers[idx].client = client;
       s_servers[idx].in_use = true;
+      s_servers[idx].declared_gateway = strcmp(srv->role, "agent_gateway") == 0;
       s_server_count++;
 
       /* Register tools only here, at startup, while the registry is still
        * unlocked. A later lazy reconnect cannot add tools (see mcp_server_entry_t
        * note), so this is the one chance to expose this server's LLM tools. */
       if (mcp_client_connect(client) == SUCCESS) {
-         register_server_tools(srv->alias, client);
+         register_server_tools(srv->alias, s_servers[idx].declared_gateway, client);
       } else {
          OLOG_WARNING("MCP bridge: server '%s' (%s) not ready at startup; will connect on "
                       "first use",
@@ -710,7 +730,11 @@ int mcp_bridge_status_text(char *out, size_t out_len, int *bytes_written_out) {
                break;
          }
          off += snprintf(out + off, out_len - off, "%s: %s, %d tool(s)%s\n", s_servers[i].alias,
-                         state, tools, s_servers[i].agent_gateway ? " (agent gateway)" : "");
+                         state, tools,
+                         s_servers[i].agent_gateway ? " (agent gateway)"
+                         : s_servers[i].declared_gateway
+                             ? " (declared agent gateway, not confirmed)"
+                             : "");
       }
    }
    pthread_mutex_unlock(&s_slots_mutex);
@@ -896,24 +920,25 @@ bool mcp_bridge_is_agent_gateway(const char *server_alias) {
       return false;
    }
    bool gateway = false;
+   bool declared = false;
    mcp_client_t *client = NULL;
    pthread_mutex_lock(&s_slots_mutex);
    for (int i = 0; i < s_server_count; i++) {
       if (s_servers[i].in_use && strcmp(s_servers[i].alias, server_alias) == 0) {
          gateway = s_servers[i].agent_gateway;
+         declared = s_servers[i].declared_gateway;
          client = s_servers[i].client;
          break;
       }
    }
    pthread_mutex_unlock(&s_slots_mutex);
-   /* Not marked yet: whichever path connected it (startup, a call's lazy
-    * reconnect, `mcp reset`), its tools/list is in the client now. */
-   if (!gateway && client != NULL && mcp_client_state(client) == MCP_STATE_CONNECTED) {
+   /* Declared but not marked yet: whichever path connected it (startup, a
+    * call's lazy reconnect, `mcp reset`), its tools/list is in the client now. */
+   if (declared && !gateway && client != NULL && mcp_client_state(client) == MCP_STATE_CONNECTED) {
       struct json_object *root = NULL;
       struct json_object *tools = server_tools(client, &root);
       if (tools != NULL) {
-         gateway = mcp_schema_is_agent_gateway(tools);
-         note_agent_gateway(server_alias, tools);
+         gateway = note_agent_gateway(server_alias, declared, tools);
          json_object_put(root);
       }
    }
