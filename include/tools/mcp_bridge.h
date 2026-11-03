@@ -166,4 +166,17 @@ int mcp_bridge_server_connected(const char *server_alias);
  */
 int mcp_bridge_ensure_connected(const char *server_alias);
 
+/**
+ * @brief Abort every call in flight to one server and refuse new ones.
+ *
+ * For a caller that is shutting down and must not wait out a long call (a
+ * long-poll): a blocked mcp_bridge_call_tool() returns with an error within
+ * about a second. Latched until mcp_bridge_shutdown(): later calls to that
+ * server fail at once instead of reconnecting.
+ *
+ * @param server_alias Configured server alias.
+ * @return SUCCESS, or FAILURE if no such server.
+ */
+int mcp_bridge_interrupt(const char *server_alias);
+
 #endif /* MCP_BRIDGE_H */

@@ -44,6 +44,7 @@
 #include "tools/mcp_bridge.h"
 #include "tools/mcp_bridge_schema.h"
 #include "tools/mcp_client.h"
+#include "tools/mcp_transport_http.h"
 #include "tools/mcp_transport_http_sse.h"
 #include "tools/tool_registry.h"
 
@@ -96,6 +97,7 @@ typedef struct {
    char alias[MCP_SERVER_ALIAS_MAX];
    mcp_client_t *client;
    bool in_use;
+   bool interrupted; /* mcp_bridge_interrupt(): no more calls until shutdown */
 } mcp_server_entry_t;
 
 static mcp_server_entry_t s_servers[MCP_SERVERS_MAX];
@@ -515,7 +517,8 @@ int mcp_bridge_init(void) {
 
       mcp_client_opts_t opts = {
          .name = srv->alias,
-         .transport_factory = mcp_transport_http_sse_create,
+         .transport_factory = strcmp(srv->transport, "http") == 0 ? mcp_transport_http_create
+                                                                  : mcp_transport_http_sse_create,
          .url = srv->url,
          .bearer_token = token,
          .tls_verify = srv->tls_verify,
@@ -676,6 +679,29 @@ int mcp_bridge_reconnect(int *connected_out) {
    return SUCCESS;
 }
 
+int mcp_bridge_interrupt(const char *server_alias) {
+   if (server_alias == NULL) {
+      return FAILURE;
+   }
+   mcp_client_t *client = NULL;
+   pthread_mutex_lock(&s_slots_mutex);
+   for (int i = 0; i < s_server_count; i++) {
+      if (s_servers[i].in_use && strcmp(s_servers[i].alias, server_alias) == 0) {
+         s_servers[i].interrupted = true; /* latched: no call reconnects it */
+         client = s_servers[i].client;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_slots_mutex);
+   if (client == NULL) {
+      return FAILURE;
+   }
+   /* Fails every call in flight and stops the transport (an http POST aborts).
+    * The client is freed only by mcp_bridge_shutdown(), so it outlives this. */
+   mcp_client_shutdown(client);
+   return SUCCESS;
+}
+
 int mcp_bridge_ensure_connected(const char *server_alias) {
    if (server_alias == NULL) {
       return FAILURE;
@@ -693,7 +719,8 @@ int mcp_bridge_ensure_connected(const char *server_alias) {
    mcp_client_t *client = NULL;
    pthread_mutex_lock(&s_slots_mutex);
    for (int i = 0; i < s_server_count; i++) {
-      if (s_servers[i].in_use && strcmp(s_servers[i].alias, server_alias) == 0) {
+      if (s_servers[i].in_use && strcmp(s_servers[i].alias, server_alias) == 0 &&
+          !s_servers[i].interrupted) {
          client = s_servers[i].client;
          break;
       }
@@ -763,7 +790,8 @@ int mcp_bridge_call_tool(const char *server_alias,
    mcp_client_t *client = NULL;
    pthread_mutex_lock(&s_slots_mutex);
    for (int i = 0; i < s_server_count; i++) {
-      if (s_servers[i].in_use && strcmp(s_servers[i].alias, server_alias) == 0) {
+      if (s_servers[i].in_use && strcmp(s_servers[i].alias, server_alias) == 0 &&
+          !s_servers[i].interrupted) {
          client = s_servers[i].client;
          break;
       }

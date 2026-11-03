@@ -470,9 +470,10 @@ int config_validate(const dawn_config_t *config,
    /* ===== MCP bridge servers ===== */
    for (int i = 0; i < config->mcp.server_count && i < MCP_SERVERS_MAX; i++) {
       const mcp_server_config_t *srv = &config->mcp.servers[i];
-      if (strcmp(srv->transport, "http+sse") != 0) {
-         ADD_ERROR("mcp.server.transport", "server '%s' transport must be 'http+sse' (got '%s')",
-                   srv->alias, srv->transport);
+      if (strcmp(srv->transport, "http+sse") != 0 && strcmp(srv->transport, "http") != 0) {
+         ADD_ERROR("mcp.server.transport",
+                   "server '%s' transport must be 'http' or 'http+sse' (got '%s')", srv->alias,
+                   srv->transport);
       }
       if (strcmp(srv->capabilities, "dangerous") != 0 &&
           strcmp(srv->capabilities, "read_only") != 0) {

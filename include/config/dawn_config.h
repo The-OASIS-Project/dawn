@@ -1126,8 +1126,8 @@ typedef struct {
 
 typedef struct {
    char alias[MCP_SERVER_ALIAS_MAX]; /* server id, used as a tool-name prefix */
-   char url[CONFIG_PATH_MAX];        /* SSE endpoint URL */
-   char transport[16];               /* "http+sse" (Phase 1) */
+   char url[CONFIG_PATH_MAX];        /* SSE endpoint, or the POST endpoint for "http" */
+   char transport[16];               /* "http+sse" | "http" (stateless POST, JSON replies) */
    bool enabled;
    char capabilities[16]; /* "dangerous" (default) | "read_only" */
    int request_timeout_seconds;

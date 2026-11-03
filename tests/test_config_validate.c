@@ -28,6 +28,7 @@
 #include "config/config_validate.h"
 #include "config/dawn_config.h"
 #include "unity.h"
+#include "utils/string_utils.h"
 
 /* Stub — config_validate.c calls into llm_silent_observe.c for the
  * silent-observe provider enum.  Test exercises range / enum / dep
@@ -316,6 +317,36 @@ static void test_compact_threshold_ordering(void) {
 
 /* ── URL Validation ──────────────────────────────────────────────────────── */
 
+static bool has_error(int n, const char *field) {
+   for (int i = 0; i < n; i++) {
+      if (strcmp(s_errors[i].field, field) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+static void test_mcp_transport_values(void) {
+   s_config.mcp.server_count = 1;
+   mcp_server_config_t *srv = &s_config.mcp.servers[0];
+   memset(srv, 0, sizeof(*srv));
+   safe_strscpy(srv->alias, "agents");
+   safe_strscpy(srv->url, "http://127.0.0.1:9760/mcp");
+   safe_strscpy(srv->capabilities, "read_only");
+   srv->enabled = true;
+   srv->tls_verify = true;
+   srv->request_timeout_seconds = 60;
+   const char *ok[] = { "http", "http+sse" };
+   for (size_t i = 0; i < 2; i++) {
+      safe_strscpy(srv->transport, ok[i]);
+      int n = config_validate(&s_config, NULL, s_errors, MAX_ERRORS);
+      TEST_ASSERT_FALSE_MESSAGE(has_error(n, "mcp.server.transport"), ok[i]);
+   }
+   safe_strscpy(srv->transport, "ws");
+   int n = config_validate(&s_config, NULL, s_errors, MAX_ERRORS);
+   TEST_ASSERT_TRUE(has_error(n, "mcp.server.transport"));
+}
+
 static void test_local_endpoint_no_http(void) {
    strncpy(s_config.llm.local.endpoint, "ftp://host:8080", sizeof(s_config.llm.local.endpoint) - 1);
    int n = config_validate(&s_config, NULL, s_errors, MAX_ERRORS);
@@ -381,6 +412,7 @@ int main(void) {
    RUN_TEST(test_compact_threshold_ordering);
 
    RUN_TEST(test_local_endpoint_no_http);
+   RUN_TEST(test_mcp_transport_values);
    RUN_TEST(test_local_endpoint_ssrf);
 
    RUN_TEST(test_null_config_returns_zero);

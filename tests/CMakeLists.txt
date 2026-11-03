@@ -246,6 +246,16 @@ dawn_add_unit_test(test_mcp_transport
    LIBS    dawn_common unity ${CURL_LIBRARIES} pthread
    LABEL   ci)
 
+# MCP stateless streamable-HTTP transport — against an in-test loopback server
+# that answers each POST as the test asks, so it is CI-safe.
+dawn_add_unit_test(test_mcp_transport_http
+   SOURCES test_mcp_transport_http.c
+           ${SRC_ROOT}/src/tools/mcp_transport_http.c
+           ${SRC_ROOT}/src/tools/mcp_client.c
+           ${SRC_ROOT}/src/tools/mcp_result.c
+   LIBS    dawn_common unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES} pthread
+   LABEL   ci)
+
 # MCP JSON-RPC client — exercised against an in-test auto-responding mock MCP
 # server (HTTP+SSE, no external network), so it is CI-safe.
 dawn_add_unit_test(test_mcp_client
@@ -327,6 +337,7 @@ dawn_add_unit_test(test_mcp_bridge
            ${SRC_ROOT}/src/tools/mcp_bridge_schema.c
            ${SRC_ROOT}/src/tools/mcp_client.c
            ${SRC_ROOT}/src/tools/mcp_result.c
+           ${SRC_ROOT}/src/tools/mcp_transport_http.c
            ${SRC_ROOT}/src/tools/mcp_transport_http_sse.c
            ${SRC_ROOT}/src/llm/sse_parser.c
            ${SRC_ROOT}/src/auth/auth_db_mcp.c
