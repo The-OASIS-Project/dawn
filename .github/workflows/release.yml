@@ -198,8 +198,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          drafts="$(gh api --paginate "repos/$GH_REPO/releases" \
-            --jq '.[] | select(.draft) | .tag_name' | grep -cxF "$GITHUB_REF_NAME" || true)"
+          # Fetched on its own line, so a failed request fails the step instead of counting
+          # as no drafts (which would create a second one).
+          draft_tags="$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.draft) | .tag_name')"
+          drafts="$(grep -cxF "$GITHUB_REF_NAME" <<<"$draft_tags" || true)"
           if [ "$drafts" -gt 1 ]; then
             echo "$drafts drafts for $GITHUB_REF_NAME: delete all but one, then re-run" >&2
             exit 1

@@ -34,10 +34,15 @@ gh attestation verify dawn_<version>+ubuntu24.04_amd64.deb --repo The-OASIS-Proj
 ```
 
 Use the release's own tag for `vX.Y.Z` (a package's version can differ from it). The same command
-checks the satellite files, `dawn_satellite` and `dawn-satellite-launch`. Keep all three options: `--repo` alone would accept an
-attestation from any workflow on any branch, and `--source-ref` ties it to the release tag, which
-can't be moved. To check offline, download `dawn-X.Y.Z.intoto.jsonl` from the same release and add
-`--bundle dawn-X.Y.Z.intoto.jsonl`.
+checks the satellite files, `dawn_satellite` and `dawn-satellite-launch`. Keep all three options:
+`--repo` alone would accept an attestation from any workflow on any branch, and `--source-ref` ties
+it to the release tag, which can't be moved.
+
+To check on a machine without internet access, prepare two files while online: download
+`dawn-X.Y.Z.intoto.jsonl` from the same release, and save Sigstore's trust roots with
+`gh attestation trusted-root > trusted_root.jsonl`. Then add
+`--bundle dawn-X.Y.Z.intoto.jsonl --custom-trusted-root trusted_root.jsonl` to the command. Save the
+trust roots again before checking a newer release: Sigstore rotates its keys.
 
 ### Moving from a source install
 
