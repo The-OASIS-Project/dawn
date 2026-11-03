@@ -1,0 +1,48 @@
+# agent-gateway configuration.  Secrets are NOT here: AGENT_GATEWAY_TOKEN (the
+# bearer DAWN sends, 32+ characters) and AGENT_GATEWAY_GITHUB_TOKEN (push + PR)
+# go in /usr/local/etc/agent-gateway/env, mode 600, owner dawn.
+
+[server]
+host = "127.0.0.1"
+port = 9760
+
+[paths]
+state_dir = "/var/lib/dawn-gateway"            # the gateway's database
+mirrors_dir = "/var/lib/dawn-gateway/mirrors"  # gateway-owned copy of each repo
+agent_home = "/var/lib/dawn-agent"
+work_dir = "/var/lib/dawn-agent/work"          # one clone per task
+
+[agent]
+# "subscription": `claude login` as dawn-agent, counted against your plan.
+# "api_key": the key in /var/lib/dawn-agent/.config/anthropic.env
+#   (ANTHROPIC_API_KEY=..., mode 600).  See the README for which to pick.
+auth = "subscription"
+# model = "claude-opus-5-5"
+# Who the agent's commits are by.  Set on every clone, so the agent never has
+# to pick one (it would otherwise use the logged-in account's name and email).
+git_name = "DAWN agent"
+git_email = "dawn-agent@localhost"
+
+[limits]
+task_budget_usd = 5.0        # per task; a task may ask for up to 4x
+daily_budget_usd = 25.0      # all tasks, rolling 24 hours (the gateway's estimate)
+max_concurrent_tasks = 1     # each task is a Node process plus whatever it builds
+keep_worktrees_days = 14     # finished tasks' clones are removed after this
+                             # (their branches stay in the mirror)
+
+[network]
+# Hosts every task may reach.  Others ask the operator, who can grant them
+# for the task, the repo, or always.  Any reachable host that accepts uploads
+# (a package registry, the Anthropic API itself) is a way out for data the
+# agent can read: the sandbox limits where, not whether.
+default_domains = ["api.anthropic.com", "pypi.org", "files.pythonhosted.org",
+                   "registry.npmjs.org", "crates.io", "static.crates.io", "index.crates.io"]
+
+# Code graph for the agent (read tools only), via MCP outside the sandbox.
+[cbm]
+url = "http://127.0.0.1:9750/sse"
+
+[[repos]]
+name = "dawn"
+url = "https://github.com/The-OASIS-Project/dawn.git"
+base = "main"
