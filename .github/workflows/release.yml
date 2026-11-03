@@ -6,6 +6,11 @@
 # .so.19 / glibc); an x86 build won't load on the Pi.  We use a GitHub-hosted
 # arm64 runner so build-pi.sh runs natively (no qemu) in the trixie container.
 #
+# Provenance: the publish job attests the binaries and .debs this workflow built (GitHub's signed
+# record of which workflow, from which commit, built those exact files) and attaches it as
+# dawn-<version>.intoto.jsonl.  Publishing goes draft first, then files, then public, so it works
+# with GitHub's immutable releases.  Verifying a release: docs/INSTALL_UBUNTU_PACKAGE.md.
+#
 # OTA model: these binaries ship UNSIGNED.  Each operator runs `ota-keytool
 # keygen`, provisions their own pubkey at /etc/dawn/ota_pubkey, and signs
 # releases for their own fleet.  The published SHA256SUMS is the publisher-
@@ -110,6 +115,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write # create the release + upload assets
+      id-token: write # sign the attestation (GitHub's OIDC token)
+      attestations: write # store the attestation
     steps:
       - name: Checkout (Dockerfile only — the pinned fork commits)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -139,13 +146,15 @@ jobs:
         # A tag cut without bumping a component's version (include/version.h,
         # satellite_version.h), or a re-run of this tag after its packages were
         # uploaded, would republish that version with new contents, and apt would
-        # treat everyone's upgrade as already done.
+        # treat everyone's upgrade as already done.  A draft left by a failed run
+        # doesn't count: Publish finishes it.
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          published="$(gh api --paginate "repos/$GH_REPO/releases" --jq '.[].assets[].name')"
+          published="$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.draft | not) | .assets[].name')"
           for f in dist/*.deb; do
             if grep -qxF "${f##*/}" <<<"$published"; then
               echo "${f##*/} is already published: bump that component's version" >&2
@@ -159,13 +168,47 @@ jobs:
           ( cd dist && sha256sum * > SHA256SUMS )
           echo "--- release artifacts ---"; ls -l dist; cat dist/SHA256SUMS
 
+      - name: Attest the build
+        # What this workflow built; not the espeak-ng source, which is downloaded.
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.deb
+            dist/dawn_satellite
+            dist/dawn-satellite-launch
+
+      - name: The provenance as a release file
+        # One Sigstore bundle per line (the format `gh attestation download` writes), for
+        # `gh attestation verify --bundle`.  After Checksums: SHA256SUMS covers the payloads,
+        # the attestation verifies itself.
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          jq -c . "$BUNDLE" > "dist/dawn-${GITHUB_REF_NAME#v}.intoto.jsonl"
+
       - name: Publish
+        # A draft first, then the files, then publish: a release is never visible half-uploaded,
+        # and this works with GitHub's immutable releases (files can only be added to a draft).
+        # Re-runnable: a draft a failed run left for this tag is reused and its files replaced.
+        # A tag with a pre-release part (v2.1.0-rc.1) publishes as a pre-release.
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Create the release if it doesn't exist yet; otherwise add to it (the check
-          # above stops a .deb from being replaced).
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes dist/* \
-            || gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          drafts="$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.draft) | .tag_name' | grep -cxF "$GITHUB_REF_NAME" || true)"
+          if [ "$drafts" -gt 1 ]; then
+            echo "$drafts drafts for $GITHUB_REF_NAME: delete all but one, then re-run" >&2
+            exit 1
+          fi
+          pre=()
+          case "$GITHUB_REF_NAME" in *-*) pre=(--prerelease) ;; esac
+          if [ "$drafts" -eq 0 ]; then
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag "${pre[@]}" \
+              --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false
