@@ -1012,6 +1012,10 @@ _Static_assert(OUTSIDE_RESEARCH == 3 && OUTSIDE_DOCUMENT == 5 && OUTSIDE_OTHER =
 #define MEMORY_CONSOLIDATION_OPS_SOURCE_COL \
    "source_conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE"
 
+/* Another: who wrote an op's reason, 'model' or 'dawn' (NULL: no reason, or a
+ * row recorded before it was kept).  A client shows the model's as its words. */
+#define MEMORY_CONSOLIDATION_OPS_REASON_BY_COL "reason_by TEXT"
+
 /* Indexes added to the v113 tables after v113 shipped: the record's ops by
  * relation (a relation forgotten removes its ops) and its batches by age (the
  * nightly prune).  Also created on their own for a database already at v113. */
@@ -1074,7 +1078,8 @@ _Static_assert(OUTSIDE_RESEARCH == 3 && OUTSIDE_DOCUMENT == 5 && OUTSIDE_OTHER =
    "   status TEXT NOT NULL DEFAULT 'applied',"                                             \
    "   created_at INTEGER NOT NULL,"                                                        \
    "   undone_at INTEGER,"                                                                  \
-   "   " MEMORY_CONSOLIDATION_OPS_SOURCE_COL ");"                                           \
+   "   " MEMORY_CONSOLIDATION_OPS_SOURCE_COL ","                                            \
+   "   " MEMORY_CONSOLIDATION_OPS_REASON_BY_COL ");"                                        \
    "CREATE INDEX IF NOT EXISTS idx_mco_batch ON memory_consolidation_ops(batch_id, seq);"   \
    "CREATE INDEX IF NOT EXISTS idx_mco_fact ON memory_consolidation_ops(user_id, fact_id) " \
    "WHERE fact_id IS NOT NULL;"                                                             \

@@ -3539,6 +3539,15 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       }
       sqlite3_free(err);
       err = NULL;
+      if (!auth_db_column_exists(s_db.db, "memory_consolidation_ops", "reason_by") &&
+          sqlite3_exec(s_db.db,
+                       "ALTER TABLE memory_consolidation_ops ADD "
+                       "COLUMN " MEMORY_CONSOLIDATION_OPS_REASON_BY_COL,
+                       NULL, NULL, &err) != SQLITE_OK) {
+         OLOG_WARNING("auth_db: consolidation record column: %s", err ? err : "?");
+      }
+      sqlite3_free(err);
+      err = NULL;
       if (sqlite3_exec(s_db.db,
                        MEMORY_CONSOLIDATION_LATER_INDEXES_SQL MEMORY_CONSOLIDATION_SOURCE_INDEX_SQL,
                        NULL, NULL, &err) != SQLITE_OK) {

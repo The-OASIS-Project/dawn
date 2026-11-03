@@ -44,6 +44,7 @@
 #include "memory/memory_db_alias_internal.h"
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_db_entities.h"
+#include "memory/memory_db_internal.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_types.h"
 #include "utils/string_utils.h"
@@ -630,106 +631,92 @@ link_fail:
    return result_rc;
 }
 
-int memory_db_entity_alias_unlink(int user_id, int64_t link_id, const char *unlink_reason) {
-   if (link_id <= 0)
-      return MEMORY_DB_FAILURE;
-   const char *reason = (unlink_reason && *unlink_reason) ? unlink_reason : "split-by-operator";
-
-   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
-
+int memory_db_internal_alias_unlink_locked(int user_id,
+                                           int64_t link_id,
+                                           const char *reason,
+                                           int64_t *source_out) {
+   *source_out = 0;
    /* Load + validate the link row.  Refuse if hard-merged or already unlinked. */
    sqlite3_stmt *load = NULL;
    if (sqlite3_prepare_v2(s_db.db,
                           "SELECT source_entity_id, link_kind, unlinked_at "
                           "FROM memory_entity_aliases WHERE id = ? AND user_id = ?",
                           -1, &load, NULL) != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;
    }
    sqlite3_bind_int64(load, 1, link_id);
    sqlite3_bind_int(load, 2, user_id);
-
    int rc = sqlite3_step(load);
-   if (rc == SQLITE_DONE) {
-      sqlite3_finalize(load);
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_NOT_FOUND;
-   }
    if (rc != SQLITE_ROW) {
       sqlite3_finalize(load);
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
+      return rc == SQLITE_DONE ? MEMORY_DB_NOT_FOUND : MEMORY_DB_FAILURE;
    }
-   int64_t source_id = sqlite3_column_int64(load, 0);
+   const int64_t source_id = sqlite3_column_int64(load, 0);
    const unsigned char *kind = sqlite3_column_text(load, 1);
-   bool is_hard = kind && strcmp((const char *)kind, "hard") == 0;
-   bool already_unlinked = sqlite3_column_type(load, 2) != SQLITE_NULL;
+   const bool is_hard = kind && strcmp((const char *)kind, "hard") == 0;
+   const bool already_unlinked = sqlite3_column_type(load, 2) != SQLITE_NULL;
    sqlite3_finalize(load);
-
    if (is_hard) {
-      AUTH_DB_UNLOCK();
       OLOG_WARNING("memory_db_alias: refusing to split hard-merged link %lld", (long long)link_id);
       return MEMORY_DB_FAILURE;
    }
    if (already_unlinked) {
-      AUTH_DB_UNLOCK();
       return MEMORY_DB_NOT_FOUND;
    }
+   /* The split: the source's canonical_id cleared, the audit row stamped. */
+   sqlite3_stmt *clr = NULL;
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE memory_entities SET canonical_id = NULL WHERE id = ? AND "
+                           "user_id = ?",
+                           -1, &clr, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int64(clr, 1, source_id);
+      sqlite3_bind_int(clr, 2, user_id);
+      rc = sqlite3_step(clr);
+   }
+   sqlite3_finalize(clr);
+   if (rc != SQLITE_DONE) {
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_stmt *audit = NULL;
+   rc = sqlite3_prepare_v2(s_db.db,
+                           "UPDATE memory_entity_aliases SET unlinked_at = strftime('%s','now'), "
+                           "       unlink_reason = ? WHERE id = ?",
+                           -1, &audit, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_text(audit, 1, reason, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64(audit, 2, link_id);
+      rc = sqlite3_step(audit);
+   }
+   sqlite3_finalize(audit);
+   if (rc != SQLITE_DONE) {
+      return MEMORY_DB_FAILURE;
+   }
+   *source_out = source_id;
+   return MEMORY_DB_SUCCESS;
+}
 
-   /* Atomic split: UPDATE memory_entities.canonical_id = NULL + UPDATE
-    * memory_entity_aliases SET unlinked_at, unlink_reason. */
-   char *errmsg = NULL;
-   if (sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, &errmsg) != SQLITE_OK) {
-      OLOG_ERROR("memory_db_alias: BEGIN IMMEDIATE failed: %s", errmsg ? errmsg : "unknown");
-      sqlite3_free(errmsg);
+int memory_db_entity_alias_unlink(int user_id, int64_t link_id, const char *unlink_reason) {
+   if (link_id <= 0)
+      return MEMORY_DB_FAILURE;
+   const char *reason = (unlink_reason && *unlink_reason) ? unlink_reason : "split-by-operator";
+
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   if (auth_db_txn_begin_locked("memory_db_alias: split") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
       return MEMORY_DB_FAILURE;
    }
-
-   int result_rc = MEMORY_DB_SUCCESS;
-
-   sqlite3_stmt *clr = NULL;
-   if (sqlite3_prepare_v2(s_db.db,
-                          "UPDATE memory_entities SET canonical_id = NULL "
-                          "WHERE id = ? AND user_id = ?",
-                          -1, &clr, NULL) != SQLITE_OK) {
+   int64_t source_id = 0;
+   int result_rc = memory_db_internal_alias_unlink_locked(user_id, link_id, reason, &source_id);
+   if (auth_db_txn_end_locked(result_rc == MEMORY_DB_SUCCESS ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
+                              "memory_db_alias: split") != AUTH_DB_SUCCESS &&
+       result_rc == MEMORY_DB_SUCCESS) {
       result_rc = MEMORY_DB_FAILURE;
-      goto split_fail;
    }
-   sqlite3_bind_int64(clr, 1, source_id);
-   sqlite3_bind_int(clr, 2, user_id);
-   if (sqlite3_step(clr) != SQLITE_DONE) {
-      sqlite3_finalize(clr);
-      result_rc = MEMORY_DB_FAILURE;
-      goto split_fail;
-   }
-   sqlite3_finalize(clr);
-
-   sqlite3_stmt *audit = NULL;
-   if (sqlite3_prepare_v2(s_db.db,
-                          "UPDATE memory_entity_aliases SET unlinked_at = strftime('%s','now'), "
-                          "       unlink_reason = ? WHERE id = ?",
-                          -1, &audit, NULL) != SQLITE_OK) {
-      result_rc = MEMORY_DB_FAILURE;
-      goto split_fail;
-   }
-   sqlite3_bind_text(audit, 1, reason, -1, SQLITE_TRANSIENT);
-   sqlite3_bind_int64(audit, 2, link_id);
-   if (sqlite3_step(audit) != SQLITE_DONE) {
-      sqlite3_finalize(audit);
-      result_rc = MEMORY_DB_FAILURE;
-      goto split_fail;
-   }
-   sqlite3_finalize(audit);
-
-   if (sqlite3_exec(s_db.db, "COMMIT", NULL, NULL, &errmsg) != SQLITE_OK) {
-      OLOG_ERROR("memory_db_alias: COMMIT failed: %s", errmsg ? errmsg : "unknown");
-      sqlite3_free(errmsg);
-      result_rc = MEMORY_DB_FAILURE;
-      goto split_fail;
-   }
-
    AUTH_DB_UNLOCK();
+   if (result_rc != MEMORY_DB_SUCCESS) {
+      return result_rc;
+   }
 
    /* Post-commit cache invalidation; same contract as alias_link. */
    memory_embeddings_invalidate_entity_cache_for_user(user_id);
@@ -737,11 +724,6 @@ int memory_db_entity_alias_unlink(int user_id, int64_t link_id, const char *unli
    OLOG_INFO("memory_db_alias: split link %lld (source=%lld, reason=%s)", (long long)link_id,
              (long long)source_id, reason);
    return MEMORY_DB_SUCCESS;
-
-split_fail:
-   sqlite3_exec(s_db.db, "ROLLBACK", NULL, NULL, NULL);
-   AUTH_DB_UNLOCK();
-   return result_rc;
 }
 
 /* =============================================================================

@@ -68,6 +68,15 @@ static char *call_model(struct json_object *history,
    return reply;
 }
 
+/* A no-op unless the WebUI's strong override is linked in. */
+__attribute__((weak)) void memory_consolidation_batch_notify(int user_id,
+                                                             int64_t conversation_id,
+                                                             int64_t batch_id) {
+   (void)user_id;
+   (void)conversation_id;
+   (void)batch_id;
+}
+
 static memory_consolidate_model_fn s_model = call_model;
 static int s_samples = MEMORY_CONSOLIDATE_SAMPLES;
 
@@ -121,6 +130,8 @@ const char *memory_consolidate_stop_name(memory_consolidate_stop_t stop) {
          return "cancelled";
       case MEMORY_CONSOLIDATE_TOKENS:
          return "tokens";
+      case MEMORY_CONSOLIDATE_FULL:
+         return "full";
       case MEMORY_CONSOLIDATE_GO_ON:
          break;
    }
@@ -923,6 +934,18 @@ int memory_consolidate_batch(const memory_consolidate_input_t *in,
    if (res->rounds == 0) {
       mc_link_unjudged(b);
    }
+   if (b->full) {
+      /* Recorded to its cap: what it couldn't record wasn't applied (a set-aside
+       * candidate stays open for the next batch). */
+      OLOG_WARNING("memory_consolidate: conv %lld: batch %lld is full (%d ops); the rest isn't "
+                   "applied",
+                   (long long)in->conversation_id, (long long)b->batch_id,
+                   MEMORY_CONSOLIDATION_OPS_MAX);
+      res->stop = MEMORY_CONSOLIDATE_FULL;
+      res->partial = true;
+      memory_db_consolidation_batch_set_stop(b->batch_id, in->user_id, "agent_partial",
+                                             memory_consolidate_stop_name(MEMORY_CONSOLIDATE_FULL));
+   }
 #ifdef ENABLE_WEBUI
    if (res->proposed > 0) {
       webui_broadcast_memory_proposals_changed(in->user_id);
@@ -938,6 +961,9 @@ int memory_consolidate_batch(const memory_consolidate_input_t *in,
    if (summary_id > 0 && b->batch_id > 0) {
       memory_db_consolidation_batch_set_summary(b->batch_id, in->user_id, summary_id);
    }
+   if (b->batch_id > 0) {
+      memory_consolidation_batch_notify(in->user_id, in->conversation_id, b->batch_id);
+   }
    res->batch_id = b->batch_id;
    OLOG_INFO("memory_consolidate: conv %lld: stop=%s%s rounds=%d calls=%d input=%d candidates=%d "
              "triage=%d/%d/%d to_model=%d added=%d reinforced=%d merged=%d replaced=%d closed=%d "
@@ -949,4 +975,130 @@ int memory_consolidate_batch(const memory_consolidate_input_t *in,
              res->linked, res->proposed, res->deferred, res->dropped, res->refused, res->rejected);
    batch_free(b);
    return SUCCESS;
+}
+
+/* =============================================================================
+ * Keep
+ * ============================================================================= */
+
+/* The kept candidate into b->d[0], as load_deferred reads one (FAILURE: it
+ * can't be stored: unreadable, or about the assistant). */
+static int keep_candidate(mc_batch_t *b, const memory_consolidation_keep_t *k) {
+   mc_deferred_t *d = &b->d[0];
+   memset(d, 0, sizeof(*d));
+   struct json_object *fact = json_tokener_parse(k->candidate);
+   if (!fact || !json_object_is_type(fact, json_type_object)) {
+      json_object_put(fact);
+      return FAILURE;
+   }
+   struct json_object *arr = json_object_new_array();
+   json_object_array_add(arr, fact);
+   d->root = json_object_new_object();
+   json_object_object_add(d->root, "facts", arr);
+   b->n_d = 1; /* freed with the batch from here */
+   if (memory_candidates_parse(d->root, b->in->user_id, &d->c) != SUCCESS ||
+       (memory_candidates_drop_assistant(&d->c, b->ai_name), d->c.count != 1)) {
+      return FAILURE;
+   }
+   d->outside = k->outside;
+   d->prov = *b->in->prov;
+   d->taken = true; /* its status is the Keep's to change */
+   d->disp_op = -1;
+   return SUCCESS;
+}
+
+/* keep_known(): nothing decided yet; store the candidate. */
+#define KEEP_STORE (-2)
+
+/* A Keep decided before any write: the batch's record full
+ * (MEMORY_CONSOLIDATION_FULL), or the same text a current fact already says
+ * (the op kept, pointing at it: SUCCESS, nothing reinforced, so nothing a
+ * failed record would have to take back).  KEEP_STORE to store it. */
+static int keep_known(mc_batch_t *b, int64_t *fact_id_out) {
+   const int user_id = b->in->user_id;
+   int room = 0;
+   if (memory_db_consolidation_batch_room(user_id, b->batch_id, &room) != MEMORY_DB_SUCCESS) {
+      return FAILURE;
+   }
+   if (room <= 0) {
+      return MEMORY_CONSOLIDATION_FULL;
+   }
+   int64_t same = 0;
+   memory_fact_t f;
+   if (memory_db_fact_find_exact(user_id, b->d[0].c.items[0].text, &same) != MEMORY_DB_SUCCESS ||
+       memory_db_fact_get(same, user_id, &f) != MEMORY_DB_SUCCESS || f.superseded_by != 0) {
+      return KEEP_STORE;
+   }
+   if (memory_db_consolidation_keep_record(user_id, b->batch_id, b->keep_op_id, NULL, NULL) !=
+       MEMORY_DB_SUCCESS) {
+      return FAILURE;
+   }
+   *fact_id_out = same;
+   return SUCCESS;
+}
+
+int memory_consolidate_keep(int user_id, int64_t batch_id, int64_t op_id, int64_t *fact_id_out) {
+   *fact_id_out = 0;
+   memory_consolidation_keep_t k;
+   int rc = memory_db_consolidation_keep_get(user_id, batch_id, op_id, &k);
+   if (rc != MEMORY_DB_SUCCESS) {
+      return rc;
+   }
+   mc_batch_t *b = calloc(1, sizeof(*b));
+   memory_forgotten_list_t forgotten;
+   memset(&forgotten, 0, sizeof(forgotten));
+   /* Every forgotten record of the user's (since the epoch). */
+   if (!b || memory_forgotten_load(user_id, 0, 0, 1, &forgotten) != MEMORY_DB_SUCCESS) {
+      memory_db_consolidation_keep_free(&k);
+      free(b);
+      return FAILURE;
+   }
+   /* Learned from the conversation it came from, with its outside text: a
+    * Keep is the user's choice to store it, not its words made theirs. */
+   const memory_provenance_t prov = { .conv_id = k.conversation_id,
+                                      .msg_id_start = k.msg_id_start,
+                                      .msg_id_end = k.msg_id_end,
+                                      .outside = k.outside };
+   memory_consolidate_result_t res;
+   memset(&res, 0, sizeof(res));
+   const memory_consolidate_input_t in = { .user_id = user_id,
+                                           .conversation_id = k.conversation_id,
+                                           .prov = &prov,
+                                           .forgotten = &forgotten };
+   b->in = &in;
+   b->res = &res;
+   b->outside = k.outside;
+   b->tainted = outside_is_tainted(k.outside);
+   b->batch_id = batch_id;
+   b->keep_op_id = op_id;
+   safe_strscpy(b->ai_name, g_config.general.ai_name);
+   rc = keep_candidate(b, &k);
+   memory_db_consolidation_keep_free(&k);
+   if (rc != SUCCESS) {
+      rc = MEMORY_CONSOLIDATION_NOTHING;
+   } else if (memory_forgotten_names(&forgotten, b->d[0].c.items[0].text)) {
+      rc = MEMORY_CONSOLIDATE_KEEP_FORGOTTEN;
+   } else if ((rc = keep_known(b, fact_id_out)) != KEEP_STORE) {
+      /* full, said already, or the database: decided without storing */
+   } else if (!(b->st = memory_store_open(user_id, prov.conv_id, &prov, true))) {
+      rc = FAILURE;
+   } else {
+      *fact_id_out = mc_keep_store(b);
+      memory_store_close(b->st);
+      b->st = NULL;
+      rc = *fact_id_out > 0 && b->kept ? SUCCESS : FAILURE;
+      if (rc != SUCCESS && b->keep_created > 0) {
+         /* not-a-removal: the fact this Keep just made, its record refused */
+         memory_db_fact_delete(b->keep_created, user_id);
+         *fact_id_out = 0;
+      }
+   }
+   OLOG_INFO("memory_consolidate: user %d kept op %lld of batch %lld: %s", user_id,
+             (long long)op_id, (long long)batch_id,
+             rc == SUCCESS                             ? "stored"
+             : rc == MEMORY_CONSOLIDATE_KEEP_FORGOTTEN ? "refused (forgotten)"
+                                                       : "not stored");
+   batch_free(b);
+   memory_forgotten_free(&forgotten);
+   return rc;
 }

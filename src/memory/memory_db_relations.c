@@ -130,6 +130,29 @@ int memory_db_relation_create(int user_id,
                               int64_t valid_from,
                               int64_t valid_to,
                               const memory_provenance_t *prov) {
+   return memory_db_relation_create_ex(user_id, subject_entity_id, relation, object_entity_id,
+                                       object_value, fact_id, confidence, valid_from, valid_to,
+                                       prov, NULL, NULL);
+}
+
+int memory_db_relation_create_ex(int user_id,
+                                 int64_t subject_entity_id,
+                                 const char *relation,
+                                 int64_t object_entity_id,
+                                 const char *object_value,
+                                 int64_t fact_id,
+                                 float confidence,
+                                 int64_t valid_from,
+                                 int64_t valid_to,
+                                 const memory_provenance_t *prov,
+                                 int64_t *id_out,
+                                 bool *created_out) {
+   if (id_out) {
+      *id_out = 0;
+   }
+   if (created_out) {
+      *created_out = false;
+   }
    if (!relation)
       return MEMORY_DB_FAILURE;
 
@@ -184,10 +207,15 @@ int memory_db_relation_create(int user_id,
     * at the supersede call site where extraction can log dedup-hits. */
    int rc = sqlite3_step(s_db.stmt_memory_relation_create);
    bool ok = (rc == SQLITE_ROW || rc == SQLITE_DONE);
-   if (rc == SQLITE_ROW && prov) {
-      memory_db_internal_source_add_locked(
-          MEMORY_SOURCE_RELATION, sqlite3_column_int64(s_db.stmt_memory_relation_create, 0),
-          prov->conv_id);
+   int64_t rel_id = 0;
+   bool created = false;
+   if (rc == SQLITE_ROW) {
+      rel_id = sqlite3_column_int64(s_db.stmt_memory_relation_create, 0);
+      /* A new row starts at one mention; an open one said again counts up. */
+      created = sqlite3_column_int(s_db.stmt_memory_relation_create, 1) == 1;
+      if (prov) {
+         memory_db_internal_source_add_locked(MEMORY_SOURCE_RELATION, rel_id, prov->conv_id);
+      }
    }
    while (rc == SQLITE_ROW) {
       rc = sqlite3_step(s_db.stmt_memory_relation_create);
@@ -202,6 +230,12 @@ int memory_db_relation_create(int user_id,
    }
    AUTH_DB_UNLOCK();
 
+   if (ok && id_out) {
+      *id_out = rel_id;
+   }
+   if (ok && created_out) {
+      *created_out = created;
+   }
    return ok ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 

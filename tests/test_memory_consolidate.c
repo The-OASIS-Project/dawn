@@ -1192,6 +1192,27 @@ void test_a_deferred_candidate_whose_conversation_went_private_is_not_recorded(v
    deferred_source_goes_private("{\"ops\": [{\"op\": \"drop\", \"c\": \"D1\"}], \"finish\": true}");
 }
 
+/* An op on a set-aside candidate refused by a guard (near something the user
+ * forgot, from outside text) whose conversation went private while the batch
+ * planned: the refusal is not recorded, so nothing quotes it. */
+void test_a_refused_op_on_a_revoked_deferred_candidate_is_not_recorded(void) {
+   forgot("Jonathan Smith visits Porto in June");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "B", &s_private_conv));
+   set_aside(s_private_conv, OUTSIDE_EMAIL, LISBON,
+             "{\"text\": \"" LISBON "\", \"subject\": \"Jonathan Smith\"}");
+   s_before_call = source_goes_private;
+   script("{\"ops\": [{\"op\": \"add\", \"c\": \"C1\"}, {\"op\": \"add\", \"c\": \"D1\"}], "
+          "\"finish\": true}",
+          NULL);
+   const memory_consolidate_result_t res = run(ONE_FACT("Jonathan Smith plays the cello"), 0, 0);
+   TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATE_FINISHED, res.stop);
+   TEST_ASSERT_EQUAL_INT(0, current(LISBON));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE user_id = ?1 "
+                              "AND (text = ?2 OR pre_image LIKE '%Lisbon%')",
+                              s_user, LISBON));
+   TEST_ASSERT_EQUAL_INT(0, rows(res.batch_id, "added", "refused"));
+}
+
 /* A relation closed "by" a set-aside candidate whose conversation went
  * private: the candidate isn't stored, so nothing closes the relation. */
 void test_a_close_by_a_revoked_deferred_candidate_is_refused(void) {
@@ -1361,6 +1382,7 @@ int main(void) {
    RUN_TEST(test_a_repeated_candidate_with_forgotten_words_is_recorded_without_them);
    RUN_TEST(test_a_link_with_merging_off_is_rejected_and_not_counted);
    RUN_TEST(test_a_deferred_candidate_whose_conversation_went_private_is_not_stored);
+   RUN_TEST(test_a_refused_op_on_a_revoked_deferred_candidate_is_not_recorded);
    RUN_TEST(test_a_deferred_candidate_whose_conversation_went_private_is_not_recorded);
    RUN_TEST(test_a_close_by_a_revoked_deferred_candidate_is_refused);
    RUN_TEST(test_its_source_made_private_removes_a_row_quoting_a_set_aside_candidate);

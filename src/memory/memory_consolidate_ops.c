@@ -744,17 +744,65 @@ static struct json_object *fact_json(int user_id, int64_t fact_id) {
    return o;
 }
 
-static void record(mc_batch_t *b, memory_consolidation_op_t *op) {
+/* Who wrote @p reason: the model (an op's own reason, as the plan gave it) or
+ * DAWN (anything else); NULL for no reason. */
+static const char *reason_by(const mc_batch_t *b, const char *reason) {
+   if (!reason || !reason[0]) {
+      return NULL;
+   }
+   for (int i = 0; i < b->n_ops; i++) {
+      if (reason == b->ops[i].reason) {
+         return "model";
+      }
+   }
+   return "dawn";
+}
+
+/* Record @p op in the batch: MEMORY_DB_NOT_FOUND when not written (the
+ * deferred candidate it takes up, op->claim_op_id, is no longer open, or the
+ * conversation it quotes went private). */
+static int record(mc_batch_t *b, memory_consolidation_op_t *op) {
+   if (!op->reason_by) {
+      op->reason_by = reason_by(b, op->reason);
+   }
    if (b->batch_id <= 0) {
-      return;
+      /* No record: a deferred candidate is still taken up. */
+      return op->claim_op_id > 0
+                 ? memory_db_consolidation_deferred_claim(op->claim_op_id, b->in->user_id)
+                 : MEMORY_DB_SUCCESS;
+   }
+   if (b->keep_op_id > 0) {
+      /* A Keep: the stored row marks the op kept (one transaction); one that
+       * stored nothing records nothing (the user is told). */
+      if (op->status || b->kept ||
+          (strcmp(op->op, "added") != 0 && strcmp(op->op, "reinforced") != 0)) {
+         return MEMORY_DB_SUCCESS;
+      }
+      const int kept = memory_db_consolidation_keep_record(b->in->user_id, b->batch_id,
+                                                           b->keep_op_id, op, NULL);
+      b->kept = kept == MEMORY_DB_SUCCESS;
+      return kept;
    }
    op->batch_id = b->batch_id;
    op->user_id = b->in->user_id;
    op->seq = ++b->seq;
-   if (memory_db_consolidation_op_add(op, NULL) != MEMORY_DB_SUCCESS) {
+   const int rc = memory_db_consolidation_op_add(op, NULL);
+   if (rc == MEMORY_DB_FAILURE) {
       OLOG_WARNING("memory_consolidate: batch %lld: op %d not recorded", (long long)b->batch_id,
                    op->seq);
    }
+   return rc;
+}
+
+/* Whether @p need more rows fit the batch's record (MEMORY_CONSOLIDATION_OPS_MAX).
+ * When they don't, nothing that would need them is applied: the batch is full
+ * (stop "full"), and what is left waits for the next batch. */
+static bool fits(mc_batch_t *b, int need) {
+   if (b->batch_id <= 0 || b->keep_op_id > 0 || b->seq + need <= MEMORY_CONSOLIDATION_OPS_MAX) {
+      return true;
+   }
+   b->full = true;
+   return false;
 }
 
 static const char *fact_text(int user_id, int64_t fact_id, memory_fact_t *buf) {
@@ -764,7 +812,7 @@ static const char *fact_text(int user_id, int64_t fact_id, memory_fact_t *buf) {
 /* A candidate an earlier batch set aside is taken up: by this batch, however
  * its decision ends. */
 static void consume(mc_batch_t *b, mc_slot_t s) {
-   if (s.d) {
+   if (s.d && b->keep_op_id <= 0) {
       memory_db_consolidation_op_set_status(s.d->row.op_id, b->in->user_id, "consumed");
    }
 }
@@ -799,6 +847,30 @@ static bool d_taken(mc_batch_t *b, mc_slot_t s) {
    return false;
 }
 
+/* The deferred candidate a row about @p s takes up, when not yet taken (0:
+ * none). */
+static int64_t claim_of(mc_slot_t s) {
+   return s.d && !s.d->taken ? s.d->row.op_id : 0;
+}
+
+/* A row about D @p s was written (its claim with it), or wasn't: the D can't
+ * be learned from now, and nothing of it is stored or recorded.  Whether it
+ * was. */
+static bool d_recorded(mc_batch_t *b, mc_slot_t s, int rc) {
+   if (!s.d) {
+      return true;
+   }
+   if (rc != MEMORY_DB_NOT_FOUND) {
+      s.d->taken = true;
+      return true;
+   }
+   OLOG_INFO("memory_consolidate: batch %lld: a set-aside candidate's conversation can't be "
+             "learned from now; left out",
+             (long long)b->batch_id);
+   s.d->done = true;
+   return false;
+}
+
 /* The conversation a row about @p s quotes, when it isn't the batch's. */
 static int64_t slot_source(mc_slot_t s) {
    return s.d ? s.d->row.conversation_id : 0;
@@ -808,12 +880,12 @@ static int64_t slot_source(mc_slot_t s) {
  * aside again keeps its own row (its batch's conversation, its expiry); one
  * whose words the user forgot is recorded without them. */
 static void record_candidate(mc_batch_t *b, mc_slot_t s, const char *what, const char *reason) {
+   if (!fits(b, 1)) {
+      return; /* a D stays open (not claimed) for the next batch */
+   }
    const memory_candidate_t *cand = slot_cand(s);
    const bool forgotten = memory_forgotten_names(b->in->forgotten, cand->text);
    if (s.d && !forgotten && strcmp(what, "deferred") == 0) {
-      return;
-   }
-   if (!d_taken(b, s)) {
       return;
    }
    if (forgotten) {
@@ -824,12 +896,15 @@ static void record_candidate(mc_batch_t *b, mc_slot_t s, const char *what, const
       .op = what,
       .outside = slot_outside(b, s),
       .source_conversation_id = slot_source(s),
+      .claim_op_id = claim_of(s),
       .text = cand->text,
       .reason = reason,
       .pre_image = cand->json ? json_object_to_json_string_ext(cand->json, JSON_C_TO_STRING_PLAIN)
                               : NULL
    };
-   record(b, &op);
+   if (!d_recorded(b, s, record(b, &op))) {
+      return;
+   }
    if (strcmp(what, "deferred") == 0) {
       b->res->deferred++;
    } else {
@@ -841,50 +916,87 @@ static void record_candidate(mc_batch_t *b, mc_slot_t s, const char *what, const
 /* A candidate dropped because it says what the user forgot: recorded without
  * its words (the record must not keep what a forget removed). */
 static void record_forgotten(mc_batch_t *b, mc_slot_t s, const char *reason) {
+   if (!fits(b, 1)) {
+      return;
+   }
    memory_consolidation_op_t op = { .op = "dropped",
                                     .outside = slot_outside(b, s),
                                     .source_conversation_id = slot_source(s),
+                                    .claim_op_id = claim_of(s),
                                     .reason = reason };
-   record(b, &op);
+   if (!d_recorded(b, s, record(b, &op))) {
+      return;
+   }
    b->res->dropped++;
    consume(b, s);
 }
 
+/* A fact as it is, for an image. */
+static struct json_object *state_json(const memory_consolidation_fact_state_t *f) {
+   struct json_object *o = json_object_new_object();
+   json_object_object_add(o, "text", json_object_new_string(f->text));
+   json_object_object_add(o, "confidence", json_object_new_double(f->confidence));
+   json_object_object_add(o, "source", json_object_new_string(f->source));
+   json_object_object_add(o, "outside", json_object_new_int(f->outside));
+   json_object_object_add(o, "superseded_by",
+                          f->superseded_by ? json_object_new_int64(f->superseded_by) : NULL);
+   json_object_object_add(o, "expires_at", json_object_new_int64(f->expires_at));
+   json_object_object_add(o, "subject_entity_id", json_object_new_int64(f->subject_entity_id));
+   return o;
+}
+
 /* A stored fact said again: reinforced, recorded with what it was before
- * (confidence, kind, whether this conversation was a source, its source
- * conversation and range, which a reinforce may move). */
+ * (taken before @p stored's store, when it went through one: confidence,
+ * kind, expiry, subject, whether this conversation was a source, its source
+ * conversation and range, and the relations the restatement created) so an
+ * undo can put all of it back. */
 static int reinforce(mc_batch_t *b,
                      int64_t fact_id,
                      bool told,
                      const char *said,
                      const char *why,
-                     const memory_provenance_t *prov) {
+                     const memory_provenance_t *prov,
+                     const memory_store_result_t *stored) {
    const int user_id = b->in->user_id;
-   memory_fact_t before;
-   if (memory_db_fact_get(fact_id, user_id, &before) != MEMORY_DB_SUCCESS ||
-       before.superseded_by != 0) {
+   const memory_provenance_t *p = prov ? prov : b->in->prov;
+   const int64_t conv = p ? p->conv_id : 0;
+   memory_consolidation_fact_state_t before;
+   if (stored && stored->has_prior) {
+      before = stored->prior;
+   } else if (memory_db_consolidation_fact_state(user_id, fact_id, conv, &before) !=
+              MEMORY_DB_SUCCESS) {
       return FAILURE;
    }
-   const memory_provenance_t *p = prov ? prov : b->in->prov;
-   struct json_object *pre = fact_json(user_id, fact_id);
-   memory_consolidation_fact_source_t src;
-   if (p && p->conv_id > 0 &&
-       memory_db_consolidation_fact_source(user_id, fact_id, p->conv_id, &src) ==
-           MEMORY_DB_SUCCESS) {
-      json_object_object_add(pre, "had_source", json_object_new_boolean(src.had_conversation));
-      json_object_object_add(pre, "source_conversation_id",
-                             json_object_new_int64(src.source_conversation_id));
-      json_object_object_add(pre, "msg_id_start", json_object_new_int64(src.msg_id_start));
-      json_object_object_add(pre, "msg_id_end", json_object_new_int64(src.msg_id_end));
+   if (before.superseded_by != 0) {
+      return FAILURE;
    }
+   struct json_object *pre = state_json(&before);
+   json_object_object_add(pre, "had_source", json_object_new_boolean(before.had_conversation));
+   json_object_object_add(pre, "source_conversation_id",
+                          json_object_new_int64(before.source_conversation_id));
+   json_object_object_add(pre, "msg_id_start", json_object_new_int64(before.msg_id_start));
+   json_object_object_add(pre, "msg_id_end", json_object_new_int64(before.msg_id_end));
+   /* More relations created than listed: recorded without its undo. */
+   struct json_object *rels = NULL;
+   if (!stored || !stored->relations_overflow) {
+      rels = json_object_new_array();
+      for (int i = 0; stored && i < stored->n_new_relations; i++) {
+         json_object_array_add(rels, json_object_new_int64(stored->new_relation_ids[i]));
+      }
+   }
+   json_object_object_add(pre, "relation_ids", rels);
    char *pre_s = image(pre);
    memory_store_reinforce(b->st, fact_id, told, prov);
-   char *post_s = image(fact_json(user_id, fact_id));
+   memory_consolidation_fact_state_t after;
+   char *post_s = memory_db_consolidation_fact_state(user_id, fact_id, conv, &after) ==
+                          MEMORY_DB_SUCCESS
+                      ? image(state_json(&after))
+                      : NULL;
    memory_consolidation_op_t op = { .op = "reinforced",
                                     .fact_id = fact_id,
                                     .outside = p ? p->outside : b->outside,
                                     .source_conversation_id = prov ? prov->conv_id : 0,
-                                    .text = before.fact_text,
+                                    .text = before.text,
                                     .target_text = said,
                                     .reason = why,
                                     .pre_image = pre_s,
@@ -905,6 +1017,9 @@ static int64_t store_slot(mc_batch_t *b, mc_slot_t s, const char *why, bool unju
    bool *done = s.mc ? &s.mc->stored : &s.d->done;
    if (*done) {
       return *fact_id;
+   }
+   if (!fits(b, 1)) {
+      return 0; /* not stored, not claimed: the batch is full */
    }
    if (held_near_forgotten(b, s)) {
       *done = true;
@@ -945,11 +1060,14 @@ static int64_t store_slot(mc_batch_t *b, mc_slot_t s, const char *why, bool unju
    }
    *fact_id = res.fact_id;
    if (res.reused) {
-      if (reinforce(b, res.fact_id, cand->told, text, why, prov) != SUCCESS) {
+      if (reinforce(b, res.fact_id, cand->told, text, why, prov, &res) != SUCCESS) {
          *fact_id = 0; /* retired meanwhile */
       }
       consume(b, s);
       return *fact_id;
+   }
+   if (b->keep_op_id > 0) {
+      b->keep_created = res.fact_id;
    }
    char *post = image(fact_json(b->in->user_id, res.fact_id));
    memory_consolidation_op_t op = { .op = "added",
@@ -966,6 +1084,11 @@ static int64_t store_slot(mc_batch_t *b, mc_slot_t s, const char *why, bool unju
    return res.fact_id;
 }
 
+int64_t mc_keep_store(mc_batch_t *b) {
+   const mc_ref_t kept = { MC_REF_D, 0 };
+   return b->n_d == 1 ? store_slot(b, slot_of(b, kept), MC_REASON_KEPT, false) : 0;
+}
+
 /* The fact id @p ref stands for: an S's, or a candidate's once stored. */
 static int64_t fact_of(mc_batch_t *b, mc_ref_t ref, const char *why) {
    if (ref.kind == MC_REF_S) {
@@ -975,6 +1098,9 @@ static int64_t fact_of(mc_batch_t *b, mc_ref_t ref, const char *why) {
 }
 
 static void record_refused(mc_batch_t *b, const mc_op_t *op, const char *why) {
+   if (!fits(b, 1)) {
+      return; /* refused, unrecorded: nothing changed */
+   }
    static const char *const k_names[] = { "added",  "merged",   "replaced", "closed",
                                           "linked", "deferred", "dropped",  "suggested_forget" };
    memory_fact_t buf;
@@ -1011,9 +1137,31 @@ static void record_refused(mc_batch_t *b, const mc_op_t *op, const char *why) {
  * Applying, one op kind each
  * ============================================================================= */
 
+/* Whether op @p op's rows fit: its own, and its counterpart's when that is a
+ * candidate still to store.  When they don't, the candidate it names is set
+ * aside as not reached if that row fits; the op is applied not at all. */
+static bool op_fits(mc_batch_t *b, const mc_op_t *op) {
+   if (!is_cand(op->b)) {
+      return fits(b, 1);
+   }
+   const mc_slot_t s = slot_of(b, op->b);
+   bool *done = s.mc ? &s.mc->stored : &s.d->done;
+   if (fits(b, *done ? 1 : 2)) {
+      return true;
+   }
+   if (!*done) {
+      record_candidate(b, s, "deferred", MC_REASON_NOT_REACHED);
+      *done = true;
+   }
+   return false;
+}
+
 /* Retire stored fact @p from by @p into (merged or replaced), recorded.  The
  * outside-text rules are checked again on the rows as they are now. */
 static void apply_retire(mc_batch_t *b, const mc_op_t *op, bool merge) {
+   if (!op_fits(b, op)) {
+      return;
+   }
    const int user_id = b->in->user_id;
    const int64_t from = b->s[op->a.i].id;
    const int64_t into = fact_of(b, op->b, op->reason);
@@ -1034,15 +1182,28 @@ static void apply_retire(mc_batch_t *b, const mc_op_t *op, bool merge) {
       record_refused(b, op, "outside text can't retire a stored fact that didn't come from it");
       return;
    }
+   /* What a merge gives the fact kept (sources, its outside kind), for an
+    * undo to take back. */
+   char *pre_s = merge ? memory_db_consolidation_merge_image(user_id, from, into) : NULL;
    const int rc = merge ? memory_db_fact_merge(from, into, user_id)
                         : memory_db_fact_replace(from, into, user_id);
    if (rc != MEMORY_DB_SUCCESS) {
+      free(pre_s);
       record_refused(b, op, "a fact changed since it was shown");
       return;
    }
+   memory_consolidation_fact_state_t after;
    struct json_object *post = json_object_new_object();
    json_object_object_add(post, "superseded_by", json_object_new_int64(into));
    json_object_object_add(post, "kind", json_object_new_string(merge ? "merged" : "replaced"));
+   if (memory_db_consolidation_fact_state(user_id, from, 0, &after) == MEMORY_DB_SUCCESS) {
+      json_object_object_add(post, "superseded_at", json_object_new_int64(after.superseded_at));
+   }
+   /* What the merge left on the fact kept, so an undo puts back only that. */
+   if (merge && memory_db_consolidation_fact_state(user_id, into, 0, &after) == MEMORY_DB_SUCCESS) {
+      json_object_object_add(post, "keeper_origin_unsourced",
+                             json_object_new_int(after.origin_unsourced));
+   }
    char *post_s = image(post);
    memory_consolidation_op_t row = { .op = merge ? "merged" : "replaced",
                                      .fact_id = from,
@@ -1051,8 +1212,10 @@ static void apply_retire(mc_batch_t *b, const mc_op_t *op, bool merge) {
                                      .text = from_fact.fact_text,
                                      .target_text = into_fact.fact_text,
                                      .reason = op->reason,
+                                     .pre_image = pre_s,
                                      .post_image = post_s };
    record(b, &row);
+   free(pre_s);
    free(post_s);
    if (merge) {
       b->res->merged++;
@@ -1062,6 +1225,9 @@ static void apply_retire(mc_batch_t *b, const mc_op_t *op, bool merge) {
 }
 
 static void apply_close(mc_batch_t *b, const mc_op_t *op) {
+   if (!op_fits(b, op)) {
+      return;
+   }
    const mc_rel_t *r = &b->r[op->a.i];
    const int64_t by = op->b.kind != MC_REF_NONE ? fact_of(b, op->b, op->reason) : 0;
    if (is_cand(op->b) && by <= 0) {
@@ -1108,6 +1274,9 @@ static void apply_close(mc_batch_t *b, const mc_op_t *op) {
  * outside text, a proposal the user decides.  Recorded when linked or
  * proposed; false when the ladder refused the pair. */
 static bool link_pair(mc_batch_t *b, int a, int bi, const char *reason) {
+   if (!fits(b, 1)) {
+      return false; /* not linked: the batch is full (and the refusal unrecorded) */
+   }
    const memory_entity_t *src = &b->e[a].entity;
    const memory_entity_t *tgt = &b->e[bi].entity;
    memory_alias_evaluate_t eval;
@@ -1165,15 +1334,15 @@ void mc_link_unjudged(mc_batch_t *b) {
 static void apply_copy(mc_batch_t *b, const mc_op_t *op) {
    const mc_slot_t s = slot_of(b, op->a);
    if (op->a.kind == MC_REF_D || s.mc->disp == MC_DISP_MERGE_C) {
+      /* The model's reason as its own (recorded as the model's), else code's. */
       char why[MEMORY_CONSOLIDATE_REASON_MAX + 1];
-      if (op->reason[0]) {
-         snprintf(why, sizeof(why), "%s", op->reason);
-      } else {
-         char into[16];
-         mc_ref_name(op->b, into, sizeof(into));
-         snprintf(why, sizeof(why), "says what %s says", into);
-      }
-      record_candidate(b, s, "dropped", why);
+      char into[16];
+      mc_ref_name(op->b, into, sizeof(into));
+      snprintf(why, sizeof(why), "says what %s says", into);
+      record_candidate(b, s, "dropped", op->reason[0] ? op->reason : why);
+      return;
+   }
+   if (!fits(b, 1)) {
       return;
    }
    const memory_candidate_t *cand = slot_cand(s);
@@ -1182,7 +1351,7 @@ static void apply_copy(mc_batch_t *b, const mc_op_t *op) {
       record_candidate(b, s, "deferred", MC_REASON_NEAR_FORGOTTEN);
       return;
    }
-   if (reinforce(b, b->s[s.mc->merge_into.i].id, cand->told, cand->text, op->reason, NULL) !=
+   if (reinforce(b, b->s[s.mc->merge_into.i].id, cand->told, cand->text, op->reason, NULL, NULL) !=
        SUCCESS) {
       s.mc->stored = false;
       store_slot(b, s, "the stored fact changed since", true);
@@ -1190,6 +1359,9 @@ static void apply_copy(mc_batch_t *b, const mc_op_t *op) {
 }
 
 static void apply_suggest(mc_batch_t *b, const mc_op_t *op) {
+   if (!fits(b, 1)) {
+      return;
+   }
    memory_fact_t buf;
    memory_consolidation_op_t row = {
       .op = "suggested_forget",
@@ -1317,7 +1489,7 @@ static void apply_undisposed(mc_batch_t *b) {
 /* The candidates recorded without a decision (about the assistant, the same
  * text as another candidate, or past the batch's limit). */
 static void apply_unshown(mc_batch_t *b) {
-   for (int i = 0; i < b->n_unshown; i++) {
+   for (int i = 0; i < b->n_unshown && fits(b, 1); i++) {
       const mc_unshown_t *u = &b->unshown[i];
       /* Words the user forgot are recorded as a drop, without them. */
       const bool forgotten = memory_forgotten_names(b->in->forgotten, u->text);
@@ -1347,7 +1519,7 @@ static void apply_prefs(mc_batch_t *b) {
        !json_object_is_type(prefs, json_type_array)) {
       return;
    }
-   for (size_t i = 0; i < json_object_array_length(prefs); i++) {
+   for (size_t i = 0; i < json_object_array_length(prefs) && fits(b, 1); i++) {
       struct json_object *p = json_object_array_get_idx(prefs, i);
       const char *category = str_of(p, "category");
       const char *value = str_of(p, "value");
@@ -1368,13 +1540,16 @@ static void apply_prefs(mc_batch_t *b) {
          continue; /* nothing changed (a value outside text may not replace) */
       }
       struct json_object *pre = json_object_new_object();
+      json_object_object_add(pre, "category", json_object_new_string(category));
       if (had) {
          json_object_object_add(pre, "value", json_object_new_string(before.value));
          json_object_object_add(pre, "confidence", json_object_new_double(before.confidence));
+         json_object_object_add(pre, "outside", json_object_new_int(before.outside));
       } else {
          json_object_object_add(pre, "absent", json_object_new_boolean(1));
       }
       struct json_object *post = json_object_new_object();
+      json_object_object_add(post, "category", json_object_new_string(category));
       json_object_object_add(post, "value", json_object_new_string(after.value));
       json_object_object_add(post, "confidence", json_object_new_double(after.confidence));
       char *pre_s = image(pre);

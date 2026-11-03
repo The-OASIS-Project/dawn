@@ -1061,6 +1061,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_db_provenance.c
     src/memory/memory_db_forget.c
     src/memory/memory_db_consolidation.c
+    src/memory/memory_db_consolidation_undo.c
     src/core/focus/focus_source.c
     src/core/focus/focus_recency.c
     src/core/focus/focus_candidate_helpers.c
@@ -1085,6 +1086,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_candidates.c
     src/memory/memory_consolidate.c
     src/memory/memory_consolidate_ops.c
+    src/memory/memory_consolidation_undo.c
     src/memory/memory_extraction_queue.c
     src/memory/memory_extraction_slots.c
     src/memory/memory_extraction_input.c

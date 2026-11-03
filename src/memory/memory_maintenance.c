@@ -42,7 +42,8 @@
 
 /* The consolidation record keeps a batch (its ops, and a candidate set aside
  * in it) MEMORY_CONSOLIDATE_RECORD_DAYS, whatever decay is set to: it holds
- * conversation text. */
+ * conversation text.  A candidate set aside expires after
+ * MEMORY_CONSOLIDATE_DEFERRED_DAYS. */
 static void prune_consolidation_record(time_t now) {
    int batches = 0;
    if (memory_db_consolidation_prune((int64_t)now - (int64_t)MEMORY_CONSOLIDATE_RECORD_DAYS * 86400,
@@ -50,6 +51,16 @@ static void prune_consolidation_record(time_t now) {
       OLOG_WARNING("memory_decay: pruning the consolidation record failed; it runs again tomorrow");
    } else if (batches > 0) {
       OLOG_INFO("memory_decay: %d consolidation batches past their record time removed", batches);
+   }
+   /* A candidate set aside that long: no later batch takes it up (the user
+    * may still keep it until its batch is pruned). */
+   int expired = 0;
+   if (memory_db_consolidation_expire_deferred(
+           (int64_t)now - (int64_t)MEMORY_CONSOLIDATE_DEFERRED_DAYS * 86400, &expired) !=
+       MEMORY_DB_SUCCESS) {
+      OLOG_WARNING("memory_decay: expiring set-aside candidates failed; it runs again tomorrow");
+   } else if (expired > 0) {
+      OLOG_INFO("memory_decay: %d set-aside candidates expired", expired);
    }
 }
 

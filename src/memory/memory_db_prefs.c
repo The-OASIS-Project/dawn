@@ -280,16 +280,39 @@ int memory_db_pref_delete(int user_id, const char *category) {
    }
 
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
-
+   /* The preference and the consolidation record's rows quoting its value go
+    * together: the record must not keep what the user deleted. */
+   if (auth_db_savepoint_begin_locked("pref_delete") != AUTH_DB_SUCCESS) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
    sqlite3_stmt *stmt = s_db.stmt_memory_pref_delete;
    sqlite3_reset(stmt);
    sqlite3_bind_int(stmt, 1, user_id);
    sqlite3_bind_text(stmt, 2, category, -1, SQLITE_STATIC);
 
    int rc = sqlite3_step(stmt);
-   int changes = sqlite3_changes(s_db.db);
+   const int changes = sqlite3_changes(s_db.db);
    sqlite3_reset(stmt);
 
+   if (rc == SQLITE_DONE) {
+      sqlite3_stmt *scrub = NULL;
+      rc = sqlite3_prepare_v2(s_db.db,
+                              "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND op = "
+                              "'pref_set' AND (json_extract(post_image, '$.category') = ?2 OR "
+                              "substr(text, 1, length(?2) + 2) = ?2 || ': ')",
+                              -1, &scrub, NULL);
+      if (rc == SQLITE_OK) {
+         sqlite3_bind_int(scrub, 1, user_id);
+         sqlite3_bind_text(scrub, 2, category, -1, SQLITE_STATIC);
+         rc = sqlite3_step(scrub);
+      }
+      sqlite3_finalize(scrub);
+   }
+   if (auth_db_savepoint_end_locked(rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
+                                    "pref_delete") != AUTH_DB_SUCCESS) {
+      rc = SQLITE_ERROR;
+   }
    AUTH_DB_UNLOCK();
 
    if (rc != SQLITE_DONE) {

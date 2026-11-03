@@ -36,6 +36,7 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_aliases.h"
+#include "memory/memory_db_consolidation.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_embeddings_internal.h"
@@ -577,7 +578,8 @@ static void store_relation(memory_store_t *st,
                            int64_t fact_id,
                            const char *fact_id_origin,
                            const char *text,
-                           const memory_provenance_t *prov) {
+                           const memory_provenance_t *prov,
+                           memory_store_result_t *out) {
    const char *canon_pred = r->canon;
 
    const int64_t r_subj_id = resolve_subject(st, r->subject);
@@ -610,9 +612,16 @@ static void store_relation(memory_store_t *st,
 
    if (st->agent) {
       /* The consolidator closes what a new value ends (close_relation). */
-      memory_db_relation_create(st->user_id, r_subj_id, canon_pred, r_obj_id,
-                                (r_obj_id == 0) ? r->object : NULL, fact_id, 0.8f, r->valid_from,
-                                r->valid_to, prov);
+      int64_t rel_id = 0;
+      bool created = false;
+      memory_db_relation_create_ex(st->user_id, r_subj_id, canon_pred, r_obj_id,
+                                   (r_obj_id == 0) ? r->object : NULL, fact_id, 0.8f, r->valid_from,
+                                   r->valid_to, prov, &rel_id, &created);
+      if (created && out->n_new_relations < MEMORY_STORE_NEW_RELATIONS_MAX) {
+         out->new_relation_ids[out->n_new_relations++] = rel_id;
+      } else if (created) {
+         out->relations_overflow = true;
+      }
    } else {
       int64_t old_fact_id = 0;
       int rel_rc = memory_db_relation_supersede_ex(st->user_id, r_subj_id, canon_pred, r_obj_id,
@@ -738,6 +747,13 @@ int memory_store_candidate(memory_store_t *st,
       out->reused = false;
       return FAILURE; /* fact insert/match failed */
    }
+   /* Said again and left for the caller to reinforce: as it is now, before
+    * its subject, expiry and relations below change it. */
+   if (out->reused && opts && opts->keep_exact) {
+      out->has_prior = memory_db_consolidation_fact_state(st->user_id, out->fact_id,
+                                                          prov ? prov->conv_id : 0,
+                                                          &out->prior) == MEMORY_DB_SUCCESS;
+   }
    /* Expiry the extraction model attached, for a new fact and a stored one
     * said again alike (a transient fact is often stored first by `remember`
     * and then restated): only ever set, never cleared.  A batch that read
@@ -777,7 +793,8 @@ int memory_store_candidate(memory_store_t *st,
    if (!(opts && opts->no_relations)) {
       for (int r = 0; r < cand->n_rels; r++) {
          if (!c->rels[cand->first_rel + r].dropped) {
-            store_relation(st, &c->rels[cand->first_rel + r], out->fact_id, origin, text, prov);
+            store_relation(st, &c->rels[cand->first_rel + r], out->fact_id, origin, text, prov,
+                           out);
          }
       }
    }

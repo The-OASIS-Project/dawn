@@ -65,6 +65,7 @@ struct json_object;
 #define MC_REASON_SAME_CANDIDATE "the same text as another candidate"
 #define MC_REASON_NO_ROUND "no round judged it"
 #define MC_REASON_NEAR_FORGOTTEN "near something the user forgot"
+#define MC_REASON_KEPT "kept by the user"
 
 /* A loss cap: destructive ops on stored items over max(MC_LOSS_FLOOR,
  * MC_LOSS_SHARE of the stored facts and relations shown) apply nothing
@@ -227,6 +228,12 @@ typedef struct {
     * extraction gate would decide when no round does. */
    int best_pair[MC_MAX_ENTITIES][2];
    int n_best;
+   /* A user's Keep of a candidate this op set aside (0: a batch): its first
+    * row recorded marks the op kept, in the same transaction (kept). */
+   int64_t keep_op_id;
+   bool kept;
+   int64_t keep_created; /* a Keep's new fact (not a stored one said again) */
+   bool full;            /* the record reached MEMORY_CONSOLIDATION_OPS_MAX: the rest not applied */
 } mc_batch_t;
 
 /* memory_consolidate_ops.c */
@@ -257,6 +264,10 @@ int mc_apply(mc_batch_t *b, memory_consolidate_stop_t stop, bool partial);
 /** No round ran: each new entity's best pair through the link ladder (from
  *  outside text, a proposal), recorded like a link the plan asked for. */
 void mc_link_unjudged(mc_batch_t *b);
+
+/** A Keep: store b->d[0] (the candidate kept, already checked against the
+ *  forgotten facts) and record it; its fact id, 0 when not stored. */
+int64_t mc_keep_store(mc_batch_t *b);
 
 /** "C3", "S1", ... for @p ref into @p out. */
 void mc_ref_name(mc_ref_t ref, char *out, size_t size);

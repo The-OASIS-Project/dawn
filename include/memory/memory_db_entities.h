@@ -163,6 +163,24 @@ int memory_db_relation_create(int user_id,
                               int64_t valid_to,
                               const memory_provenance_t *prov);
 
+/**
+ * @brief memory_db_relation_create(), saying which row it wrote: its id into
+ *        @p id_out and whether it is new (not an open one said again) into
+ *        @p created_out (either may be NULL; 0 and false on failure)
+ */
+int memory_db_relation_create_ex(int user_id,
+                                 int64_t subject_entity_id,
+                                 const char *relation,
+                                 int64_t object_entity_id,
+                                 const char *object_value,
+                                 int64_t fact_id,
+                                 float confidence,
+                                 int64_t valid_from,
+                                 int64_t valid_to,
+                                 const memory_provenance_t *prov,
+                                 int64_t *id_out,
+                                 bool *created_out);
+
 /** memory_db_relation_supersede_ex(): the user said the new value replaces an
  *  old one, but not which. */
 #define MEMORY_RELATION_REPLACES_UNKNOWN ""
@@ -269,6 +287,15 @@ int memory_db_relation_close(int user_id,
                              int64_t relation_id,
                              int64_t valid_to,
                              int64_t closed_by_fact_id);
+
+/**
+ * @brief Reopen a closed relation: open again (valid_to and the fact that
+ *        closed it cleared), unless that value, or for a one-at-a-time
+ *        relation any value, or its contradiction on the same object, is open
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (not the user's, not closed,
+ *         or kept closed by an open value) or MEMORY_DB_FAILURE
+ */
+int memory_db_relation_reopen(int user_id, int64_t relation_id);
 
 /**
  * @brief The open relations of one entity (not its aliases) with one
