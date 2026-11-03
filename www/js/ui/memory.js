@@ -1309,6 +1309,7 @@
       if (memoryState.activeTab === tabName) return;
 
       if (window.DawnMemoryAliases) DawnMemoryAliases.cancelMergeMode();
+      if (window.DawnMemoryBatches) DawnMemoryBatches.hideTab();
       memoryState.activeTab = tabName;
 
       if (tablist) tablist.sync();
@@ -1319,9 +1320,11 @@
          memoryElements.list.setAttribute('aria-labelledby', 'memory-tab-' + tabName);
       }
 
-      // Clear search and load data
+      // Clear search and load data (the Learned tab has no search strip)
       if (memoryElements.searchInput) {
          memoryElements.searchInput.value = '';
+         const strip = memoryElements.searchInput.closest('.memory-search');
+         if (strip) strip.hidden = tabName === 'learned';
       }
       memoryState.searchQuery = '';
 
@@ -1358,6 +1361,12 @@
             break;
          case 'contacts':
             if (typeof DawnContacts !== 'undefined') DawnContacts.loadContacts();
+            break;
+         case 'learned':
+            /* What memory learned per batch (memory_batches.js). */
+            if (window.DawnMemoryBatches) {
+               DawnMemoryBatches.showTab(memoryElements.list, memoryElements.loadMoreBtn);
+            }
             break;
       }
    }
@@ -1509,6 +1518,10 @@
 
       if (tab === 'contacts') {
          if (typeof DawnContacts !== 'undefined') DawnContacts.loadMore();
+         return;
+      }
+      if (tab === 'learned') {
+         if (window.DawnMemoryBatches) DawnMemoryBatches.loadMore();
          return;
       }
 
@@ -1728,6 +1741,7 @@
       close,
       toggle,
       updateVisibility,
+      switchTab,
       // Response handlers
       handleStatsResponse,
       handleFactsResponse,
