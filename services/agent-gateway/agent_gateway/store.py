@@ -177,13 +177,22 @@ class Store:
       self.new_event.set()
       return cur.lastrowid
 
-   def events_after(self, after_seq: int, limit: int = 200) -> list[dict]:
-      # System events (task_id '') have no user.
+   def events_after(self, after_seq: int, limit: int = 200,
+                    max_bytes: int = 256 * 1024) -> list[dict]:
+      """Events in order, each with its task's user and client_ref (system events,
+      task_id '', have neither).  A batch stops at `max_bytes` of event data (at
+      least one event), so a reply stays well within a client's size limit."""
       rows = self.db.execute(
-         "SELECT e.seq, e.task_id, e.ts, e.kind, e.data, t.dawn_user_id FROM events e "
-         "LEFT JOIN tasks t ON t.id = e.task_id WHERE e.seq > ? ORDER BY e.seq LIMIT ?",
-         (after_seq, limit))
-      return [{**dict(r), "data": json.loads(r["data"])} for r in rows]
+         "SELECT e.seq, e.task_id, e.ts, e.kind, e.data, t.dawn_user_id, t.client_ref "
+         "FROM events e LEFT JOIN tasks t ON t.id = e.task_id WHERE e.seq > ? "
+         "ORDER BY e.seq LIMIT ?", (after_seq, limit))
+      out, size = [], 0
+      for r in rows:
+         size += len(r["data"])
+         if out and size > max_bytes:
+            break
+         out.append({**dict(r), "data": json.loads(r["data"])})
+      return out
 
    async def wait_events(self, after_seq: int, wait_s: float) -> list[dict]:
       deadline = asyncio.get_running_loop().time() + wait_s

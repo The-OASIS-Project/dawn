@@ -50,6 +50,9 @@ SANDBOX_PLACEHOLDERS = [".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".pro
                         ".claude/.cc-writes"]
 
 SUBJECT_CAP = 200
+FILE_CAP = 512 * 1024     # one file's content or diff in a viewer reply
+TREE_CAP = 2000           # entries in one folder listing
+COMMITS_CAP = 100
 
 
 class GitError(Exception):
@@ -69,6 +72,14 @@ async def run(argv: list[str], cwd: str | None = None, env: dict | None = None,
 
 def text(out: bytes) -> str:
    return out.decode(errors="replace").strip()
+
+
+def safe_path(path: str) -> str:
+   """A path inside the repo, as git names it; refused otherwise."""
+   p = path.strip().strip("/")
+   if len(p) > 1024 or "\0" in p or any(part in ("..", ".") for part in p.split("/")):
+      raise GitError("not a path inside the repo")
+   return p
 
 
 def slug(s: str) -> str:
@@ -158,6 +169,8 @@ class Repos:
       except GitError as e:
          if "empty bundle" not in str(e):
             raise
+         # No commits now: an earlier collect's commits must not stay behind.
+         await run(["git", "-C", self.mirror(name), "update-ref", "-d", f"refs/agent/{task_id}"])
          return {"commits": [], "diffstat": "", "uncommitted": len(dirty.splitlines())}
       m, ref = self.mirror(name), f"refs/agent/{task_id}"
       with tempfile.NamedTemporaryFile(suffix=".bundle") as f:
@@ -170,14 +183,98 @@ class Repos:
       return {"commits": [c[:SUBJECT_CAP] for c in commits.splitlines()[:20]],
               "diffstat": stat, "uncommitted": len(dirty.splitlines())}
 
+   # --- reading the agent's work (in the mirror only) -----------------------
+
+   async def agent_ref(self, name: str, task_id: str, base: str) -> tuple[str, str]:
+      """(head, merge base) of the task's collected branch."""
+      m, ref = self.mirror(name), f"refs/agent/{task_id}"
+      try:
+         head = await self.gw("-C", m, "rev-parse", "--verify", "-q", ref)
+      except GitError:
+         raise GitError("nothing collected for this task yet")
+      return head, await self.gw("-C", m, "merge-base", f"refs/heads/{base}", head)
+
+   async def changes(self, name: str, task_id: str, base: str) -> dict:
+      head, mb = await self.agent_ref(name, task_id, base)
+      m = self.mirror(name)
+      numstat = await run(["git", "-C", m, "diff", "--no-ext-diff", "--no-textconv", "--numstat",
+                           "-z", mb, head])
+      files, fields = [], numstat.split(b"\0")
+      i = 0
+      while i < len(fields) and fields[i]:
+         added, removed, path = fields[i].decode(errors="replace").split("\t", 2)
+         if not path:  # a rename: old and new paths follow
+            path = f"{fields[i + 1].decode(errors='replace')} -> " \
+                   f"{fields[i + 2].decode(errors='replace')}"
+            i += 2
+         files.append({"path": path, "added": None if added == "-" else int(added),
+                       "removed": None if removed == "-" else int(removed)})
+         i += 1
+      log = await self.gw("-C", m, "log", "--format=%H%x00%s", f"-{COMMITS_CAP}", f"{mb}..{head}")
+      commits = [dict(zip(("hash", "subject"), c.split("\0", 1))) for c in log.splitlines()]
+      for c in commits:
+         c["subject"] = c.get("subject", "")[:SUBJECT_CAP]
+      return {"head": head, "base": mb, "files": files, "commits": commits}
+
+   async def file(self, name: str, task_id: str, base: str, path: str, view: str) -> dict:
+      """One file: its diff, or its content after (new) or before (old) the task."""
+      head, mb = await self.agent_ref(name, task_id, base)
+      p, m = safe_path(path), self.mirror(name)
+      if view == "diff":
+         for rev in (mb, head):  # git builds the whole diff in memory: check sizes first
+            size = await self.size_of(m, f"{rev}:{p}")
+            if size > FILE_CAP:
+               return {"path": p, "view": view, "too_large": size}
+         out = await run(["git", "--literal-pathspecs", "-C", m, "diff", "--no-ext-diff",
+                          "--no-textconv", mb, head, "--", p])
+      elif view in ("new", "old"):
+         rev = f"{head if view == 'new' else mb}:{p}"
+         try:
+            size = int(await self.gw("-C", m, "cat-file", "-s", rev))
+         except GitError:
+            return {"path": p, "view": view, "missing": True}
+         if size > FILE_CAP:
+            return {"path": p, "view": view, "too_large": size}
+         out = await run(["git", "-C", m, "cat-file", "blob", rev])
+      else:
+         raise GitError("view must be diff, new or old")
+      if len(out) > FILE_CAP:
+         return {"path": p, "view": view, "too_large": len(out)}
+      if b"\0" in out:
+         return {"path": p, "view": view, "binary": True}
+      return {"path": p, "view": view, "text": out.decode(errors="replace")}
+
+   async def size_of(self, m: str, rev: str) -> int:
+      """Size of a blob, or 0 if the path isn't there."""
+      try:
+         return int(await self.gw("-C", m, "cat-file", "-s", rev))
+      except GitError:
+         return 0
+
+   async def tree(self, name: str, task_id: str, base: str, path: str) -> dict:
+      """One folder of the repo at the task's commit."""
+      head, _ = await self.agent_ref(name, task_id, base)
+      p = safe_path(path) if path.strip("/") else ""
+      out = await run(["git", "-C", self.mirror(name), "ls-tree", "-z", "--long",
+                       f"{head}:{p}" if p else head])
+      entries = []
+      for rec in out.split(b"\0")[:TREE_CAP]:
+         if rec:
+            meta, entry = rec.decode(errors="replace").split("\t", 1)
+            _, kind, _, size = meta.split(None, 3)
+            entries.append({"name": entry, "type": kind,
+                            "size": None if size.strip() == "-" else int(size)})
+      return {"path": p, "head": head, "entries": entries}
+
    async def remove(self, task_id: str) -> None:
       if re.fullmatch(r"[0-9a-f]{8}", task_id):
          await run([*self.run_as, "rm", "-rf", "--one-file-system", self.workdir(task_id)])
 
-   async def publish(self, name: str, task_id: str, branch: str, base: str, token: str,
+   async def publish(self, name: str, head: str, branch: str, base: str, token: str,
                      open_pr: bool, title: str, body: str) -> dict:
-      """Push the collected branch from the mirror; optionally open a PR.  The
-      token goes in a header, never in argv; no force push."""
+      """Push `head` (the checked commit itself, not a ref that could move) from the
+      mirror to `branch`; optionally open a PR.  The token goes in a header, never
+      in argv; no force push."""
       url = self.repos[name]["url"]
       m = re.match(r"https://github\.com/([^/]+)/([^/.]+?)(\.git)?$", url)
       if not m:
@@ -189,7 +286,7 @@ class Repos:
              "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
              "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}"}
       await run(["git", "-C", self.mirror(name), "push", "-q", url,
-                 f"refs/agent/{task_id}:refs/heads/{branch}"], env=env)
+                 f"{head}:refs/heads/{branch}"], env=env)
       result = {"pushed": f"{owner}/{repo}:{branch}"}
       if open_pr:
          result["pr_url"] = await asyncio.to_thread(

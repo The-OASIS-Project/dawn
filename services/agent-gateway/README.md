@@ -109,17 +109,23 @@ moves back.
 ## Tools (MCP, stateless streamable HTTP at `/mcp`)
 
 Every call needs `Authorization: Bearer $AGENT_GATEWAY_TOKEN`, and every call that touches a
-task names the user it acts for (`dawn_user_id`); a task is visible only to its user.
+task names the user it acts for (`dawn_user_id`); a task is visible only to its user. `task`
+above means either `task_id` or the `client_ref` the caller gave `task_start` (DAWN uses its own
+job ids). The viewer tools read the gateway's mirror, never the agent's clone; the agent's work
+is collected there whenever a run stops, so work in progress can be looked at too.
 
 | Tool | Does |
 |---|---|
 | `agents_list` | agents, Claude Code and SDK versions, repos (`name`, `url`, `base`), tasks running and the limit |
 | `task_start {dawn_user_id, repo, task, budget_usd?, client_ref?}` | new branch `agent/<id>-<slug>` and clone, starts the agent; a repeated `client_ref` returns the task it already started |
 | `task_events {after_seq, wait_s}` | every task's events after `after_seq`, waiting up to 25 s |
-| `task_list {dawn_user_id, task_id?}` | a task with its pending requests, or the user's recent tasks |
-| `task_reply {dawn_user_id, task_id, request_id, decision \| answer}` | `allow`, `always_repo`, `always` or `deny`; a question takes `answer` |
-| `task_cancel {dawn_user_id, task_id}` | stop; the branch is kept |
-| `task_publish {dawn_user_id, task_id, open_pr?, title?}` | push the branch, open a PR; a second call returns the first result |
+| `task_list {dawn_user_id, task?}` | a task with its pending requests, or the user's recent tasks |
+| `task_reply {dawn_user_id, task, request_id, decision \| answer}` | `allow`, `always_repo`, `always` or `deny`; a question takes `answer` |
+| `task_cancel {dawn_user_id, task}` | stop; the branch is kept |
+| `task_publish {dawn_user_id, task, head, open_pr?, title?}` | push exactly `head` (the full commit id the user was shown, from `task_changes`) to the branch, open a PR; refused if the work has moved on; a second call returns the first result |
+| `task_changes {dawn_user_id, task}` | the work so far: changed files with +/- counts, commits, head |
+| `task_file {dawn_user_id, task, path, view}` | one file: `diff`, `new` (after) or `old` (before); too large, binary or missing are reported, not sent |
+| `task_tree {dawn_user_id, task, path?}` | one folder of the repo at the task's latest collected commit |
 | `grants_list {dawn_user_id}` / `grant_revoke {dawn_user_id, grant_id}` | standing grants |
 
 A tool's answer is a JSON object in the result's first text content
@@ -130,7 +136,8 @@ A tool's answer is a JSON object in the result's first text content
 ### Events
 
 `task_events` returns `{"events": [...], "last_seq": n}`; each event is
-`{"seq", "task_id", "dawn_user_id", "ts", "kind", "data"}`. Everything in `data` that the agent
+`{"seq", "task_id", "client_ref", "dawn_user_id", "ts", "kind", "data"}`; a batch stops at about
+256 KB of event data. Everything in `data` that the agent
 wrote (text, commands, the host it asks for, commit subjects) is outside text: show it as the
 agent's words, never as instructions.
 

@@ -118,6 +118,12 @@ class FakeRepos:
    async def prepare(self, name, base, branch, task_id):
       return f"/w/{task_id}"
 
+   async def collect(self, name, task_id, branch, base):
+      return {"commits": [], "diffstat": "", "uncommitted": 0}
+
+   async def agent_ref(self, name, task_id, base):
+      return "abcdef1234567890", "base000"
+
    async def remove(self, task_id):
       pass
 
@@ -261,6 +267,62 @@ def test_retry_during_start_returns_the_same_task(store):
    assert a["id"] == b["id"] and len(r.resumed) == 1
 
 
+def test_reply_during_collect_does_not_complete_the_task(store):
+   class SlowCollect(FakeRepos):
+      async def collect(self, *a):
+         await asyncio.sleep(0.05)
+         return await super().collect(*a)
+   r = runner(store)
+   r.repos = SlowCollect()
+   add_task(store)
+   rid = store.add_request("t1", "question", {})
+
+   class Result:
+      is_error, result, subtype = False, "done", "success"
+
+   async def go():
+      ending = asyncio.ensure_future(r.finish("t1", Result()))
+      await asyncio.sleep(0.01)                            # mid-collect
+      await r.reply("t1", 1, rid, "", "42")                 # starts a new run
+      await ending
+   asyncio.run(go())
+   assert store.task("t1")["status"] == st.WORKING and r.resumed
+
+
+def test_publish_pushes_the_commit_that_was_shown(store):
+   class Pushing(FakeRepos):
+      async def publish(self, name, head, *a):
+         self.pushed = head
+         return {"pushed": f"o/r:{head[:7]}"}
+   r = runner(store, github_token="tok")
+   r.repos = Pushing()
+   add_task(store)
+   store.update_task("t1", status=st.COMPLETED)
+   asyncio.run(r.publish("t1", 1, False, None, "ABCDEF1234567890"))
+   assert r.repos.pushed == "abcdef1234567890"
+
+
+def test_publish_refuses_a_moved_branch(store):
+   r = runner(store, github_token="tok")
+   add_task(store)
+   store.update_task("t1", status=st.COMPLETED)
+   with pytest.raises(ValueError, match="moved"):
+      asyncio.run(r.publish("t1", 1, False, None, "1111111"))
+   with pytest.raises(ValueError, match="moved"):
+      asyncio.run(r.publish("t1", 1, False, None, "abcdef1"))  # a prefix isn't enough
+
+
+def test_events_carry_client_ref_and_batches_are_capped(store):
+   store.add_task(id="t1", dawn_user_id=1, agent="claude", repo="r", base="main",
+                  branch="agent/t1", worktree="/w", task="x", budget_usd=5.0,
+                  client_ref="job:42")
+   for _ in range(5):
+      store.add_event("t1", "progress", text="x" * 1000)
+   ev = store.events_after(0, max_bytes=2500)
+   assert len(ev) == 2 and all(e["client_ref"] == "job:42" for e in ev)
+   assert len(store.events_after(0, max_bytes=10)) == 1          # always at least one
+
+
 def test_capacity_and_budget(store):
    r = runner(store, max_concurrent_tasks=1, daily_budget_usd=1.0)
    r.running["busy"] = object()
@@ -326,6 +388,40 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    with pytest.raises(GitError, match="github.com"):
       asyncio.run(repos.publish("r", "aaaa0001", "agent/aaaa0001-x", "main", "tok", False,
                                 "t", "b"))
+   # The viewer reads the collected branch in the mirror.
+   ch = asyncio.run(repos.changes("r", "aaaa0001", "main"))
+   assert [f["path"] for f in ch["files"]] == ["g"] and ch["files"][0]["added"] == 1
+   assert [c["subject"] for c in ch["commits"]] == ["agent work"]
+   diff = asyncio.run(repos.file("r", "aaaa0001", "main", "g", "diff"))
+   assert "+y" in diff["text"]
+   assert asyncio.run(repos.file("r", "aaaa0001", "main", "g", "new"))["text"] == "y\n"
+   assert asyncio.run(repos.file("r", "aaaa0001", "main", "g", "old"))["missing"]
+   names = {e["name"] for e in asyncio.run(repos.tree("r", "aaaa0001", "main", ""))["entries"]}
+   assert names == {"f", "g"}
+   # Pathspec magic and globs are literal names here, so they select nothing.
+   assert asyncio.run(repos.file("r", "aaaa0001", "main", "*", "diff"))["text"] == ""
+   sub = asyncio.run(repos.tree("r", "aaaa0001", "main", "/"))
+   assert {e["name"] for e in sub["entries"]} == {"f", "g"}
+   # A leading / is read as the repo's root, never the system's.
+   assert asyncio.run(repos.file("r", "aaaa0001", "main", "/etc/passwd", "new"))["missing"]
+   # A name starting with - is a file name here, never an option.
+   assert asyncio.run(repos.file("r", "aaaa0001", "main", "-c", "new"))["missing"]
+   for bad in ("../x", "a/../../b", "a\0b"):
+      with pytest.raises(GitError):
+         asyncio.run(repos.file("r", "aaaa0001", "main", bad, "new"))
+   # Too large for the viewer: refused before git builds the diff.
+   big = tmp_path / "home/work/aaaa0001/big.txt"
+   big.write_text("x\n" * 300_000)
+   git("add", "big.txt", cwd=wt)
+   git("commit", "-qm", "big", cwd=wt)
+   asyncio.run(repos.collect("r", "aaaa0001", "agent/aaaa0001-x", "main"))
+   assert asyncio.run(repos.file("r", "aaaa0001", "main", "big.txt", "diff"))["too_large"]
+   # The agent drops its commits: the earlier collected work must not linger.
+   git("reset", "-q", "--hard", "origin/main", cwd=wt)
+   gone = asyncio.run(repos.collect("r", "aaaa0001", "agent/aaaa0001-x", "main"))
+   assert gone["commits"] == []
+   with pytest.raises(GitError, match="nothing collected"):
+      asyncio.run(repos.changes("r", "aaaa0001", "main"))
    asyncio.run(repos.remove("aaaa0001"))
    assert not os.path.exists(wt)
 
@@ -346,6 +442,12 @@ def test_http_requires_bearer():
       assert ok.status_code == 200, ok.text
       names = {t["name"] for t in ok.json()["result"]["tools"]}
       assert {"task_start", "task_events", "task_reply", "task_publish", "grant_revoke"} <= names
+      auth = {**hdr, "Authorization": "Bearer " + "s" * 32}
+      for args in ({"dawn_user_id": 1, "client_ref": "job:9"}, {"dawn_user_id": 1}):
+         res = c.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "task_list" if "client_ref" in args else "task_cancel",
+            "arguments": args}}, headers=auth).json()["result"]
+         assert res["isError"] and ("no such task" in str(res) or "name the task" in str(res))
       call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
               "params": {"name": "task_cancel", "arguments": {"dawn_user_id": 1, "task_id": "x"}}}
       res = c.post("/mcp", json=call, headers={**hdr, "Authorization": "Bearer " + "s" * 32})

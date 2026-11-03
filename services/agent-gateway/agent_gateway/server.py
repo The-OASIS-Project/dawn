@@ -107,33 +107,76 @@ def build(runner, cfg) -> MCPServer:
       events = await store.wait_events(after_seq, min(max(wait_s, 0), MAX_WAIT_S))
       return {"events": events, "last_seq": events[-1]["seq"] if events else after_seq}
 
+   def task_of(dawn_user_id: int, task_id: str | None, client_ref: str | None) -> dict:
+      """A task named by its id or by the caller's client_ref; the user's own only."""
+      if client_ref:
+         t = store.task_by_ref(dawn_user_id, client_ref)
+         if not t:
+            raise ValueError("no such task")
+         return t
+      if not task_id:
+         raise ValueError("name the task by task_id or client_ref")
+      return runner.owned(task_id, dawn_user_id)
+
    @tool
-   async def task_list(dawn_user_id: int, task_id: str | None = None) -> dict:
-      """One task with its pending requests, or the user's recent tasks."""
-      if task_id:
-         t = runner.owned(task_id, dawn_user_id)
-         return {"task": public(t), "pending": store.pending_requests(task_id)}
+   async def task_list(dawn_user_id: int, task_id: str | None = None,
+                       client_ref: str | None = None) -> dict:
+      """One task (by task_id or client_ref) with its pending requests, or the user's
+      recent tasks."""
+      if task_id or client_ref:
+         t = task_of(dawn_user_id, task_id, client_ref)
+         return {"task": public(t), "pending": store.pending_requests(t["id"])}
       return {"tasks": [public(t) for t in store.tasks(dawn_user_id)]}
 
    @tool
-   async def task_reply(dawn_user_id: int, task_id: str, request_id: int, decision: str = "",
-                        answer: str | None = None) -> dict:
+   async def task_reply(dawn_user_id: int, request_id: int, decision: str = "",
+                        answer: str | None = None, task_id: str | None = None,
+                        client_ref: str | None = None) -> dict:
       """Answer a pending request.  decision: allow (this task), always_repo, always, or
       deny; a question takes `answer` instead.  Resumes the task when nothing else is
       pending and there is room."""
-      return public(await runner.reply(task_id, dawn_user_id, request_id, decision, answer))
+      t = task_of(dawn_user_id, task_id, client_ref)
+      return public(await runner.reply(t["id"], dawn_user_id, request_id, decision, answer))
 
    @tool
-   async def task_cancel(dawn_user_id: int, task_id: str) -> dict:
+   async def task_cancel(dawn_user_id: int, task_id: str | None = None,
+                         client_ref: str | None = None) -> dict:
       """Stop a task.  Its branch and worktree are kept."""
-      return public(await runner.cancel(task_id, dawn_user_id))
+      t = task_of(dawn_user_id, task_id, client_ref)
+      return public(await runner.cancel(t["id"], dawn_user_id))
 
    @tool
-   async def task_publish(dawn_user_id: int, task_id: str, open_pr: bool = True,
+   async def task_publish(dawn_user_id: int, head: str, task_id: str | None = None,
+                          client_ref: str | None = None, open_pr: bool = True,
                           title: str | None = None) -> dict:
       """Push a completed task's agent/* branch and optionally open a pull request.  DAWN
-      calls this only after the user confirmed.  A second call returns the first result."""
-      return await runner.publish(task_id, dawn_user_id, open_pr, title)
+      calls this only after the user confirmed, passing the head commit they were shown;
+      a branch that moved since is refused.  A second call returns the first result."""
+      t = task_of(dawn_user_id, task_id, client_ref)
+      return await runner.publish(t["id"], dawn_user_id, open_pr, title, head)
+
+   # --- reading the work: from the gateway's mirror, never the agent's clone ---
+
+   @tool
+   async def task_changes(dawn_user_id: int, task_id: str | None = None,
+                          client_ref: str | None = None) -> dict:
+      """The task's work so far: changed files with +/- counts, and its commits."""
+      t = task_of(dawn_user_id, task_id, client_ref)
+      return await runner.repos.changes(t["repo"], t["id"], t["base"])
+
+   @tool
+   async def task_file(dawn_user_id: int, path: str, view: str = "diff",
+                       task_id: str | None = None, client_ref: str | None = None) -> dict:
+      """One file of the task's work: view diff, new (after) or old (before)."""
+      t = task_of(dawn_user_id, task_id, client_ref)
+      return await runner.repos.file(t["repo"], t["id"], t["base"], path, view)
+
+   @tool
+   async def task_tree(dawn_user_id: int, path: str = "", task_id: str | None = None,
+                       client_ref: str | None = None) -> dict:
+      """One folder of the repo at the task's latest collected commit."""
+      t = task_of(dawn_user_id, task_id, client_ref)
+      return await runner.repos.tree(t["repo"], t["id"], t["base"], path)
 
    @tool
    async def grants_list(dawn_user_id: int) -> dict:

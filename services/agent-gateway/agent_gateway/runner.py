@@ -37,7 +37,7 @@ from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKCli
                               SystemMessage)
 
 from . import policy, store as st
-from .repos import Repos, slug
+from .repos import GitError, Repos, slug
 
 log = logging.getLogger("agent-gateway")
 
@@ -347,6 +347,18 @@ class Runner:
       task = self.store.task(task_id)
       if task["status"] == st.CANCELLED:
          return
+      # Whenever a run stops, its work so far goes to the mirror, so it can be
+      # looked at before an approval or a cancel, not only once it's done.
+      try:
+         outcome = await self.repos.collect(task["repo"], task_id, task["branch"],
+                                            task["base"])
+      except GitError as e:
+         log.warning("task %s: could not collect its branch: %s", task_id, e)
+         outcome = None
+      if self.store.task(task_id)["status"] == st.CANCELLED:
+         return  # cancelled while the branch was being collected
+      if task_id in self.running:
+         return  # answered while the branch was being collected: a new run has it
       pending = self.store.pending_requests(task_id)
       if pending:
          self.store.update_task(task_id, status=st.INPUT_REQUIRED)
@@ -365,9 +377,9 @@ class Runner:
             err = f"task budget of ${task['budget_usd']:.2f} used"
          self.fail(task_id, clip(err, 500))
          return
-      outcome = await self.repos.collect(task["repo"], task_id, task["branch"], task["base"])
-      if self.store.task(task_id)["status"] == st.CANCELLED:
-         return  # cancelled while the branch was being collected
+      if outcome is None:
+         self.fail(task_id, "the task's work could not be collected")
+         return
       self.store.update_task(task_id, status=st.COMPLETED, summary=clip(r.result or ""))
       self.store.add_event(task_id, "completed", summary=clip(r.result or ""),
                            branch=task["branch"], session_id=task["session_id"],
@@ -441,17 +453,21 @@ class Runner:
             await asyncio.wait([run], timeout=5)
       return self.store.task(task_id)
 
-   async def publish(self, task_id: str, dawn_user_id: int, open_pr: bool,
-                     title: str | None) -> dict:
+   async def publish(self, task_id: str, dawn_user_id: int, open_pr: bool, title: str | None,
+                     head: str) -> dict:
+      """`head` is the commit the user was shown; a branch that moved since is refused."""
       t = self.owned(task_id, dawn_user_id)
       if t["published"]:
          return json.loads(t["published"])  # already done: the same answer again
       if t["status"] != st.COMPLETED:
          raise ValueError("only a completed task is published")
+      now, _ = await self.repos.agent_ref(t["repo"], task_id, t["base"])
+      if head.lower() != now:
+         raise ValueError(f"the branch moved since it was shown (it is now at {now[:12]})")
       if not self.cfg.github_token:
          raise ValueError("no GitHub token configured (AGENT_GATEWAY_GITHUB_TOKEN)")
       body = (t["summary"] or "") + f"\n\nTask: {t['task']}"
-      res = await self.repos.publish(t["repo"], task_id, t["branch"], t["base"],
+      res = await self.repos.publish(t["repo"], now, t["branch"], t["base"],
                                      self.cfg.github_token, open_pr,
                                      title or t["task"].splitlines()[0][:72], clip(body, 6000))
       self.store.update_task(task_id, published=json.dumps(res))
