@@ -38,9 +38,9 @@ SANDBOXED = {"Bash", "BashOutput", "KillShell"}
 CBM_READ_TOOLS = ("search_graph", "query_graph", "get_architecture", "get_code_snippet",
                   "search_code", "trace_path", "get_graph_schema", "list_projects")
 
-# The floor allows permission rules only from managed settings, so a repo (or
-# the agent writing its clone's .claude/settings.json) can't pre-approve a
-# call around this function; every call that would prompt comes here.
+# The agent runs with no settings loaded but the gateway's floor (no repo or
+# user settings), so nothing can pre-approve a call around this function;
+# every call that would prompt comes here.
 READ_ONLY = {*(f"mcp__cbm__{t}" for t in CBM_READ_TOOLS),
              "Read", "Glob", "Grep", "LS", "NotebookRead", "TodoWrite", "ToolSearch",
              "Task", "Agent", "TaskOutput", "Skill", "EnterPlanMode", "ExitPlanMode"}

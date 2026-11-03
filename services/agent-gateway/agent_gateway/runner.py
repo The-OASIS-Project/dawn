@@ -265,15 +265,21 @@ class Runner:
    async def options(self, task: dict) -> ClaudeAgentOptions:
       domains = sorted({*self.cfg.default_domains, *self.store.grants_for(task, "domain")})
       granted_tools = self.store.grants_for(task, "tool")
-      system = GUIDANCE
-      if not await self.repos.has_claude_md(task["repo"], task["base"]):
+      # No settings are loaded from the repo or the agent's home (a repo's
+      # .claude/settings.json could pre-approve calls around the policy), so
+      # the repo's CLAUDE.md comes from here, as the base branch has it.
+      rules = await self.repos.claude_md(task["repo"], task["base"])
+      if rules is not None:
+         system = GUIDANCE + "\n\nThe repository's CLAUDE.md (its rules):\n" + rules
+      else:
          with open(TEMPLATE) as f:
-            system += "\n\nThis repository has no CLAUDE.md.  Follow these rules:\n" + f.read()
+            system = GUIDANCE + "\n\nThis repository has no CLAUDE.md.  Follow these rules:\n" + \
+               f.read()
       mcp = {"cbm": {"type": "sse", "url": self.cfg.cbm_url}} if self.cfg.cbm_url else {}
       return ClaudeAgentOptions(
          cwd=task["worktree"], cli_path=self.cfg.claude_cli, resume=task["session_id"],
          model=self.cfg.model, permission_mode="acceptEdits",
-         setting_sources=["user", "project"], strict_mcp_config=True, mcp_servers=mcp,
+         setting_sources=[], strict_mcp_config=True, mcp_servers=mcp,
          disallowed_tools=[f"mcp__cbm__{t}" for t in CBM_WRITE_TOOLS],
          settings=floor_settings(self.cfg.agent_home, self.cfg.work_dir, task["worktree"],
                                  domains),

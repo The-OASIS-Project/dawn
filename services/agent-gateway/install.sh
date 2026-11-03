@@ -2,7 +2,7 @@
 #
 # agent-gateway installer: lets DAWN hand coding tasks to Claude Code running
 # as a separate, sandboxed user.  Runs as root because it creates the users and
-# writes /etc (sudoers, the agent's managed settings, the systemd unit):
+# writes /etc (sudoers, the systemd units):
 #   sudo UV=$(command -v uv) ./install.sh
 #
 # Installs:
@@ -10,7 +10,6 @@
 #                                 update.py,claude,tests,claude-as-agent,
 #                                 claude-agent-exec,agent-gitconfig}
 #   /usr/local/etc/agent-gateway/{agent-gateway.toml,env}   (kept if they exist)
-#   /etc/claude-code/managed-settings.json                  (the agent's fixed rules)
 #   /etc/sudoers.d/agent-gateway                            (dawn may run as dawn-agent)
 #   /etc/systemd/system/agent-gateway.service, agent-gateway-update.{service,timer}
 #
@@ -109,14 +108,13 @@ ln -sfn "current/${SITE#"$VENV"/}/claude_agent_sdk/_bundled/claude" "$LIB_DIR/cl
 "$LIB_DIR/claude" --version >/dev/null || error "the SDK's bundled claude doesn't run"
 log "Claude Code $("$LIB_DIR/claude" --version | cut -d' ' -f1) (claude-agent-sdk $VER)"
 
-# --- the agent's fixed rules ---------------------------------------------
-install -d -m 755 /etc/claude-code
-# The same rules the gateway passes with every run, as a second layer.
-if [ -f "$MANAGED" ] && ! cmp -s "$MANAGED" "$SCRIPT_DIR/agent_gateway/floor.json"; then
-   cp "$MANAGED" "$MANAGED.bak.$(date +%Y%m%d%H%M%S)"
-   warn "Replaced $MANAGED (previous copy kept beside it)"
+# The agent's rules are passed by the gateway with every run, never installed
+# machine-wide: a managed-settings file applies to every Claude Code session on
+# the machine, the operator's own included.  An earlier version installed one.
+if [ -f "$MANAGED" ] && grep -q "dawn-gateway" "$MANAGED"; then
+   warn "$MANAGED is from an earlier agent-gateway install and applies to every"
+   warn "Claude Code session on this machine; remove it: sudo rm $MANAGED"
 fi
-install -m 644 "$SCRIPT_DIR/agent_gateway/floor.json" "$MANAGED"
 
 log "sudoers: dawn may run commands as dawn-agent"
 install -m 440 "$SCRIPT_DIR/agent-gateway.sudoers" /etc/sudoers.d/agent-gateway

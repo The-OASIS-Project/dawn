@@ -25,11 +25,14 @@ client (DAWN)  --MCP + bearer token-->  agent-gateway (user dawn, 127.0.0.1:9760
   allowed hosts reachable (no host services, no gateway), and writes only inside the task's
   clone. Read and edit tools are held to the same places by permission rules. Claude Code itself
   is the copy the gateway's Python SDK ships, root-owned, with self-update off.
-- **Fixed rules** (`agent_gateway/floor.json`) are passed by the gateway with every run, which
-  outranks a repo's own settings, and installed as `/etc/claude-code/managed-settings.json` as a
-  second layer: a repo's `.claude/` settings can't run hooks, start MCP servers, or turn on
-  bypass mode, and the sandbox hides the agent's credentials and other tasks' clones. A repo's
-  `CLAUDE.md` still applies; a repo without one gets `agent_gateway/CLAUDE.template.md`.
+- **Fixed rules** (`agent_gateway/floor.json`) are the only settings the agent runs with: the
+  gateway passes them with every run and loads none from the repo or the agent's home, so a
+  repo's `.claude/` settings can't pre-approve calls, run hooks, start MCP servers or turn on
+  bypass mode. Nothing is installed machine-wide (a managed-settings file would govern every
+  Claude Code session on the machine). The sandbox hides the agent's credentials and other
+  tasks' clones. A repo's `CLAUDE.md` still applies: the gateway reads it from its mirror, as the
+  base branch has it, and adds it to the agent's instructions; a repo without one gets
+  `agent_gateway/CLAUDE.template.md`.
 - **Git the agent can't steer.** A repo's config can make git run programs, and the agent controls
   its clone's config. So the gateway runs git only in its own mirror; the agent's work comes back
   as a bundle that git writes from inside a jail with no network and the agent's home hidden.

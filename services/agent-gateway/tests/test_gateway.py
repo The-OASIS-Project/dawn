@@ -124,6 +124,9 @@ class FakeRepos:
    async def agent_ref(self, name, task_id, base):
       return "abcdef1234567890", "base000"
 
+   async def claude_md(self, name, base):
+      return "Commits need the developer's OK."
+
    async def remove(self, task_id):
       pass
 
@@ -366,7 +369,7 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    assert git("-C", wt, "config", "user.email") == "dawn-agent@localhost"
    exclude = (tmp_path / "home/work/aaaa0001/.git/info/exclude").read_text()
    assert "/.claude/hooks" in exclude and "/.bashrc" in exclude
-   assert not asyncio.run(repos.has_claude_md("r", "main"))
+   assert asyncio.run(repos.claude_md("r", "main")) is None
    # Under the service's umask the mirror must still be readable, never writable,
    # by the agent's group.
    mirror = tmp_path / "mirrors/r.git"
@@ -602,10 +605,33 @@ def test_canary_sections_survive_bare_number_lines():
    assert refused("no credentials", section(fenced, 3))
 
 
-def test_floor_takes_permission_rules_from_managed_settings_only():
+def test_floor_hides_transcripts_and_policy_decides_code_graph_reads():
    from agent_gateway import policy
    floor = json.load(open(os.path.join(os.path.dirname(policy.__file__), "floor.json")))
-   assert floor["allowManagedPermissionRulesOnly"] is True
    assert "~/.claude/projects" in floor["sandbox"]["filesystem"]["denyRead"]
    assert policy.decide("mcp__cbm__search_graph", {}, "/w/a", []).allow
    assert not policy.decide("mcp__cbm__delete_project", {}, "/w/a", []).allow
+
+
+def test_repo_claude_md_comes_from_the_mirror(tmp_path):
+   src = tmp_path / "src"
+   src.mkdir()
+   git("init", "-q", "-b", "main", cwd=src)
+   (src / "CLAUDE.md").write_text("Run make test.\n")
+   git("add", "CLAUDE.md", cwd=src)
+   git("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "init", cwd=src)
+   repos = Repos({"r": {"url": str(src), "base": "main"}}, str(tmp_path / "m"), "/w", [],
+                 "/h", "/g")
+   asyncio.run(repos.refresh("r"))
+   assert asyncio.run(repos.claude_md("r", "main")) == "Run make test.\n"
+
+
+def test_agent_runs_on_the_floor_alone(store):
+   """No settings from the repo or the agent's home: the repo's rules come in
+   through the instructions instead."""
+   r = runner(store)
+   t = add_task(store)
+   opts = asyncio.run(r.options(t))
+   assert opts.setting_sources == []
+   assert "Commits need the developer's OK." in opts.system_prompt["append"]
+   assert json.loads(opts.settings)["disableAllHooks"] is True

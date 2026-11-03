@@ -53,6 +53,7 @@ SUBJECT_CAP = 200
 FILE_CAP = 512 * 1024     # one file's content or diff in a viewer reply
 TREE_CAP = 2000           # entries in one folder listing
 COMMITS_CAP = 100
+CLAUDE_MD_CAP = 64 * 1024
 
 
 class GitError(Exception):
@@ -149,13 +150,15 @@ class Repos:
                           stdin="".join(f"/{p}\n" for p in SANDBOX_PLACEHOLDERS))
       return w
 
-   async def has_claude_md(self, name: str, base: str) -> bool:
-      try:
-         await self.gw("-C", self.mirror(name), "cat-file", "-e",
-                       f"refs/heads/{base}:CLAUDE.md")
-         return True
-      except GitError:
-         return False
+   async def claude_md(self, name: str, base: str) -> str | None:
+      """The repo's CLAUDE.md as the base branch has it (from the mirror, so
+      nothing the agent writes during the task changes its rules), or None."""
+      rev = f"refs/heads/{base}:CLAUDE.md"
+      m = self.mirror(name)
+      size = await self.size_of(m, rev)
+      if size == 0 or size > CLAUDE_MD_CAP:
+         return None
+      return (await run(["git", "-C", m, "cat-file", "blob", rev])).decode(errors="replace")
 
    # --- after the agent runs --------------------------------------------
 

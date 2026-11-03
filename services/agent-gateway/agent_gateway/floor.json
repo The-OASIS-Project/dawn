@@ -42,6 +42,5 @@
         "~/.claude/todos"
       ]
     }
-  },
-  "allowManagedPermissionRulesOnly": true
+  }
 }
