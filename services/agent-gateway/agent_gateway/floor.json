@@ -6,9 +6,20 @@
   "permissions": {
     "disableBypassPermissionsMode": "disable",
     "deny": [
-      "Bash(git push:*)", "Bash(git push)", "WebFetch", "WebSearch",
-      "Read(//var/lib/dawn/**)", "Read(//var/lib/dawn-gateway/**)", "Read(//usr/local/etc/agent-gateway/**)",
-      "Read(//home/**)", "Read(~/.claude/.credentials.json)", "Read(~/.claude.json)", "Read(~/.config/**)"
+      "Bash(git push:*)",
+      "Bash(git push)",
+      "WebFetch",
+      "WebSearch",
+      "Read(//var/lib/dawn/**)",
+      "Read(//var/lib/dawn-gateway/**)",
+      "Read(//usr/local/etc/agent-gateway/**)",
+      "Read(//home/**)",
+      "Read(~/.claude/.credentials.json)",
+      "Read(~/.claude.json)",
+      "Read(~/.config/**)",
+      "Read(~/.claude/projects/**)",
+      "Read(~/.claude/file-history/**)",
+      "Read(~/.claude/todos/**)"
     ]
   },
   "sandbox": {
@@ -16,7 +27,21 @@
     "failIfUnavailable": true,
     "allowUnsandboxedCommands": false,
     "autoAllowBashIfSandboxed": true,
-    "network": { "allowedDomains": ["api.anthropic.com"] },
-    "filesystem": { "denyRead": ["~/.claude/.credentials.json", "~/.claude.json", "~/.config"] }
-  }
+    "network": {
+      "allowedDomains": [
+        "api.anthropic.com"
+      ]
+    },
+    "filesystem": {
+      "denyRead": [
+        "~/.claude/.credentials.json",
+        "~/.claude.json",
+        "~/.config",
+        "~/.claude/projects",
+        "~/.claude/file-history",
+        "~/.claude/todos"
+      ]
+    }
+  },
+  "allowManagedPermissionRulesOnly": true
 }

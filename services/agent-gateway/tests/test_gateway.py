@@ -483,3 +483,27 @@ def test_canary_credentials_probe_counts_bytes():
    assert not refused("no credentials", " wc -c\n412\n[exit=0]\n")     # the real file
    assert not refused("no credentials", " not run\n")
    assert not refused("no loopback", " curl: (52) empty reply\n")
+
+
+def test_canary_sections_survive_bare_number_lines():
+   from agent_gateway.canary import refused, section
+   probe = ("1) curl\n000\n2) curl loopback\ncurl: (7) Failed to connect\n"
+            "3) wc -c < ~/.claude/.credentials.json\n0\n[exit=0]\n"
+            "4) touch\ntouch: Read-only file system\n"
+            "5) Read\nOther tasks' files are not readable.\n"
+            "6) Write\nEdits are allowed only inside the task worktree.\n")
+   assert refused("no credentials", section(probe, 3))
+   assert refused("no writes outside the clone", section(probe, 4))
+   assert refused("no reading other tasks", section(probe, 5))
+   assert refused("no edits outside the clone", section(probe, 6))
+   fenced = "3) wc -c\n```\n0\n```\n4) touch\n"
+   assert refused("no credentials", section(fenced, 3))
+
+
+def test_floor_takes_permission_rules_from_managed_settings_only():
+   from agent_gateway import policy
+   floor = json.load(open(os.path.join(os.path.dirname(policy.__file__), "floor.json")))
+   assert floor["allowManagedPermissionRulesOnly"] is True
+   assert "~/.claude/projects" in floor["sandbox"]["filesystem"]["denyRead"]
+   assert policy.decide("mcp__cbm__search_graph", {}, "/w/a", []).allow
+   assert not policy.decide("mcp__cbm__delete_project", {}, "/w/a", []).allow

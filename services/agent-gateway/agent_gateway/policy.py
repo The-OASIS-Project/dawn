@@ -35,7 +35,14 @@ SANDBOXED = {"Bash", "BashOutput", "KillShell"}
 
 # Tools that read or only organise the agent's own work.  Secrets are kept out
 # by the floor's Read deny rules and by Unix permissions.
-READ_ONLY = {"Read", "Glob", "Grep", "LS", "NotebookRead", "TodoWrite", "ToolSearch",
+CBM_READ_TOOLS = ("search_graph", "query_graph", "get_architecture", "get_code_snippet",
+                  "search_code", "trace_path", "get_graph_schema", "list_projects")
+
+# The floor allows permission rules only from managed settings, so a repo (or
+# the agent writing its clone's .claude/settings.json) can't pre-approve a
+# call around this function; every call that would prompt comes here.
+READ_ONLY = {*(f"mcp__cbm__{t}" for t in CBM_READ_TOOLS),
+             "Read", "Glob", "Grep", "LS", "NotebookRead", "TodoWrite", "ToolSearch",
              "Task", "Agent", "TaskOutput", "Skill", "EnterPlanMode", "ExitPlanMode"}
 
 EDITS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}

@@ -31,7 +31,6 @@ import logging
 import os
 import secrets
 import time
-import warnings
 
 from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient,
                               PermissionResultAllow, PermissionResultDeny, ResultMessage,
@@ -42,9 +41,6 @@ from .repos import Repos, slug
 
 log = logging.getLogger("agent-gateway")
 
-# The code-graph read tools are allowed outright on purpose; the SDK warns that
-# the permission callback won't see them.
-warnings.filterwarnings("ignore", message="can_use_tool will not be invoked")
 
 TEXT_CAP = 2000
 PAYLOAD_CAP = 4000
@@ -59,8 +55,6 @@ will be resumed with the answer."""
 TEMPLATE = os.path.join(os.path.dirname(__file__), "CLAUDE.template.md")
 FLOOR = os.path.join(os.path.dirname(__file__), "floor.json")
 
-CBM_READ_TOOLS = ("search_graph", "query_graph", "get_architecture", "get_code_snippet",
-                  "search_code", "trace_path", "get_graph_schema", "list_projects")
 CBM_WRITE_TOOLS = ("index_repository", "delete_project", "manage_adr")
 
 
@@ -280,7 +274,6 @@ class Runner:
          cwd=task["worktree"], cli_path=self.cfg.claude_cli, resume=task["session_id"],
          model=self.cfg.model, permission_mode="acceptEdits",
          setting_sources=["user", "project"], strict_mcp_config=True, mcp_servers=mcp,
-         allowed_tools=[f"mcp__cbm__{t}" for t in CBM_READ_TOOLS] + granted_tools,
          disallowed_tools=[f"mcp__cbm__{t}" for t in CBM_WRITE_TOOLS],
          settings=floor_settings(self.cfg.agent_home, self.cfg.work_dir, task["worktree"],
                                  domains),
