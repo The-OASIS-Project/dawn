@@ -177,6 +177,48 @@ int contacts_find(int user_id,
    return 0;
 }
 
+int contacts_find_by_value(int user_id,
+                           const char *field_type,
+                           const char *value,
+                           contact_result_t *out,
+                           int max_results,
+                           int *count_out) {
+   if (count_out)
+      *count_out = 0;
+   if (!field_type || !value || !value[0] || !out || max_results <= 0)
+      return 0;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int count = 0;
+   /* lower(value) lets idx_contacts_field_lvalue seek the value; the unary +
+    * keeps the exact equality from displacing that term in the plan. */
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT c.id, c.entity_id, e.name, e.canonical_name, c.field_type, c.value, c.label, "
+       "e.photo_id FROM contacts c JOIN memory_entities e ON c.entity_id = e.id "
+       "WHERE c.user_id = ?1 AND c.field_type = ?2 AND lower(c.value) = lower(?3) "
+       "AND +c.value = ?3 ORDER BY e.name LIMIT ?4",
+       -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_text(st, 2, field_type, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(st, 3, value, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int(st, 4, max_results);
+      while (count < max_results && (rc = sqlite3_step(st)) == SQLITE_ROW) {
+         row_to_contact(st, &out[count++]);
+      }
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+      OLOG_ERROR("contacts_find_by_value: %s", sqlite3_errmsg(s_db.db));
+      return 1;
+   }
+   if (count_out)
+      *count_out = count;
+   return 0;
+}
+
 int contacts_add(int user_id,
                  int64_t entity_id,
                  const char *field_type,
