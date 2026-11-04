@@ -35,7 +35,6 @@
 #include "memory/memory_db_consolidation.h"
 #include "memory/memory_db_entities.h"
 #include "memory/memory_extraction.h"
-#include "memory/memory_forget.h"
 
 /* Maximum users to process in one run */
 #define MAX_USERS 64
@@ -72,6 +71,11 @@ static void prune_consolidation_record(time_t now) {
  * saw in the Graph tab doesn't vanish under them. */
 #define ORPHAN_ENTITY_MIN_AGE_DAYS 7
 
+/* How long the sweep waits for a user's running extraction before leaving
+ * that user to the next night: short, so a slow batch never stalls the
+ * maintenance thread for every user after it. */
+#define ORPHAN_SWEEP_HOLD_WAIT_SEC 5
+
 /* Entities nothing names (no fact, relation, alias, proposal, contact or
  * record row), left before batches removed their own: noise in focus and the
  * graph that undo and forget never reach.  Each user's extraction is held so
@@ -81,8 +85,11 @@ static void sweep_orphan_entities(time_t now) {
    int user_count = 0;
    memory_db_get_all_user_ids(user_ids, MAX_USERS, &user_count);
    for (int i = 0; i < user_count; i++) {
-      if (!memory_extraction_hold_user(user_ids[i], MEMORY_FORGET_WAIT_SEC)) {
-         continue; /* runs again tomorrow */
+      if (!memory_extraction_hold_user(user_ids[i], ORPHAN_SWEEP_HOLD_WAIT_SEC)) {
+         OLOG_INFO("memory_decay: user %d: extraction running; entity sweep skipped until "
+                   "tomorrow",
+                   user_ids[i]);
+         continue;
       }
       int deleted = 0;
       const int rc = memory_db_entity_sweep_orphans(

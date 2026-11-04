@@ -431,6 +431,9 @@
 
    function handleSearchResponse(payload) {
       memoryState.loading = false;
+      /* A delete's focus target is for the full list; a search result list
+       * isn't it, so drop the target rather than move focus later. */
+      focusAfter = null;
       /* Landed after a switch to Learned: that list isn't a search result. */
       if (memoryState.activeTab === 'learned') return;
 
@@ -1342,6 +1345,7 @@
       if (window.DawnMemoryAliases) DawnMemoryAliases.cancelMergeMode();
       if (window.DawnMemoryBatches) DawnMemoryBatches.hideTab();
       memoryState.activeTab = tabName;
+      focusAfter = null;
 
       if (tablist) tablist.sync();
       syncSortControl();
