@@ -1141,6 +1141,7 @@ typedef struct {
 #define MCP_SERVERS_MAX 16
 #define MCP_SERVER_ALIAS_MAX 64
 #define MCP_SERVER_ROLE_MAX 24
+#define MCP_SERVER_ROLE_AGENT_GATEWAY "agent_gateway" /* a coding-agent gateway */
 
 typedef struct {
    char alias[MCP_SERVER_ALIAS_MAX]; /* server id, used as a tool-name prefix */

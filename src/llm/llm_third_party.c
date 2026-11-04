@@ -40,6 +40,8 @@ static const struct {
 } k_frames[] = {
    { TOOL_FRAME_EMAIL, THIRD_PARTY_WHAT_EMAIL, OUTSIDE_EMAIL },
    { TOOL_FRAME_WEB, THIRD_PARTY_WHAT_WEB, OUTSIDE_WEB },
+   /* A coding agent's words, from the agent gateway over MCP. */
+   { TOOL_FRAME_AGENT, THIRD_PARTY_WHAT_AGENT, OUTSIDE_MCP },
 };
 
 char *llm_third_party_frame(const char *name, const char *tag, const char *body) {

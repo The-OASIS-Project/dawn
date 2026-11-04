@@ -468,8 +468,17 @@ int config_validate(const dawn_config_t *config,
    }
 
    /* ===== MCP bridge servers ===== */
+   int gateways = 0;
    for (int i = 0; i < config->mcp.server_count && i < MCP_SERVERS_MAX; i++) {
       const mcp_server_config_t *srv = &config->mcp.servers[i];
+      /* One gateway, so the coding agent never chooses between them by order. */
+      if (srv->enabled && strcmp(srv->role, MCP_SERVER_ROLE_AGENT_GATEWAY) == 0 &&
+          ++gateways == 2) {
+         ADD_ERROR("mcp.server.role",
+                   "server '%s': only one enabled server may be the "
+                   "agent gateway",
+                   srv->alias);
+      }
       if (strcmp(srv->transport, "http+sse") != 0 && strcmp(srv->transport, "http") != 0) {
          ADD_ERROR("mcp.server.transport",
                    "server '%s' transport must be 'http' or 'http+sse' (got '%s')", srv->alias,
@@ -481,7 +490,7 @@ int config_validate(const dawn_config_t *config,
                    "server '%s' capabilities must be 'dangerous' or 'read_only' (got '%s')",
                    srv->alias, srv->capabilities);
       }
-      if (srv->role[0] != '\0' && strcmp(srv->role, "agent_gateway") != 0) {
+      if (srv->role[0] != '\0' && strcmp(srv->role, MCP_SERVER_ROLE_AGENT_GATEWAY) != 0) {
          ADD_ERROR("mcp.server.role",
                    "server '%s' role must be 'agent_gateway' or unset (got '%s')", srv->alias,
                    srv->role);

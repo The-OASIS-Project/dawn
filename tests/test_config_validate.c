@@ -366,6 +366,18 @@ static void test_mcp_role_values(void) {
    safe_strscpy(srv->role, "gateway");
    int n = config_validate(&s_config, NULL, s_errors, MAX_ERRORS);
    TEST_ASSERT_TRUE(has_error(n, "mcp.server.role"));
+
+   /* Two enabled gateways: refused; a disabled second one is fine. */
+   safe_strscpy(srv->role, "agent_gateway");
+   s_config.mcp.servers[1] = *srv;
+   safe_strscpy(s_config.mcp.servers[1].alias, "agents2");
+   s_config.mcp.server_count = 2;
+   n = config_validate(&s_config, NULL, s_errors, MAX_ERRORS);
+   TEST_ASSERT_TRUE(has_error(n, "mcp.server.role"));
+   s_config.mcp.servers[1].enabled = false;
+   n = config_validate(&s_config, NULL, s_errors, MAX_ERRORS);
+   TEST_ASSERT_FALSE(has_error(n, "mcp.server.role"));
+   s_config.mcp.server_count = 0;
 }
 
 static void test_local_endpoint_no_http(void) {

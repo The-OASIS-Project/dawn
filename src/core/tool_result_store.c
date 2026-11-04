@@ -525,6 +525,7 @@ static const struct {
 } k_frames[] = {
    { TOOL_RESULTS_FRAME_EMAIL, TOOL_FRAME_EMAIL },
    { TOOL_RESULTS_FRAME_WEB, TOOL_FRAME_WEB },
+   { TOOL_RESULTS_FRAME_AGENT, TOOL_FRAME_AGENT },
 };
 
 static int frame_id(const char *name) {

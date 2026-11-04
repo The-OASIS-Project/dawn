@@ -260,6 +260,7 @@ them as one Layer-2 unit, not as separate modules with a direction between them.
 | lower-layer broadcasts (scheduler, jobs, calendar, phone, ...) | `webui_broadcasts.c` | weak no-op default, strong WebUI override |
 | `src/tools/email_service_move.c` (a move or undo changed a mailbox) | `webui_email_changed.c` (email_changed to every tab of the user) | weak `email_changed_notify` |
 | `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |
+| `src/core/job_manager.c` (cancel a job whose work runs outside DAWN) | `coding_agent_tool.c` (asks the agent gateway to stop a coding job's task) | `job_manager_register_kind_cancel` |
 
 \* **Orchestration-unit note.** `job_worker.c` and `research_worker.c` physically live in
 `src/core/` but are **application-orchestration units**: each is a detached top-of-stack sequencer
@@ -393,6 +394,10 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    WebUI email request and kept until  │
 │                    shutdown: the panel's email work,   │
 │                    off the lws thread                  │
+│  Coding cancel   — transient, one per cancelled coding │
+│                    job: asks the agent gateway to stop │
+│                    its task; waited for by the tool's  │
+│                    stop                                │
 │  Email fan-out   — transient, one per enabled account  │
 │                    (≤16) for an all-accounts email     │
 │                    search from the tool, joined before │

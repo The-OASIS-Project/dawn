@@ -59,6 +59,7 @@ typedef enum {
 #define TOOL_RESULTS_FRAME_NONE 0
 #define TOOL_RESULTS_FRAME_EMAIL 1
 #define TOOL_RESULTS_FRAME_WEB 2
+#define TOOL_RESULTS_FRAME_AGENT 3
 #define TOOL_RESULTS_FRAME_MAX 15
 
 /** A result to store. */

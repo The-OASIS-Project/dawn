@@ -633,7 +633,7 @@ int mcp_bridge_init(void) {
       snprintf(s_servers[idx].alias, sizeof(s_servers[idx].alias), "%s", srv->alias);
       s_servers[idx].client = client;
       s_servers[idx].in_use = true;
-      s_servers[idx].declared_gateway = strcmp(srv->role, "agent_gateway") == 0;
+      s_servers[idx].declared_gateway = strcmp(srv->role, MCP_SERVER_ROLE_AGENT_GATEWAY) == 0;
       s_server_count++;
 
       /* Register tools only here, at startup, while the registry is still

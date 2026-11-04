@@ -2333,6 +2333,18 @@ dawn_add_unit_test(test_history_strip_markers
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# coding_agent tool: start order, confirm gating, cancel hook (gateway and job
+# store stubbed).
+dawn_add_unit_test(test_coding_agent_tool
+   SOURCES test_coding_agent_tool.c
+           ${SRC_ROOT}/src/tools/coding_agent_tool.c
+           ${SRC_ROOT}/src/tools/coding_agent_gateway.c
+           ${SRC_ROOT}/src/core/pending_slots.c
+           ${SRC_ROOT}/src/tools/tool_pending.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Background-job session pool.
 dawn_add_unit_test(test_job_manager
    SOURCES test_job_manager.c

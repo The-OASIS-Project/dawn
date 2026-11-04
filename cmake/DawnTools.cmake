@@ -519,6 +519,18 @@ else()
     message(STATUS "DAWN: MCP bridge tool DISABLED")
 endif()
 
+# Coding agent (tasks for an agent gateway, services/agent-gateway).  Reaches the
+# gateway through the MCP bridge; each task is a background job, so it needs the
+# WebUI too.
+option(DAWN_ENABLE_CODING_AGENT_TOOL "Enable the coding_agent tool" ON)
+if(DAWN_ENABLE_CODING_AGENT_TOOL AND DAWN_ENABLE_MCP_BRIDGE_TOOL AND ENABLE_WEBUI)
+    add_definitions(-DDAWN_ENABLE_CODING_AGENT_TOOL)
+    list(APPEND TOOL_SOURCES src/tools/coding_agent_gateway.c src/tools/coding_agent_tool.c)
+    message(STATUS "DAWN: Coding agent tool ENABLED")
+else()
+    message(STATUS "DAWN: Coding agent tool DISABLED")
+endif()
+
 # Code Projects (coding harness — clone + index repos via libgit2 + MCP bridge)
 option(DAWN_ENABLE_CODE_PROJECTS "Enable code projects subsystem (requires MCP bridge + libgit2)" OFF)
 if(DAWN_ENABLE_CODE_PROJECTS)

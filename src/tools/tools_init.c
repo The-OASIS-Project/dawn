@@ -29,6 +29,9 @@
 #ifdef DAWN_ENABLE_MCP_BRIDGE_TOOL
 #include "tools/mcp_bridge.h"
 #endif
+#ifdef DAWN_ENABLE_CODING_AGENT_TOOL
+#include "tools/coding_agent_tool.h"
+#endif
 
 #ifdef DAWN_ENABLE_CODE_PROJECTS
 #include "tools/code_project_service.h"
@@ -424,6 +427,12 @@ int tools_register_all(void) {
     * a missing/unreachable server is logged and skipped. */
    if (mcp_bridge_init() != 0) {
       OLOG_WARNING("MCP bridge init failed; continuing without bridged tools");
+   }
+#endif
+
+#ifdef DAWN_ENABLE_CODING_AGENT_TOOL
+   if (coding_agent_tool_register() != 0) {
+      OLOG_WARNING("Failed to register coding_agent tool");
    }
 #endif
 

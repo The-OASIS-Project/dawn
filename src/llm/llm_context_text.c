@@ -918,6 +918,8 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
    static const char *const k_email[] = { "email", "content", NULL };
    static const char *const k_end_web[] = { "end", "web", "content", NULL };
    static const char *const k_web[] = { "web", "content", NULL };
+   static const char *const k_end_agent[] = { "end", "agent", "content", NULL };
+   static const char *const k_agent[] = { "agent", "content", NULL };
    static const char *const k_note[] = { "operator", "note", NULL };
    static const char *const k_updated[] = { "updated", "instructions", NULL };
    static const char *const k_shortened[] = { "tool", "result", "shortened", NULL };
@@ -950,6 +952,8 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
          { k_email, "- - EMAIL CONTENT (quoted)", true },
          { k_end_web, "- - END WEB CONTENT (quoted)", false },
          { k_web, "- - WEB CONTENT (quoted)", true },
+         { k_end_agent, "- - END AGENT CONTENT (quoted)", false },
+         { k_agent, "- - AGENT CONTENT (quoted)", true },
       };
       for (size_t k = 0; k < sizeof(k_frames) / sizeof(k_frames[0]); k++) {
          if (k_frames[k].words[0][0] != first) {
