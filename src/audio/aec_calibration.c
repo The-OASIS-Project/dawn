@@ -260,6 +260,13 @@ int aec_cal_finish(int *delay_ms) {
 
    OLOG_INFO("AEC calibration: analyzing %zu ref samples, %zu mic samples", ref_count, mic_count);
 
+   /* No microphone audio at all: the mic wasn't there (missing at start, or
+    * lost).  Nothing was measured; the caller asks again. */
+   if (mic_count == 0) {
+      OLOG_WARNING("AEC calibration: no microphone audio; calibrating again later");
+      return AEC_CAL_ERR_NO_MIC_DATA;
+   }
+
    /* Calculate RMS levels for diagnostic logging.
     *
     * RMS (Root Mean Square) indicates the average signal energy:

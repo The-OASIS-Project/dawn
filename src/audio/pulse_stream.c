@@ -63,7 +63,8 @@ struct pulse_stream {
    int op_success;
 };
 
-/* A named device, as opposed to the default (which the stream may follow). */
+/* A named device, as opposed to the default or a selector such as
+ * @DEFAULT_MONITOR@ (which the stream follows, and may be moved with). */
 static bool is_named(const char *device) {
    return device && device[0] != '\0' && device[0] != '@' && strcmp(device, "default") != 0;
 }
@@ -210,15 +211,19 @@ pulse_stream_t *pulse_stream_new(pa_stream_direction_t dir,
 
    /* pa_simple's flags (ADJUST_LATENCY is what makes the buffer attributes mean
     * what they say), and a named device is never left. */
-   pa_stream_flags_t flags = PA_STREAM_INTERPOLATE_TIMING | PA_STREAM_ADJUST_LATENCY |
-                             PA_STREAM_AUTO_TIMING_UPDATE;
+   unsigned flags = PA_STREAM_INTERPOLATE_TIMING | PA_STREAM_ADJUST_LATENCY |
+                    PA_STREAM_AUTO_TIMING_UPDATE;
    if (named) {
       flags |= PA_STREAM_DONT_MOVE;
    }
-   const char *dev = named ? device : NULL;
+   /* "default" is the default device; a selector goes to the server as given. */
+   const char *dev = device && device[0] != '\0' && strcmp(device, "default") != 0 ? device : NULL;
+   /* The API takes flags OR-ed together, which no single enumerator is. */
+   // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+   const pa_stream_flags_t stream_flags = (pa_stream_flags_t)flags;
    int r = dir == PA_STREAM_PLAYBACK
-               ? pa_stream_connect_playback(s->stream, dev, attr, flags, NULL, NULL)
-               : pa_stream_connect_record(s->stream, dev, attr, flags);
+               ? pa_stream_connect_playback(s->stream, dev, attr, stream_flags, NULL, NULL)
+               : pa_stream_connect_record(s->stream, dev, attr, stream_flags);
    if (r < 0) {
       err = pa_context_errno(s->context);
       goto unlock_and_fail;

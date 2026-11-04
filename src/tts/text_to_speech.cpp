@@ -859,6 +859,8 @@ void *tts_thread_function(void *arg) {
                    aec_set_delay_hint(measured_delay_ms);
                    metrics_record_aec_calibration(true, measured_delay_ms, correlation);
                    metrics_update_aec_enabled(true);  // AEC confirmed working
+                } else if (cal_result == AEC_CAL_ERR_NO_MIC_DATA) {
+                   aec_cal_set_pending(); /* the next utterance, once the mic is back */
                 } else {
                    OLOG_WARNING("AEC calibration: failed (error %d), using default delay",
                                 cal_result);
