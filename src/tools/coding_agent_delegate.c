@@ -51,12 +51,14 @@
 #define CA_REPO_MAX 64
 #define CA_TASK_MAX 4000 /* the task text sent (the gateway caps what it stores too) */
 #define CA_BRANCH_MAX 160
+#define CA_NAME_MAX 60 /* a job's short name, as the user hears it */
 
 typedef struct {
    pending_slot_t hdr;
    char repo[CA_REPO_MAX];
    char task[CA_TASK_MAX];
-   double budget_usd; /* 0 = the gateway's default */
+   char name[CONV_TITLE_MAX]; /* the job's title: the model's short name, else from the task */
+   double budget_usd;         /* 0 = the gateway's default */
    int64_t parent_conv;
 } ca_pending_t;
 
@@ -76,12 +78,48 @@ static const pending_slots_t s_pending_slots = {
 
 /* ========== delegate: a preview, then the user's yes ========== */
 
+/* Whether @p name is a short one-line name: no control characters, no double
+ * quote (previews quote it), and none of the invisible or direction-changing
+ * characters that would make it show differently than it reads (C1 controls,
+ * U+200B-200F, U+2028-202E, U+2060-2069, U+FEFF). */
+static bool name_ok(const char *name) {
+   const size_t n = strlen(name);
+   if (n > CA_NAME_MAX) {
+      return false;
+   }
+   for (size_t i = 0; i < n; i++) {
+      const unsigned char c = (unsigned char)name[i];
+      if (c < 0x20 || c == 0x7f || c == '"' ||
+          (c == 0xc2 && i + 1 < n && (unsigned char)name[i + 1] < 0xa0)) {
+         return false;
+      }
+      if (c == 0xe2 && i + 2 < n) {
+         const unsigned char c1 = (unsigned char)name[i + 1], c2 = (unsigned char)name[i + 2];
+         if ((c1 == 0x80 && ((c2 >= 0x8b && c2 <= 0x8f) || (c2 >= 0xa8 && c2 <= 0xae))) ||
+             (c1 == 0x81 && c2 >= 0xa0 && c2 <= 0xa9)) {
+            return false;
+         }
+      }
+      if (c == 0xef && i + 2 < n && (unsigned char)name[i + 1] == 0xbb &&
+          (unsigned char)name[i + 2] == 0xbf) {
+         return false;
+      }
+   }
+   return true;
+}
+
+/* Whether @p s has anything but spaces. */
+static bool has_text(const char *s) {
+   return s[strspn(s, " ")] != '\0';
+}
+
 char *coding_delegate_propose(struct json_object *details,
                               int user_id,
                               int64_t parent_conv,
                               const turn_origin_t *origin) {
    const char *repo = coding_gateway_jstr(details, "repo");
    const char *task = coding_gateway_jstr(details, "task");
+   const char *name = coding_gateway_jstr(details, "name");
    struct json_object *jbudget = NULL;
    const double budget = json_object_object_get_ex(details, "budget_usd", &jbudget)
                              ? json_object_get_double(jbudget)
@@ -92,6 +130,10 @@ char *coding_delegate_propose(struct json_object *details,
    }
    if (strlen(task) >= CA_TASK_MAX) {
       return coding_agent_error("That task is too long to send; say it more briefly.");
+   }
+   if (!name_ok(name)) {
+      return coding_agent_error("name is a short one-line name for the job, at most 60 "
+                                "bytes, without double quotes.");
    }
    if (budget < 0.0) {
       return coding_agent_error("budget_usd can't be negative (0 or none: the gateway's default).");
@@ -133,9 +175,16 @@ char *coding_delegate_propose(struct json_object *details,
                                                          CA_PENDING_DELEGATE, pending_slots_now(),
                                                          &rc);
    const uint32_t id = p ? p->hdr.item_id : 0;
+   char shown[CONV_TITLE_MAX] = "";
    if (p != NULL) {
       safe_strscpy(p->repo, repo);
       safe_strscpy(p->task, task);
+      if (has_text(name)) {
+         safe_strscpy(p->name, name);
+      } else {
+         conv_generate_title(task, p->name, sizeof(p->name));
+      }
+      safe_strscpy(shown, p->name);
       p->budget_usd = budget;
       p->parent_conv = parent_conv;
    }
@@ -145,7 +194,8 @@ char *coding_delegate_propose(struct json_object *details,
    }
    strbuf_t sb;
    strbuf_init(&sb, CA_TASK_MAX);
-   strbuf_appendf(&sb, "About to give the coding agent this task in repo '%s'", repo);
+   strbuf_appendf(&sb, "About to give the coding agent a task named \"%s\" in repo '%s'", shown,
+                  repo);
    if (budget > 0.0) {
       strbuf_appendf(&sb, " (budget $%.2f)", budget);
    }
@@ -213,8 +263,7 @@ char *coding_delegate_confirm(struct json_object *details,
    }
 
    /* The job row first: the gateway's task is named after it. */
-   char title[CONV_TITLE_MAX];
-   conv_generate_title(p.task, title, sizeof(title));
+   const char *title = p.name;
    int64_t conv_id = 0;
    if (conv_db_create_job_ex(user_id, title, p.parent_conv, "detached", "notify", NULL, 1, p.task,
                              job_spawn_origin_string(), &conv_id) != AUTH_DB_SUCCESS) {
@@ -247,9 +296,9 @@ char *coding_delegate_confirm(struct json_object *details,
       if (read && strcmp(rec.job_status, "queued") != 0 &&
           strcmp(rec.job_status, "cancelled") != 0) {
          /* The agent already finished (its end came in first): the job says how. */
-         char buf[CONV_TITLE_MAX + 64];
-         snprintf(buf, sizeof(buf), "Started coding job #%lld; it has already ended (%s).",
-                  (long long)conv_id, rec.job_status);
+         char buf[2 * CONV_TITLE_MAX + 64];
+         snprintf(buf, sizeof(buf), "Started coding job #%lld (%s); it has already ended (%s).",
+                  (long long)conv_id, title, rec.job_status);
          return strdup(buf);
       }
       coding_gateway_cancel(user_id, conv_id);
@@ -265,9 +314,10 @@ char *coding_delegate_confirm(struct json_object *details,
    strbuf_t sb;
    strbuf_init(&sb, 256);
    strbuf_appendf(&sb,
-                  "Started coding job #%lld in %s on branch %s. It runs in the background; the "
-                  "user hears when it needs them or finishes, and can check on it with status.",
-                  (long long)conv_id, p.repo, branch);
+                  "Started coding job #%lld (\"%s\") in %s on branch %s. It runs in the "
+                  "background; the user hears when it needs them or finishes, and can check on it "
+                  "with status. Call it by its name when you talk about it.",
+                  (long long)conv_id, title, p.repo, branch);
    return strbuf_steal(&sb);
 }
 
@@ -293,8 +343,8 @@ int coding_delegate_describe(const char *value, char *out, size_t out_len, int *
       if (p->budget_usd > 0.0) {
          snprintf(budget, sizeof(budget), " (budget $%.2f)", p->budget_usd);
       }
-      n = snprintf(out, out_len, "give the coding agent, in repo '%s'%s, the task: %s", p->repo,
-                   budget, p->task);
+      n = snprintf(out, out_len, "give the coding agent a task named \"%s\", in repo '%s'%s: %s",
+                   p->name, p->repo, budget, p->task);
       *valid_for_sec = pending_slots_valid_for(&s_pending_slots, slot, pending_slots_now());
    }
    pthread_mutex_unlock(&s_pending_mutex);

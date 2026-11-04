@@ -2347,6 +2347,7 @@ dawn_add_unit_test(test_coding_agent_tool
    SOURCES test_coding_agent_tool.c
            ${SRC_ROOT}/src/tools/coding_agent_tool.c
            ${SRC_ROOT}/src/tools/coding_agent_delegate.c
+           ${SRC_ROOT}/src/tools/coding_agent_requests.c
            ${SRC_ROOT}/src/tools/coding_agent_gateway.c
            ${SRC_ROOT}/src/core/pending_slots.c
            ${SRC_ROOT}/src/tools/tool_pending.c

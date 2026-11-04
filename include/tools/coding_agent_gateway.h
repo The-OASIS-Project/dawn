@@ -25,6 +25,8 @@
 #define CODING_AGENT_GATEWAY_H
 
 #include <json-c/json.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -68,6 +70,23 @@ void coding_gateway_ref(int64_t conv_id, char *out, size_t out_len);
 
 /** The job id in a client_ref DAWN gave, or 0. */
 int64_t coding_gateway_ref_job(const char *client_ref);
+
+/** Room for coding_gateway_request_line()'s line. */
+#define CODING_GATEWAY_REQUEST_LINE_MAX 320
+
+/**
+ * @brief What a pending request asks for, in DAWN's words ("reach the host
+ *        `pypi.org`", "use the tool `WebFetch`", "ask you a question").
+ *
+ * The request's own value is used only once DAWN's check passes (a host: a
+ * lowercase name of letters, digits, '-' and '.', at most 253 characters; a
+ * tool: [A-Za-z0-9_.:-], at most 64); a question's text is the agent's and
+ * never goes into the line.
+ * @param req A request from task_list's "pending" ({id, kind, payload}).
+ * @return Whether @p out holds a line (false: an unknown kind, or a value that
+ *         fails the check).
+ */
+bool coding_gateway_request_line(struct json_object *req, char *out, size_t out_len);
 
 /** Ask the gateway to stop job @p conv_id's task (it may already be gone). */
 void coding_gateway_cancel(int user_id, int64_t conv_id);

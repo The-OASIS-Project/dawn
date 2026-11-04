@@ -17,8 +17,9 @@
  * the project author(s).
  *
  * The coding_agent tool's parts (coding_agent_tool.c: the callback, the
- * reads and these helpers; coding_agent_delegate.c: starting a task) and
- * what they share.  Not for use outside the tool.
+ * reads and these helpers; coding_agent_delegate.c: starting a task;
+ * coding_agent_requests.c: answering what a task waits on) and what they
+ * share.  Not for use outside the tool.
  */
 
 #ifndef CODING_AGENT_INTERNAL_H
@@ -83,6 +84,30 @@ char *coding_delegate_confirm(struct json_object *details,
 
 /** describe_call for confirm_delegate (tool_metadata_t.describe_call). */
 int coding_delegate_describe(const char *value, char *out, size_t out_len, int *valid_for_sec);
+
+/* ---- coding_agent_requests.c ---- */
+
+/** approve: stage allowing the host or tool a job waits on; return the preview. */
+char *coding_requests_approve(struct json_object *details,
+                              int user_id,
+                              const turn_origin_t *origin);
+
+/** confirm_approve: allow it, for that task only, if it is still open. */
+char *coding_requests_confirm_approve(struct json_object *details,
+                                      int user_id,
+                                      const turn_origin_t *origin);
+
+/** describe_call for confirm_approve (tool_metadata_t.describe_call). */
+int coding_requests_describe(const char *value, char *out, size_t out_len, int *valid_for_sec);
+
+/** deny: decline the host or tool a job waits on.  One step, no confirm and
+ *  no turn check, on purpose: declining reaches no further. */
+char *coding_requests_deny(struct json_object *details, int user_id);
+
+/** answer: send the user's answer to the agent's question.  One step, no
+ *  confirm and no turn check, on purpose: an answer only goes back to the
+ *  sandboxed agent and allows it nothing. */
+char *coding_requests_answer(struct json_object *details, int user_id);
 
 #ifdef __cplusplus
 }

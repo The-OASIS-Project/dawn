@@ -23,6 +23,7 @@
 
 #include "tools/coding_agent_gateway.h"
 
+#include <ctype.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -128,6 +129,66 @@ const char *coding_gateway_jstr(struct json_object *o, const char *key) {
 
 void coding_gateway_ref(int64_t conv_id, char *out, size_t out_len) {
    snprintf(out, out_len, CODING_AGENT_CLIENT_REF_FMT, (long long)conv_id);
+}
+
+#define CG_HOST_MAX 253
+#define CG_LABEL_MAX 63
+#define CG_TOOL_NAME_MAX 64
+
+/* A host name DAWN will show and allow: lowercase LDH labels, dot-separated. */
+static bool host_ok(const char *h) {
+   const size_t n = strlen(h);
+   if (n == 0 || n > CG_HOST_MAX || strchr(h, '.') == NULL) {
+      return false;
+   }
+   size_t label = 0;
+   for (size_t i = 0; i <= n; i++) {
+      const char c = h[i];
+      if (c == '.' || c == '\0') {
+         if (label == 0 || label > CG_LABEL_MAX || h[i - 1] == '-') {
+            return false; /* empty, too long, or ending in '-' */
+         }
+         label = 0;
+      } else if (islower((unsigned char)c) || isdigit((unsigned char)c) ||
+                 (c == '-' && label > 0)) {
+         label++;
+      } else {
+         return false;
+      }
+   }
+   return true;
+}
+
+static bool tool_name_ok(const char *t) {
+   const size_t n = strlen(t);
+   if (n == 0 || n > CG_TOOL_NAME_MAX) {
+      return false;
+   }
+   for (size_t i = 0; i < n; i++) {
+      const unsigned char c = (unsigned char)t[i];
+      if (!isalnum(c) && c != '_' && c != '.' && c != ':' && c != '-') {
+         return false;
+      }
+   }
+   return true;
+}
+
+bool coding_gateway_request_line(struct json_object *req, char *out, size_t out_len) {
+   const char *kind = coding_gateway_jstr(req, "kind");
+   const char *value = coding_gateway_jstr(json_object_object_get(req, "payload"), "value");
+   /* The value is the agent's: quoted as a name, never read as words. */
+   if (strcmp(kind, "domain") == 0 && host_ok(value)) {
+      const bool encoded = strncmp(value, "xn--", 4) == 0 || strstr(value, ".xn--") != NULL;
+      snprintf(out, out_len, "reach the host `%s`%s", value,
+               encoded ? " (an international name, shown encoded)" : "");
+   } else if (strcmp(kind, "tool") == 0 && tool_name_ok(value)) {
+      snprintf(out, out_len, "use the tool `%s`", value);
+   } else if (strcmp(kind, "question") == 0) {
+      snprintf(out, out_len, "ask you a question");
+   } else {
+      return false;
+   }
+   return true;
 }
 
 int64_t coding_gateway_ref_job(const char *client_ref) {

@@ -84,9 +84,31 @@ void conv_event_emit(int64_t conv_id, int user_id, const char *kind, char *paylo
    snprintf(g_last_payload, sizeof(g_last_payload), "%s", payload_owned ? payload_owned : "");
    free(payload_owned);
 }
+static char g_notice[512];
+static char g_posted[512];
+static int64_t g_posted_to;
 bool job_notify_user(int user_id, const char *text, int64_t conv_id, int running) {
-   (void)user_id, (void)text, (void)conv_id, (void)running;
+   (void)user_id, (void)conv_id, (void)running;
+   snprintf(g_notice, sizeof(g_notice), "%s", text);
    g_notices++;
+   return true;
+}
+int job_report_post(int64_t parent_conv, int user_id, const char *text) {
+   (void)user_id;
+   g_posted_to = parent_conv;
+   snprintf(g_posted, sizeof(g_posted), "%s", text);
+   return SUCCESS;
+}
+char *llm_context_neutralize(const char *text) {
+   return strdup(text);
+}
+bool coding_gateway_request_line(struct json_object *req, char *out, size_t out_len) {
+   struct json_object *payload = json_object_object_get(req, "payload");
+   struct json_object *v = json_object_object_get(payload, "value");
+   if (v == NULL) {
+      return false;
+   }
+   snprintf(out, out_len, "reach the host %s", json_object_get_string(v));
    return true;
 }
 int conv_db_job_scan_active_kind(const char *kind, job_record_t *out, int max, int *count_out) {
@@ -168,7 +190,8 @@ int coding_gateway_call(int user_id,
    if (strcmp(tool, "task_list") == 0) {
       *out = json_tokener_parse(!g_has_task ? "{\"task\":null,\"pending\":[]}"
                                 : g_pending ? "{\"task\":{\"status\":\"input_required\"},"
-                                              "\"pending\":[{\"id\":1}]}"
+                                              "\"pending\":[{\"id\":1,\"kind\":\"domain\","
+                                              "\"payload\":{\"value\":\"pypi.org\"}}]}"
                                             : "{\"task\":{\"status\":\"working\"},"
                                               "\"pending\":[]}");
       return CODING_GW_OK;
@@ -213,6 +236,7 @@ static void row(const char *status, const char *kind) {
    snprintf(g_row.job_status, sizeof(g_row.job_status), "%s", status);
    snprintf(g_row.job_kind, sizeof(g_row.job_kind), "%s", kind);
    snprintf(g_row.title, sizeof(g_row.title), "fix the oracle");
+   g_row.parent_id = 7;
    g_row_exists = true;
 }
 
@@ -258,6 +282,12 @@ static void test_ends(void) {
    setUp();
    apply("input_required", "job:42", 5);
    TEST_ASSERT_EQUAL_INT(1, g_notices);
+   /* What it asks, in DAWN's words, and the same line in its conversation. */
+   TEST_ASSERT_EQUAL_STRING("Coding job #42 (fix the oracle) is waiting: it wants to reach the "
+                            "host pypi.org.",
+                            g_notice);
+   TEST_ASSERT_EQUAL_STRING(g_notice, g_posted);
+   TEST_ASSERT_EQUAL_INT64(7, g_posted_to);
    TEST_ASSERT_EQUAL_STRING(CONV_EVENT_AGENT_REQUEST, g_last_kind);
    TEST_ASSERT_EQUAL_STRING("", g_end);
    g_pending = false; /* replayed after the answer: no notice */

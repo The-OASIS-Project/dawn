@@ -41,7 +41,9 @@
 #include "core/conv_event.h"
 #include "core/event_payload.h"
 #include "core/job_manager.h"
+#include "core/job_report.h"
 #include "dawn_error.h"
+#include "llm/llm_context_text.h"
 #include "logging.h"
 #include "tools/coding_agent_gateway.h"
 #include "tools/coding_agent_report.h"
@@ -53,9 +55,9 @@
 #define CW_SERVER_TIMEOUT_S 30 /* [[mcp.server]] request_timeout_seconds when unset */
 #define CW_BACKOFF_S 30        /* after the gateway didn't answer; doubled each time */
 #define CW_BACKOFF_MAX_S 300
-#define CW_RECANCEL_MAX 32                  /* jobs whose task was asked to stop again */
-#define CW_SCAN_MAX 64                      /* open coding jobs checked at start */
-#define CW_NOTICE_MAX (CONV_TITLE_MAX + 64) /* the title plus DAWN's words */
+#define CW_RECANCEL_MAX 32 /* jobs whose task was asked to stop again */
+#define CW_SCAN_MAX 64     /* open coding jobs checked at start */
+#define CW_NOTICE_MAX (CONV_TITLE_MAX + CODING_GATEWAY_REQUEST_LINE_MAX + 128)
 #define CW_CURSOR_SUFFIX ".cursor"
 #define CW_TMP_SUFFIX ".XXXXXX"
 #define CW_PATH_MAX \
@@ -152,8 +154,9 @@ static void end_job(int64_t job, int user_id, const char *kind, struct json_obje
 }
 
 /* Whether job @p job's task still waits for the user (a replayed notice of a
- * question already answered says nothing). */
-static bool still_waiting(int user_id, int64_t job) {
+ * question already answered says nothing), and what its first request asks
+ * into @p asks ("" when unknown or not one DAWN can say). */
+static bool still_waiting(int user_id, int64_t job, char *asks, size_t asks_len) {
    char ref[CODING_AGENT_REF_MAX];
    coding_gateway_ref(job, ref, sizeof(ref));
    struct json_object *args = json_object_new_object();
@@ -165,10 +168,33 @@ static bool still_waiting(int user_id, int64_t job) {
       struct json_object *pending = json_object_object_get(ans, "pending");
       waiting = json_object_is_type(pending, json_type_array) &&
                 json_object_array_length(pending) > 0;
+      if (!waiting ||
+          !coding_gateway_request_line(json_object_array_get_idx(pending, 0), asks, asks_len)) {
+         asks[0] = '\0';
+      }
    }
    json_object_put(ans);
    free(err);
    return waiting;
+}
+
+/* Tell the user job @p job waits for them: a notice, and a line in DAWN's
+ * words in the conversation it came from (where they'd answer). */
+static void notify_waiting(int user_id, int64_t job, const job_record_t *rec, const char *asks) {
+   char *title = llm_context_neutralize(rec->title);
+   char text[CW_NOTICE_MAX];
+   if (asks[0] != '\0') {
+      snprintf(text, sizeof(text), "Coding job #%lld (%s) is waiting: it wants to %s.",
+               (long long)job, title ? title : rec->title, asks);
+   } else {
+      snprintf(text, sizeof(text), "Coding job #%lld (%s) is waiting for your answer.",
+               (long long)job, title ? title : rec->title);
+   }
+   free(title);
+   job_notify_user(user_id, text, job, 0);
+   if (rec->parent_id > 0) {
+      job_report_post(rec->parent_id, user_id, text);
+   }
 }
 
 void coding_watch_apply(struct json_object *event) {
@@ -218,11 +244,9 @@ void coding_watch_apply(struct json_object *event) {
          break;
       }
    }
-   if (strcmp(kind, "input_required") == 0 && still_waiting(user_id, job)) {
-      char text[CW_NOTICE_MAX];
-      snprintf(text, sizeof(text), "Coding job #%lld (%s) is waiting for your answer.",
-               (long long)job, rec.title);
-      job_notify_user(user_id, text, job, 0);
+   char asks[CODING_GATEWAY_REQUEST_LINE_MAX] = "";
+   if (strcmp(kind, "input_required") == 0 && still_waiting(user_id, job, asks, sizeof(asks))) {
+      notify_waiting(user_id, job, &rec, asks);
    } else if (is_end(kind)) {
       end_job(job, user_id, kind, json_object_object_get(event, "data"));
    }
