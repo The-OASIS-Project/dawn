@@ -1096,7 +1096,7 @@ messages: they never appear in `messages`, the history, or what the model is sen
    "status": "applied",
    "outside": false,
    "counts": {"added": 3, "reinforced": 2, "merged": 1, "replaced": 1, "closed": 1,
-              "linked": 0, "proposed": 0, "dropped": 4, "deferred": 1,
+              "linked": 0, "proposed": 0, "pref_set": 1, "dropped": 4, "deferred": 1,
               "suggested_forget": 0, "refused": 0},
    "ops": [ ]
 }

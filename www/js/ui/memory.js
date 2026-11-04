@@ -1320,11 +1320,13 @@
          memoryElements.list.setAttribute('aria-labelledby', 'memory-tab-' + tabName);
       }
 
-      // Clear search and load data (the Learned tab has no search strip)
+      // Clear search (a pending one too) and load data (the Learned tab has no search strip)
+      clearTimeout(memoryState.searchTimeout);
+      memoryState.searchTimeout = null;
       if (memoryElements.searchInput) {
          memoryElements.searchInput.value = '';
          const strip = memoryElements.searchInput.closest('.memory-search');
-         if (strip) strip.hidden = tabName === 'learned';
+         if (strip) strip.classList.toggle('hidden', tabName === 'learned');
       }
       memoryState.searchQuery = '';
 

@@ -24,8 +24,8 @@
 #include <string.h>
 
 const char *const memory_consolidation_count_kinds[MEMORY_CONSOLIDATION_COUNT_KINDS] = {
-   "added",  "reinforced", "merged",  "replaced", "closed",
-   "linked", "proposed",   "dropped", "deferred", "suggested_forget"
+   "added",    "reinforced", "merged",  "replaced", "closed",          "linked",
+   "proposed", "pref_set",   "dropped", "deferred", "suggested_forget"
 };
 
 static bool is(const char *a, const char *b) {

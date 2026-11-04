@@ -1532,14 +1532,22 @@ static void apply_prefs(mc_batch_t *b) {
                              : 0.7f;
       memory_preference_t before;
       const bool had = memory_db_pref_get(in->user_id, category, &before) == MEMORY_DB_SUCCESS;
+      /* Where it was learned: a new value resets its sources to this batch's. */
+      char *was = had ? memory_db_consolidation_pref_image(in->user_id, category) : NULL;
       memory_db_pref_upsert(in->user_id, category, value, conf, "inferred", in->prov);
       memory_preference_t after;
       if (memory_db_pref_get(in->user_id, category, &after) != MEMORY_DB_SUCCESS ||
           (had && strcmp(after.value, before.value) == 0 &&
            after.confidence == before.confidence)) {
+         free(was);
          continue; /* nothing changed (a value outside text may not replace) */
       }
-      struct json_object *pre = json_object_new_object();
+      struct json_object *pre = was ? json_tokener_parse(was) : NULL;
+      free(was);
+      if (!json_object_is_type(pre, json_type_object)) {
+         json_object_put(pre);
+         pre = json_object_new_object();
+      }
       json_object_object_add(pre, "category", json_object_new_string(category));
       if (had) {
          json_object_object_add(pre, "value", json_object_new_string(before.value));

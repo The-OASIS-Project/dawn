@@ -121,9 +121,10 @@ static int undo_ids(memory_consolidation_outcome_t *io, const int64_t *ids, int 
       }
    }
    conv_db_withdraw_intent_end();
-   if (effect.facts || effect.entities) {
-      /* What was undone leaves the conversations it was sent into. */
-      (void)session_withdraw_forgotten(io->user_id, false);
+   if (effect.facts || effect.entities || effect.memory_bodies) {
+      /* What was undone leaves the conversations it was sent into (a
+       * preference with the USER MEMORY blocks it went in). */
+      (void)session_withdraw_forgotten(io->user_id, effect.memory_bodies);
    }
    return rc;
 }

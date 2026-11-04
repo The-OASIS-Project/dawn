@@ -974,6 +974,29 @@ char *memory_db_consolidation_merge_image(int user_id, int64_t from, int64_t int
    return out;
 }
 
+char *memory_db_consolidation_pref_image(int user_id, const char *category) {
+   AUTH_DB_LOCK_OR_RETURN(NULL);
+   sqlite3_stmt *st = NULL;
+   char *out = NULL;
+   if (sqlite3_prepare_v2(
+           s_db.db,
+           "SELECT json_object('source_conversation_id', COALESCE(source_conversation_id, 0), "
+           "'msg_id_start', COALESCE(source_msg_id_start, 0), 'msg_id_end', "
+           "COALESCE(source_msg_id_end, 0), 'origin_unsourced', origin_unsourced, 'sources', "
+           "(SELECT json_group_array(conversation_id) FROM memory_preference_sources WHERE "
+           "preference_id = p.id)) FROM memory_preferences p WHERE user_id = ?1 AND category = ?2",
+           -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_text(st, 2, category, -1, SQLITE_TRANSIENT);
+      if (sqlite3_step(st) == SQLITE_ROW) {
+         out = dup_column(st, 0);
+      }
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return out;
+}
+
 int memory_db_consolidation_batches_naming(int user_id,
                                            int64_t fact_id,
                                            int64_t *ids,

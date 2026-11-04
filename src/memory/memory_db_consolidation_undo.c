@@ -587,8 +587,48 @@ static int undo_linked(int user_id, const undo_row_t *r, memory_consolidation_un
    return un;
 }
 
-/* pref_set: the preference's value before, or none. */
-static int undo_pref(int user_id, const undo_row_t *r) {
+/* pref_set's pre-image provenance (where the value before was learned) put
+ * back: a new value reset the sources to the batch's conversation.  Rows
+ * recorded before the pre-image held it keep the batch's. */
+static int pref_provenance_back(int user_id, const char *category, const undo_row_t *r) {
+   struct json_object *sources = NULL;
+   if (!json_object_object_get_ex(r->pre, "sources", &sources) ||
+       !json_object_is_type(sources, json_type_array)) {
+      return MEMORY_DB_SUCCESS;
+   }
+   static const char *const SQL[] = {
+      "UPDATE memory_preferences SET source_conversation_id = (SELECT id FROM conversations "
+      "WHERE id = ?3), source_msg_id_start = NULLIF(?4, 0), source_msg_id_end = NULLIF(?5, 0), "
+      "origin_unsourced = ?6 WHERE user_id = ?1 AND category = ?2",
+      "DELETE FROM memory_preference_sources WHERE preference_id = (SELECT id FROM "
+      "memory_preferences WHERE user_id = ?1 AND category = ?2)",
+      "INSERT OR IGNORE INTO memory_preference_sources (preference_id, conversation_id) SELECT "
+      "p.id, j.value FROM memory_preferences p, json_each(?7) j WHERE p.user_id = ?1 AND "
+      "p.category = ?2 AND j.value IN (SELECT id FROM conversations)",
+   };
+   const char *list = json_object_to_json_string_ext(sources, JSON_C_TO_STRING_PLAIN);
+   int rc = SQLITE_DONE;
+   for (size_t i = 0; rc == SQLITE_DONE && i < sizeof(SQL) / sizeof(SQL[0]); i++) {
+      sqlite3_stmt *st = NULL;
+      rc = sqlite3_prepare_v2(s_db.db, SQL[i], -1, &st, NULL);
+      if (rc == SQLITE_OK) {
+         sqlite3_bind_int(st, 1, user_id);
+         sqlite3_bind_text(st, 2, category, -1, SQLITE_TRANSIENT);
+         sqlite3_bind_int64(st, 3, get_i64(r->pre, "source_conversation_id"));
+         sqlite3_bind_int64(st, 4, get_i64(r->pre, "msg_id_start"));
+         sqlite3_bind_int64(st, 5, get_i64(r->pre, "msg_id_end"));
+         sqlite3_bind_int(st, 6, get_i64(r->pre, "origin_unsourced") ? 1 : 0);
+         sqlite3_bind_text(st, 7, list, -1, SQLITE_TRANSIENT);
+         rc = sqlite3_step(st);
+      }
+      sqlite3_finalize(st);
+   }
+   return rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
+/* pref_set: the preference's value before, and where it was learned, or none.
+ * Sessions that were sent it get their USER MEMORY blocks withdrawn. */
+static int undo_pref(int user_id, const undo_row_t *r, memory_consolidation_undo_effect_t *eff) {
    const char *category = get_str(r->pre, "category");
    const char *value = get_str(r->post, "value");
    sqlite3_stmt *st = NULL;
@@ -630,7 +670,12 @@ static int undo_pref(int user_id, const undo_row_t *r) {
       rc = sqlite3_step(st);
    }
    sqlite3_finalize(st);
-   return rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+   int ok = rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+   if (ok == MEMORY_DB_SUCCESS && !absent) {
+      ok = pref_provenance_back(user_id, category, r);
+   }
+   eff->memory_bodies = eff->memory_bodies || ok == MEMORY_DB_SUCCESS;
+   return ok;
 }
 
 /* The op's status, and its batch undone once nothing of it stays applied. */
@@ -739,7 +784,7 @@ static int undo_kind(int user_id,
    if (is_op(op, "linked")) {
       return undo_linked(user_id, r, eff);
    }
-   return undo_pref(user_id, r);
+   return undo_pref(user_id, r, eff);
 }
 
 /* Lock held: check, write and mark in one savepoint. */
@@ -803,6 +848,7 @@ static int undo_locked(int user_id,
    if (rc == MEMORY_DB_SUCCESS) {
       eff->facts = eff->facts || local.facts;
       eff->entities = eff->entities || local.entities;
+      eff->memory_bodies = eff->memory_bodies || local.memory_bodies;
    }
    undo_row_free(&r);
    return rc;

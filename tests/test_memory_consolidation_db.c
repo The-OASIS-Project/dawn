@@ -390,6 +390,35 @@ void test_undo_pref_set_puts_the_old_value_back(void) {
    TEST_ASSERT_EQUAL_STRING("espresso", p.value);
 }
 
+/* Undone, the value goes back with where it was learned: forgetting the
+ * undone batch's conversation keeps it; the USER MEMORY blocks are withdrawn. */
+void test_undo_pref_set_puts_the_old_source_back(void) {
+   int64_t conv_a = 0;
+   conv_db_create(s_user, "A", &conv_a);
+   const memory_provenance_t prov_a = { .conv_id = conv_a, .msg_id_start = 2, .msg_id_end = 4 };
+   memory_db_pref_upsert(s_user, "coffee", "espresso", 0.6f, "inferred", &prov_a);
+   script(NULL);
+   const int64_t batch = run(PREF_REPLY("oat latte"), 0);
+   memory_consolidation_undo_effect_t eff = { 0 };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_undo_op(
+                                                s_user, batch, op_of(batch, "pref_set"), &eff));
+   TEST_ASSERT_TRUE(eff.memory_bodies);
+   TEST_ASSERT_EQUAL_INT64(conv_a, q("SELECT source_conversation_id FROM memory_preferences WHERE "
+                                     "user_id = ?1 AND category = ?2",
+                                     s_user, "coffee"));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_conversations_forget(s_user, &s_conv, 1, NULL));
+   memory_preference_t p;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_pref_get(s_user, "coffee", &p));
+   TEST_ASSERT_EQUAL_STRING("espresso", p.value);
+   TEST_ASSERT_EQUAL_INT64(conv_a, q("SELECT source_conversation_id FROM memory_preferences WHERE "
+                                     "user_id = ?1 AND category = ?2",
+                                     s_user, "coffee"));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT COUNT(*) FROM memory_preference_sources WHERE "
+                              "conversation_id = ?1",
+                              conv_a, NULL));
+}
+
 /* ---- undo never removes what a later batch changed (stale) ---- */
 
 static void assert_stale(int64_t batch, int64_t op) {
@@ -1249,6 +1278,7 @@ int main(void) {
    RUN_TEST(test_undo_linked_splits_the_entities);
    RUN_TEST(test_undo_pref_set_removes_a_new_preference);
    RUN_TEST(test_undo_pref_set_puts_the_old_value_back);
+   RUN_TEST(test_undo_pref_set_puts_the_old_source_back);
    RUN_TEST(test_stale_added_another_conversation_taught_it);
    RUN_TEST(test_stale_added_something_since_merged_into_it);
    RUN_TEST(test_stale_reinforced_made_told_since);

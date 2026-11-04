@@ -204,6 +204,18 @@ void test_a_dropped_candidate_offers_keep(void) {
    json_object_put(b);
 }
 
+/* A batch that only set a preference counts it (the tab and marker say so). */
+void test_a_preference_only_batch_counts_it(void) {
+   const int64_t batch = run("{\"facts\": [], \"preferences\": [{\"category\": \"coffee\", "
+                             "\"value\": \"oat latte\", \"confidence\": 0.8}]}",
+                             NULL);
+   json_object *b = webui_memory_batch_json(s_user, batch);
+   TEST_ASSERT_NOT_NULL(b);
+   TEST_ASSERT_EQUAL_INT(1, json_object_get_int(get(get(b, "counts"), "pref_set")));
+   TEST_ASSERT_EQUAL_STRING("undo", str(op_named(b, "pref_set"), "action"));
+   json_object_put(b);
+}
+
 /* ---- list_memory_batches ---- */
 
 static void add_batches(int n, int64_t *ids) {
@@ -393,6 +405,7 @@ void test_an_undo_of_another_users_batch_is_not_found(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_the_batch_object_carries_ops_counts_and_actions);
+   RUN_TEST(test_a_preference_only_batch_counts_it);
    RUN_TEST(test_a_dropped_candidate_offers_keep);
    RUN_TEST(test_list_pages_with_has_more_and_the_next_cursor);
    RUN_TEST(test_list_clamps_the_limit);

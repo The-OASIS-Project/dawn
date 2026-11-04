@@ -52,8 +52,11 @@ typedef enum {
    CONV_MEMORY_FORGET_FACT, /* delete one fact (conv_id is the fact's id) */
 } conv_memory_op_t;
 
-/* Batches told when a fact a consolidation recorded is forgotten (the newest). */
-#define FORGET_BATCHES_MAX 16
+/* Batches told when a fact a consolidation recorded is forgotten: every one
+ * naming it (the record keeps 30 days of batches, so a fact is named by far
+ * fewer).  Past this, the oldest are scrubbed all the same; a tab showing one
+ * keeps the forgotten text until it reloads. */
+#define FORGET_BATCHES_MAX 256
 
 typedef struct {
    uint32_t session_id; /* looked up again to reply: no reference held while waiting */

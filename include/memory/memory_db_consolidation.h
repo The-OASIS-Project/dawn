@@ -323,10 +323,12 @@ bool memory_consolidation_op_undoable(const memory_consolidation_op_row_t *o);
 bool memory_consolidation_op_keepable(const memory_consolidation_op_row_t *o);
 
 /** What an undo changed beyond the record (set, never cleared): the caches
- *  the caller drops. */
+ *  the caller drops, and with @c memory_bodies (a preference changed) the
+ *  USER MEMORY blocks it withdraws from the conversations. */
 typedef struct {
    bool facts;
    bool entities;
+   bool memory_bodies;
 } memory_consolidation_undo_effect_t;
 
 /**
@@ -415,6 +417,15 @@ int memory_db_consolidation_expire_deferred(int64_t older_than, int *count_out);
  * isn't the user's or on failure.
  */
 char *memory_db_consolidation_merge_image(int user_id, int64_t from, int64_t into);
+
+/**
+ * @brief Where preference @p category was learned, as a JSON object (heap):
+ *        its source conversation and message range, origin_unsourced and its
+ *        source conversations ("sources"), so undoing a change to it puts them
+ *        back with the value.  NULL when the user has no such preference or on
+ *        failure.
+ */
+char *memory_db_consolidation_pref_image(int user_id, const char *category);
 
 /**
  * @brief The user's batches (up to @p max ids, newest first) with an op

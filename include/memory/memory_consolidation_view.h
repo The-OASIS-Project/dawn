@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 /** The kinds a batch's counts give, in order. */
-#define MEMORY_CONSOLIDATION_COUNT_KINDS 10
+#define MEMORY_CONSOLIDATION_COUNT_KINDS 11
 extern const char *const memory_consolidation_count_kinds[MEMORY_CONSOLIDATION_COUNT_KINDS];
 
 /** One op as shown. */
