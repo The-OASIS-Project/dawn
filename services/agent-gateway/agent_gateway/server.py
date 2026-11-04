@@ -141,7 +141,11 @@ def build(runner, cfg) -> MCPServer:
    @tool
    async def task_cancel(dawn_user_id: int, task_id: str | None = None,
                          client_ref: str | None = None) -> dict:
-      """Stop a task.  Its branch and worktree are kept."""
+      """Stop a task.  Its branch and worktree are kept.  A task still starting
+      under `client_ref` is stopped as soon as it exists."""
+      if client_ref and not task_id:
+         t = await runner.cancel_ref(dawn_user_id, client_ref)
+         return public(t) if t else {"client_ref": client_ref, "status": "cancelling"}
       t = task_of(dawn_user_id, task_id, client_ref)
       return public(await runner.cancel(t["id"], dawn_user_id))
 

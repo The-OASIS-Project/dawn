@@ -270,6 +270,160 @@ def test_retry_during_start_returns_the_same_task(store):
    assert a["id"] == b["id"] and len(r.resumed) == 1
 
 
+def test_cancel_during_start_stops_the_task_once_it_exists(store):
+   """A caller that gave up waiting on a start cancels it by client_ref; the task
+   the start then makes is cancelled, and a retried start returns it as such."""
+   class SlowRepos(FakeRepos):
+      async def prepare(self, *a):
+         await asyncio.sleep(0.05)
+         return "/w/x"
+
+   class Quiet(FakeRunner):
+      def launch(self, task_id, prompt):  # no run to interrupt
+         self.store.update_task(task_id, status=st.WORKING, error=None)
+   r = Quiet(Config(token="x" * 32, repos={"r": {"url": "u", "base": "main"}}), store,
+             SlowRepos())
+
+   async def go():
+      start = asyncio.create_task(r.start(1, "r", "fix", None, "job:7"))
+      await asyncio.sleep(0.01)
+      assert await r.cancel_ref(1, "job:7") is None  # still starting
+      return await start
+   t = asyncio.run(go())
+   assert t["status"] == st.CANCELLED and not r.cancel_on_start
+   again = asyncio.run(r.start(1, "r", "fix", None, "job:7"))
+   assert again["id"] == t["id"] and again["status"] == st.CANCELLED
+   with pytest.raises(ValueError):
+      asyncio.run(r.cancel_ref(1, "job:8"))
+
+
+def test_cancelled_start_never_reaches_the_agent(store, monkeypatch):
+   """The real launch path: a start cancelled mid-clone never opens an agent
+   session, and a cancel just after launch stops the run before it does."""
+   from agent_gateway import runner as rmod
+   opened = []
+
+   class Client:
+      def __init__(self, options):
+         pass
+
+      async def __aenter__(self):
+         opened.append(1)
+         return self
+
+      async def __aexit__(self, *a):
+         return False
+
+   monkeypatch.setattr(rmod, "ClaudeSDKClient", Client)
+
+   class SlowRepos(FakeRepos):
+      async def prepare(self, *a):
+         await asyncio.sleep(0.05)
+         return "/w/x"
+
+   class R(Runner):
+      async def options(self, task):
+         await asyncio.sleep(0.05)
+
+   r = R(Config(token="x" * 32, repos={"r": {"url": "u", "base": "main"}}), store, SlowRepos())
+
+   async def go():
+      start = asyncio.create_task(r.start(1, "r", "fix", None, "job:7"))
+      await asyncio.sleep(0.01)
+      await r.cancel_ref(1, "job:7")
+      t = await start
+      later = await r.start(1, "r", "fix", None, "job:8")  # launched, agent not yet reached
+      stopped = await r.cancel(later["id"], 1)
+      return t, stopped
+   t, stopped = asyncio.run(go())
+   assert t["status"] == st.CANCELLED and stopped["status"] == st.CANCELLED
+   assert not opened and not r.running and not r.cancel_on_start
+
+
+def test_failed_start_clears_its_cancel(store):
+   class Broken(FakeRepos):
+      async def prepare(self, *a):
+         await asyncio.sleep(0.02)
+         raise ValueError("clone failed")
+   r = runner(store)
+   r.repos = Broken()
+
+   async def go():
+      start = asyncio.create_task(r.start(1, "r", "fix", None, "job:7"))
+      await asyncio.sleep(0.005)
+      await r.cancel_ref(1, "job:7")
+      with pytest.raises(ValueError):
+         await start
+   asyncio.run(go())
+   assert not r.cancel_on_start
+
+
+def test_cancelled_start_wakes_a_blocked_task(store):
+   """A start that runs nothing frees its slot: a task blocked behind it resumes."""
+   class SlowRepos(FakeRepos):
+      async def prepare(self, *a):
+         await asyncio.sleep(0.05)
+         return "/w/x"
+   r = FakeRunner(Config(token="x" * 32, repos={"r": {"url": "u", "base": "main"}}), store,
+                  SlowRepos())
+   add_task(store, "b1")
+   store.update_task("b1", status=st.INPUT_REQUIRED)
+   rid = store.add_request("b1", "question", {"value": "q"})
+
+   async def go():
+      start = asyncio.create_task(r.start(1, "r", "fix", None, "job:7"))
+      await asyncio.sleep(0.01)
+      await r.reply("b1", 1, rid, "answer", "yes")  # the start holds the only slot
+      assert store.task("b1")["status"] == st.INPUT_REQUIRED
+      await r.cancel_ref(1, "job:7")
+      await start
+      await asyncio.sleep(0.1)
+   asyncio.run(go())
+   assert [t for t, _ in r.resumed] == ["b1"]
+
+
+def test_cancel_before_the_agent_is_reached(store, monkeypatch):
+   """A run stopped while it gets ready (options, connect) never reaches the agent,
+   says cancelled once, and frees its slot for a blocked task."""
+   from agent_gateway import runner as rmod
+
+   class Client:
+      def __init__(self, options):
+         pass
+
+      async def __aenter__(self):
+         raise AssertionError("agent reached")
+
+      async def __aexit__(self, *a):
+         return False
+
+   monkeypatch.setattr(rmod, "ClaudeSDKClient", Client)
+
+   class R(Runner):
+      async def options(self, task):
+         await asyncio.sleep(0.2)
+
+   r = R(Config(token="x" * 32, repos={"r": {"url": "u", "base": "main"}}), store, FakeRepos())
+   retried = []
+
+   async def go():
+      t = await r.start(1, "r", "fix", None, "job:9")
+      await asyncio.sleep(0.01)  # the run is inside options()
+      orig = r.retry_blocked
+
+      async def rb():
+         retried.append(1)
+         await orig()
+      r.retry_blocked = rb
+      out = await r.cancel(t["id"], 1)
+      await asyncio.sleep(0.05)
+      return t["id"], out
+   tid, out = asyncio.run(go())
+   kinds = [e["kind"] for e in store.events_after(0) if e["task_id"] == tid]
+   assert out["status"] == st.CANCELLED and not r.running and retried
+   assert kinds.count("cancelled") == 1
+
+
 def test_reply_during_collect_does_not_complete_the_task(store):
    class SlowCollect(FakeRepos):
       async def collect(self, *a):

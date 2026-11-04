@@ -102,6 +102,8 @@ class Runner:
       self.starting = 0
       self.background: set[asyncio.Task] = set()
       self.inflight: dict[tuple[int, str], asyncio.Future] = {}
+      # Starts cancelled before their task existed: cancelled once it does.
+      self.cancel_on_start: set[tuple[int, str]] = set()
 
    def soon(self, coro) -> None:
       """Run `coro` after the current step; the task is kept until it ends."""
@@ -142,6 +144,18 @@ class Runner:
          raise
       finally:
          del self.inflight[key]
+         self.cancel_on_start.discard(key)
+
+   async def cancel_ref(self, dawn_user_id: int, client_ref: str) -> dict | None:
+      """Cancel the task started as `client_ref`.  One still starting (its caller
+      may have given up waiting) is cancelled as soon as it exists: None."""
+      t = self.store.task_by_ref(dawn_user_id, client_ref)
+      if t:
+         return await self.cancel(t["id"], dawn_user_id)
+      if (dawn_user_id, client_ref) in self.inflight:
+         self.cancel_on_start.add((dawn_user_id, client_ref))
+         return None
+      raise ValueError("no such task")
 
    async def start_new(self, dawn_user_id: int, repo: str, task: str,
                        budget_usd: float | None, client_ref: str | None) -> dict:
@@ -171,8 +185,12 @@ class Runner:
          raise
       finally:
          self.starting -= 1
+         self.soon(self.retry_blocked())  # a start that runs nothing frees its slot here
       self.store.add_event(task_id, "started", repo=repo, branch=branch, task=clip(task))
-      self.launch(task_id, task)
+      if client_ref and (dawn_user_id, client_ref) in self.cancel_on_start:
+         self.finish_cancelled(task_id)  # cancelled while it started: never launched
+      else:
+         self.launch(task_id, task)
       return self.store.task(task_id)
 
    def launch(self, task_id: str, prompt: str) -> None:
@@ -452,11 +470,16 @@ class Runner:
          client = self.clients.get(task_id)
          if client:
             await self.interrupt(client)
-         # The interrupted run usually ends by itself and records its cost.
-         await asyncio.wait([run], timeout=10)
-         if not run.done():
+            # The interrupted run usually ends by itself and records its cost.
+            await asyncio.wait([run], timeout=10)
+         if not run.done():  # or the agent isn't reached yet: stop before it is
             run.cancel()
             await asyncio.wait([run], timeout=5)
+         if run.done() and self.running.get(task_id) is run:
+            # Cancelled before its first step, it never ran its own finally.
+            del self.running[task_id]
+            self.clients.pop(task_id, None)
+            self.soon(self.retry_blocked())
       return self.store.task(task_id)
 
    async def publish(self, task_id: str, dawn_user_id: int, open_pr: bool, title: str | None,
