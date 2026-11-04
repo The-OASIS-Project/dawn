@@ -38,6 +38,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
@@ -3513,6 +3514,53 @@ static void test_entity_upsert_at_overrides_take_effect(void) {
  * timestamps must always be ~now even though the call shape is the same
  * as it was before the _at split.  Keeps live-extraction callers
  * behaviorally unchanged. */
+/* ============================================================================
+ * memory_db_entity_sweep_orphans — the nightly sweep of entities nothing names
+ * ============================================================================ */
+
+static void exec_sql(const char *sql) {
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+}
+
+static bool entity_exists(int64_t id) {
+   char sql[96];
+   snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM memory_entities WHERE id = %lld",
+            (long long)id);
+   return count_db_rows(sql) == 1;
+}
+
+static void test_sweep_removes_only_old_entities_nothing_names(void) {
+   const int64_t old_orphan = insert_entity_typed(g_test_user_id, "Old Orphan", "thing");
+   const int64_t young_orphan = insert_entity_typed(g_test_user_id, "Young Orphan", "thing");
+   const int64_t alias = insert_entity_typed(g_test_user_id, "Jon", "person");
+   const int64_t canonical = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   const int64_t subject = insert_entity_typed(g_test_user_id, "Dawn Smith", "person");
+   const int64_t object = insert_entity_typed(g_test_user_id, "Acme", "organization");
+   const int64_t self = insert_entity_typed(g_test_user_id, "Kim Smith", "person");
+   mark_entity_user_self(self);
+   insert_open_relation(g_test_user_id, subject, "works_at", object, NULL);
+   char sql[160];
+   snprintf(sql, sizeof(sql), "UPDATE memory_entities SET canonical_id = %lld WHERE id = %lld",
+            (long long)canonical, (long long)alias);
+   exec_sql(sql);
+   const int64_t now = (int64_t)time(NULL);
+   snprintf(sql, sizeof(sql), "UPDATE memory_entities SET first_seen = %lld WHERE id != %lld",
+            (long long)(now - 30 * 86400), (long long)young_orphan);
+   exec_sql(sql);
+
+   int deleted = -1;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_sweep_orphans(g_test_user_id, now - 7 * 86400, &deleted));
+   TEST_ASSERT_EQUAL_INT(1, deleted);
+   TEST_ASSERT_FALSE(entity_exists(old_orphan));
+   TEST_ASSERT_TRUE(entity_exists(young_orphan));
+   TEST_ASSERT_TRUE(entity_exists(alias));
+   TEST_ASSERT_TRUE(entity_exists(canonical));
+   TEST_ASSERT_TRUE(entity_exists(subject));
+   TEST_ASSERT_TRUE(entity_exists(object));
+   TEST_ASSERT_TRUE(entity_exists(self));
+}
+
 static void test_entity_upsert_wrapper_uses_now(void) {
    int64_t before = (int64_t)time(NULL);
    int64_t eid = 0;
@@ -3924,6 +3972,7 @@ int main(void) {
    /* Entity upsert timestamp overrides for reextract */
    RUN_TEST(test_entity_upsert_at_overrides_take_effect);
    RUN_TEST(test_entity_upsert_wrapper_uses_now);
+   RUN_TEST(test_sweep_removes_only_old_entities_nothing_names);
 
    return UNITY_END();
 }

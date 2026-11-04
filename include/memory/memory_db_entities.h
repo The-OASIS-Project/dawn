@@ -566,6 +566,19 @@ int memory_db_entity_delete(int64_t entity_id, int user_id);
 int memory_db_entity_delete_orphans(int user_id, const int64_t *ids, int n, int *deleted_out);
 
 /**
+ * @brief Delete user @p user_id's entities first seen before @p older_than
+ *        that nothing names (as memory_db_entity_delete_orphans): the nightly
+ *        sweep of those left before batches removed their own
+ *
+ * Hold the user's extraction around it: an entity a running batch just made
+ * may carry its conversation's (older) time and be named a moment later.
+ *
+ * @param deleted_out Receives how many went (may be NULL)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_sweep_orphans(int user_id, int64_t older_than, int *deleted_out);
+
+/**
  * @brief Set an entity's photo (image store reference).
  *
  * @param user_id User ID (ownership check)

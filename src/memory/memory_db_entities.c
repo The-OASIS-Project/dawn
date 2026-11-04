@@ -642,6 +642,13 @@ int memory_db_entity_delete_orphans(int user_id, const int64_t *ids, int n, int 
    return rc;
 }
 
+int memory_db_entity_sweep_orphans(int user_id, int64_t older_than, int *deleted_out) {
+   return delete_orphans(user_id,
+                         "DELETE FROM memory_entities WHERE user_id = ?1 AND first_seen < ?2 "
+                         "AND " ENTITY_ORPHAN_SQL,
+                         NULL, older_than, deleted_out);
+}
+
 int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id) {
    if (source_id == target_id || source_id <= 0 || target_id <= 0)
       return MEMORY_DB_FAILURE;

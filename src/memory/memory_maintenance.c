@@ -33,6 +33,9 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_consolidation.h"
+#include "memory/memory_db_entities.h"
+#include "memory/memory_extraction.h"
+#include "memory/memory_forget.h"
 
 /* Maximum users to process in one run */
 #define MAX_USERS 64
@@ -64,6 +67,34 @@ static void prune_consolidation_record(time_t now) {
    }
 }
 
+/* How old an entity nothing names must be before the sweep removes it: past
+ * any batch that could still name it, and long enough that one the user just
+ * saw in the Graph tab doesn't vanish under them. */
+#define ORPHAN_ENTITY_MIN_AGE_DAYS 7
+
+/* Entities nothing names (no fact, relation, alias, proposal, contact or
+ * record row), left before batches removed their own: noise in focus and the
+ * graph that undo and forget never reach.  Each user's extraction is held so
+ * a running batch's new entity isn't taken before it is named. */
+static void sweep_orphan_entities(time_t now) {
+   int user_ids[MAX_USERS];
+   int user_count = 0;
+   memory_db_get_all_user_ids(user_ids, MAX_USERS, &user_count);
+   for (int i = 0; i < user_count; i++) {
+      if (!memory_extraction_hold_user(user_ids[i], MEMORY_FORGET_WAIT_SEC)) {
+         continue; /* runs again tomorrow */
+      }
+      int deleted = 0;
+      const int rc = memory_db_entity_sweep_orphans(
+          user_ids[i], (int64_t)now - (int64_t)ORPHAN_ENTITY_MIN_AGE_DAYS * 86400, &deleted);
+      memory_extraction_release_user(user_ids[i]);
+      if (rc == MEMORY_DB_SUCCESS && deleted > 0) {
+         OLOG_INFO("memory_decay: user %d: %d entities nothing names removed", user_ids[i],
+                   deleted);
+      }
+   }
+}
+
 void memory_run_nightly_decay(void) {
    /* Check if current hour matches configured decay hour */
    time_t now = time(NULL);
@@ -81,6 +112,9 @@ void memory_run_nightly_decay(void) {
       return;
    }
    prune_consolidation_record(now);
+   if (g_config.memory.enabled) {
+      sweep_orphan_entities(now);
+   }
 
    /* Check if memory and decay are enabled */
    if (!g_config.memory.enabled || !g_config.memory.decay_enabled) {
