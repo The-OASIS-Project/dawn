@@ -89,16 +89,17 @@
       summary.textContent = 'Memory: ' + (B ? B.summaryText(batch) : 'updated');
       if (batch.outside) {
          /* Said where it shows when closed, too. */
+         const text = B ? B.outsideText(batch) : 'Read outside text';
          const b = document.createElement('span');
          b.className = 'dawn-badge warning soft';
-         b.textContent = 'Outside text';
-         b.title = 'This conversation included text from outside (an email, a web page)';
+         b.textContent = text;
+         b.title = 'This conversation included text someone else wrote';
          b.setAttribute('aria-hidden', 'true');
          summary.appendChild(document.createTextNode(' '));
          summary.appendChild(b);
          const sr = document.createElement('span');
          sr.className = 'sr-only';
-         sr.textContent = ', read outside text';
+         sr.textContent = ', ' + text.charAt(0).toLowerCase() + text.slice(1);
          summary.appendChild(sr);
       }
       marker.appendChild(summary);

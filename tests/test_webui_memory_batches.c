@@ -30,6 +30,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/outside_kind.h"
 #include "dawn_error.h"
 #include "memory/memory_consolidate.h"
 #include "memory/memory_consolidation_undo.h"
@@ -226,6 +227,43 @@ void test_a_preference_only_batch_counts_it(void) {
    TEST_ASSERT_EQUAL_INT(1, json_object_get_int(get(get(b, "counts"), "pref_set")));
    TEST_ASSERT_EQUAL_STRING("undo", str(op_named(b, "pref_set"), "action"));
    json_object_put(b);
+}
+
+/* What outside text a batch read is named once on the batch; a row carries its
+ * own (a candidate from another batch differs). */
+void test_the_batch_says_what_outside_text_it_read(void) {
+   const memory_consolidation_batch_t b = { .user_id = s_user,
+                                            .conversation_id = s_conv,
+                                            .path = "agent",
+                                            .stop = "finished",
+                                            .outside = OUTSIDE_EMAIL };
+   int64_t batch = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_batch_add(&b, &batch));
+   memory_consolidation_op_t op = { .batch_id = batch,
+                                    .user_id = s_user,
+                                    .seq = 1,
+                                    .op = "dropped",
+                                    .outside = OUTSIDE_EMAIL,
+                                    .text = "A memo" };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_op_add(&op, NULL));
+   op.seq = 2;
+   op.op = "deferred";
+   op.outside = OUTSIDE_WEB;
+   op.text = "A page";
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_op_add(&op, NULL));
+   json_object *j = webui_memory_batch_json(s_user, batch);
+   TEST_ASSERT_NOT_NULL(j);
+   TEST_ASSERT_TRUE(json_object_get_boolean(get(j, "outside")));
+   TEST_ASSERT_EQUAL_STRING("email", str(j, "outside_from"));
+   TEST_ASSERT_EQUAL_STRING("email", str(op_named(j, "dropped"), "outside_from"));
+   TEST_ASSERT_EQUAL_STRING("web", str(op_named(j, "deferred"), "outside_from"));
+   json_object_put(j);
+
+   const int64_t clean = run(ONE_FACT("Jonathan Smith plays the cello"), NULL);
+   j = webui_memory_batch_json(s_user, clean);
+   TEST_ASSERT_FALSE(json_object_get_boolean(get(j, "outside")));
+   TEST_ASSERT_NULL(str(j, "outside_from"));
+   json_object_put(j);
 }
 
 /* ---- list_memory_batches ---- */
@@ -439,6 +477,7 @@ int main(void) {
    RUN_TEST(test_the_batch_object_carries_ops_counts_and_actions);
    RUN_TEST(test_a_preference_only_batch_counts_it);
    RUN_TEST(test_a_dropped_candidate_offers_keep);
+   RUN_TEST(test_the_batch_says_what_outside_text_it_read);
    RUN_TEST(test_list_pages_with_has_more_and_the_next_cursor);
    RUN_TEST(test_list_clamps_the_limit);
    RUN_TEST(test_list_answers_not_found_alike_for_missing_and_foreign);

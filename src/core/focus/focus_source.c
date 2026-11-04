@@ -386,8 +386,10 @@ int focus_compose_ex(int user_id,
          pool[pool_count] = *c;
          pool[pool_count].source_id = a->source_id;
          pool[pool_count].source_type = a->source_type;
-         /* Text others may have written (an invitation, a document) says so. */
-         if (a->source_type != FOCUS_SOURCE_INTERNAL)
+         /* Text others may have written (an invitation, a document) says so;
+          * an outside source's candidate of the user's own text (a note) is
+          * marked internal by its adapter. */
+         if (a->source_type != FOCUS_SOURCE_INTERNAL && c->source_type != FOCUS_SOURCE_INTERNAL)
             pool[pool_count].kind = OUTSIDE_MARKER_ITEM_KIND;
          pool_weights[pool_count] = adapter_weight;
          /* Adapter buffer no longer owns text/item_id; zero so a stray

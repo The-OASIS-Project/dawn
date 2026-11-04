@@ -1094,7 +1094,8 @@ messages: they never appear in `messages`, the history, or what the model is sen
    "created_at": 1793000000,
    "path": "agent",
    "status": "applied",
-   "outside": false,
+   "outside": true,
+   "outside_from": "email",
    "counts": {"added": 3, "reinforced": 2, "merged": 1, "replaced": 1, "closed": 1,
               "linked": 0, "proposed": 0, "pref_set": 1, "dropped": 4, "deferred": 1,
               "suggested_forget": 0, "refused": 0},
@@ -1118,7 +1119,12 @@ messages: they never appear in `messages`, the history, or what the model is sen
   applied.
 - `status`: `applied` · `partial` (some ops undone, some not) · `undone` (every op that can be
   undone was).
-- `outside`: the batch read outside text (an email, a web page, ...).
+- `outside`: the batch read outside text (an email, a web page, ...).  `outside_from`: what it
+  read, `null` when `outside` is false: `web` · `email` · `research` (a research report) ·
+  `messaging` (a message from a chat channel) · `document` · `mcp` (an MCP server's result) ·
+  `other` (any other tool's result, DAWN's own posts, a device's data).  Show it once per batch
+  ("Read outside text: an email").  A memory DAWN recalled into the conversation doesn't count,
+  whatever it was learned from, and neither does a note.
 - `counts`: the batch's ops by kind (a link that became a proposal counts as `proposed`); refused
   ops count in `refused` only and are not listed.
 
@@ -1130,6 +1136,7 @@ messages: they never appear in `messages`, the history, or what the model is sen
    "op": "merged",
    "status": "applied",
    "outside": false,
+   "outside_from": null,
    "fact_id": 7690,
    "relation_id": null,
    "entity_id": null,
@@ -1156,8 +1163,9 @@ merged into it:
   set-aside candidate the user kept) · `consumed` (a set-aside candidate a later batch took up) ·
   `expired` (a set-aside candidate past its 30 days).  There is no `forgotten` status: forgetting
   a fact removes every row naming it, so an acted-on suggestion leaves the list.
-- `outside`: the batch's taint (a kept or set-aside candidate: its own batch's).  A stored fact's
-  own taint is read from the fact.
+- `outside`, `outside_from`: the batch's taint (a kept or set-aside candidate: its own batch's).
+  Tag a row only when they differ from the batch's.  A stored fact's own taint is read from the
+  fact.
 - `fact_id`: the op's own fact; absent or `null` for `closed`, `linked` and `pref_set`.
 - `text`: the op's item when it was recorded: fact text, a relation as "subject predicate
   object", an entity name, a preference as "category: value"; `null` for a candidate dropped

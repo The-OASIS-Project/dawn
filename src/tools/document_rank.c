@@ -236,6 +236,7 @@ int document_ranking_load_text(int user_id,
       for (int i = 0; i < n; i++) {
          if (!items[i]->text && items[i]->chunk_id == block[j].id) {
             items[i]->text = block[j].text;
+            items[i]->is_note = strcmp(block[j].doc_filetype, "note") == 0;
          }
       }
    }

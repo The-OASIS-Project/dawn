@@ -40,7 +40,6 @@
 #include "logging.h"
 #include "memory/memory_history_loader.h"
 #include "memory/memory_note_guard.h"
-#include "memory/memory_types.h"
 #include "prompts.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
@@ -205,27 +204,10 @@ static bool result_is_own(struct json_object *history, size_t at, const char *id
    return own;
 }
 
-/* Whether @p content (a string or text parts) holds @p needle. */
-static bool content_has(struct json_object *content, const char *needle) {
-   if (json_object_is_type(content, json_type_string)) {
-      return strstr(json_object_get_string(content), needle) != NULL;
-   }
-   for (size_t i = 0;
-        json_object_is_type(content, json_type_array) && i < json_object_array_length(content);
-        i++) {
-      struct json_object *text = NULL;
-      if (json_object_object_get_ex(json_object_array_get_idx(content, i), "text", &text) &&
-          strstr(json_object_get_string(text), needle)) {
-         return true;
-      }
-   }
-   return false;
-}
-
 /* A tool result's outside kind: its frame's, when DAWN framed it; none for one
- * of DAWN's own tools, unless it is the memory store returning rows learned
- * from outside text (each listed with its kind word); any other tool's (or
- * one whose call isn't found) counts as outside text. */
+ * of DAWN's own tools (the memory store's rows learned from outside text
+ * included: they say so, but are its own rendering of what it stored); any
+ * other tool's (or one whose call isn't found) counts as outside text. */
 static int result_outside(struct json_object *history,
                           size_t at,
                           const char *call_id,
@@ -234,19 +216,15 @@ static int result_outside(struct json_object *history,
    if (frame) {
       return llm_third_party_outside_kind(frame);
    }
-   if (!result_is_own(history, at, call_id) ||
-       content_has(content, OUTSIDE_MARKER_KIND_SUFFIX ")") ||
-       content_has(content, MEMORY_OUTSIDE_MARK)) {
-      return OUTSIDE_OTHER;
-   }
-   return OUTSIDE_NONE;
+   return result_is_own(history, at, call_id) ? OUTSIDE_NONE : OUTSIDE_OTHER;
 }
 
 /* The outside kind of the turn's items DAWN put in a turn context
  * (focus_incremental.c renders "[M3 source kind date] text", or without the
- * handle when an item has none): an item from an outside source, or a memory
- * learned from outside text, carries "outside" in its kind word.  A document's
- * chunk is a document; anything else OTHER. */
+ * handle when an item has none): an item from an outside source carries
+ * "outside" in its kind word; a document's chunk is a document, anything else
+ * OTHER.  A recalled memory's "outside" (where it was learned) doesn't count;
+ * CONV_ROW_OUTSIDE_KIND_SQL reads stored rows the same way. */
 static int focus_items_outside(const char *text) {
    for (const char *line = text; line && *line;) {
       const char *end = strchr(line, '\n');
@@ -258,7 +236,8 @@ static int focus_items_outside(const char *text) {
          char head[160];
          const size_t len = n - 1 < sizeof(head) - 2 ? n - 1 : sizeof(head) - 2;
          snprintf(head, sizeof(head), " %.*s", (int)len, line + 1);
-         if (strstr(head, " " OUTSIDE_MARKER_ITEM_KIND)) {
+         if (strstr(head, " " OUTSIDE_MARKER_ITEM_KIND) &&
+             !strstr(head, " " OUTSIDE_MARKER_MEMORY_SOURCE)) {
             return strstr(head, " " OUTSIDE_MARKER_DOC_SOURCE " ") ? OUTSIDE_DOCUMENT
                                                                    : OUTSIDE_OTHER;
          }

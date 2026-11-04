@@ -48,4 +48,10 @@
 /* The source of a document's chunk in a turn context's item header. */
 #define OUTSIDE_MARKER_DOC_SOURCE "document_chunk"
 
+/* What a recalled memory's source in an item header starts with (memory_fact,
+ * memory_entity, memory_relation, memory_summary).  Its kind word may say
+ * "outside" (where it was learned), but the line is DAWN's own rendering of
+ * what it stored under the guard, so it never counts as outside text again. */
+#define OUTSIDE_MARKER_MEMORY_SOURCE "memory_"
+
 #endif /* OUTSIDE_MARKERS_H */

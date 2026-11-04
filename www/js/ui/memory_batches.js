@@ -69,6 +69,17 @@
 
    const ACTION_LABELS = { undo: 'Undo', keep: 'Keep', forget: 'Forget' };
 
+   /* What outside text a batch (or a row from another batch) read, by outside_from. */
+   const OUTSIDE_CAUSES = {
+      web: 'a web page',
+      email: 'an email',
+      research: 'a research report',
+      messaging: 'a message',
+      document: 'a document',
+      mcp: "another tool's result",
+      other: "another tool's result",
+   };
+
    let enabled = false;
    const tab = {
       active: false,
@@ -122,6 +133,13 @@
       s.className = 'sr-only';
       s.textContent = text;
       return s;
+   }
+
+   /* "Read outside text: an email" for a tainted batch or row, else ''. */
+   function outsideText(item) {
+      if (!item || !item.outside) return '';
+      const cause = OUTSIDE_CAUSES[item.outside_from];
+      return 'Read outside text' + (cause ? ': ' + cause : '');
    }
 
    function shorten(text) {
@@ -207,9 +225,11 @@
          meta.appendChild(b);
          meta.appendChild(srOnly(status.help));
       }
-      if (op.outside) {
-         const b = badge('Outside text', 'warning soft');
-         b.title = 'Learned while reading text from outside (an email, a web page)';
+      /* The batch says what it read once; a row only when it differs (a
+       * candidate from another batch). */
+      if (op.outside && (!batch.outside || op.outside_from !== batch.outside_from)) {
+         const b = badge(outsideText(op), 'warning soft');
+         b.title = 'Learned while reading text someone else wrote';
          meta.appendChild(b);
       }
       if (op.target_text) {
@@ -284,8 +304,8 @@
       if (batch.status === 'undone') head.appendChild(badge('Undone'));
       else if (batch.status === 'partial') head.appendChild(badge('Partly undone'));
       if (batch.outside && where !== 'marker') {
-         const b = badge('Read outside text', 'warning soft');
-         b.title = 'This conversation included text from outside (an email, a web page)';
+         const b = badge(outsideText(batch), 'warning soft');
+         b.title = 'This conversation included text someone else wrote';
          head.appendChild(b);
       }
       const ops = Array.isArray(batch.ops) ? batch.ops : [];
@@ -671,6 +691,7 @@
       handleReconnect,
       renderBatch,
       summaryText,
+      outsideText,
       replaceKeepingFocus,
       showTab,
       hideTab,

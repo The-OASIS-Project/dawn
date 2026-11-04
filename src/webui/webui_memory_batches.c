@@ -65,6 +65,17 @@ static json_object *text_or_null(const char *text) {
    return text && text[0] ? json_object_new_string(text) : NULL;
 }
 
+/* What outside text @p k is, by name (outside_from), or NULL when none. */
+static json_object *outside_from(int k) {
+   static const char *const names[] = {
+      [OUTSIDE_WEB] = "web",           [OUTSIDE_EMAIL] = "email",
+      [OUTSIDE_RESEARCH] = "research", [OUTSIDE_MESSAGING] = "messaging",
+      [OUTSIDE_DOCUMENT] = "document", [OUTSIDE_MCP] = "mcp",
+      [OUTSIDE_OTHER] = "other",
+   };
+   return outside_is_tainted(k) && k <= OUTSIDE_OTHER ? json_object_new_string(names[k]) : NULL;
+}
+
 /* What a merge onto @p o's fact brought in: the batch's merged rows whose
  * keeper it is. */
 static json_object *sources_of(const memory_consolidation_op_row_t *o,
@@ -96,6 +107,7 @@ static json_object *op_json(const memory_consolidation_op_row_t *o,
    json_object_object_add(j, "op", json_object_new_string(v->op));
    json_object_object_add(j, "status", json_object_new_string(v->status));
    json_object_object_add(j, "outside", json_object_new_boolean(outside_is_tainted(o->outside)));
+   json_object_object_add(j, "outside_from", outside_from(o->outside));
    json_object_object_add(j, "fact_id", id_or_null(o->fact_id));
    json_object_object_add(j, "relation_id", id_or_null(o->relation_id));
    json_object_object_add(j, "entity_id", id_or_null(o->entity_id));
@@ -140,6 +152,7 @@ static json_object *batch_object(const memory_consolidation_batch_row_t *b,
    json_object_object_add(j, "path", json_object_new_string(b->path));
    json_object_object_add(j, "status", json_object_new_string(bv.status));
    json_object_object_add(j, "outside", json_object_new_boolean(outside_is_tainted(b->outside)));
+   json_object_object_add(j, "outside_from", outside_from(b->outside));
    json_object *c = json_object_new_object();
    for (int k = 0; k < MEMORY_CONSOLIDATION_COUNT_KINDS; k++) {
       json_object_object_add(c, memory_consolidation_count_kinds[k],

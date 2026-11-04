@@ -322,10 +322,14 @@ static void test_outside_kind_of_tool_results(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_of(buf, 0));
    snprintf(buf, sizeof(buf), call, "no_such_tool", "{}", "text");
    TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_of(buf, 0));
-   /* The memory store returning a fact learned from outside text. */
+   /* The memory store returning rows learned from outside text: its own
+    * rendering of what it stored, not outside text again. */
    snprintf(buf, sizeof(buf), call, "memory", "{}", "- [ID:4] (inferred, outside) A memo");
-   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_of(buf, 0));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_of(buf, 0));
    snprintf(buf, sizeof(buf), call, "memory", "{}", "  works_at: Acme (outside)");
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_of(buf, 0));
+   /* Another tool's result keeps its rule, whatever it says. */
+   snprintf(buf, sizeof(buf), call, "search", "{}", "- [ID:4] (inferred, outside) A memo");
    TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_of(buf, 0));
 }
 
@@ -386,7 +390,7 @@ static void test_dawn_input_with_outside_text(void) {
                                     0));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER,
                          outside_of("[{\"role\":\"user\",\"_kind\":\"turn_context\",\"content\":"
-                                    "\"[M4 memory_fact told, outside 2026-10-01] A memo\"},"
+                                    "\"[M4 calendar_event outside 2026-10-01] A meeting\"},"
                                     "{\"role\":\"user\",\"content\":\"Hi\",\"id\":10}]",
                                     0));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT,
@@ -397,6 +401,27 @@ static void test_dawn_input_with_outside_text(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE,
                          outside_of("[{\"role\":\"user\",\"_kind\":\"turn_context\",\"content\":"
                                     "\"[M1 memory_fact told 2026-10-01] Jon likes tea\"},"
+                                    "{\"role\":\"user\",\"content\":\"Hi\",\"id\":10}]",
+                                    0));
+}
+
+/* A memory recalled into a turn context was learned from outside text at most
+ * once: its "outside" word is where it came from, not new outside text.  A
+ * note's chunk is the user's own text and carries no outside word. */
+static void test_recalled_memories_and_notes_are_not_outside(void) {
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE,
+                         outside_of("[{\"role\":\"user\",\"_kind\":\"turn_context\",\"content\":"
+                                    "\"[M4 memory_fact told, outside 2026-10-01] A memo\\n"
+                                    "[M5 memory_relation outside 2026-10-01] Jon works_at Acme\\n"
+                                    "[memory_summary outside] A talk\\n"
+                                    "[M6 document_chunk 2026-10-01] [Groceries] Eggs\"},"
+                                    "{\"role\":\"user\",\"content\":\"Hi\",\"id\":10}]",
+                                    0));
+   /* An outside item beside them still counts. */
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT,
+                         outside_of("[{\"role\":\"user\",\"_kind\":\"turn_context\",\"content\":"
+                                    "\"[M4 memory_fact told, outside 2026-10-01] A memo\\n"
+                                    "[M7 document_chunk outside 2026-10-01] [a.pdf] A page\"},"
                                     "{\"role\":\"user\",\"content\":\"Hi\",\"id\":10}]",
                                     0));
 }
@@ -423,6 +448,7 @@ int main(void) {
    RUN_TEST(test_rows_before_the_cursor_are_the_floors);
    RUN_TEST(test_attached_document_is_outside);
    RUN_TEST(test_dawn_input_with_outside_text);
+   RUN_TEST(test_recalled_memories_and_notes_are_not_outside);
    RUN_TEST(test_posts_are_outside);
    return UNITY_END();
 }

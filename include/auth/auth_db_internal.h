@@ -952,20 +952,35 @@ int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
    "COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.conversation_id = " conv \
    " AND m.kind IS NULL), 0)"
 
+/* A turn context row @p m's content with a recalled memory's outside word
+ * taken out of its item headers: a fact's kind word ("told, outside"), a
+ * relation's, summary's or entity's ("memory_relation outside").  What's left
+ * saying "outside" is an item from an outside source. */
+/* clang-format off */
+#define CONV_TURN_CONTEXT_FOREIGN_SQL(m) \
+   "replace(replace(replace(replace(replace(" m ".content, '" OUTSIDE_MARKER_KIND_SUFFIX \
+   "', ''), '" OUTSIDE_MARKER_MEMORY_SOURCE "fact " OUTSIDE_MARKER_ITEM_KIND "', ''), '" \
+   OUTSIDE_MARKER_MEMORY_SOURCE "entity " OUTSIDE_MARKER_ITEM_KIND "', ''), '" \
+   OUTSIDE_MARKER_MEMORY_SOURCE "relation " OUTSIDE_MARKER_ITEM_KIND "', ''), '" \
+   OUTSIDE_MARKER_MEMORY_SOURCE "summary " OUTSIDE_MARKER_ITEM_KIND "', '')"
+/* clang-format on */
+
 /* The outside kind a stored row @p m (a messages row, by name) carries as
  * DAWN wrote it, NULL when none, by the live scan's rules
  * (memory_extraction_input.c) for what isn't a tool's result: one of DAWN's
- * posts, a turn context naming an item from outside ("[M3 source outside
- * YYYY-MM-DD]" or no date), a document attached to the user's message, a
- * background job's result, a device's relayed data (core/outside_markers.h). */
+ * posts, a turn context naming an item from an outside source ("[M3 source
+ * outside YYYY-MM-DD]" or no date; a recalled memory's "outside" doesn't
+ * count), a document attached to the user's message, a background job's
+ * result, a device's relayed data (core/outside_markers.h). */
 /* clang-format off */
 #define CONV_ROW_OUTSIDE_KIND_SQL(m) \
    "(CASE WHEN " m ".id IN (SELECT message_id FROM message_unprompted) THEN 7 " \
    "WHEN " m ".role != 'user' THEN NULL " \
-   "WHEN " m ".kind = 'turn_context' THEN (CASE WHEN " m ".content GLOB '* " \
-   OUTSIDE_MARKER_ITEM_KIND " [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]]*' OR instr(" m \
-   ".content, ' " OUTSIDE_MARKER_ITEM_KIND "]') > 0 THEN (CASE WHEN instr(" m ".content, '" \
-   OUTSIDE_MARKER_DOC_SOURCE " " OUTSIDE_MARKER_ITEM_KIND "') > 0 THEN 5 ELSE 7 END) END) " \
+   "WHEN " m ".kind = 'turn_context' THEN (CASE WHEN " CONV_TURN_CONTEXT_FOREIGN_SQL(m) \
+   " GLOB '* " OUTSIDE_MARKER_ITEM_KIND " [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]]*' OR " \
+   "instr(" CONV_TURN_CONTEXT_FOREIGN_SQL(m) ", ' " OUTSIDE_MARKER_ITEM_KIND "]') > 0 THEN " \
+   "(CASE WHEN instr(" m ".content, '" OUTSIDE_MARKER_DOC_SOURCE " " OUTSIDE_MARKER_ITEM_KIND \
+   "') > 0 THEN 5 ELSE 7 END) END) " \
    "WHEN " m ".kind IS NULL AND instr(" m ".content, '" OUTSIDE_MARKER_DOC_OPEN "') > 0 THEN 5 " \
    "WHEN substr(" m ".content, 1, length('" OUTSIDE_MARKER_JOB_UPDATE "')) = '" \
    OUTSIDE_MARKER_JOB_UPDATE "' THEN 3 " \
