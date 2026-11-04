@@ -279,6 +279,9 @@ bool turn_origin_capture(turn_origin_t *out) {
 
 /* --- the watcher (its own test) ------------------------------------------- */
 
+void coding_report_stop(void) {
+}
+
 int coding_watch_start(void) {
    return SUCCESS;
 }

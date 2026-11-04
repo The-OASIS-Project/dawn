@@ -44,6 +44,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/coding_agent_gateway.h"
+#include "tools/coding_agent_report.h"
 #include "tools/mcp_bridge.h"
 #include "utils/string_utils.h"
 
@@ -131,16 +132,22 @@ static void recancel(int user_id, int64_t job) {
 }
 
 /* The job's end from the gateway's word for it: done, or failed with why.  A
- * cancel DAWN didn't ask for (DAWN ends those itself) is a failure to the user. */
-static void end_job(int64_t job, int user_id, const char *kind) {
+ * cancel DAWN didn't ask for (DAWN ends those itself) is a failure to the user.
+ * The first time it ends the job, the end is reported into the conversation
+ * the task came from (@p data: the end's facts and the agent's report). */
+static void end_job(int64_t job, int user_id, const char *kind, struct json_object *data) {
+   int rc;
    if (strcmp(kind, "completed") == 0) {
-      job_manager_set_terminal_if_active(job, user_id, "done", NULL, time(NULL), 0);
+      rc = job_manager_set_terminal_if_active(job, user_id, "done", NULL, time(NULL), 0);
    } else if (strcmp(kind, "failed") == 0) {
-      job_manager_set_terminal_if_active(job, user_id, "failed", "the agent stopped with an error",
-                                         time(NULL), 0);
+      rc = job_manager_set_terminal_if_active(job, user_id, "failed",
+                                              "the agent stopped with an error", time(NULL), 0);
    } else {
-      job_manager_set_terminal_if_active(job, user_id, "failed", "stopped at the gateway",
-                                         time(NULL), 0);
+      rc = job_manager_set_terminal_if_active(job, user_id, "failed", "stopped at the gateway",
+                                              time(NULL), 0);
+   }
+   if (rc == AUTH_DB_SUCCESS) {
+      coding_report_job_end(job, user_id, kind, data);
    }
 }
 
@@ -217,7 +224,7 @@ void coding_watch_apply(struct json_object *event) {
                (long long)job, rec.title);
       job_notify_user(user_id, text, job, 0);
    } else if (is_end(kind)) {
-      end_job(job, user_id, kind);
+      end_job(job, user_id, kind, json_object_object_get(event, "data"));
    }
 }
 
@@ -306,8 +313,8 @@ static int reconcile_job(const job_record_t *rec) {
                                          time(NULL), 0);
       coding_gateway_cancel(rec->user_id, rec->id);
    } else if (is_end(coding_gateway_jstr(task, "status"))) {
-      end_job(rec->id, rec->user_id,
-              coding_gateway_jstr(task, "status")); /* its end event is gone */
+      /* Its end event is gone; the task record holds the same facts. */
+      end_job(rec->id, rec->user_id, coding_gateway_jstr(task, "status"), task);
    } else if (queued) {
       /* It started, but DAWN stopped before recording it: the start path that
        * would have is gone, so the watcher does. */

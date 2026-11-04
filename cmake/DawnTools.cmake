@@ -526,7 +526,7 @@ option(DAWN_ENABLE_CODING_AGENT_TOOL "Enable the coding_agent tool" ON)
 if(DAWN_ENABLE_CODING_AGENT_TOOL AND DAWN_ENABLE_MCP_BRIDGE_TOOL AND ENABLE_WEBUI)
     add_definitions(-DDAWN_ENABLE_CODING_AGENT_TOOL)
     list(APPEND TOOL_SOURCES src/tools/coding_agent_gateway.c src/tools/coding_agent_tool.c
-         src/tools/coding_agent_watch.c)
+         src/tools/coding_agent_watch.c src/tools/coding_agent_report.c)
     message(STATUS "DAWN: Coding agent tool ENABLED")
 else()
     message(STATUS "DAWN: Coding agent tool DISABLED")

@@ -42,6 +42,7 @@
 #include "config/dawn_config.h"
 #include "core/conv_event.h"
 #include "core/event_payload.h"
+#include "core/job_report.h"
 #include "core/memory_filter.h" /* memory_filter_check_injection_commands (critic gap gate) */
 #include "core/outside_kind.h"
 #include "core/session_manager.h"
@@ -514,11 +515,7 @@ static char *research_commentary_context(const research_run_t *run0) {
  * (caller frees) or NULL on failure — caller falls back to the mechanical excerpt. */
 static char *research_commentary(struct session *s, const research_run_t *run0, const char *prose) {
    char persona[LLM_PERSONA_MAX];
-   llm_persona_effective(persona, sizeof(persona));
-   size_t plen = strlen(persona);
-   while (plen > 0 && (persona[plen - 1] == '\n' || persona[plen - 1] == ' ')) {
-      persona[--plen] = '\0'; /* the template supplies the blank line after it */
-   }
+   job_report_persona(persona, sizeof(persona));
    char *convo = research_commentary_context(run0);
 
    size_t sys_need = strlen(persona) + sizeof(RESEARCH_COMMENTARY_PROMPT_TEMPLATE);
@@ -544,24 +541,11 @@ static char *research_commentary(struct session *s, const research_run_t *run0, 
        run0->brief, prose);
    free(convo);
 
-   session_init_system_prompt(s, sysprompt); /* persona + report-back instructions */
-   session_set_tools_suppressed(s, true);    /* a take needs no tools */
-   text_input_dispatch_opts_t opts = {
-      .conversation_id = 0,
-      .auth_user_id = run0->user_id,
-      .skip_prompt_rebuild = true,
-   };
-   /* A side call on the run's session: recorded, but it doesn't touch the
-    * rounds' cache key or context numbers. */
-   const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_SYNTHESIS);
-   char *take = core_text_input_dispatch(s, directive, &opts);
-   llm_cache_monitor_pop_kind(kind_prev);
-   session_set_tools_suppressed(s, false);
+   /* A side call on the run's session (no tools): it doesn't touch the rounds'
+    * cache key or context numbers. */
+   char *take = job_report_take(s, sysprompt, directive, run0->user_id);
    free(directive);
    free(sysprompt);
-   if (take != NULL) {
-      sanitize_utf8_for_json(take); /* becomes the chat completion body */
-   }
    return take;
 }
 

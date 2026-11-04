@@ -2353,6 +2353,14 @@ dawn_add_unit_test(test_coding_agent_tool
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# coding-agent report-back: what is posted, what the no-tools take is asked.
+dawn_add_unit_test(test_coding_agent_report
+   SOURCES test_coding_agent_report.c
+           ${SRC_ROOT}/src/tools/coding_agent_report.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # coding-agent watcher: gateway events onto jobs, start-up check, cursor.
 dawn_add_unit_test(test_coding_agent_watch
    SOURCES test_coding_agent_watch.c

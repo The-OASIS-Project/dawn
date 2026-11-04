@@ -48,6 +48,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/coding_agent_gateway.h"
+#include "tools/coding_agent_report.h"
 #include "tools/coding_agent_watch.h"
 #include "tools/tool_pending.h"
 #include "tools/tool_registry.h"
@@ -706,11 +707,13 @@ static int coding_agent_start(void) {
    return coding_watch_start();
 }
 
-/* Cancels in flight get their wait first: stopping the watcher cuts the
- * gateway off for everyone. */
+/* Gateway cancels in flight get their wait first (stopping the watcher cuts
+ * the gateway off for everyone), then the watcher, then the reporter, so an
+ * end the watcher applies while stopping is still reported. */
 static void coding_agent_stop(void) {
    coding_gateway_stop();
    coding_watch_stop();
+   coding_report_stop();
 }
 
 static const treg_param_t coding_agent_params[] = {

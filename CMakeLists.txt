@@ -849,6 +849,7 @@ list(APPEND DAWN_SOURCES
     src/core/job_worker.c
     src/core/job_reinvoke.c
     src/core/job_dispatch.c
+    src/core/job_report.c
     # Deep-research live orchestration (rides on the job session + dispatch).
     src/tools/research_run_loop.c
     src/core/research_worker.c

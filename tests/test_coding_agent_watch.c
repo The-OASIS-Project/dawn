@@ -112,6 +112,19 @@ int mcp_bridge_interrupt(const char *alias) {
    return SUCCESS;
 }
 
+/* --- the report-back (its own unit) --------------------------------------- */
+
+static int g_reports;
+static char g_report_kind[16];
+void coding_report_job_end(int64_t job,
+                           int user_id,
+                           const char *gw_kind,
+                           struct json_object *data) {
+   (void)job, (void)user_id, (void)data;
+   g_reports++;
+   snprintf(g_report_kind, sizeof(g_report_kind), "%s", gw_kind);
+}
+
 /* --- the gateway ------------------------------------------------------------ */
 
 static atomic_int g_cancels;
@@ -208,6 +221,7 @@ void setUp(void) {
    g_end[0] = '\0';
    g_events = 0;
    g_notices = 0;
+   g_reports = 0;
    g_pending = true;
    atomic_store(&g_cancels, 0);
 }
@@ -228,12 +242,18 @@ static void test_steps_go_into_the_job(void) {
 static void test_ends(void) {
    apply("completed", "job:42", 5);
    TEST_ASSERT_EQUAL_STRING("done", g_end);
+   TEST_ASSERT_EQUAL_INT(1, g_reports); /* reported once, */
+   TEST_ASSERT_EQUAL_STRING("completed", g_report_kind);
+   apply("completed", "job:42", 5); /* not again on a replay */
+   TEST_ASSERT_EQUAL_INT(1, g_reports);
    setUp();
    apply("failed", "job:42", 5);
    TEST_ASSERT_EQUAL_STRING("failed", g_end);
+   TEST_ASSERT_EQUAL_STRING("failed", g_report_kind);
    setUp();
    apply("cancelled", "job:42", 5); /* not asked for here */
    TEST_ASSERT_EQUAL_STRING("failed", g_end);
+   TEST_ASSERT_EQUAL_STRING("cancelled", g_report_kind);
    TEST_ASSERT_EQUAL_STRING("stopped at the gateway", g_end_why);
    setUp();
    apply("input_required", "job:42", 5);
