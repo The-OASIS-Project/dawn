@@ -91,6 +91,13 @@ def test_grant_scopes(store):
    assert store.grants_for(t1, "domain") == ["a.org", "b.org"]
 
 
+def test_latest_seq(store):
+   assert store.latest_seq() == 0
+   add_task(store)
+   store.add_event("t1", "progress", text="a")
+   assert store.latest_seq() == store.events_after(0)[-1]["seq"]
+
+
 def test_event_replay_and_wait(store):
    add_task(store)
    a = store.add_event("t1", "progress", text="x")
@@ -602,11 +609,13 @@ def test_http_requires_bearer():
       # then offers none of its tools to a model: renaming either one breaks that.
       assert {"task_start", "task_events", "task_reply", "task_publish", "grant_revoke"} <= names
       auth = {**hdr, "Authorization": "Bearer " + "s" * 32}
-      for args in ({"dawn_user_id": 1, "client_ref": "job:9"}, {"dawn_user_id": 1}):
-         res = c.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
-            "name": "task_list" if "client_ref" in args else "task_cancel",
-            "arguments": args}}, headers=auth).json()["result"]
-         assert res["isError"] and ("no such task" in str(res) or "name the task" in str(res))
+      res = c.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+         "name": "task_list", "arguments": {"dawn_user_id": 1, "client_ref": "job:9"}}},
+         headers=auth).json()["result"]
+      assert not res["isError"] and json.loads(res["content"][0]["text"])["task"] is None
+      res = c.post("/mcp", json={"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
+         "name": "task_cancel", "arguments": {"dawn_user_id": 1}}}, headers=auth).json()["result"]
+      assert res["isError"] and "name the task" in str(res)
       call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
               "params": {"name": "task_cancel", "arguments": {"dawn_user_id": 1, "task_id": "x"}}}
       res = c.post("/mcp", json=call, headers={**hdr, "Authorization": "Bearer " + "s" * 32})

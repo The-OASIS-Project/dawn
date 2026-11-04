@@ -194,6 +194,9 @@ class Store:
          out.append({**dict(r), "data": json.loads(r["data"])})
       return out
 
+   def latest_seq(self) -> int:
+      return self.db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
+
    async def wait_events(self, after_seq: int, wait_s: float) -> list[dict]:
       deadline = asyncio.get_running_loop().time() + wait_s
       while True:

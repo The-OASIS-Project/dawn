@@ -105,7 +105,8 @@ def build(runner, cfg) -> MCPServer:
       to `wait_s` (max 25) for one."""
       report_update()
       events = await store.wait_events(after_seq, min(max(wait_s, 0), MAX_WAIT_S))
-      return {"events": events, "last_seq": events[-1]["seq"] if events else after_seq}
+      # With none, the newest there is: below after_seq, the events started over.
+      return {"events": events, "last_seq": events[-1]["seq"] if events else store.latest_seq()}
 
    def task_of(dawn_user_id: int, task_id: str | None, client_ref: str | None) -> dict:
       """A task named by its id or by the caller's client_ref; the user's own only."""
@@ -122,7 +123,9 @@ def build(runner, cfg) -> MCPServer:
    async def task_list(dawn_user_id: int, task_id: str | None = None,
                        client_ref: str | None = None) -> dict:
       """One task (by task_id or client_ref) with its pending requests, or the user's
-      recent tasks."""
+      recent tasks.  A client_ref with no task: task null."""
+      if client_ref and not task_id and not store.task_by_ref(dawn_user_id, client_ref):
+         return {"task": None, "pending": []}
       if task_id or client_ref:
          t = task_of(dawn_user_id, task_id, client_ref)
          return {"task": public(t), "pending": store.pending_requests(t["id"])}

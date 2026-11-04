@@ -142,7 +142,7 @@ is collected there whenever a run stops, so work in progress can be looked at to
 | `agents_list` | agents, Claude Code and SDK versions, repos (`name`, `url`, `base`), tasks running and the limit |
 | `task_start {dawn_user_id, repo, task, budget_usd?, client_ref?}` | new branch `agent/<id>-<slug>` and clone, starts the agent; a repeated `client_ref` returns the task it already started |
 | `task_events {after_seq, wait_s}` | every task's events after `after_seq`, waiting up to 25 s |
-| `task_list {dawn_user_id, task?}` | a task with its pending requests, or the user's recent tasks |
+| `task_list {dawn_user_id, task?}` | a task with its pending requests (`task` null for a `client_ref` with none), or the user's recent tasks |
 | `task_reply {dawn_user_id, task, request_id, decision \| answer}` | `allow`, `always_repo`, `always` or `deny`; a question takes `answer` |
 | `task_cancel {dawn_user_id, task}` | stop; the branch is kept |
 | `task_publish {dawn_user_id, task, head, open_pr?, title?}` | push exactly `head` (the full commit id the user was shown, from `task_changes`) to the branch, open a PR; refused if the work has moved on; a second call returns the first result |
@@ -158,7 +158,9 @@ A tool's answer is a JSON object in the result's first text content
 
 ### Events
 
-`task_events` returns `{"events": [...], "last_seq": n}`; each event is
+`task_events` returns `{"events": [...], "last_seq": n}`: the last event's `seq`, or with no
+events the newest `seq` the gateway has (below `after_seq`: its events started over, so read
+from 0); each event is
 `{"seq", "task_id", "client_ref", "dawn_user_id", "ts", "kind", "data"}`; a batch stops at about
 256 KB of event data. Everything in `data` that the agent
 wrote (text, commands, the host it asks for, commit subjects) is outside text: show it as the
