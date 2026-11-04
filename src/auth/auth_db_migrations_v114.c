@@ -24,10 +24,15 @@
  * adds its column: a research run's report is RESEARCH; a note whose gloss
  * fact learned from outside text carries that fact's kind; any other document
  * other than a note is DOCUMENT; the other notes stay NONE.  A version takes
- * its document's kind, at least DOCUMENT for a document other than a note
- * (when the document is gone, RESEARCH if a research run names it, else
- * DOCUMENT: what it was can't be told, and a deleted upload recovered as a
- * note must not read as the user's words).
+ * its document's kind, at least DOCUMENT for a document other than a note.
+ * A version names its document by id alone (document_versions has only
+ * document_id, user_id, filename, text and archived_at), and a v113 database
+ * can reuse an id (the highest-id document deleted, a note created), so the
+ * kind is taken only from a document of the same user created no later than
+ * the version was archived.  Otherwise (the document gone, or the id reused)
+ * it is RESEARCH if a research run names the id, else DOCUMENT: what it was
+ * can't be told, and a deleted upload recovered as a note must not read as
+ * the user's words.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -55,7 +60,8 @@ static const char k_fill_documents_sql[] =
 static const char k_fill_versions_sql[] =
     "UPDATE document_versions SET outside = COALESCE((SELECT CASE WHEN d.filetype != 'note' AND "
     "d.outside IN (" OUTSIDE_UNTAINTED_SQL ") THEN 5 ELSE d.outside END FROM documents d WHERE "
-    "d.id = document_versions.document_id), CASE WHEN document_id IN (SELECT report_doc_id "
+    "d.id = document_versions.document_id AND d.user_id = document_versions.user_id AND "
+    "d.created_at <= document_versions.archived_at), CASE WHEN document_id IN (SELECT report_doc_id "
     "FROM research_runs WHERE report_doc_id IS NOT NULL) THEN 3 ELSE 5 END);";
 /* clang-format on */
 

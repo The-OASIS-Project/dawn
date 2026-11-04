@@ -649,6 +649,73 @@ void test_version_recover_upload_not_own(void) {
    TEST_ASSERT_FALSE(chunk_is_own(chunk));
 }
 
+/* A deleted document the user marked as their own, re-created as a document
+ * (too long for a note): it starts as DOCUMENT; the version's kind, applied
+ * (with the turn's, by the recover tool; as is, by the panel's restore),
+ * brings it back as the user's own. */
+static int64_t deleted_own_document(int *outside_out, char **text_out) {
+   g_config.documents.version_retention_days = 14;
+   int64_t doc = 0, chunk = 0;
+   const float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_create(1, "plan.txt", "plan.txt", "text", "h-own", 1,
+                                                     false, &doc));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_chunk_create(doc, 0, "my plan", emb, 4, 1.0f, 0, &chunk));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_own(1, doc, true, NULL));
+   seed_note(1, "RowidFiller4", "x", 96);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_delete_indexed(doc));
+   document_version_meta_t v[8];
+   int n = 0;
+   document_db_version_list_deleted(1, v, 8, &n);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_get_text(v[0].id, 1, text_out, NULL, 0, NULL,
+                                                               outside_out));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, *outside_out);
+   return doc;
+}
+
+/* The fallback's re-created document (DOCUMENT until its kind is applied);
+ * into @p chunk_out its chunk. */
+static int64_t recreated_document(const char *text, const char *hash, int64_t *chunk_out) {
+   int64_t again = 0;
+   const float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_create(1, "plan.txt", "plan.txt", "text", hash, 1,
+                                                     false, &again));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_chunk_create(again, 0, text, emb, 4, 1.0f, 0, chunk_out));
+   TEST_ASSERT_FALSE(chunk_is_own(*chunk_out));
+   return again;
+}
+
+void test_version_recover_long_document_keeps_own(void) {
+   int outside = -1;
+   char *text = NULL;
+   deleted_own_document(&outside, &text);
+   int64_t chunk = 0;
+   int64_t again = recreated_document(text, "h-own2", &chunk);
+   /* The recover tool: the version's kind with a clean turn's. */
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS, document_db_set_outside(1, again, outside_combine(outside, OUTSIDE_NONE), false));
+   TEST_ASSERT_TRUE(chunk_is_own(chunk));
+   /* A turn that read a page: not the user's own words. */
+   TEST_ASSERT_EQUAL_INT(
+       SUCCESS, document_db_set_outside(1, again, outside_combine(outside, OUTSIDE_WEB), false));
+   TEST_ASSERT_FALSE(chunk_is_own(chunk));
+   free(text);
+}
+
+void test_version_restore_long_document_keeps_own(void) {
+   int outside = -1;
+   char *text = NULL;
+   deleted_own_document(&outside, &text);
+   int64_t chunk = 0;
+   int64_t again = recreated_document(text, "h-own3", &chunk);
+   /* The panel's restore: the version's kind, not combined (nothing was kept). */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, again, outside, false));
+   TEST_ASSERT_TRUE(chunk_is_own(chunk));
+   free(text);
+}
+
 /* Restoring the only kept version of a clean note: the restore archives the
  * current text, which prunes the version restored from, so its kind is read
  * with its text first and the note stays the user's own. */
@@ -712,6 +779,8 @@ int main(void) {
    RUN_TEST(test_version_recover_keeps_outside);
    RUN_TEST(test_version_recover_upload_not_own);
    RUN_TEST(test_version_restore_at_cap_keeps_kind);
+   RUN_TEST(test_version_recover_long_document_keeps_own);
+   RUN_TEST(test_version_restore_long_document_keeps_own);
    RUN_TEST(test_set_num_chunks);
    return UNITY_END();
 }

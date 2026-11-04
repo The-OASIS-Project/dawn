@@ -731,6 +731,50 @@ void test_undo_reinforced_takes_back_a_relation_created_closed(void) {
                          q("SELECT COUNT(*) FROM memory_relations WHERE fact_id = ?1", fact, NULL));
 }
 
+/* An entity only a restatement's pre-image names (the subject it moved the
+ * fact from) outlives a forget of another fact about it, so the undo can put
+ * it back; once the op is undone it no longer holds the entity. */
+void test_forget_keeps_the_subject_a_pre_image_holds(void) {
+   char sql[768];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_entities (user_id, name, entity_type, canonical_name) VALUES "
+            "(%d, 'Old Subject', 'person', 'old subject'), (%d, 'New Subject', 'person', "
+            "'new subject')",
+            s_user, s_user);
+   exec(sql);
+   const int64_t was = q("SELECT id FROM memory_entities WHERE canonical_name = ?2", 0,
+                         "old subject");
+   const int64_t now = q("SELECT id FROM memory_entities WHERE canonical_name = ?2", 0,
+                         "new subject");
+   const int64_t fact = stored(CELLO, "inferred");
+   const int64_t other = stored("Old Subject plays the drums", "inferred");
+   snprintf(sql, sizeof(sql),
+            "UPDATE memory_facts SET subject_entity_id = %lld WHERE id = %lld;"
+            "UPDATE memory_facts SET subject_entity_id = %lld WHERE id = %lld;"
+            "INSERT INTO memory_consolidation_batches (user_id, conversation_id, path, stop, "
+            "created_at) VALUES (%d, %lld, 'agent', 'finish', 1);"
+            "INSERT INTO memory_consolidation_ops (batch_id, user_id, seq, op, fact_id, "
+            "pre_image, post_image, created_at) SELECT MAX(id), %d, 1, 'reinforced', %lld, "
+            "'{\"subject_entity_id\": %lld, \"confidence\": 0.7, \"expires_at\": 0, "
+            "\"relation_ids\": []}', '{\"subject_entity_id\": %lld, \"confidence\": 0.7}', 1 "
+            "FROM memory_consolidation_batches;",
+            (long long)now, (long long)fact, (long long)was, (long long)other, s_user,
+            (long long)s_conv, s_user, (long long)fact, (long long)was, (long long)now);
+   exec(sql);
+   const int64_t batch = q("SELECT MAX(id) FROM memory_consolidation_batches", 0, NULL);
+   const int64_t op = op_of(batch, "reinforced");
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(other, s_user, NULL));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT COUNT(*) FROM memory_entities WHERE id = ?1", was, NULL));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, undo(batch, op));
+   TEST_ASSERT_EQUAL_INT64(was, q("SELECT subject_entity_id FROM memory_facts WHERE id = ?1", fact,
+                                  NULL));
+
+   /* Undone, the pre-image no longer holds it: forgetting the fact takes it. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(fact, s_user, NULL));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_entities WHERE id = ?1", was, NULL));
+}
+
 /* Conversations made in the order given (older first), the batch's the last. */
 static void convs(int64_t *ids, int n) {
    for (int i = 0; i < n; i++) {
@@ -2120,5 +2164,6 @@ int main(void) {
    RUN_TEST(test_cross_batch_undo_keeps_a_relation_taught_later);
    RUN_TEST(test_cross_batch_undo_keeps_a_relation_restated_later);
    RUN_TEST(test_the_record_queries_use_their_indexes);
+   RUN_TEST(test_forget_keeps_the_subject_a_pre_image_holds);
    return UNITY_END();
 }

@@ -280,23 +280,30 @@ void memory_db_internal_source_add_locked(memory_source_kind_t kind,
 /* A memory_entities row nothing else names any more (?1: the user): not the
  * user's own (is_user_self; a generic "user" entity is recreated on its next
  * mention), no relation or fact about it, no contact, alias or merge pointing at
- * it, and not itself linked as another's alias (its canonical_id set: the
- * link would lose its source).  An entity an alias still targets stays (its
- * target column can't be nulled).  One index seek each ("+user_id" keeps the
- * planner off the user_id index, which scans every relation per entity). */
-#define MEMORY_ENTITY_UNREFERENCED                                                     \
-   "memory_entities.is_user_self = 0 AND memory_entities.canonical_id IS NULL AND "    \
-   "NOT EXISTS (SELECT 1 FROM memory_relations r WHERE "                               \
-   "            r.subject_entity_id = memory_entities.id AND +r.user_id = ?1) AND "    \
-   "NOT EXISTS (SELECT 1 FROM memory_relations r WHERE "                               \
-   "            r.object_entity_id = memory_entities.id AND +r.user_id = ?1) AND "     \
-   "NOT EXISTS (SELECT 1 FROM memory_facts f WHERE f.user_id = ?1 AND "                \
-   "            f.subject_entity_id = memory_entities.id) AND "                        \
-   "NOT EXISTS (SELECT 1 FROM contacts c WHERE c.entity_id = memory_entities.id) AND " \
-   "NOT EXISTS (SELECT 1 FROM memory_entities a WHERE "                                \
-   "            a.canonical_id = memory_entities.id) AND "                             \
-   "NOT EXISTS (SELECT 1 FROM memory_entity_aliases al WHERE al.user_id = ?1 AND "     \
-   "            al.target_entity_id = memory_entities.id)"
+ * it, not itself linked as another's alias (its canonical_id set: the link
+ * would lose its source), and not the subject an applied (or stale) op's
+ * pre-image holds for its undo (a malformed pre-image names nothing).  An
+ * entity an alias still targets stays (its target column can't be nulled).
+ * The one definition of "named": the nightly sweep (ENTITY_ORPHAN_SQL) adds
+ * what only it keeps.  One index seek each ("+user_id" keeps the planner off
+ * the user_id index, which scans every relation per entity); the pre-image
+ * list is read once per statement. */
+#define MEMORY_ENTITY_UNREFERENCED                                                          \
+   "memory_entities.is_user_self = 0 AND memory_entities.canonical_id IS NULL AND "         \
+   "NOT EXISTS (SELECT 1 FROM memory_relations r WHERE "                                    \
+   "            r.subject_entity_id = memory_entities.id AND +r.user_id = ?1) AND "         \
+   "NOT EXISTS (SELECT 1 FROM memory_relations r WHERE "                                    \
+   "            r.object_entity_id = memory_entities.id AND +r.user_id = ?1) AND "          \
+   "NOT EXISTS (SELECT 1 FROM memory_facts f WHERE f.user_id = ?1 AND "                     \
+   "            f.subject_entity_id = memory_entities.id) AND "                             \
+   "NOT EXISTS (SELECT 1 FROM contacts c WHERE c.entity_id = memory_entities.id) AND "      \
+   "NOT EXISTS (SELECT 1 FROM memory_entities a WHERE "                                     \
+   "            a.canonical_id = memory_entities.id) AND "                                  \
+   "NOT EXISTS (SELECT 1 FROM memory_entity_aliases al WHERE al.user_id = ?1 AND "          \
+   "            al.target_entity_id = memory_entities.id) AND "                             \
+   "memory_entities.id NOT IN (SELECT s FROM (SELECT CASE WHEN json_valid(pre_image) THEN " \
+   "json_extract(pre_image, '$.subject_entity_id') END AS s FROM memory_consolidation_ops " \
+   "WHERE user_id = ?1 AND status IN ('applied', 'stale')) WHERE s IS NOT NULL)"
 /* memory_preferences aliased "p" (sources: every conversation that gave its
  * current value). */
 #define MEMORY_FORGET_PREF_WHERE \

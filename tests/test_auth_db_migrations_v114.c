@@ -66,7 +66,7 @@ static int outside_in(const char *table, int id) {
  *   4 one whose gloss predates the kind (UNKNOWN); 6 an uploaded file.
  * Versions: 1 of the report, 2 of the clean note, 3 of a deleted item (99),
  * 4 of a deleted research report (98, its run still naming it), 5 of the
- * uploaded file. */
+ * uploaded file, 6 of a deleted upload whose id a later note (7) reuses. */
 static void seed_v113(void) {
    exec_ok("PRAGMA foreign_keys=OFF;"
            "ALTER TABLE documents DROP COLUMN outside;"
@@ -80,7 +80,7 @@ static void seed_v113(void) {
            "num_chunks, created_at) VALUES (1, 1, 'Research #1', '', 'note', 'h1', 1, 1),"
            "(2, 1, 'Tea', '', 'note', 'h2', 1, 1), (3, 1, 'Groceries', '', 'note', 'h3', 1, 1),"
            "(4, 1, 'Old', '', 'note', 'h4', 1, 1), (5, 1, 'Research #2', '', 'text', 'h5', 3, 1),"
-           "(6, 1, 'a.pdf', 'a.pdf', 'pdf', 'h6', 2, 1);"
+           "(6, 1, 'a.pdf', 'a.pdf', 'pdf', 'h6', 2, 1), (7, 1, 'Later', '', 'note', 'h7', 1, 10);"
            "INSERT INTO research_runs (conversation_id, user_id, brief, status, report_doc_id, "
            "created_at) VALUES (10, 1, 'tea', 'done', 1, 1), (11, 1, 'more', 'done', 5, 1), (12, "
            "1, 'old', 'done', 98, 1);"
@@ -90,7 +90,7 @@ static void seed_v113(void) {
            "INSERT INTO document_versions (id, document_id, user_id, filename, text, "
            "archived_at) VALUES (1, 1, 1, 'Research #1', 'old', 1), (2, 3, 1, 'Groceries', "
            "'eggs', 1), (3, 99, 1, 'Gone', 'x', 1), (4, 98, 1, 'Research #3', 'y', 1), "
-           "(5, 6, 1, 'a.pdf', 'z', 1);"
+           "(5, 6, 1, 'a.pdf', 'z', 1), (6, 7, 1, 'b.pdf', 'w', 5);"
            "PRAGMA foreign_keys=ON;");
 }
 
@@ -156,6 +156,14 @@ static void test_notes_outside_filled_in(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside_in("document_versions", 5));
 }
 
+/* A version older than the document now holding its id was another's: it
+ * doesn't take the later note's kind. */
+static void test_reused_id_not_inherited(void) {
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 7));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside_in("document_versions", 6));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("document_versions", 2)); /* its own: kept */
+}
+
 /* A rerun (the version held back by a later step) leaves alone what new code
  * has tagged since. */
 static void test_rerun_keeps_new_tags(void) {
@@ -204,6 +212,7 @@ int main(void) {
    test_tmp_path(s_fresh_path, sizeof(s_fresh_path), "dawn_test_mig_v114_fresh.db");
    UNITY_BEGIN();
    RUN_TEST(test_notes_outside_filled_in);
+   RUN_TEST(test_reused_id_not_inherited);
    RUN_TEST(test_rerun_keeps_new_tags);
    RUN_TEST(test_migrated_schema_matches_new);
    return UNITY_END();

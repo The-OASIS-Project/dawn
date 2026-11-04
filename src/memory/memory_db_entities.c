@@ -562,35 +562,23 @@ int memory_db_entity_delete(int64_t entity_id, int user_id) {
    return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
 }
 
-/* An entity (user ?1) nothing names: what keeps it is a fact about it, a
- * relation on either side, an alias either way, a merge proposal, a contact,
- * a consolidation record row or the subject its pre-image holds for an undo
- * (a malformed pre-image names nothing), a photo, or being the user's own. */
+/* An entity (user ?1) the nightly sweep may remove: nothing names it
+ * (MEMORY_ENTITY_UNREFERENCED), and, what only the sweep keeps (a forget
+ * removes these records with the entity), no photo, alias from it, merge
+ * proposal or consolidation record row names it. */
 /* clang-format off */
 #define ENTITY_ORPHAN_SQL \
-   "is_user_self = 0 AND canonical_id IS NULL AND photo_id IS NULL " \
-   "AND id NOT IN (SELECT subject_entity_id FROM memory_facts WHERE user_id = ?1 AND " \
-   "subject_entity_id IS NOT NULL) " \
-   "AND id NOT IN (SELECT subject_entity_id FROM memory_relations WHERE user_id = ?1) " \
-   "AND id NOT IN (SELECT object_entity_id FROM memory_relations WHERE user_id = ?1 AND " \
-   "object_entity_id IS NOT NULL) " \
-   "AND id NOT IN (SELECT canonical_id FROM memory_entities WHERE user_id = ?1 AND " \
-   "canonical_id IS NOT NULL) " \
+   MEMORY_ENTITY_UNREFERENCED " AND photo_id IS NULL " \
    "AND id NOT IN (SELECT source_entity_id FROM memory_entity_aliases WHERE user_id = ?1 AND " \
    "source_entity_id IS NOT NULL) " \
-   "AND id NOT IN (SELECT target_entity_id FROM memory_entity_aliases WHERE user_id = ?1) " \
    "AND id NOT IN (SELECT source_entity_id FROM memory_entity_merge_proposals WHERE " \
    "user_id = ?1) " \
    "AND id NOT IN (SELECT target_entity_id FROM memory_entity_merge_proposals WHERE " \
    "user_id = ?1) " \
-   "AND id NOT IN (SELECT entity_id FROM contacts WHERE user_id = ?1) " \
    "AND id NOT IN (SELECT entity_id FROM memory_consolidation_ops WHERE user_id = ?1 AND " \
    "entity_id IS NOT NULL) " \
    "AND id NOT IN (SELECT other_entity_id FROM memory_consolidation_ops WHERE user_id = ?1 AND " \
-   "other_entity_id IS NOT NULL) " \
-   "AND id NOT IN (SELECT s FROM (SELECT CASE WHEN json_valid(pre_image) THEN " \
-   "json_extract(pre_image, '$.subject_entity_id') END AS s FROM memory_consolidation_ops " \
-   "WHERE user_id = ?1 AND status IN ('applied', 'stale')) WHERE s IS NOT NULL)"
+   "other_entity_id IS NOT NULL)"
 /* clang-format on */
 
 /* Delete user @p user_id's entities that @p sql (binding ?2) picks and

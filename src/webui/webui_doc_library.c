@@ -882,10 +882,8 @@ void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payl
       bool restored_note = exists ? (strcmp(doc.filetype, "note") == 0 && doc.num_chunks == 1)
                                   : recreated_as_note;
       /* It takes back the kind the version carried (with its own, kept in
-       * place); a document re-created from it starts as DOCUMENT. */
-      if (exists || restored_note) {
-         (void)document_db_set_outside(conn->auth_user_id, doc_id, outside, exists);
-      }
+       * place), a document re-created from it too. */
+      (void)document_db_set_outside(conn->auth_user_id, doc_id, outside, exists);
       if (restored_note) {
          (void)memory_note_bridge_upsert_gloss_from(conn->auth_user_id, doc_id, label, outside);
       }

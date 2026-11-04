@@ -903,12 +903,13 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
                res.error_msg);
       return strdup(msg);
    }
-   /* The note takes back the kind its version carried, with what this turn
-    * read. */
-   if (as_note && res.doc_id > 0) {
+   /* The item takes back the kind its version carried, with what this turn
+    * read; a note also gets its gloss back. */
+   if (res.doc_id > 0) {
       outside = outside_combine(outside, memory_turn_outside(user_id));
       (void)document_db_set_outside(user_id, res.doc_id, outside, false);
-      (void)memory_note_bridge_upsert_gloss_from(user_id, res.doc_id, fname, outside);
+      if (as_note)
+         (void)memory_note_bridge_upsert_gloss_from(user_id, res.doc_id, fname, outside);
    }
 
    /* Move the deleted item's surviving snapshots onto the re-created doc so it
