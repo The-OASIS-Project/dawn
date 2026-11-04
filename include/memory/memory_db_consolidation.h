@@ -239,10 +239,11 @@ int memory_db_consolidation_ops_list(int user_id,
 void memory_db_consolidation_ops_free(memory_consolidation_op_row_t *rows, int n);
 
 /**
- * @brief A batch was recorded, undone, changed by a Keep or by a forget:
- *        told to the user's surfaces.  Weak, a no-op unless the WebUI is
- *        built (its strong override sends memory_batch to every tab of the
- *        user).
+ * @brief A batch was recorded, undone, changed by a Keep or by a forget, or
+ *        removed by one: told to the user's surfaces.  Weak, a no-op unless
+ *        the WebUI is built (its strong override sends memory_batch to every
+ *        tab of the user, the batch object or, for one no longer there,
+ *        {batch_id, removed: true}).
  */
 void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id);
 
@@ -282,7 +283,8 @@ void memory_consolidation_touched_notify(int user_id,
  * @brief In a forget's transaction (lock held): remove the batches (and with
  *        them their ops) of the conversations in @p ids_json (a JSON array),
  *        and the rows other batches made quoting what they taught
- * @param touched The other batches whose rows changed, added to (may be NULL)
+ * @param touched The batches removed and the others whose rows changed,
+ *                added to (may be NULL)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
 int memory_db_consolidation_drop_conversations_locked(int user_id,

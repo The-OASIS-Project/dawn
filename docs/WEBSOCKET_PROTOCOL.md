@@ -1271,6 +1271,12 @@ The batch object, to every browser tab of the user, after a batch is recorded, a
 keep (before the reply), and after a fact one of its ops names is forgotten (a Forget from a
 suggestion removes that row).  Replace a batch already shown by `batch_id`.
 
+A batch a forget removed (its conversation forgotten) comes as its id alone:
+```json
+{"type": "memory_batch", "payload": {"batch_id": 412, "removed": true}}
+```
+Drop it (its row and its conversation marker) wherever it is shown.
+
 #### `delete_memory_preference`
 Delete a specific user preference.
 ```json
@@ -2608,7 +2614,8 @@ The conversation isn't named (it may be another user's, or private); the daemon 
 
 #### `memory_batch`
 A consolidation batch recorded, undone, kept from, or changed by a forget: the batch object, to every
-browser tab of the user. See Memory Management, Consolidation.
+browser tab of the user; one a forget removed: `{"batch_id", "removed": true}`. See Memory
+Management, Consolidation.
 
 #### `memory_proposals_changed`
 The count of pending memory proposals changed (signal to refresh a proposals view).

@@ -701,11 +701,11 @@ int memory_db_consolidation_drop_conversations_locked(int user_id,
 #define PRE_SOURCES "json_each(pre_image, '$.sources')"
 #define PRE_CONV "json_extract(pre_image, '$.source_conversation_id')"
 #define PREF_OPS "user_id = ?1 AND op = 'pref_set' AND "
-/* The other batches whose rows change, for their tabs (the set's own go). */
+/* The batches that go and the others whose rows change, for their tabs. */
 #define RET " RETURNING batch_id"
    static const char *const k_sql[] = {
       "DELETE FROM memory_consolidation_batches WHERE user_id = ?1 AND conversation_id IN "
-      "(SELECT value FROM json_each(?2))",
+      "(SELECT value FROM json_each(?2)) RETURNING id",
       "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND source_conversation_id IN "
       "(SELECT value FROM json_each(?2))" RET,
       /* The DELETE runs before the two trims: a pre-image whose only source

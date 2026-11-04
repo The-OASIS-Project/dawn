@@ -1760,14 +1760,15 @@ void webui_broadcast_memory_proposals_changed(int user_id) {
 }
 
 /* Strong override of the weak no-op in memory_db_consolidation.c: a batch recorded,
- * undone or changed by a Keep goes to every tab of its user as the batch
- * object (memory_batch).  From the extraction thread or the undo worker. */
+ * undone, changed by a Keep or a forget, or removed by one goes to every tab of
+ * its user (memory_batch: the batch object, or its id marked removed).  From
+ * the extraction thread, the undo worker or a forget. */
 void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id) {
    (void)conversation_id; /* the batch object carries it */
    if (user_id <= 0) {
       return; /* never every user's tabs */
    }
-   json_object *batch = webui_memory_batch_json(user_id, batch_id);
+   json_object *batch = webui_memory_batch_notice(user_id, batch_id);
    if (!batch) {
       return;
    }

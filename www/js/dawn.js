@@ -1696,7 +1696,7 @@
          if (typeof DawnHistory !== 'undefined' && DawnHistory.handleDisconnect) {
             DawnHistory.handleDisconnect();
          }
-         // Same for the Learned tab's page request.
+         // Same for the Learned tab's and the markers' page requests.
          if (window.DawnMemoryBatches) {
             DawnMemoryBatches.handleDisconnect();
          }

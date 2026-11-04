@@ -63,7 +63,7 @@ static json_object *s_notified;
 void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id) {
    (void)conversation_id;
    json_object_put(s_notified);
-   s_notified = webui_memory_batch_json(user_id, batch_id);
+   s_notified = webui_memory_batch_notice(user_id, batch_id);
 }
 
 /* ---- fixtures ---- */
@@ -472,6 +472,22 @@ void test_a_forget_sends_the_batch_it_changed(void) {
                          json_object_get_int64(get(json_object_array_get_idx(ops, 0), "fact_id")));
 }
 
+/* A conversation forget that removes a batch tells its tabs by id, marked
+ * removed, so a shown batch and its chip go. */
+void test_a_conversation_forget_sends_the_batch_it_removed(void) {
+   const int64_t batch = run("{\"facts\": [{\"text\": \"Jonathan Smith plays the cello\", "
+                             "\"subject\": \"Jonathan Smith\"}]}",
+                             NULL);
+   json_object_put(s_notified);
+   s_notified = NULL;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_conversations_forget(s_user, &s_conv, 1, NULL));
+   TEST_ASSERT_NOT_NULL(s_notified);
+   TEST_ASSERT_EQUAL_INT64(batch, json_object_get_int64(get(s_notified, "batch_id")));
+   TEST_ASSERT_TRUE(json_object_get_boolean(get(s_notified, "removed")));
+   TEST_ASSERT_NULL(get(s_notified, "ops"));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_the_batch_object_carries_ops_counts_and_actions);
@@ -488,5 +504,6 @@ int main(void) {
    RUN_TEST(test_a_stale_undo_is_reported_with_its_op);
    RUN_TEST(test_an_undo_of_another_users_batch_is_not_found);
    RUN_TEST(test_a_forget_sends_the_batch_it_changed);
+   RUN_TEST(test_a_conversation_forget_sends_the_batch_it_removed);
    return UNITY_END();
 }

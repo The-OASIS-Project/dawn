@@ -51,6 +51,11 @@ bool webui_memory_batches_enabled(void);
  *  user's, gone, or the database). */
 json_object *webui_memory_batch_json(int user_id, int64_t batch_id);
 
+/** The memory_batch payload a notify sends: the batch object, or
+ *  {batch_id, removed: true} when the user has no such batch (a forget
+ *  removed it), or NULL (the database). */
+json_object *webui_memory_batch_notice(int user_id, int64_t batch_id);
+
 /** The list_memory_batches_response payload for @p request (its
  *  conversation_id, before_batch_id and limit). */
 json_object *webui_memory_batches_list_payload(int user_id, json_object *request);

@@ -638,11 +638,18 @@ int memory_db_entity_delete_orphans(int user_id, const int64_t *ids, int n, int 
    if (!list) {
       return MEMORY_DB_FAILURE;
    }
+   int deleted = 0;
    const int rc = delete_orphans(user_id,
                                  "DELETE FROM memory_entities WHERE user_id = ?1 AND id IN "
                                  "(SELECT value FROM json_each(?2)) AND " ENTITY_ORPHAN_SQL,
-                                 list, 0, deleted_out);
+                                 list, 0, &deleted);
    free(list);
+   if (deleted > 0) {
+      OLOG_INFO("memory_db: removed %d unnamed entities of user %d", deleted, user_id);
+   }
+   if (deleted_out) {
+      *deleted_out = deleted;
+   }
    return rc;
 }
 

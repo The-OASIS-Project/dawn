@@ -38,6 +38,10 @@
 
    const held = new Map(); /* batch_id → {batch, until, timer} */
    let pages = 0; /* pages asked for since the conversation loaded */
+   let asking = 0; /* pages asked for whose response hasn't come */
+   /* memory_batch pushes that came while a page was asked for: applied over
+    * its response (an older picture of them). */
+   const pushedWhileAsking = new Map(); /* batch_id → batch */
 
    function transcript() {
       return typeof DawnElements !== 'undefined' ? DawnElements.transcript : null;
@@ -176,43 +180,110 @@
       const payload = { conversation_id: id, limit: LIST_LIMIT };
       if (before) payload.before_batch_id = before;
       pages++;
+      asking++;
       DawnWS.send({ type: 'list_memory_batches', payload: payload });
    }
 
    function conversationLoaded(id) {
       clearHeld();
       pages = 0;
+      pushedWhileAsking.clear(); /* the page asked for below brings them */
       if (!window.DawnMemoryBatches || !DawnMemoryBatches.isEnabled() || id == null) return;
       ask(id, null);
    }
 
+   function markerOf(t, batchId) {
+      return t ? t.querySelector(`.memory-marker[data-batch-id="${batchId}"]`) : null;
+   }
+
+   /* A batch a forget removed: its marker goes, and a held one with it. */
+   function drop(t, batchId) {
+      const h = held.get(batchId);
+      if (h) clearTimeout(h.timer);
+      held.delete(batchId);
+      const el = markerOf(t, batchId);
+      if (!el) return;
+      if (window.DawnMemoryBatches) DawnMemoryBatches.removeKeepingFocus(el);
+      else el.remove();
+   }
+
+   /* @p batch pushed (memory_batch): placed, held for its reply, or dropped. */
+   function apply(t, batch) {
+      if (batch.removed) drop(t, batch.batch_id);
+      else if (shown(batch.conversation_id) && !place(batch, true)) hold(batch);
+   }
+
+   /* The pushes held while pages were asked for, taken. */
+   function takePushed() {
+      const pushed = Array.from(pushedWhileAsking.values());
+      pushedWhileAsking.clear();
+      return pushed;
+   }
+
    /** list_memory_batches_response for a conversation. */
    function handleList(payload) {
-      if (!payload || !shown(payload.conversation_id) || payload.error) return;
+      if (!payload) return;
+      /* Every response ends a request, the shown conversation's or not. */
+      asking = Math.max(0, asking - 1);
+      const t = transcript();
+      if (!shown(payload.conversation_id)) {
+         /* Another conversation's (left meanwhile): the held pushes go when
+          * nothing else is asked for (apply skips a hidden conversation's). */
+         if (asking === 0) takePushed().forEach((b) => apply(t, b));
+         return;
+      }
+      const pushed = takePushed();
+      if (payload.error) {
+         pushed.forEach((b) => apply(t, b));
+         return;
+      }
       const batches = Array.isArray(payload.batches) ? payload.batches.slice() : [];
       /* Oldest first, so markers sharing a message read in order. */
       batches.sort((a, b) => a.batch_id - b.batch_id);
-      batches.forEach((b) => place(b, false));
+      /* A marker in the page's range the page doesn't hold is gone (a forget
+       * removed it while this view was away); a push since is newer. */
+      const ids = new Set(batches.map((b) => b.batch_id));
+      pushed.forEach((b) => ids.add(b.batch_id));
+      const low = payload.has_more && batches.length ? batches[0].batch_id : -Infinity;
+      const high = payload.before_batch_id != null ? payload.before_batch_id : Infinity;
+      if (t) {
+         t.querySelectorAll('.memory-marker').forEach((el) => {
+            const id = Number(el.dataset.batchId);
+            if (id >= low && id < high && !ids.has(id)) drop(t, id);
+         });
+      }
+      const fresh = new Map(pushed.map((b) => [b.batch_id, b]));
+      batches.filter((b) => !fresh.has(b.batch_id)).forEach((b) => place(b, false));
+      pushed.forEach((b) => apply(t, b));
       /* Older batches of a long conversation: the next pages, up to a few. */
       if (payload.has_more && pages < LIST_PAGES_MAX) {
          ask(payload.conversation_id, payload.next_before_batch_id);
       }
    }
 
-   /** memory_batch: recorded or changed.  Whether it is new to this view. */
+   /** memory_batch: recorded, changed or removed.  Whether it is new to this view. */
    function handleBatch(batch) {
-      if (!shown(batch.conversation_id)) return false;
+      if (!batch.removed && !shown(batch.conversation_id)) return false;
       const t = transcript();
-      const known =
-         held.has(batch.batch_id) ||
-         !!(t && t.querySelector(`.memory-marker[data-batch-id="${batch.batch_id}"]`));
-      if (!place(batch, true)) hold(batch);
-      return !known;
+      const known = held.has(batch.batch_id) || !!markerOf(t, batch.batch_id);
+      if (asking > 0) {
+         pushedWhileAsking.set(batch.batch_id, batch);
+      } else {
+         apply(t, batch);
+      }
+      return !known && !batch.removed;
+   }
+
+   /** The socket dropped: a page asked for won't come, so what it held goes now. */
+   function handleDisconnect() {
+      asking = 0;
+      takePushed().forEach((b) => apply(transcript(), b));
    }
 
    window.DawnMemoryMarker = {
       conversationLoaded,
       handleList,
       handleBatch,
+      handleDisconnect,
    };
 })();

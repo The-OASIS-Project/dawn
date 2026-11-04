@@ -99,6 +99,7 @@ void setUp(void) {
 
 void tearDown(void) {
    auth_db_shutdown();
+   g_config.documents.version_keep_per_doc = 10; /* a test that lowered it may have failed */
 }
 
 /* The exact-label query "public bio" must return the Public Bio note rank-1 —
@@ -683,7 +684,6 @@ void test_version_restore_at_cap_keeps_kind(void) {
    document_db_chunk_read(doc, &chunk, 1, 0, &cc);
    TEST_ASSERT_EQUAL_STRING("FIRST", chunk.text);
    TEST_ASSERT_TRUE(chunk_is_own_note(chunk_id)); /* a note edit keeps its chunk id */
-   g_config.documents.version_keep_per_doc = 10;
 }
 
 int main(void) {

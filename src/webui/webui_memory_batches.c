@@ -178,14 +178,33 @@ static json_object *batch_json_with(int user_id,
    return j;
 }
 
-json_object *webui_memory_batch_json(int user_id, int64_t batch_id) {
+/* webui_memory_batch_json, and whether the batch is no longer there. */
+static json_object *batch_json(int user_id, int64_t batch_id, bool *gone) {
    memory_consolidation_batch_row_t b;
-   if (memory_db_consolidation_batch_get(user_id, batch_id, &b) != MEMORY_DB_SUCCESS) {
+   const int rc = memory_db_consolidation_batch_get(user_id, batch_id, &b);
+   *gone = rc == MEMORY_DB_NOT_FOUND;
+   if (rc != MEMORY_DB_SUCCESS) {
       return NULL;
    }
    memory_consolidation_op_row_t *rows = calloc(MEMORY_CONSOLIDATION_OPS_MAX, sizeof(*rows));
    json_object *j = rows ? batch_json_with(user_id, &b, rows) : NULL;
    free(rows);
+   return j;
+}
+
+json_object *webui_memory_batch_json(int user_id, int64_t batch_id) {
+   bool gone = false;
+   return batch_json(user_id, batch_id, &gone);
+}
+
+json_object *webui_memory_batch_notice(int user_id, int64_t batch_id) {
+   bool gone = false;
+   json_object *j = batch_json(user_id, batch_id, &gone);
+   if (!j && gone) {
+      j = json_object_new_object();
+      json_object_object_add(j, "batch_id", json_object_new_int64(batch_id));
+      json_object_object_add(j, "removed", json_object_new_boolean(1));
+   }
    return j;
 }
 

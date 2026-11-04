@@ -1206,6 +1206,24 @@ void test_conversation_forget_notifies_a_batch_whose_reinforce_record_it_changes
    TEST_ASSERT_TRUE(notified(batch)); /* removed */
 }
 
+/* A conversation forget removes the conversation's own batches and tells
+ * their tabs, so a shown batch and its marker go. */
+void test_conversation_forget_notifies_the_batches_it_removes(void) {
+   int64_t gone = 0;
+   int64_t kept = 0;
+   conv_db_create(s_user, "Gone", &gone);
+   conv_db_create(s_user, "Kept", &kept);
+   const int64_t removed = batch_with(gone, "dropped", 0, "Jonathan Smith hums");
+   const int64_t other = batch_with(kept, "dropped", 0, "Jonathan Smith hums");
+   s_n_notified = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(s_user, &gone, 1, NULL));
+   TEST_ASSERT_TRUE(notified(removed));
+   TEST_ASSERT_FALSE(notified(other));
+   memory_consolidation_batch_row_t b;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_NOT_FOUND,
+                         memory_db_consolidation_batch_get(s_user, removed, &b));
+}
+
 /* A fact forget that sweeps an entity a batch's link names tells that batch. */
 void test_forget_notifies_a_batch_whose_link_names_a_swept_entity(void) {
    bool created = false;
@@ -2068,6 +2086,7 @@ int main(void) {
    RUN_TEST(test_forget_notifies_every_batch_its_scrub_changed);
    RUN_TEST(test_conversation_forget_notifies_a_batch_whose_pref_record_it_trims);
    RUN_TEST(test_conversation_forget_notifies_a_batch_whose_reinforce_record_it_changes);
+   RUN_TEST(test_conversation_forget_notifies_the_batches_it_removes);
    RUN_TEST(test_forget_notifies_a_batch_whose_link_names_a_swept_entity);
    RUN_TEST(test_entity_delete_notifies_a_batch_whose_link_names_it);
    RUN_TEST(test_a_row_taking_up_a_deferred_candidate_is_written_with_its_claim);

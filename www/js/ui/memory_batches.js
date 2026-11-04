@@ -30,6 +30,7 @@
    'use strict';
 
    const PAGE_LIMIT = 20;
+   const NOTHING_LEARNED = 'Nothing learned yet. Batches show here after a conversation ends.';
 
    /* What each op says, as a label before its text. */
    const OP_LABELS = {
@@ -347,6 +348,28 @@
       if (target) target.focus();
    }
 
+   /**
+    * Remove @p el (a shown batch or marker).  When the keyboard was in it, it
+    * moves to what is next to it: a batch's title, a marker's summary, or (a
+    * marker among the messages) the message entry; else to the list or
+    * transcript that held it.
+    */
+   function removeKeepingFocus(el) {
+      const was = el.contains(document.activeElement);
+      const next = el.nextElementSibling || el.previousElementSibling;
+      const holder = el.parentElement;
+      el.remove();
+      if (!was) return;
+      let target = holder;
+      if (next && next.matches('.memory-marker')) target = next.querySelector('summary');
+      else if (next && next.matches('.memory-batch'))
+         target = next.querySelector('.memory-batch-title');
+      else if (next) target = next;
+      if (!target) return;
+      if (!target.matches('summary, button')) target.setAttribute('tabindex', '-1');
+      target.focus();
+   }
+
    /* ---- the Learned tab ---- */
 
    function request(before) {
@@ -433,9 +456,17 @@
    }
 
    /* @p batch drawn in the tab: in place when shown, else where it goes
-    * newest first (one a later page will bring is left to it).  Whether it
-    * was shown already. */
+    * newest first (one a later page will bring is left to it); a removed one
+    * leaves it.  Whether it was shown already. */
    function placeInTab(batch) {
+      if (batch.removed) {
+         const gone = tab.list.querySelector(`.memory-batch[data-batch-id="${batch.batch_id}"]`);
+         if (gone) removeKeepingFocus(gone);
+         if (gone && !tab.hasMore && !tab.list.querySelector('.memory-batch')) {
+            setTabStatus(NOTHING_LEARNED);
+         }
+         return true;
+      }
       const body = tabBody();
       const old = body.querySelector(`.memory-batch[data-batch-id="${batch.batch_id}"]`);
       if (old) {
@@ -479,7 +510,7 @@
       }
       const batches = Array.isArray(payload.batches) ? payload.batches : [];
       if (first && batches.length === 0) {
-         setTabStatus('Nothing learned yet. Batches show here after a conversation ends.');
+         setTabStatus(NOTHING_LEARNED);
       } else {
          if (first) tab.list.textContent = '';
          const body = tabBody();
@@ -513,7 +544,8 @@
       liveRegion.textContent = text;
    }
 
-   /* A batch recorded or changed (memory_batch): redrawn where it is shown. */
+   /* A batch recorded or changed (memory_batch): redrawn where it is shown;
+    * one a forget removed ({batch_id, removed}) leaves every view. */
    function handleBatch(batch) {
       if (!batch || batch.batch_id == null) return;
       let isNew = true;
@@ -667,6 +699,7 @@
       tab.loading = false;
       pushedWhileLoading.clear();
       syncLoadMore();
+      if (window.DawnMemoryMarker) DawnMemoryMarker.handleDisconnect();
    }
 
    /** The session is back: what changed meanwhile, from its first page. */
@@ -690,6 +723,7 @@
       handleDisconnect,
       handleReconnect,
       renderBatch,
+      removeKeepingFocus,
       summaryText,
       outsideText,
       replaceKeepingFocus,
