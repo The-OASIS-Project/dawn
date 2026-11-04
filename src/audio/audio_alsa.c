@@ -336,6 +336,27 @@ static int configure_hw_params(snd_pcm_t *pcm,
  * ALSA Capture Implementation
  * ============================================================================= */
 
+/* A device that isn't there (unplugged, or not back yet) is its caller's to
+ * report: it may be waiting for it. */
+static bool alsa_device_missing(int rc) {
+   return rc == -ENOENT || rc == -ENODEV || rc == -ENXIO;
+}
+
+/* "hw:1" names a card by its index, which can change when USB devices are
+ * plugged in again; "hw:CARD=<name>" stays on the same card.  Said once. */
+static void alsa_warn_index_name(const char *device) {
+   static bool warned = false;
+   const char *p = strncmp(device, "plughw:", 7) == 0 ? device + 7
+                   : strncmp(device, "hw:", 3) == 0   ? device + 3
+                                                      : NULL;
+   if (!warned && p && *p >= '0' && *p <= '9') {
+      OLOG_WARNING("ALSA: device '%s' names a card by its index, which can change when a USB "
+                   "device is plugged in again; use its CARD= name (arecord -L / aplay -L)",
+                   device);
+      warned = true;
+   }
+}
+
 audio_stream_capture_handle_t *alsa_capture_open(const char *device,
                                                  const audio_stream_params_t *params,
                                                  audio_hw_params_t *hw_params) {
@@ -351,11 +372,16 @@ audio_stream_capture_handle_t *alsa_capture_open(const char *device,
       return NULL;
    }
 
-   OLOG_INFO("ALSA: Opening capture device: %s", device);
+   OLOG_DEBUG("ALSA: Opening capture device: %s", device);
+   alsa_warn_index_name(device);
 
    rc = snd_pcm_open(&handle->pcm, device, SND_PCM_STREAM_CAPTURE, 0);
    if (rc < 0) {
-      OLOG_ERROR("ALSA: Cannot open capture device '%s': %s", device, snd_strerror(rc));
+      if (alsa_device_missing(rc)) {
+         OLOG_DEBUG("ALSA: capture device '%s' not available: %s", device, snd_strerror(rc));
+      } else {
+         OLOG_ERROR("ALSA: Cannot open capture device '%s': %s", device, snd_strerror(rc));
+      }
       free_capture_handle(handle);
       return NULL;
    }
@@ -374,6 +400,7 @@ audio_stream_capture_handle_t *alsa_capture_open(const char *device,
       *hw_params = handle->hw_params;
    }
 
+   OLOG_INFO("ALSA capture: %s", device);
    return handle;
 }
 
@@ -473,11 +500,16 @@ audio_stream_playback_handle_t *alsa_playback_open(const char *device,
       return NULL;
    }
 
-   OLOG_INFO("ALSA: Opening playback device: %s", device);
+   OLOG_DEBUG("ALSA: Opening playback device: %s", device);
+   alsa_warn_index_name(device);
 
    rc = snd_pcm_open(&handle->pcm, device, SND_PCM_STREAM_PLAYBACK, 0);
    if (rc < 0) {
-      OLOG_ERROR("ALSA: Cannot open playback device '%s': %s", device, snd_strerror(rc));
+      if (alsa_device_missing(rc)) {
+         OLOG_DEBUG("ALSA: playback device '%s' not available: %s", device, snd_strerror(rc));
+      } else {
+         OLOG_ERROR("ALSA: Cannot open playback device '%s': %s", device, snd_strerror(rc));
+      }
       free_playback_handle(handle);
       return NULL;
    }
@@ -496,6 +528,7 @@ audio_stream_playback_handle_t *alsa_playback_open(const char *device,
       *hw_params = handle->hw_params;
    }
 
+   OLOG_INFO("ALSA playback: %s", device);
    return handle;
 }
 

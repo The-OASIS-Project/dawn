@@ -40,6 +40,7 @@
 
 #include "audio/resampler.h"
 #include "dawn.h"
+#include "dawn_error.h"
 #include "logging.h"
 #include "ui/metrics.h"
 #include "utils/string_utils.h"
@@ -147,11 +148,152 @@ static int set_realtime_priority(void) {
    return 0;
 }
 
+/* How to find the device when it's missing, for the log. */
+#define CAPTURE_DEVICE_HINT                                                                  \
+   "check `pactl list sources short` (PulseAudio) or `arecord -L` (ALSA); a card that came " \
+   "back with another profile needs `pactl set-card-profile <card> <profile>`"
+
+/* Seconds before each try to reopen a missing device: 1, 2, then every 5 (a
+ * try costs a few milliseconds, so a replug is found within 5 s). */
+
+/* Seconds on the monotonic clock: a step of the wall clock can't delay a retry. */
+static time_t mono_sec(void) {
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return ts.tv_sec;
+}
+
+static time_t capture_reopen_delay(int attempts) {
+   return attempts == 0 ? 1 : attempts == 1 ? 2 : 5;
+}
+
+/* Sizes the read, ASR and AEC buffers for the device as opened (ctx->hw_params).
+ * FAILURE when the read buffer can't be had; the others degrade as at start. */
+static int capture_size_buffers(audio_capture_context_t *ctx) {
+   ctx->frames = ctx->hw_params.period_frames;
+   ctx->buffer_size = ctx->frames * ctx->hw_params.channels * 2;  // S16_LE
+
+   free(ctx->read_buffer);
+   ctx->read_buffer = (char *)malloc(ctx->buffer_size);
+   if (!ctx->read_buffer) {
+      OLOG_ERROR("Failed to allocate capture buffer of %zu bytes", ctx->buffer_size);
+      return FAILURE;
+   }
+
+   // Input buffer size in samples (for the resampler's output size)
+   size_t input_samples = ctx->buffer_size / sizeof(int16_t);
+   if (ctx->downsample_resampler) {
+      ctx->asr_buffer_size = resampler_get_output_size(ctx->downsample_resampler, input_samples);
+   } else {
+      ctx->asr_buffer_size = (input_samples / 3) + 128;
+   }
+   free(ctx->asr_buffer);
+   ctx->asr_buffer = (int16_t *)malloc(ctx->asr_buffer_size * sizeof(int16_t));
+   if (!ctx->asr_buffer) {
+      OLOG_WARNING("Failed to allocate ASR buffer");
+   }
+
+#ifdef ENABLE_AEC
+   ctx->aec_buffer_size = input_samples;
+   if (ctx->aec_buffer_size > AEC_MAX_SAMPLES) {
+      ctx->aec_buffer_size = AEC_MAX_SAMPLES;
+   }
+   free(ctx->aec_buffer);
+   ctx->aec_buffer = (int16_t *)malloc(ctx->aec_buffer_size * sizeof(int16_t));
+   if (!ctx->aec_buffer) {
+      OLOG_WARNING("Failed to allocate AEC buffer - continuing without AEC");
+   }
+   ctx->aec_rate_mismatch = 0;
+   if (ctx->hw_params.sample_rate != AEC_SAMPLE_RATE) {
+      OLOG_WARNING("AEC requires %d Hz but device is %u Hz - AEC disabled for this session",
+                   AEC_SAMPLE_RATE, ctx->hw_params.sample_rate);
+      ctx->aec_rate_mismatch = 1;
+   }
+#endif
+   return SUCCESS;
+}
+
+/* Opens the device from this (realtime) thread at normal priority: libpulse's
+ * stream thread takes its creator's scheduling, and it mustn't run above the
+ * sound server it reads from (the first open, at start, is on the main thread). */
+static audio_stream_capture_handle_t *capture_open_device(audio_capture_context_t *ctx,
+                                                          audio_hw_params_t *hw) {
+   int policy = SCHED_OTHER;
+   struct sched_param param = { 0 };
+   pthread_getschedparam(pthread_self(), &policy, &param);
+   if (policy != SCHED_OTHER) {
+      const struct sched_param normal = { 0 };
+      pthread_setschedparam(pthread_self(), SCHED_OTHER, &normal);
+   }
+   audio_stream_capture_handle_t *handle = audio_stream_capture_open(ctx->pcm_device, &ctx->params,
+                                                                     hw);
+   if (policy != SCHED_OTHER && pthread_setschedparam(pthread_self(), policy, &param) != 0) {
+      OLOG_WARNING("Audio capture: couldn't restore realtime priority after reopening the device");
+   }
+   return handle;
+}
+
+/* The device is missing: one period of silence goes to the ring at the period's
+ * pace (so VAD and the voice loop's timers keep running), and the device is
+ * tried again when due.  Returns once it is back, or the period has passed. */
+static void capture_wait_for_device(audio_capture_context_t *ctx,
+                                    struct timespec *next_tick,
+                                    time_t *next_attempt,
+                                    int *attempts) {
+   const long period_ns = (long)(ctx->frames * 1000000000ULL / CAPTURE_RATE);
+   next_tick->tv_nsec += period_ns;
+   while (next_tick->tv_nsec >= 1000000000L) {
+      next_tick->tv_nsec -= 1000000000L;
+      next_tick->tv_sec++;
+   }
+   clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, next_tick, NULL);
+
+   size_t samples_16k = ctx->frames * ASR_RATE / CAPTURE_RATE;
+   if (ctx->asr_buffer && samples_16k <= ctx->asr_buffer_size) {
+      memset(ctx->asr_buffer, 0, samples_16k * sizeof(int16_t));
+      ring_buffer_write(ctx->ring_buffer, (char *)ctx->asr_buffer, samples_16k * sizeof(int16_t));
+   }
+
+   time_t now = mono_sec();
+   if (now < *next_attempt) {
+      return;
+   }
+   audio_hw_params_t hw;
+   ctx->capture_handle = capture_open_device(ctx, &hw);
+   if (!ctx->capture_handle) {
+      *next_attempt = now + capture_reopen_delay(++*attempts);
+      return;
+   }
+
+   const bool changed = hw.sample_rate != ctx->hw_params.sample_rate ||
+                        hw.channels != ctx->hw_params.channels ||
+                        hw.format != ctx->hw_params.format ||
+                        hw.period_frames != ctx->hw_params.period_frames;
+   ctx->hw_params = hw;
+   if (changed && capture_size_buffers(ctx) != SUCCESS) {
+      audio_stream_capture_close(ctx->capture_handle);
+      ctx->capture_handle = NULL;
+      ctx->hw_params.period_frames = 0; /* the next open sizes them again */
+      *next_attempt = now + capture_reopen_delay(++*attempts);
+      return;
+   }
+   /* What was held across the gap is stale. */
+   if (ctx->downsample_resampler) {
+      resampler_reset((resampler_t *)ctx->downsample_resampler);
+   }
+#ifdef ENABLE_AEC
+   aec_reset();
+#endif
+   OLOG_INFO("Audio capture: device '%s' is back", ctx->pcm_device);
+}
+
 /**
  * @brief Audio capture thread function
  *
  * Continuously reads audio from device and writes to ring buffer.
  * Uses the audio_backend abstraction for runtime backend selection.
+ * When the device goes away (or isn't there at start) it writes silence and
+ * reopens the same device by name when it comes back; never another one.
  */
 static void *capture_thread_func(void *arg) {
    audio_capture_context_t *ctx = (audio_capture_context_t *)arg;
@@ -161,13 +303,12 @@ static void *capture_thread_func(void *arg) {
       set_realtime_priority();
    }
 
-   // Allocate capture buffer
-   char *buffer = (char *)malloc(ctx->buffer_size);
-   if (!buffer) {
-      OLOG_ERROR("Failed to allocate capture buffer of %zu bytes", ctx->buffer_size);
-      atomic_store(&ctx->running, false);
-      return NULL;
-   }
+   char *buffer = ctx->read_buffer;
+   struct timespec next_tick;
+   clock_gettime(CLOCK_MONOTONIC, &next_tick);
+   time_t next_attempt = mono_sec() + capture_reopen_delay(0);
+   int attempts = 0;
+   bool suspended_logged = false;
 
    OLOG_INFO("Audio capture thread started (buffer=%zu bytes, device=%s, backend=%s, AEC=%s)",
              ctx->buffer_size, ctx->pcm_device, audio_backend_type_name(audio_backend_get_type()),
@@ -188,9 +329,15 @@ static void *capture_thread_func(void *arg) {
 
    // Unified capture loop using audio_backend abstraction
    while (atomic_load(&ctx->running)) {
+      if (!ctx->capture_handle) {
+         capture_wait_for_device(ctx, &next_tick, &next_attempt, &attempts);
+         buffer = ctx->read_buffer; /* resized if the device came back different */
+         continue;
+      }
       ssize_t rc = audio_stream_capture_read(ctx->capture_handle, buffer, ctx->frames);
 
       if (rc > 0) {
+         suspended_logged = false;
          // Successful read at 48kHz
          size_t bytes_read_48k = (size_t)rc * DEFAULT_CHANNELS * 2;  // 2 bytes per sample (S16_LE)
          size_t samples_read_48k = bytes_read_48k / sizeof(int16_t);
@@ -245,24 +392,33 @@ static void *capture_thread_func(void *arg) {
          // Error occurred - map to error code
          int err = (int)(-rc);
 
-         if (err == AUDIO_ERR_OVERRUN) {
+         if (err == AUDIO_ERR_OVERRUN &&
+             audio_stream_capture_recover(ctx->capture_handle, err) == AUDIO_SUCCESS) {
             OLOG_WARNING("Audio capture overrun, recovering");
-            audio_stream_capture_recover(ctx->capture_handle, err);
             continue;
-         } else if (err == AUDIO_ERR_SUSPENDED) {
-            OLOG_WARNING("Audio capture suspended, recovering");
-            audio_stream_capture_recover(ctx->capture_handle, err);
-            continue;
-         } else {
-            OLOG_ERROR("Audio capture read error: %s", audio_error_string((audio_error_t)err));
-            // Continue trying despite error
-            usleep(10000);  // 10ms delay before retry
          }
+         if (err == AUDIO_ERR_SUSPENDED &&
+             audio_stream_capture_recover(ctx->capture_handle, err) == AUDIO_SUCCESS) {
+            if (!suspended_logged) {
+               OLOG_WARNING("Audio capture suspended, waiting for it to resume");
+               suspended_logged = true;
+            }
+            usleep(10000);  // until the device resumes
+            continue;
+         }
+         /* Anything else: the device is gone or unusable.  Reopen it by name;
+          * retrying the same handle would only fail again. */
+         OLOG_WARNING("Audio capture: lost device '%s' (%s); waiting for it to come back - %s",
+                      ctx->pcm_device, audio_error_string((audio_error_t)err), CAPTURE_DEVICE_HINT);
+         audio_stream_capture_close(ctx->capture_handle);
+         ctx->capture_handle = NULL;
+         clock_gettime(CLOCK_MONOTONIC, &next_tick);
+         attempts = 0;
+         next_attempt = mono_sec() + capture_reopen_delay(0);
       }
       // rc == 0 means no data available, continue polling
    }
 
-   free(buffer);
    OLOG_INFO("Audio capture thread stopped");
 
    return NULL;
@@ -304,32 +460,28 @@ audio_capture_context_t *audio_capture_start(const char *pcm_device,
    }
 
    // Set up stream parameters
-   audio_stream_params_t params = { .sample_rate = CAPTURE_RATE,
-                                    .channels = DEFAULT_CHANNELS,
-                                    .format = AUDIO_FORMAT_S16_LE,
-                                    .period_frames = DEFAULT_FRAMES,
-                                    .buffer_frames = DEFAULT_FRAMES * 4 };
+   ctx->params = (audio_stream_params_t){ .sample_rate = CAPTURE_RATE,
+                                          .channels = DEFAULT_CHANNELS,
+                                          .format = AUDIO_FORMAT_S16_LE,
+                                          .period_frames = DEFAULT_FRAMES,
+                                          .buffer_frames = DEFAULT_FRAMES * 4 };
 
    // Open capture device using audio_backend abstraction
-   ctx->capture_handle = audio_stream_capture_open(pcm_device, &params, &ctx->hw_params);
+   ctx->capture_handle = audio_stream_capture_open(pcm_device, &ctx->params, &ctx->hw_params);
    if (!ctx->capture_handle) {
-      OLOG_ERROR("Failed to open capture device: %s", pcm_device);
-      ring_buffer_free(ctx->ring_buffer);
-      free(ctx->pcm_device);
-      free(ctx);
-      return NULL;
+      /* Not there yet (a USB device switched off): the thread waits for it. */
+      OLOG_WARNING("Audio capture: device '%s' not available; waiting for it - %s", pcm_device,
+                   CAPTURE_DEVICE_HINT);
+      ctx->hw_params = (audio_hw_params_t){ .sample_rate = ctx->params.sample_rate,
+                                            .channels = ctx->params.channels,
+                                            .format = ctx->params.format,
+                                            .period_frames = ctx->params.period_frames,
+                                            .buffer_frames = ctx->params.buffer_frames };
+   } else {
+      OLOG_INFO("Audio capture opened: rate=%u ch=%u period=%zu buffer=%zu (backend=%s)",
+                ctx->hw_params.sample_rate, ctx->hw_params.channels, ctx->hw_params.period_frames,
+                ctx->hw_params.buffer_frames, audio_backend_type_name(audio_backend_get_type()));
    }
-
-   // Use actual hardware parameters
-   ctx->frames = ctx->hw_params.period_frames;
-   ctx->buffer_size = ctx->frames * ctx->hw_params.channels * 2;  // 2 bytes per sample (S16_LE)
-
-   OLOG_INFO("Audio capture opened: rate=%u ch=%u period=%zu buffer=%zu (backend=%s)",
-             ctx->hw_params.sample_rate, ctx->hw_params.channels, ctx->hw_params.period_frames,
-             ctx->hw_params.buffer_frames, audio_backend_type_name(audio_backend_get_type()));
-
-   // Calculate input buffer size in samples (for resampler allocation)
-   size_t input_samples = ctx->buffer_size / sizeof(int16_t);
 
    // Create resampler for 48kHz → 16kHz downsampling (always needed for ASR)
    ctx->downsample_resampler = resampler_create(CAPTURE_RATE, ASR_RATE, 1);
@@ -337,38 +489,22 @@ audio_capture_context_t *audio_capture_start(const char *pcm_device,
       OLOG_ERROR("Failed to create 48kHz→16kHz resampler");
    }
 
-   // Pre-allocate ASR buffer for 16kHz output
-   // Use resampler's calculation to include proper margin for filter delay
-   if (ctx->downsample_resampler) {
-      ctx->asr_buffer_size = resampler_get_output_size(ctx->downsample_resampler, input_samples);
-   } else {
-      // Fallback if resampler failed to create
-      ctx->asr_buffer_size = (input_samples / 3) + 128;
-   }
-   ctx->asr_buffer = (int16_t *)malloc(ctx->asr_buffer_size * sizeof(int16_t));
-   if (!ctx->asr_buffer) {
-      OLOG_WARNING("Failed to allocate ASR buffer");
+   if (capture_size_buffers(ctx) != SUCCESS) {
+      if (ctx->capture_handle) {
+         audio_stream_capture_close(ctx->capture_handle);
+      }
+      resampler_destroy((resampler_t *)ctx->downsample_resampler);
+      free(ctx->asr_buffer);
+#ifdef ENABLE_AEC
+      free(ctx->aec_buffer);
+#endif
+      ring_buffer_free(ctx->ring_buffer);
+      free(ctx->pcm_device);
+      free(ctx);
+      return NULL;
    }
 
 #ifdef ENABLE_AEC
-   // Pre-allocate AEC buffer for 48kHz processing (same size as capture buffer)
-   ctx->aec_buffer_size = input_samples;
-   if (ctx->aec_buffer_size > AEC_MAX_SAMPLES) {
-      ctx->aec_buffer_size = AEC_MAX_SAMPLES;
-   }
-   ctx->aec_buffer = (int16_t *)malloc(ctx->aec_buffer_size * sizeof(int16_t));
-   if (!ctx->aec_buffer) {
-      OLOG_WARNING("Failed to allocate AEC buffer - continuing without AEC");
-   }
-
-   // Runtime sample rate validation for AEC
-   ctx->aec_rate_mismatch = 0;
-   if (ctx->hw_params.sample_rate != AEC_SAMPLE_RATE) {
-      OLOG_WARNING("AEC requires %d Hz but device is %u Hz - AEC disabled for this session",
-                   AEC_SAMPLE_RATE, ctx->hw_params.sample_rate);
-      ctx->aec_rate_mismatch = 1;
-   }
-
    OLOG_INFO("Audio capture: %dHz → AEC → %dHz for ASR (buffers: aec=%zu, asr=%zu samples)",
              CAPTURE_RATE, ASR_RATE, ctx->aec_buffer_size, ctx->asr_buffer_size);
 #else
@@ -380,7 +516,9 @@ audio_capture_context_t *audio_capture_start(const char *pcm_device,
    atomic_store(&ctx->running, true);
    if (pthread_create(&ctx->thread, NULL, capture_thread_func, ctx) != 0) {
       OLOG_ERROR("Failed to create capture thread: %s", strerror(errno));
-      audio_stream_capture_close(ctx->capture_handle);
+      if (ctx->capture_handle) {
+         audio_stream_capture_close(ctx->capture_handle);
+      }
       ring_buffer_free(ctx->ring_buffer);
       free(ctx->pcm_device);
       free(ctx);
@@ -432,6 +570,9 @@ void audio_capture_stop(audio_capture_context_t *ctx) {
       ctx->aec_buffer = NULL;
    }
 #endif
+
+   free(ctx->read_buffer);
+   ctx->read_buffer = NULL;
 
    // Free device name
    free(ctx->pcm_device);

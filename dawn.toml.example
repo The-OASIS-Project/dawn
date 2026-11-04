@@ -60,6 +60,11 @@
                                   # Env: DAWN_AUDIO_CAPTURE_DEVICE
 # playback_device = "default"     # Speaker device (use `aplay -L` to list)
                                   # Env: DAWN_AUDIO_PLAYBACK_DEVICE
+                                  # A named device is used only by that name: if it goes away,
+                                  # DAWN waits for it to come back rather than use another one.
+                                  # Name it so it survives replugging: ALSA "plughw:CARD=<name>,..."
+                                  # (not "hw:1"), PulseAudio the source/sink name (not its index).
+                                  # "default" follows the system's default device.
 # output_rate = 44100             # Playback sample rate (44100 or 48000)
                                   # Env: DAWN_AUDIO_OUTPUT_RATE
 # output_channels = 2             # Playback channels (2 = stereo, required for dmix)

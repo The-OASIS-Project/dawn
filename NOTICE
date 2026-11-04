@@ -77,6 +77,26 @@ reproduced in upstream Mem0 at https://github.com/mem0ai/mem0/blob/main/LICENSE.
 
 ================================================================================
 
+--------------------------------------------------------------------------------
+PulseAudio (libpulse, src/pulse/simple.c)
+--------------------------------------------------------------------------------
+
+  Copyright (C) 2004-2009 Lennart Poettering
+  Copyright (C) 2006-2007 Pierre Ossman <ossman@cendio.se> for Cendio AB
+  Licensed under the GNU Lesser General Public License, version 2.1 or later
+  https://gitlab.freedesktop.org/pulseaudio/pulseaudio
+
+src/audio/pulse_stream.c is adapted from libpulse's simple.c (the pa_simple
+API) and is used here under the GPLv3 or later, as LGPL-2.1 section 3 allows.
+Taken from it: the per-stream threaded mainloop, the connect flags, the state
+callbacks that wake every wait, the dead-stream check after each wait, the read
+that carries a fragment across calls and the operation wait for drain and
+flush.  Changed: a stream on a named device is connected with
+PA_STREAM_DONT_MOVE and must land on that device; holes in a recording read as
+silence; a suspended source is reported to the reader.
+
+================================================================================
+
 D.A.W.N. also bundles or links against numerous third-party libraries (curl,
 SQLite, libwebsockets, json-c, OpenSSL, libsodium, whisper.cpp, Piper,
 ONNX Runtime, etc.).  See DEPENDENCIES.md for the complete list and each
