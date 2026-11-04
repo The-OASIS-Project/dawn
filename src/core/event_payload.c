@@ -411,6 +411,7 @@ static bool all_ints(struct json_object *arr) {
 
 char *event_payload_agent(const char *gw_kind,
                           int64_t gw_seq,
+                          int64_t gw_ts,
                           struct json_object *data,
                           const char *const *fields,
                           const char *const *scrubbed) {
@@ -420,6 +421,7 @@ char *event_payload_agent(const char *gw_kind,
    }
    json_object_object_add(root, "gw", json_object_new_string(gw_kind ? gw_kind : ""));
    json_object_object_add(root, "gw_seq", json_object_new_int64(gw_seq));
+   json_object_object_add(root, "gw_ts", json_object_new_int64(gw_ts));
    for (size_t i = 0; data != NULL && fields != NULL && fields[i] != NULL; i++) {
       struct json_object *v = NULL;
       if (!json_object_object_get_ex(data, fields[i], &v) || v == NULL) {

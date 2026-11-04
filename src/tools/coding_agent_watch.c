@@ -202,8 +202,10 @@ void coding_watch_apply(struct json_object *event) {
    for (size_t i = 0; i < sizeof(k_kinds) / sizeof(k_kinds[0]); i++) {
       if (strcmp(kind, k_kinds[i].gw) == 0) {
          struct json_object *jseq = json_object_object_get(event, "seq");
+         struct json_object *jts = json_object_object_get(event, "ts"); /* when it happened */
          conv_event_emit(job, user_id, k_kinds[i].kind,
                          event_payload_agent(kind, json_object_get_int64(jseq),
+                                             (int64_t)json_object_get_double(jts),
                                              json_object_object_get(event, "data"),
                                              k_kinds[i].fields, k_scrubbed));
          break;

@@ -31,6 +31,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/conv_event.h"
 #include "core/job_manager.h"
 #include "core/session_manager.h"
 #include "core/turn_origin.h"
@@ -90,6 +91,9 @@ int mcp_bridge_call_tool(const char *alias,
          return FAILURE; /* no text: no answer */
       }
       *result_out = strdup("{\"id\":\"t1\",\"branch\":\"agent/t1-fix\",\"status\":\"working\"}");
+   } else if (strcmp(tool, "task_list") == 0 && args_json && strstr(args_json, "client_ref")) {
+      *result_out = strdup("{\"task\":{\"status\":\"working\",\"client_ref\":\"job:42\","
+                           "\"repo\":\"dawn\"},\"pending\":[]}");
    } else if (strcmp(tool, "task_list") == 0 && g_ntasks > 0) {
       /* Each summary ends in a multi-byte character past any excerpt's cut. */
       struct json_object *tasks = json_object_new_array();
@@ -209,6 +213,41 @@ char *event_payload_spawn(int64_t child_conv_id, const char *title) {
 }
 const char *job_spawn_origin_string(void) {
    return "webui";
+}
+
+/* The job's stored events: seven steps, the last a word from the agent. */
+int conv_db_event_list(int64_t conv_id,
+                       int user_id,
+                       int64_t after_seq,
+                       int max,
+                       conv_event_t *out,
+                       int *count_out) {
+   (void)conv_id, (void)user_id;
+   int n = 0;
+   for (int64_t seq = after_seq + 1; seq <= 7 && n < max; seq++, n++) {
+      memset(&out[n], 0, sizeof(out[n]));
+      out[n].seq = seq;
+      out[n].created_at = time(NULL) - 120;
+      snprintf(out[n].kind, sizeof(out[n].kind), "%s", CONV_EVENT_AGENT_STEP);
+      char payload[128];
+      if (seq == 7) { /* the gateway's own time: ten minutes ago */
+         snprintf(payload, sizeof(payload),
+                  "{\"gw\":\"progress\",\"gw_ts\":%lld,\"text\":\"tests pass\"}",
+                  (long long)(time(NULL) - 600));
+      } else {
+         snprintf(payload, sizeof(payload),
+                  "{\"gw\":\"tool\",\"tool\":\"Read\",\"brief\":\"file%lld.c\"}", (long long)seq);
+      }
+      out[n].payload = strdup(payload);
+   }
+   *count_out = n;
+   return AUTH_DB_SUCCESS;
+}
+void conv_db_event_rows_free(conv_event_t *rows, int n) {
+   for (int i = 0; i < n; i++) {
+      free(rows[i].payload);
+      rows[i].payload = NULL;
+   }
 }
 
 /* --- the session and the turn -------------------------------------------- */
@@ -525,6 +564,21 @@ static void test_cancel_hook_ends_the_row_and_asks_the_gateway(void) {
    TEST_ASSERT_NOT_NULL(strstr(g_args[0], "\"job:42\""));
 }
 
+/* status says when the agent last acted, its last steps, and that a running
+ * run's spend isn't counted yet. */
+static void test_status_shows_recent_steps(void) {
+   snprintf(g_status, sizeof(g_status), "running");
+   snprintf(g_kind, sizeof(g_kind), "%s", JOB_KIND_CODING);
+   char *r = call("status", "{\"job\":42}");
+   TEST_ASSERT_FALSE(is_error(r));
+   TEST_ASSERT_NOT_NULL(strstr(r, "Last activity: 2 min ago."));
+   TEST_ASSERT_NULL(strstr(r, "file2.c")); /* only the last five */
+   TEST_ASSERT_NOT_NULL(strstr(r, "Read: file3.c"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "10 min ago, said: tests pass"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "isn't in the total yet"));
+   free(r);
+}
+
 static void test_list_shows_repos(void) {
    char *r = call("list", NULL);
    TEST_ASSERT_FALSE(is_error(r));
@@ -559,6 +613,7 @@ int main(void) {
    RUN_TEST(test_list_is_bounded_and_whole_characters);
    RUN_TEST(test_lost_claim_cancels_the_started_task);
    RUN_TEST(test_list_shows_repos);
+   RUN_TEST(test_status_shows_recent_steps);
    RUN_TEST(test_needs_the_gateway_grant);
    RUN_TEST(test_cancel_hook_ends_the_row_and_asks_the_gateway);
    free(g_session);

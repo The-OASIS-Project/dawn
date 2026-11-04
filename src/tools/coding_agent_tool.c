@@ -60,9 +60,12 @@
 #define CA_REPO_MAX 64
 #define CA_TASK_MAX 4000          /* the task text sent (the gateway caps what it stores too) */
 #define CA_RESULT_MAX (16 * 1024) /* what list/status hand the model */
-#define CA_RESULT_ROOM 1024       /* kept free in a result for its "more" line */
+#define CA_RESULT_ROOM 2048       /* kept free in a result: its "more" line, the recent steps */
 #define CA_EXCERPT 160            /* a task's or result's first characters in a list */
-#define CA_FULL_TEXT 6000         /* a task's or result's characters in status */
+#define CA_FULL_TEXT 8000         /* a task's or result's characters in status */
+#define CA_RECENT_STEPS 5         /* the agent's last steps in status */
+#define CA_TOOL_NAME_MAX 64       /* a step's tool name in status */
+#define CA_EVENT_PAGE 64          /* stored events read at a time */
 #define CA_VALUE_MAX 200          /* a pending request's value in status */
 #define CA_BRANCH_MAX 160
 #define CA_MARKS_MAX 16 /* sessions whose current turn read the agent's words */
@@ -227,6 +230,77 @@ static char *handle_list(int user_id) {
    return strbuf_steal(&sb);
 }
 
+/* When a stored agent event happened: the gateway's time (gw_ts), else when
+ * it was stored (a backlog read at once would all look recent). */
+static time_t step_time(struct json_object *o, time_t stored) {
+   struct json_object *ts = NULL;
+   const int64_t gw = json_object_object_get_ex(o, "gw_ts", &ts) ? json_object_get_int64(ts) : 0;
+   return gw > 0 ? (time_t)gw : stored;
+}
+
+/* One stored step as a line: what the agent ran, or what it said. */
+static void append_step(strbuf_t *sb, struct json_object *o, time_t at, time_t now) {
+   const char *tool = coding_gateway_jstr(o, "tool");
+   const char *what = tool[0] ? coding_gateway_jstr(o, "brief") : coding_gateway_jstr(o, "text");
+   char name[CA_TOOL_NAME_MAX + 64], line[CA_EXCERPT + 64];
+   str_excerpt_line(tool[0] ? tool : "said", CA_TOOL_NAME_MAX, name, sizeof(name));
+   str_excerpt_line(what, CA_EXCERPT, line, sizeof(line));
+   strbuf_appendf(sb, "- %ld min ago, %s: %s\n", (long)((now - at) / 60), name, line);
+}
+
+/* When the agent last did something and its last steps, from the events the
+ * watcher stored on the job; while it runs, that its spend isn't counted yet. */
+static void append_recent(strbuf_t *sb, int64_t job, int user_id, const char *status) {
+   conv_event_t page[CA_EVENT_PAGE];
+   struct json_object *steps[CA_RECENT_STEPS] = { 0 };
+   time_t step_at[CA_RECENT_STEPS] = { 0 };
+   int next = 0, kept = 0, n = 0;
+   time_t last = 0;
+   int64_t after = 0;
+   do {
+      if (conv_db_event_list(job, user_id, after, CA_EVENT_PAGE, page, &n) != AUTH_DB_SUCCESS) {
+         break;
+      }
+      for (int i = 0; i < n; i++) {
+         after = page[i].seq;
+         if (strncmp(page[i].kind, "agent_", 6) != 0 || page[i].payload == NULL) {
+            continue;
+         }
+         struct json_object *o = json_tokener_parse(page[i].payload);
+         const time_t at = step_time(o, page[i].created_at);
+         last = at > last ? at : last;
+         if (o != NULL && strcmp(page[i].kind, CONV_EVENT_AGENT_STEP) == 0) {
+            json_object_put(steps[next]);
+            steps[next] = json_object_get(o);
+            step_at[next] = at;
+            next = (next + 1) % CA_RECENT_STEPS;
+            kept = kept < CA_RECENT_STEPS ? kept + 1 : kept;
+         }
+         json_object_put(o);
+      }
+      conv_db_event_rows_free(page, n);
+   } while (n == CA_EVENT_PAGE);
+
+   const time_t now = time(NULL);
+   const bool running = strcmp(status, "running") == 0 || strcmp(status, "queued") == 0;
+   if (last > 0) {
+      strbuf_appendf(sb, "Last activity: %ld min ago.\n", (long)((now - last) / 60));
+   }
+   if (kept > 0) {
+      strbuf_append(sb, "Its last steps, oldest first:\n");
+      for (int k = 0; k < kept; k++) {
+         const int i = (next - kept + k + CA_RECENT_STEPS) % CA_RECENT_STEPS;
+         append_step(sb, steps[i], step_at[i], now);
+      }
+   }
+   if (running) {
+      strbuf_append(sb, "Spend is counted when a run ends; this run's isn't in the total yet.\n");
+   }
+   for (int i = 0; i < CA_RECENT_STEPS; i++) {
+      json_object_put(steps[i]);
+   }
+}
+
 /* NULL when @p job is a coding job owned by @p user_id (@p rec filled); else
  * the error result to return. */
 static char *check_job(int64_t job, int user_id, job_record_t *rec) {
@@ -298,6 +372,9 @@ static char *handle_status(struct json_object *details, int user_id) {
       }
    }
    json_object_put(ans);
+   if (strbuf_len(&sb) < CA_RESULT_MAX - CA_RESULT_ROOM) { /* room for it, else left out */
+      append_recent(&sb, job, user_id, rec.job_status);
+   }
    mark_agent_text();
    return strbuf_steal(&sb);
 }

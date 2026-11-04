@@ -138,7 +138,8 @@ struct json_object;
 
 /**
  * @brief Build a payload from one agent-gateway event:
- *        {"gw": <its kind>, "gw_seq": <its number>, <the named fields>}.
+ *        {"gw": <its kind>, "gw_seq": <its number>, "gw_ts": <when, epoch s>,
+ *         <the named fields>}.
  *
  * Copies only @p fields (NULL-terminated) from @p data: numbers and lists of
  * numbers as they are, strings cut at EVENT_AGENT_TEXT_CAP bytes on a whole
@@ -150,6 +151,7 @@ struct json_object;
  */
 char *event_payload_agent(const char *gw_kind,
                           int64_t gw_seq,
+                          int64_t gw_ts,
                           struct json_object *data,
                           const char *const *fields,
                           const char *const *scrubbed);

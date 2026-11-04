@@ -307,7 +307,7 @@ static void test_agent_payload(void) {
                           json_object_new_string("curl -H 'Authorization: Bearer abc123' "
                                                  "KEY=sk-live-1234 x"));
    json_object_object_add(data, "repo", json_object_new_string("not listed"));
-   char *p = event_payload_agent("completed", 7, data, fields, scrubbed);
+   char *p = event_payload_agent("completed", 7, 0, data, fields, scrubbed);
    json_object_put(data);
    struct json_object *o = json_tokener_parse(p);
    TEST_ASSERT_NOT_NULL(o);
@@ -332,7 +332,7 @@ static void test_agent_payload(void) {
                               "https://github.com/The-OASIS-Project/dawn/pull/123/files "
                               "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig "
                               "TOKEN=a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0x"));
-   p = event_payload_agent("request", 8, data, fields, scrubbed);
+   p = event_payload_agent("request", 8, 0, data, fields, scrubbed);
    json_object_put(data);
    o = json_tokener_parse(p);
    input = json_object_get_string(json_object_object_get(o, "input"));
@@ -355,7 +355,7 @@ static void test_agent_payload(void) {
       json_object_array_add(list, json_object_new_string(dashes));
    }
    json_object_object_add(data, "commits", list);
-   p = event_payload_agent("completed", 9, data, fields, scrubbed);
+   p = event_payload_agent("completed", 9, 0, data, fields, scrubbed);
    json_object_put(data);
    o = json_tokener_parse(p);
    const char *joined = json_object_get_string(json_object_object_get(o, "commits"));
