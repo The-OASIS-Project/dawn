@@ -67,6 +67,9 @@
    let focusTrapCleanup = null;
    let triggerElement = null;
    let memoryEscToken = null; // DawnEscStack registration while the panel is open
+   /* After a delete, where focus goes once the tab's list comes back: the row
+    * that took the deleted one's place (its delete button), else the tab. */
+   let focusAfter = null; // { tab, index }
 
    /* Phase 2 entity-merge: one-shot flag so auto-route-to-Graph fires
     * on the FIRST open per page-load when proposals are pending, then
@@ -238,6 +241,7 @@
          memoryState.allEntities = newEntities;
          if (memoryState.activeTab === 'entities' && !memoryState.searchQuery) {
             renderEntitiesList();
+            focusAfterDelete();
          }
       }
    }
@@ -247,6 +251,7 @@
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show(payload.error || 'Failed to delete entity', 'error');
          }
+         focusAfter = null;
          return;
       }
 
@@ -313,6 +318,7 @@
          memoryState.facts = newFacts;
          if (memoryState.activeTab === 'facts' && !memoryState.searchQuery) {
             renderFactsList();
+            focusAfterDelete();
          }
       }
    }
@@ -392,6 +398,7 @@
          memoryState.allPreferences = newPrefs;
          if (memoryState.activeTab === 'preferences' && !memoryState.searchQuery) {
             renderPreferencesList();
+            focusAfterDelete();
          }
       }
    }
@@ -417,6 +424,7 @@
          memoryState.summaries = newSummaries;
          if (memoryState.activeTab === 'summaries' && !memoryState.searchQuery) {
             renderSummariesList();
+            focusAfterDelete();
          }
       }
    }
@@ -465,6 +473,7 @@
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show(payload.error || 'Failed to delete fact', 'error');
          }
+         focusAfter = null;
          return;
       }
 
@@ -500,6 +509,7 @@
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show(payload.error || 'Failed to delete preference', 'error');
          }
+         focusAfter = null;
          return;
       }
 
@@ -518,6 +528,7 @@
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show(payload.error || 'Failed to delete summary', 'error');
          }
+         focusAfter = null;
          return;
       }
 
@@ -1106,6 +1117,11 @@
       if (!btn) return;
 
       e.stopPropagation();
+      const index = Array.prototype.indexOf.call(
+         memoryElements.list.querySelectorAll('.memory-item-delete'),
+         btn
+      );
+      const deleting = { tab: memoryState.activeTab, index: index };
       const factId = btn.dataset.factId;
       const prefCategory = btn.dataset.prefCategory;
       const summaryId = btn.dataset.summaryId;
@@ -1116,6 +1132,7 @@
          const detail = fact ? fact.fact_text : null;
 
          if (await DawnDialog.confirm('Delete this fact?', { detail: detail, danger: true })) {
+            focusAfter = deleting;
             requestDeleteFact(parseInt(factId, 10));
          }
       } else if (prefCategory) {
@@ -1125,6 +1142,7 @@
          if (
             await DawnDialog.confirm('Delete this preference?', { detail: detail, danger: true })
          ) {
+            focusAfter = deleting;
             requestDeletePreference(prefCategory);
          }
       } else if (summaryId) {
@@ -1132,6 +1150,7 @@
          const detail = summary ? summary.summary : null;
 
          if (await DawnDialog.confirm('Delete this summary?', { detail: detail, danger: true })) {
+            focusAfter = deleting;
             requestDeleteSummary(parseInt(summaryId, 10));
          }
       } else if (entityId) {
@@ -1144,9 +1163,19 @@
                danger: true,
             })
          ) {
+            focusAfter = deleting;
             requestDeleteEntity(parseInt(entityId, 10));
          }
       }
+   }
+
+   function focusAfterDelete() {
+      if (!focusAfter || focusAfter.tab !== memoryState.activeTab || !memoryElements.list) return;
+      const buttons = memoryElements.list.querySelectorAll('.memory-item-delete');
+      const next = buttons[Math.min(focusAfter.index, buttons.length - 1)];
+      const target = next || document.getElementById('memory-tab-' + focusAfter.tab);
+      focusAfter = null;
+      if (target) target.focus();
    }
 
    function scrollToEntity(entityId) {
@@ -1278,11 +1307,11 @@
 
    function handleClickOutside(e) {
       // A dialog opened over the panel (contact, source, merged, import,
-      // export) is a sibling overlay, not a child: a click on it, its × or its
-      // backdrop must not close the panel underneath.  A closed overlay is
-      // display:none, so its nodes take no clicks.  No stopPropagation, so the
-      // image lightbox still receives them.
-      if (e.target.closest && e.target.closest('.modal-overlay')) return;
+      // export, or a confirm such as a delete's) is a sibling overlay, not a
+      // child: a click on it, its × or its backdrop must not close the panel
+      // underneath.  A closed overlay is display:none, so its nodes take no
+      // clicks.  No stopPropagation, so the image lightbox still receives them.
+      if (e.target.closest && e.target.closest('.modal-overlay, .modal')) return;
 
       if (
          memoryElements.popover &&
