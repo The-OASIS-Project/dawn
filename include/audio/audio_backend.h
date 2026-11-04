@@ -46,7 +46,7 @@
  *     - read()/write() support partial transfers (may return fewer frames)
  *     - close() respects prior drop() call (won't drain if dropped)
  *
- *   PulseAudio (pa_simple API):
+ *   PulseAudio (blocking stream, pulse_stream.c):
  *     - avail() returns TIME-BASED ESTIMATE, not actual buffer level
  *     - read()/write() ALWAYS complete fully (blocks until done)
  *     - Suitable for DAWN's voice pipeline where blocking is acceptable
