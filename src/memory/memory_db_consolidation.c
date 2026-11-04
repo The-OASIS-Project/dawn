@@ -638,13 +638,42 @@ int memory_db_consolidation_drop_conversations_locked(int user_id, const char *i
    if (user_id <= 0 || !ids_json) {
       return MEMORY_DB_FAILURE;
    }
-   /* Its batches, and the rows other batches made quoting what it set aside. */
+   /* Its batches, and the rows other batches made quoting what it set aside.
+    * A preference's value before a batch is quoted in its pref_set pre-image
+    * with where it was learned: the row goes when it was learned only from
+    * the set (as MEMORY_FORGET_ONLY_FROM decides for the preference itself),
+    * else it loses the set's conversations, so an undo never puts back a
+    * forgotten value or source.  A pre-image recorded without its sources
+    * can't be told apart: it goes on any forget of the user's (an undo lost,
+    * visible in the Learned tab; never a forgotten value kept). */
+#define PRE_SOURCES "json_each(pre_image, '$.sources')"
+#define PRE_CONV "json_extract(pre_image, '$.source_conversation_id')"
+#define PREF_OPS "user_id = ?1 AND op = 'pref_set' AND "
    static const char *const k_sql[] = {
       "DELETE FROM memory_consolidation_batches WHERE user_id = ?1 AND conversation_id IN "
       "(SELECT value FROM json_each(?2))",
       "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND source_conversation_id IN "
       "(SELECT value FROM json_each(?2))",
+      /* The DELETE runs before the two trims: a pre-image whose only source
+       * is forgotten would otherwise be trimmed to empty and escape it. */
+      "DELETE FROM memory_consolidation_ops WHERE " PREF_OPS "json_extract(pre_image, "
+      "'$.absent') IS NULL AND (json_type(pre_image, '$.sources') IS NULL OR "
+      "(COALESCE(json_extract(pre_image, '$.origin_unsourced'), 0) = 0 AND (" PRE_CONV
+      " IN " MEMORY_FORGET_IN_SET " OR EXISTS (SELECT 1 FROM " PRE_SOURCES
+      " WHERE value IN " MEMORY_FORGET_IN_SET ")) AND (COALESCE(" PRE_CONV ", 0) = 0 OR " PRE_CONV
+      " IN " MEMORY_FORGET_IN_SET ") AND NOT EXISTS (SELECT 1 FROM " PRE_SOURCES
+      " WHERE value NOT IN " MEMORY_FORGET_IN_SET ")))",
+      "UPDATE memory_consolidation_ops SET pre_image = json_set(pre_image, '$.sources', "
+      "json((SELECT json_group_array(value) FROM " PRE_SOURCES
+      " WHERE value NOT IN " MEMORY_FORGET_IN_SET "))) WHERE " PREF_OPS
+      "EXISTS (SELECT 1 FROM " PRE_SOURCES " WHERE value IN " MEMORY_FORGET_IN_SET ")",
+      "UPDATE memory_consolidation_ops SET pre_image = json_set(pre_image, "
+      "'$.source_conversation_id', 0, '$.msg_id_start', 0, '$.msg_id_end', 0) WHERE " PREF_OPS
+          PRE_CONV " IN " MEMORY_FORGET_IN_SET,
    };
+#undef PRE_SOURCES
+#undef PRE_CONV
+#undef PREF_OPS
    sqlite3_stmt *st = NULL;
    int rc = SQLITE_DONE;
    for (size_t i = 0; i < sizeof(k_sql) / sizeof(k_sql[0]) && rc == SQLITE_DONE; i++) {
@@ -982,7 +1011,8 @@ char *memory_db_consolidation_pref_image(int user_id, const char *category) {
            s_db.db,
            "SELECT json_object('source_conversation_id', COALESCE(source_conversation_id, 0), "
            "'msg_id_start', COALESCE(source_msg_id_start, 0), 'msg_id_end', "
-           "COALESCE(source_msg_id_end, 0), 'origin_unsourced', origin_unsourced, 'sources', "
+           "COALESCE(source_msg_id_end, 0), 'origin_unsourced', origin_unsourced, "
+           "'reinforcement_count', reinforcement_count, 'updated_at', updated_at, 'sources', "
            "(SELECT json_group_array(conversation_id) FROM memory_preference_sources WHERE "
            "preference_id = p.id)) FROM memory_preferences p WHERE user_id = ?1 AND category = ?2",
            -1, &st, NULL) == SQLITE_OK) {

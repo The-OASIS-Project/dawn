@@ -420,10 +420,10 @@ char *memory_db_consolidation_merge_image(int user_id, int64_t from, int64_t int
 
 /**
  * @brief Where preference @p category was learned, as a JSON object (heap):
- *        its source conversation and message range, origin_unsourced and its
- *        source conversations ("sources"), so undoing a change to it puts them
- *        back with the value.  NULL when the user has no such preference or on
- *        failure.
+ *        its source conversation and message range, origin_unsourced,
+ *        reinforcement_count, updated_at and its source conversations
+ *        ("sources"), so undoing a change to it puts them back with the
+ *        value.  NULL when the user has no such preference or on failure.
  */
 char *memory_db_consolidation_pref_image(int user_id, const char *category);
 

@@ -589,7 +589,11 @@ static int undo_linked(int user_id, const undo_row_t *r, memory_consolidation_un
 
 /* pref_set's pre-image provenance (where the value before was learned) put
  * back: a new value reset the sources to the batch's conversation.  Rows
- * recorded before the pre-image held it keep the batch's. */
+ * recorded before the pre-image held it keep the batch's.  A source
+ * conversation deleted since goes as auth_db_conv.c's delete takes it: its
+ * range with it, the row's own source another of its sources, and learned
+ * outside any conversation when none is left.  A 0 source id with sources
+ * listed is one a forget cleared, not a value that never had one. */
 static int pref_provenance_back(int user_id, const char *category, const undo_row_t *r) {
    struct json_object *sources = NULL;
    if (!json_object_object_get_ex(r->pre, "sources", &sources) ||
@@ -597,9 +601,14 @@ static int pref_provenance_back(int user_id, const char *category, const undo_ro
       return MEMORY_DB_SUCCESS;
    }
    static const char *const SQL[] = {
-      "UPDATE memory_preferences SET source_conversation_id = (SELECT id FROM conversations "
-      "WHERE id = ?3), source_msg_id_start = NULLIF(?4, 0), source_msg_id_end = NULLIF(?5, 0), "
-      "origin_unsourced = ?6 WHERE user_id = ?1 AND category = ?2",
+      "UPDATE memory_preferences SET source_conversation_id = COALESCE((SELECT id FROM "
+      "conversations WHERE id = ?3), (SELECT MAX(j.value) FROM json_each(?7) j WHERE j.value IN "
+      "(SELECT id FROM conversations))), source_msg_id_start = (SELECT NULLIF(?4, 0) FROM "
+      "conversations WHERE id = ?3), source_msg_id_end = (SELECT NULLIF(?5, 0) FROM "
+      "conversations WHERE id = ?3), origin_unsourced = CASE WHEN (?3 = 0 AND "
+      "json_array_length(?7) = 0) OR EXISTS (SELECT 1 FROM conversations WHERE id = ?3) OR "
+      "EXISTS (SELECT 1 FROM json_each(?7) j WHERE j.value IN (SELECT id FROM conversations)) "
+      "THEN ?6 ELSE 1 END WHERE user_id = ?1 AND category = ?2",
       "DELETE FROM memory_preference_sources WHERE preference_id = (SELECT id FROM "
       "memory_preferences WHERE user_id = ?1 AND category = ?2)",
       "INSERT OR IGNORE INTO memory_preference_sources (preference_id, conversation_id) SELECT "
@@ -631,18 +640,38 @@ static int pref_provenance_back(int user_id, const char *category, const undo_ro
 static int undo_pref(int user_id, const undo_row_t *r, memory_consolidation_undo_effect_t *eff) {
    const char *category = get_str(r->pre, "category");
    const char *value = get_str(r->post, "value");
+   const char *before = get_str(r->pre, "value");
+   /* The pre-image's sources are exempt only for a reinforcement: a new value
+    * reset the sources to the batch's conversation, so one of them present
+    * now taught the new value since. */
+   struct json_object *was = NULL;
+   const char *sources = before && value && strcmp(before, value) == 0 &&
+                                 json_object_object_get_ex(r->pre, "sources", &was)
+                             ? json_object_to_json_string_ext(was, JSON_C_TO_STRING_PLAIN)
+                             : "[]";
+   /* Changed since when its value differs, a conversation other than where
+    * it was learned and this batch's taught it since, or it was learned
+    * outside a conversation since (a prompt-path extraction, an import). */
    sqlite3_stmt *st = NULL;
    int rc = sqlite3_prepare_v2(s_db.db,
-                               "SELECT value FROM memory_preferences WHERE user_id = ?1 AND "
-                               "category = ?2",
+                               "SELECT value, origin_unsourced, EXISTS (SELECT 1 FROM "
+                               "memory_preference_sources s WHERE s.preference_id = p.id AND "
+                               "s.conversation_id != ?4 AND s.conversation_id NOT IN (SELECT "
+                               "value FROM json_each(?3))) FROM memory_preferences p WHERE "
+                               "user_id = ?1 AND category = ?2",
                                -1, &st, NULL);
    if (rc == SQLITE_OK) {
       sqlite3_bind_int(st, 1, user_id);
       sqlite3_bind_text(st, 2, category, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(st, 3, sources, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64(st, 4, r->conversation_id);
       rc = sqlite3_step(st);
    }
    const char *now = rc == SQLITE_ROW ? (const char *)sqlite3_column_text(st, 0) : NULL;
-   const bool stale = rc != SQLITE_ROW || !now || !value || strcmp(now, value) != 0;
+   const bool stale = rc != SQLITE_ROW || !now || !value || strcmp(now, value) != 0 ||
+                      sqlite3_column_int(st, 2) != 0 ||
+                      (has(r->post, "origin_unsourced") &&
+                       sqlite3_column_int(st, 1) > get_i64(r->post, "origin_unsourced"));
    sqlite3_finalize(st);
    if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
       return MEMORY_DB_FAILURE;
@@ -656,16 +685,24 @@ static int undo_pref(int user_id, const undo_row_t *r, memory_consolidation_undo
                            absent ? "DELETE FROM memory_preferences WHERE user_id = ?1 AND "
                                     "category = ?2"
                                   : "UPDATE memory_preferences SET value = ?3, confidence = ?4, "
-                                    "outside = ?5 WHERE user_id = ?1 AND category = ?2",
+                                    "outside = ?5, reinforcement_count = COALESCE(?6, "
+                                    "reinforcement_count), updated_at = COALESCE(?7, updated_at) "
+                                    "WHERE user_id = ?1 AND category = ?2",
                            -1, &st, NULL);
    if (rc == SQLITE_OK) {
       sqlite3_bind_int(st, 1, user_id);
       sqlite3_bind_text(st, 2, category, -1, SQLITE_TRANSIENT);
       if (!absent) {
-         const char *before = get_str(r->pre, "value");
          sqlite3_bind_text(st, 3, before ? before : "", -1, SQLITE_TRANSIENT);
          sqlite3_bind_double(st, 4, get_double(r->pre, "confidence"));
          sqlite3_bind_int(st, 5, (int)get_i64(r->pre, "outside"));
+         /* Pre-images recorded without them leave the two as they are. */
+         if (has(r->pre, "reinforcement_count")) {
+            sqlite3_bind_int64(st, 6, get_i64(r->pre, "reinforcement_count"));
+         }
+         if (has(r->pre, "updated_at")) {
+            sqlite3_bind_int64(st, 7, get_i64(r->pre, "updated_at"));
+         }
       }
       rc = sqlite3_step(st);
    }

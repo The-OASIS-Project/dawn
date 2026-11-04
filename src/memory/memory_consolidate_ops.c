@@ -1560,6 +1560,17 @@ static void apply_prefs(mc_batch_t *b) {
       json_object_object_add(post, "category", json_object_new_string(category));
       json_object_object_add(post, "value", json_object_new_string(after.value));
       json_object_object_add(post, "confidence", json_object_new_double(after.confidence));
+      /* Whether it counts as learned outside a conversation now: learned so
+       * later (an import, "remember"), it isn't this batch's to undo. */
+      char *now = memory_db_consolidation_pref_image(in->user_id, category);
+      struct json_object *now_obj = now ? json_tokener_parse(now) : NULL;
+      struct json_object *unsourced = NULL;
+      if (json_object_object_get_ex(now_obj, "origin_unsourced", &unsourced)) {
+         json_object_object_add(post, "origin_unsourced",
+                                json_object_new_int(json_object_get_int(unsourced)));
+      }
+      json_object_put(now_obj);
+      free(now);
       char *pre_s = image(pre);
       char *post_s = image(post);
       char text[MEMORY_FACT_TEXT_MAX];

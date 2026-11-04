@@ -419,11 +419,254 @@ void test_undo_pref_set_puts_the_old_source_back(void) {
                               conv_a, NULL));
 }
 
+/* The conversation that taught the value before is forgotten: the record
+ * drops it, and an undo can't bring the value back. */
+void test_undo_pref_after_forgetting_the_old_values_conversation(void) {
+   int64_t conv_a = 0;
+   conv_db_create(s_user, "A", &conv_a);
+   const memory_provenance_t prov_a = { .conv_id = conv_a, .msg_id_start = 2, .msg_id_end = 4 };
+   memory_db_pref_upsert(s_user, "coffee", "espresso", 0.6f, "inferred", &prov_a);
+   script(NULL);
+   const int64_t batch = run(PREF_REPLY("oat latte"), 0);
+   const int64_t op = op_of(batch, "pref_set");
+   TEST_ASSERT_TRUE(op > 0);
+   /* Forget A: "oat latte" (taught by the batch's conversation) stays. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_conversations_forget(s_user, &conv_a, 1, NULL));
+   memory_preference_t p;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_pref_get(s_user, "coffee", &p));
+   TEST_ASSERT_EQUAL_STRING("oat latte", p.value);
+   /* The record must not keep the forgotten value, and an undo must not
+    * restore it. */
+   const int64_t quoted = q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE id = ?1 "
+                            "AND pre_image LIKE '%espresso%'",
+                            op, NULL);
+   memory_consolidation_undo_effect_t eff = { 0 };
+   (void)memory_db_consolidation_undo_op(s_user, batch, op, &eff);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_pref_get(s_user, "coffee", &p));
+   TEST_ASSERT_NOT_EQUAL_MESSAGE(0, strcmp("espresso", p.value),
+                                 "undo brought back a forgotten conversation's preference");
+   TEST_ASSERT_EQUAL_INT_MESSAGE(0, quoted,
+                                 "record still quotes the forgotten conversation's value");
+}
+
+/* A preference the batch created goes with its sources. */
+void test_undo_created_pref_drops_its_sources(void) {
+   script(NULL);
+   const int64_t batch = run(PREF_REPLY("oat latte"), 0);
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT COUNT(*) FROM memory_preference_sources WHERE "
+                              "conversation_id = ?1",
+                              s_conv, NULL));
+   memory_consolidation_undo_effect_t eff = { 0 };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_undo_op(
+                                                s_user, batch, op_of(batch, "pref_set"), &eff));
+   TEST_ASSERT_TRUE(eff.memory_bodies);
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_preference_sources", 0, NULL));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_preferences WHERE user_id = ?1", s_user,
+                              NULL));
+}
+
+/* A pre-image recorded without its provenance undoes the value only. */
+void test_undo_pref_old_pre_image(void) {
+   int64_t conv_a = 0;
+   conv_db_create(s_user, "A", &conv_a);
+   const memory_provenance_t prov_a = { .conv_id = conv_a, .msg_id_start = 2, .msg_id_end = 4 };
+   memory_db_pref_upsert(s_user, "coffee", "espresso", 0.6f, "inferred", &prov_a);
+   script(NULL);
+   const int64_t batch = run(PREF_REPLY("oat latte"), 0);
+   const int64_t op = op_of(batch, "pref_set");
+   exec("UPDATE memory_consolidation_ops SET pre_image = json_remove(pre_image, "
+        "'$.sources', '$.source_conversation_id', '$.msg_id_start', '$.msg_id_end', "
+        "'$.origin_unsourced') WHERE op = 'pref_set'");
+   memory_consolidation_undo_effect_t eff = { 0 };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_consolidation_undo_op(s_user, batch, op, &eff));
+   memory_preference_t p;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_pref_get(s_user, "coffee", &p));
+   TEST_ASSERT_EQUAL_STRING("espresso", p.value);
+   TEST_ASSERT_EQUAL_INT64(s_conv, q("SELECT source_conversation_id FROM memory_preferences WHERE "
+                                     "user_id = ?1 AND category = ?2",
+                                     s_user, "coffee"));
+}
+
+/* Same value, new confidence (a reinforcement): the batch's conversation
+ * leaves the sources and the range comes back. */
+void test_undo_pref_reinforcement(void) {
+   int64_t conv_a = 0;
+   conv_db_create(s_user, "A", &conv_a);
+   const memory_provenance_t prov_a = { .conv_id = conv_a, .msg_id_start = 2, .msg_id_end = 4 };
+   memory_db_pref_upsert(s_user, "coffee", "oat latte", 0.6f, "inferred", &prov_a);
+   script(NULL);
+   const int64_t batch = run(PREF_REPLY("oat latte"), 0);
+   const int64_t op = op_of(batch, "pref_set");
+   TEST_ASSERT_TRUE(op > 0);
+   TEST_ASSERT_EQUAL_INT(2, q("SELECT COUNT(*) FROM memory_preference_sources", 0, NULL));
+   memory_consolidation_undo_effect_t eff = { 0 };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_consolidation_undo_op(s_user, batch, op, &eff));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT COUNT(*) FROM memory_preference_sources WHERE "
+                              "conversation_id = ?1",
+                              conv_a, NULL));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_preference_sources WHERE "
+                              "conversation_id = ?1",
+                              s_conv, NULL));
+   TEST_ASSERT_EQUAL_INT64(2, q("SELECT source_msg_id_start FROM memory_preferences WHERE "
+                                "user_id = ?1 AND category = ?2",
+                                s_user, "coffee"));
+}
+
+/* A reinforcement of a value two conversations taught, one forgotten: the
+ * undo puts back the other alone, as the row's own source. */
+void test_undo_pref_reinforcement_after_forgetting_one_source(void) {
+   int64_t conv_a = 0;
+   int64_t conv_b = 0;
+   conv_db_create(s_user, "A", &conv_a);
+   conv_db_create(s_user, "B", &conv_b);
+   const memory_provenance_t prov_a = { .conv_id = conv_a, .msg_id_start = 2, .msg_id_end = 4 };
+   const memory_provenance_t prov_b = { .conv_id = conv_b, .msg_id_start = 5, .msg_id_end = 6 };
+   memory_db_pref_upsert(s_user, "coffee", "oat latte", 0.5f, "inferred", &prov_b);
+   memory_db_pref_upsert(s_user, "coffee", "oat latte", 0.6f, "inferred", &prov_a);
+   script(NULL);
+   const int64_t batch = run(PREF_REPLY("oat latte"), 0);
+   const int64_t op = op_of(batch, "pref_set");
+   TEST_ASSERT_TRUE(op > 0);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_conversations_forget(s_user, &conv_a, 1, NULL));
+   /* The record keeps B alone. */
+   TEST_ASSERT_EQUAL_INT64(conv_b, q("SELECT group_concat(j.value) FROM memory_consolidation_ops "
+                                     "o, json_each(o.pre_image, '$.sources') j WHERE o.id = ?1",
+                                     op, NULL));
+   TEST_ASSERT_EQUAL_INT64(0, q("SELECT json_extract(pre_image, '$.source_conversation_id') FROM "
+                                "memory_consolidation_ops WHERE id = ?1",
+                                op, NULL));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, undo(batch, op));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_preference_sources WHERE "
+                              "conversation_id = ?1",
+                              conv_a, NULL));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT COUNT(*) FROM memory_preference_sources WHERE "
+                              "conversation_id = ?1",
+                              conv_b, NULL));
+   TEST_ASSERT_EQUAL_INT64(conv_b, q("SELECT source_conversation_id FROM memory_preferences WHERE "
+                                     "user_id = ?1 AND category = ?2",
+                                     s_user, "coffee"));
+   TEST_ASSERT_EQUAL_INT64(0, q("SELECT COALESCE(source_msg_id_start, 0) FROM memory_preferences "
+                                "WHERE user_id = ?1 AND category = ?2",
+                                s_user, "coffee"));
+}
+
+/* Undone, the value's reinforcement count and update time are the ones
+ * before the batch. */
+void test_undo_pref_restores_count_and_updated_at(void) {
+   memory_db_pref_upsert(s_user, "coffee", "espresso", 0.6f, "inferred", NULL);
+   exec("UPDATE memory_preferences SET reinforcement_count = 5, updated_at = 1000");
+   script(NULL);
+   const int64_t batch = run(PREF_REPLY("oat latte"), 0);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, undo(batch, op_of(batch, "pref_set")));
+   TEST_ASSERT_EQUAL_INT64(5, q("SELECT reinforcement_count FROM memory_preferences WHERE "
+                                "user_id = ?1 AND category = ?2",
+                                s_user, "coffee"));
+   TEST_ASSERT_EQUAL_INT64(1000, q("SELECT updated_at FROM memory_preferences WHERE "
+                                   "user_id = ?1 AND category = ?2",
+                                   s_user, "coffee"));
+}
+
+/* The conversation the value before was learned from was deleted since: the
+ * value comes back learned outside any conversation, with no range. */
+void test_undo_pref_after_deleting_the_old_values_conversation(void) {
+   int64_t conv_a = 0;
+   conv_db_create(s_user, "A", &conv_a);
+   const memory_provenance_t prov_a = { .conv_id = conv_a, .msg_id_start = 2, .msg_id_end = 4 };
+   memory_db_pref_upsert(s_user, "coffee", "espresso", 0.6f, "inferred", &prov_a);
+   script(NULL);
+   const int64_t batch = run(PREF_REPLY("oat latte"), 0);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_delete(conv_a, s_user));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, undo(batch, op_of(batch, "pref_set")));
+   memory_preference_t p;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_pref_get(s_user, "coffee", &p));
+   TEST_ASSERT_EQUAL_STRING("espresso", p.value);
+   TEST_ASSERT_EQUAL_INT64(1, q("SELECT origin_unsourced FROM memory_preferences WHERE "
+                                "user_id = ?1 AND category = ?2",
+                                s_user, "coffee"));
+   TEST_ASSERT_EQUAL_INT64(0, q("SELECT COALESCE(source_conversation_id, 0) + "
+                                "COALESCE(source_msg_id_start, 0) + COALESCE(source_msg_id_end, 0) "
+                                "FROM memory_preferences WHERE user_id = ?1 AND category = ?2",
+                                s_user, "coffee"));
+}
+
 /* ---- undo never removes what a later batch changed (stale) ---- */
 
 static void assert_stale(int64_t batch, int64_t op) {
    TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATION_STALE, undo(batch, op));
    TEST_ASSERT_EQUAL_STRING("stale", status_of(op));
+}
+
+/* Forget A clears the pre-image's own source to 0; B, the last remaining
+ * source, is then deleted; the undo counts the value as learned outside any
+ * conversation, as a conversation delete would. */
+void test_undo_pref_after_forget_then_delete_last_source(void) {
+   int64_t conv_a = 0, conv_b = 0;
+   conv_db_create(s_user, "A", &conv_a);
+   conv_db_create(s_user, "B", &conv_b);
+   const memory_provenance_t pb = { .conv_id = conv_b, .msg_id_start = 5, .msg_id_end = 6 };
+   const memory_provenance_t pa = { .conv_id = conv_a, .msg_id_start = 2, .msg_id_end = 4 };
+   memory_db_pref_upsert(s_user, "coffee", "espresso", 0.5f, "inferred", &pb);
+   memory_db_pref_upsert(s_user, "coffee", "espresso", 0.6f, "inferred", &pa);
+   script(NULL);
+   const int64_t batch = run(PREF_REPLY("oat latte"), 0);
+   const int64_t op = op_of(batch, "pref_set");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_conversations_forget(s_user, &conv_a, 1, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_delete(conv_b, s_user));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, undo(batch, op));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_preference_sources", 0, NULL));
+   TEST_ASSERT_EQUAL_INT64(0,
+                           q("SELECT COALESCE(source_conversation_id, 0) FROM memory_preferences "
+                             "WHERE user_id = ?1 AND category = ?2",
+                             s_user, "coffee"));
+   TEST_ASSERT_EQUAL_INT64_MESSAGE(1,
+                                   q("SELECT origin_unsourced FROM memory_preferences WHERE "
+                                     "user_id = ?1 AND category = ?2",
+                                     s_user, "coffee"),
+                                   "orphan: no source and origin_unsourced 0");
+}
+
+/* A conversation that taught the value before teaches the batch's new value
+ * since: the undo would put the old value back over it, so it is stale. */
+void test_stale_pref_old_source_reteaches_new_value(void) {
+   int64_t conv_a = 0;
+   conv_db_create(s_user, "A", &conv_a);
+   const memory_provenance_t pa = { .conv_id = conv_a, .msg_id_start = 2, .msg_id_end = 4 };
+   memory_db_pref_upsert(s_user, "coffee", "espresso", 0.6f, "inferred", &pa);
+   script(NULL);
+   const int64_t batch = run(PREF_REPLY("oat latte"), 0);
+   const memory_provenance_t pa2 = { .conv_id = conv_a, .msg_id_start = 20, .msg_id_end = 24 };
+   memory_db_pref_upsert(s_user, "coffee", "oat latte", 0.8f, "inferred", &pa2);
+   assert_stale(batch, op_of(batch, "pref_set"));
+}
+
+/* Another conversation taught the batch's value since, outside the record:
+ * the undo would take its teaching; it stays, with its source. */
+void test_stale_pref_another_conversation_taught_it(void) {
+   script(NULL);
+   const int64_t batch = run(PREF_REPLY("oat latte"), 0);
+   int64_t conv_c = 0;
+   conv_db_create(s_user, "C", &conv_c);
+   const memory_provenance_t prov_c = { .conv_id = conv_c, .msg_id_start = 7, .msg_id_end = 9 };
+   memory_db_pref_upsert(s_user, "coffee", "oat latte", 0.8f, "inferred", &prov_c);
+   assert_stale(batch, op_of(batch, "pref_set"));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT COUNT(*) FROM memory_preference_sources WHERE "
+                              "conversation_id = ?1",
+                              conv_c, NULL));
+}
+
+/* Learned outside any conversation since (an import): stale too. */
+void test_stale_pref_learned_unsourced_since(void) {
+   script(NULL);
+   const int64_t batch = run(PREF_REPLY("oat latte"), 0);
+   memory_db_pref_upsert(s_user, "coffee", "oat latte", 0.8f, "imported", NULL);
+   assert_stale(batch, op_of(batch, "pref_set"));
+   memory_preference_t p;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_pref_get(s_user, "coffee", &p));
 }
 
 void test_stale_added_another_conversation_taught_it(void) {
@@ -1279,6 +1522,17 @@ int main(void) {
    RUN_TEST(test_undo_pref_set_removes_a_new_preference);
    RUN_TEST(test_undo_pref_set_puts_the_old_value_back);
    RUN_TEST(test_undo_pref_set_puts_the_old_source_back);
+   RUN_TEST(test_undo_pref_after_forgetting_the_old_values_conversation);
+   RUN_TEST(test_undo_created_pref_drops_its_sources);
+   RUN_TEST(test_undo_pref_old_pre_image);
+   RUN_TEST(test_undo_pref_reinforcement);
+   RUN_TEST(test_undo_pref_reinforcement_after_forgetting_one_source);
+   RUN_TEST(test_undo_pref_restores_count_and_updated_at);
+   RUN_TEST(test_undo_pref_after_deleting_the_old_values_conversation);
+   RUN_TEST(test_stale_pref_another_conversation_taught_it);
+   RUN_TEST(test_stale_pref_learned_unsourced_since);
+   RUN_TEST(test_undo_pref_after_forget_then_delete_last_source);
+   RUN_TEST(test_stale_pref_old_source_reteaches_new_value);
    RUN_TEST(test_stale_added_another_conversation_taught_it);
    RUN_TEST(test_stale_added_something_since_merged_into_it);
    RUN_TEST(test_stale_reinforced_made_told_since);

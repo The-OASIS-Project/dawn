@@ -423,6 +423,8 @@
 
    function handleSearchResponse(payload) {
       memoryState.loading = false;
+      /* Landed after a switch to Learned: that list isn't a search result. */
+      if (memoryState.activeTab === 'learned') return;
 
       if (!payload.success) {
          console.error('Failed to search memory:', payload.error);
