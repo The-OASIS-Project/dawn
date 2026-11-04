@@ -208,10 +208,15 @@ int contacts_find_by_value(int user_id,
          row_to_contact(st, &out[count++]);
       }
    }
+   /* The error message is read under the lock: another thread's call could
+    * replace it once released. */
+   const bool failed = rc != SQLITE_DONE && rc != SQLITE_ROW;
+   if (failed) {
+      OLOG_ERROR("contacts_find_by_value: %s", sqlite3_errmsg(s_db.db));
+   }
    sqlite3_finalize(st);
    AUTH_DB_UNLOCK();
-   if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
-      OLOG_ERROR("contacts_find_by_value: %s", sqlite3_errmsg(s_db.db));
+   if (failed) {
       return 1;
    }
    if (count_out)
