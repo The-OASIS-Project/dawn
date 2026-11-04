@@ -39,6 +39,7 @@
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "core/outside_kind.h"
+#include "core/strbuf.h"
 #include "dawn_error.h"
 #include "memory/memory_consolidate.h"
 #include "memory/memory_consolidation_undo.h"
@@ -1128,20 +1129,20 @@ void test_a_merge_whose_keeper_a_later_batch_restated_is_stale(void) {
 /* A batch whose record fills up: nothing past the cap is applied without its
  * row, and it stops as full. */
 void test_a_batch_that_fills_its_record_stops_cleanly(void) {
-   size_t cap = 64 * 1024;
-   char *reply = malloc(cap);
-   TEST_ASSERT_NOT_NULL(reply);
-   size_t len = (size_t)snprintf(reply, cap, "{\"facts\": [");
+   strbuf_t reply;
+   strbuf_init(&reply, 64 * 1024);
+   strbuf_append(&reply, "{\"facts\": [");
    for (int i = 0; i < 300; i++) {
-      len += (size_t)snprintf(reply + len, cap - len,
-                              "%s{\"text\": \"Jonathan Smith owns rare item number %d\", "
-                              "\"subject\": \"Jonathan Smith\"}",
-                              i ? ", " : "", i);
+      strbuf_appendf(&reply,
+                     "%s{\"text\": \"Jonathan Smith owns rare item number %d\", "
+                     "\"subject\": \"Jonathan Smith\"}",
+                     i ? ", " : "", i);
    }
-   snprintf(reply + len, cap - len, "]}");
+   strbuf_append(&reply, "]}");
+   TEST_ASSERT_FALSE(strbuf_oom(&reply));
    script(NULL);
-   const int64_t batch = run(reply, 0);
-   free(reply);
+   const int64_t batch = run(strbuf_str(&reply), 0);
+   strbuf_free(&reply);
    TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATION_OPS_MAX,
                          (int)q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE batch_id = ?1",
                                 batch, NULL));
