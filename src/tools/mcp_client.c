@@ -49,6 +49,7 @@
 #define MCP_DESTROY_WAIT_MS 5000
 #define MCP_FAIL_WINDOW_SEC 60
 #define MCP_FAIL_THRESHOLD 3
+#define MCP_DISABLED_COOLDOWN_SEC 300 /* then one more connect attempt */
 #define MCP_DEFAULT_TIMEOUT_MS 30000
 #define MCP_DEFAULT_CONNECT_WAIT_MS 10000
 
@@ -490,6 +491,22 @@ static int do_request(mcp_client_t *c,
  * Handshake + lifecycle
  * -------------------------------------------------------------------------- */
 
+/* Disabled, and not yet cooled down: a server that was down gets one more
+ * attempt each cooldown rather than staying off until an operator reset. */
+static bool disabled_locked(mcp_client_t *c) {
+   if (c->state != MCP_STATE_DISABLED) {
+      return false;
+   }
+   const int64_t now = mono_now_sec();
+   if (now - c->fail_ts[2] < MCP_DISABLED_COOLDOWN_SEC) {
+      return true;
+   }
+   /* One attempt: its failure disables it again for another cooldown. */
+   c->fail_ts[1] = c->fail_ts[2] = now;
+   c->state = MCP_STATE_DISCONNECTED;
+   return false;
+}
+
 static bool record_failure_locked(mcp_client_t *c) {
    int64_t now = mono_now_sec();
    c->fail_ts[0] = c->fail_ts[1];
@@ -582,7 +599,7 @@ int mcp_client_connect(mcp_client_t *c) {
    while (c->state == MCP_STATE_CONNECTING) {
       pthread_cond_wait(&c->state_cv, &c->state_mtx); /* another thread is connecting */
    }
-   if (c->state == MCP_STATE_DISABLED) {
+   if (disabled_locked(c)) {
       pthread_mutex_unlock(&c->state_mtx);
       return MCP_ERR_DISABLED;
    }
@@ -692,11 +709,12 @@ int mcp_client_call(mcp_client_t *c,
    atomic_fetch_add(&c->calls_in_flight, 1);
 
    pthread_mutex_lock(&c->state_mtx);
+   const bool disabled = disabled_locked(c);
    mcp_client_state_t st = c->state;
    pthread_mutex_unlock(&c->state_mtx);
 
    int rc = SUCCESS;
-   if (st == MCP_STATE_DISABLED) {
+   if (disabled) {
       rc = MCP_ERR_DISABLED;
    } else if (st == MCP_STATE_SHUTTING_DOWN) {
       rc = MCP_ERR_SHUTDOWN;

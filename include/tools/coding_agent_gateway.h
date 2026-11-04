@@ -60,6 +60,9 @@ int coding_gateway_call(int user_id,
                         struct json_object **out,
                         char **err);
 
+/** The string @p key of a gateway answer's object @p o, or "" (missing, null). */
+const char *coding_gateway_jstr(struct json_object *o, const char *key);
+
 /** DAWN's client_ref for job @p conv_id into @p out (CODING_AGENT_REF_MAX). */
 void coding_gateway_ref(int64_t conv_id, char *out, size_t out_len);
 

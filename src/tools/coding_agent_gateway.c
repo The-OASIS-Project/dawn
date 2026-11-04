@@ -117,6 +117,15 @@ int coding_gateway_call(int user_id,
    return CODING_GW_OK;
 }
 
+const char *coding_gateway_jstr(struct json_object *o, const char *key) {
+   struct json_object *v = NULL;
+   if (o == NULL || !json_object_object_get_ex(o, key, &v) || v == NULL ||
+       json_object_is_type(v, json_type_null)) {
+      return "";
+   }
+   return json_object_get_string(v);
+}
+
 void coding_gateway_ref(int64_t conv_id, char *out, size_t out_len) {
    snprintf(out, out_len, CODING_AGENT_CLIENT_REF_FMT, (long long)conv_id);
 }

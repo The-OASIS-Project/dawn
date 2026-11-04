@@ -238,6 +238,14 @@ bool turn_origin_capture(turn_origin_t *out) {
    return true;
 }
 
+/* --- the watcher (its own test) ------------------------------------------- */
+
+int coding_watch_start(void) {
+   return SUCCESS;
+}
+void coding_watch_stop(void) {
+}
+
 /* --- the registry ---------------------------------------------------------- */
 
 static tool_metadata_t g_meta;

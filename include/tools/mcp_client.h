@@ -50,7 +50,8 @@ typedef enum {
    MCP_STATE_CONNECTING,    /**< Transport starting + handshake in progress. */
    MCP_STATE_CONNECTED,     /**< Handshake complete; calls allowed. */
    MCP_STATE_SHUTTING_DOWN, /**< Graceful teardown in progress. */
-   MCP_STATE_DISABLED,      /**< Too many connect failures; needs operator reset. */
+   MCP_STATE_DISABLED,      /**< Too many connect failures: no attempt until a cooldown
+                                 passes or an operator reset. */
 } mcp_client_state_t;
 
 /** Per-request progress callback (driven by `notifications/progress`). */

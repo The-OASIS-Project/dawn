@@ -2345,6 +2345,14 @@ dawn_add_unit_test(test_coding_agent_tool
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# coding-agent watcher: gateway events onto jobs, start-up check, cursor.
+dawn_add_unit_test(test_coding_agent_watch
+   SOURCES test_coding_agent_watch.c
+           ${SRC_ROOT}/src/tools/coding_agent_watch.c
+           ${SRC_ROOT}/src/core/event_payload.c
+   LIBS    dawn_common unity pthread m ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Background-job session pool.
 dawn_add_unit_test(test_job_manager
    SOURCES test_job_manager.c

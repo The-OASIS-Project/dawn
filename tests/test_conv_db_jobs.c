@@ -292,6 +292,12 @@ static void test_coding_job_is_not_plain_resumable(void) {
    conv_db_create_job(alice_id, "fix the oracle", 0, "detached", "notify", NULL, 1, "task", &cjob);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_kind(cjob, JOB_KIND_CODING));
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_running(cjob, 100));
+   job_record_t only[4];
+   int n = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_job_scan_active_kind(JOB_KIND_CODING, only, 4, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(cjob, only[0].id);
    conv_db_job_set_terminal(cjob, "failed", "x", 200);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(cjob, alice_id, false));
    conv_db_job_set_terminal(cjob, "cancelled", NULL, 200);

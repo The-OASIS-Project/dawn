@@ -768,6 +768,30 @@ int conv_db_job_scan_active(job_record_t *out, int max, int *count_out) {
    return rc;
 }
 
+struct kind_bind {
+   const char *kind;
+   int limit;
+};
+static void bind_kind_limit(sqlite3_stmt *st, void *ctx) {
+   const struct kind_bind *b = ctx;
+   sqlite3_bind_text(st, 1, b->kind, -1, SQLITE_STATIC);
+   sqlite3_bind_int(st, 2, b->limit);
+}
+
+int conv_db_job_scan_active_kind(const char *kind, job_record_t *out, int max, int *count_out) {
+   if (!count_out || !kind) {
+      return AUTH_DB_INVALID;
+   }
+   struct kind_bind b = { kind, max };
+   AUTH_DB_LOCK_OR_FAIL();
+   int rc = job_select_into("SELECT " JOB_SELECT_COLS " FROM conversations "
+                            "WHERE job_status IN ('running','queued') AND job_kind = ? "
+                            "ORDER BY created_at ASC LIMIT ?",
+                            bind_kind_limit, &b, out, max, count_out);
+   AUTH_DB_UNLOCK();
+   return rc;
+}
+
 /* =============================================================================
  * Reinvoke support (Phase 3 — reinvoke_parent)
  * ============================================================================= */

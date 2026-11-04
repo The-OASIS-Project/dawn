@@ -1522,6 +1522,13 @@ int conv_db_job_pending_reinvoke_for_parent(int64_t parent_id,
 int conv_db_job_scan_active(job_record_t *out, int max, int *count_out);
 
 /**
+ * @brief System-caller: the jobs of one kind still running/queued, oldest
+ *        first.
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID or AUTH_DB_FAILURE.
+ */
+int conv_db_job_scan_active_kind(const char *kind, job_record_t *out, int max, int *count_out);
+
+/**
  * @brief System-caller: mark several jobs' on_complete_fired=1 in one transaction.
  *
  * Used by the reinvoke worker to claim a coalesced group atomically alongside

@@ -48,6 +48,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "tools/coding_agent_gateway.h"
+#include "tools/coding_agent_watch.h"
 #include "tools/tool_pending.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
@@ -89,15 +90,6 @@ static int s_marks_next;
 
 /* ========== Helpers ========== */
 
-static const char *jstr(struct json_object *o, const char *key) {
-   struct json_object *v = NULL;
-   if (o == NULL || !json_object_object_get_ex(o, key, &v) || v == NULL ||
-       json_object_is_type(v, json_type_null)) {
-      return "";
-   }
-   return json_object_get_string(v);
-}
-
 static char *error_result(const char *text) {
    char *out = malloc(strlen(text) + sizeof(TOOL_RESULT_ERROR_MARK));
    if (out != NULL) {
@@ -126,22 +118,23 @@ static void append_excerpt(strbuf_t *sb, const char *label, const char *text, si
 /* One task: its job, state, repo and branch, then what it was asked (and its
  * result once it ended). */
 static void append_task(strbuf_t *sb, struct json_object *t, bool full) {
-   const int64_t job = coding_gateway_ref_job(jstr(t, "client_ref"));
+   const int64_t job = coding_gateway_ref_job(coding_gateway_jstr(t, "client_ref"));
    if (job > 0) {
       strbuf_appendf(sb, "- job #%lld", (long long)job);
    } else {
-      strbuf_appendf(sb, "- task %s", jstr(t, "id"));
+      strbuf_appendf(sb, "- task %s", coding_gateway_jstr(t, "id"));
    }
-   strbuf_appendf(sb, " [%s] %s, branch %s", jstr(t, "status"), jstr(t, "repo"), jstr(t, "branch"));
-   const char *cost = jstr(t, "cost_usd");
+   strbuf_appendf(sb, " [%s] %s, branch %s", coding_gateway_jstr(t, "status"),
+                  coding_gateway_jstr(t, "repo"), coding_gateway_jstr(t, "branch"));
+   const char *cost = coding_gateway_jstr(t, "cost_usd");
    if (cost[0] != '\0') {
       strbuf_appendf(sb, ", spent $%s", cost);
    }
    strbuf_append(sb, "\n");
    const size_t max = full ? CA_FULL_TEXT : CA_EXCERPT;
-   append_excerpt(sb, "task", jstr(t, "task"), max);
-   append_excerpt(sb, "result", jstr(t, "summary"), max);
-   append_excerpt(sb, "error", jstr(t, "error"), max);
+   append_excerpt(sb, "task", coding_gateway_jstr(t, "task"), max);
+   append_excerpt(sb, "result", coding_gateway_jstr(t, "summary"), max);
+   append_excerpt(sb, "error", coding_gateway_jstr(t, "error"), max);
 }
 
 /* Note that this turn returned the agent's words: a delegate in it would rest
@@ -200,8 +193,8 @@ static char *handle_list(int user_id) {
       const size_t n = json_object_array_length(repos);
       for (size_t i = 0; i < n; i++) {
          struct json_object *r = json_object_array_get_idx(repos, i);
-         strbuf_appendf(&sb, " %s (base %s)%s", jstr(r, "name"), jstr(r, "base"),
-                        i + 1 < n ? "," : "");
+         strbuf_appendf(&sb, " %s (base %s)%s", coding_gateway_jstr(r, "name"),
+                        coding_gateway_jstr(r, "base"), i + 1 < n ? "," : "");
       }
    }
    strbuf_append(&sb, "\nYour coding tasks, newest first:\n");
@@ -263,7 +256,8 @@ static char *handle_status(struct json_object *details, int user_id) {
       return error_result_free(strbuf_steal(&sb));
    }
    struct json_object *task = NULL, *pending = NULL;
-   if (!json_object_object_get_ex(ans, "task", &task)) {
+   if (!json_object_object_get_ex(ans, "task", &task) ||
+       !json_object_is_type(task, json_type_object)) {
       json_object_put(ans);
       char buf[160];
       snprintf(buf, sizeof(buf),
@@ -285,8 +279,10 @@ static char *handle_status(struct json_object *details, int user_id) {
          struct json_object *payload = NULL;
          json_object_object_get_ex(r, "payload", &payload);
          char value[CA_VALUE_MAX + 64];
-         str_excerpt_line(jstr(payload, "value"), CA_VALUE_MAX, value, sizeof(value));
-         strbuf_appendf(&sb, "- request %s (%s): %s\n", jstr(r, "id"), jstr(r, "kind"), value);
+         str_excerpt_line(coding_gateway_jstr(payload, "value"), CA_VALUE_MAX, value,
+                          sizeof(value));
+         strbuf_appendf(&sb, "- request %s (%s): %s\n", coding_gateway_jstr(r, "id"),
+                        coding_gateway_jstr(r, "kind"), value);
       }
       if (i < n) {
          strbuf_appendf(&sb, "(%zu more requests not shown)\n", n - i);
@@ -303,8 +299,8 @@ static char *handle_delegate(struct json_object *details,
                              int user_id,
                              int64_t parent_conv,
                              const turn_origin_t *origin) {
-   const char *repo = jstr(details, "repo");
-   const char *task = jstr(details, "task");
+   const char *repo = coding_gateway_jstr(details, "repo");
+   const char *task = coding_gateway_jstr(details, "task");
    struct json_object *jbudget = NULL;
    const double budget = json_object_object_get_ex(details, "budget_usd", &jbudget)
                              ? json_object_get_double(jbudget)
@@ -337,7 +333,8 @@ static char *handle_delegate(struct json_object *details,
    if (json_object_object_get_ex(agents, "repos", &repos) &&
        json_object_is_type(repos, json_type_array)) {
       for (size_t i = 0; i < json_object_array_length(repos) && !known; i++) {
-         known = strcmp(jstr(json_object_array_get_idx(repos, i), "name"), repo) == 0;
+         known = strcmp(coding_gateway_jstr(json_object_array_get_idx(repos, i), "name"), repo) ==
+                 0;
       }
    }
    json_object_put(agents);
@@ -408,7 +405,7 @@ static int start_task(int user_id,
       struct json_object *ans = NULL;
       rc = coding_gateway_call(user_id, "task_start", args, &ans, err);
       if (rc == CODING_GW_OK) {
-         snprintf(branch, branch_len, "%s", jstr(ans, "branch"));
+         snprintf(branch, branch_len, "%s", coding_gateway_jstr(ans, "branch"));
       }
       json_object_put(ans);
    }
@@ -470,10 +467,17 @@ static char *handle_confirm_delegate(struct json_object *details,
     * the row was made wins, and the task it started is stopped. */
    if (conv_db_job_set_running(conv_id, time(NULL)) != AUTH_DB_SUCCESS) {
       job_record_t rec;
-      const bool cancelled = conv_db_job_get(conv_id, user_id, &rec) == AUTH_DB_SUCCESS &&
-                             strcmp(rec.job_status, "cancelled") == 0;
+      const bool read = conv_db_job_get(conv_id, user_id, &rec) == AUTH_DB_SUCCESS;
+      if (read && strcmp(rec.job_status, "queued") != 0 &&
+          strcmp(rec.job_status, "cancelled") != 0) {
+         /* The agent already finished (its end came in first): the job says how. */
+         char buf[CONV_TITLE_MAX + 64];
+         snprintf(buf, sizeof(buf), "Started coding job #%lld; it has already ended (%s).",
+                  (long long)conv_id, rec.job_status);
+         return strdup(buf);
+      }
       coding_gateway_cancel(user_id, conv_id);
-      if (cancelled) {
+      if (read && strcmp(rec.job_status, "cancelled") == 0) {
          return error_result("The job was cancelled while it started; the agent was stopped.");
       }
       end_quietly(conv_id, user_id, "failed", "couldn't record the start");
@@ -606,8 +610,16 @@ static int coding_agent_init(void) {
    return job_manager_register_kind_cancel(JOB_KIND_CODING, coding_cancel);
 }
 
+/* Once the daemon is up: the watcher carries the gateway's events onto jobs. */
+static int coding_agent_start(void) {
+   return coding_watch_start();
+}
+
+/* Cancels in flight get their wait first: stopping the watcher cuts the
+ * gateway off for everyone. */
 static void coding_agent_stop(void) {
    coding_gateway_stop();
+   coding_watch_stop();
 }
 
 static const treg_param_t coding_agent_params[] = {
@@ -665,6 +677,7 @@ static const tool_metadata_t coding_agent_metadata = {
    .callback = coding_agent_callback,
    .is_available = coding_agent_is_available,
    .init = coding_agent_init,
+   .start = coding_agent_start,
    .stop = coding_agent_stop,
 };
 

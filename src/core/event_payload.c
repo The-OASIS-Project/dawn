@@ -306,6 +306,154 @@ char *event_payload_tool_result(const char *tool_name,
    return out;
 }
 
+/* Whether a run of @p len bytes at @p p reads as a credential: an "sk-" key, a
+ * JWT ("eyJ..."), or an opaque run of OPAQUE_RUN_MIN or more mixing letters and
+ * digits. */
+static bool run_is_secret(const char *p, size_t len) {
+   if ((len > 3 && strncmp(p, "sk-", 3) == 0) || (len >= 16 && strncmp(p, "eyJ", 3) == 0)) {
+      return true;
+   }
+   bool letter = false, digit = false;
+   for (size_t k = 0; k < len; k++) {
+      letter = letter || isalpha((unsigned char)p[k]);
+      digit = digit || isdigit((unsigned char)p[k]);
+   }
+   return len >= OPAQUE_RUN_MIN && letter && digit;
+}
+
+/* A copy of @p in with each run that looks like a credential (run_is_secret, or
+ * the token after "Bearer") replaced by EVENT_REDACTED_MARKER.  A run is
+ * letters, digits, '-', '_' and '+': '/', '.', '=' and ':' end it, so a path,
+ * a URL or KEY=value is judged part by part. */
+static char *redact_runs(const char *in) {
+   const size_t len = strlen(in);
+   char *out = malloc(len * sizeof(EVENT_REDACTED_MARKER) + 1); /* every run a marker */
+   if (out == NULL) {
+      return NULL;
+   }
+   size_t o = 0;
+   bool after_bearer = false;
+   for (size_t i = 0; i < len;) {
+      size_t run = 0;
+      while (i + run < len &&
+             (isalnum((unsigned char)in[i + run]) || strchr("-_+", in[i + run]) != NULL)) {
+         run++;
+      }
+      if (run == 0) {
+         out[o++] = in[i++];
+         continue;
+      }
+      const bool secret = after_bearer || run_is_secret(in + i, run);
+      after_bearer = run == 6 && strncasecmp(in + i, "bearer", 6) == 0;
+      if (secret) {
+         memcpy(out + o, EVENT_REDACTED_MARKER, sizeof(EVENT_REDACTED_MARKER) - 1);
+         o += sizeof(EVENT_REDACTED_MARKER) - 1;
+      } else {
+         memcpy(out + o, in + i, run);
+         o += run;
+      }
+      i += run;
+   }
+   out[o] = '\0';
+   return out;
+}
+
+/* One field's text: a string, or a list of strings one per line; cut at
+ * EVENT_AGENT_TEXT_CAP on a whole character. */
+static char *agent_field_text(struct json_object *v) {
+   char *text = NULL;
+   if (json_object_is_type(v, json_type_array)) {
+      text = calloc(1, EVENT_AGENT_TEXT_CAP + 1);
+      size_t used = 0;
+      for (size_t j = 0; text != NULL && j < json_object_array_length(v); j++) {
+         struct json_object *el = json_object_array_get_idx(v, j);
+         if (!json_object_is_type(el, json_type_string)) {
+            continue;
+         }
+         const char *str = json_object_get_string(el);
+         const size_t sep = used ? 1 : 0;
+         size_t take = strlen(str);
+         if (used + sep + take > EVENT_AGENT_TEXT_CAP) {
+            take = used + sep < EVENT_AGENT_TEXT_CAP
+                       ? event_payload_utf8_floor(str, EVENT_AGENT_TEXT_CAP - used - sep)
+                       : 0;
+            if (take == 0) {
+               break;
+            }
+         }
+         if (sep) {
+            text[used++] = '\n';
+         }
+         memcpy(text + used, str, take);
+         used += take;
+         text[used] = '\0';
+         if (used >= EVENT_AGENT_TEXT_CAP) {
+            break;
+         }
+      }
+   } else if (json_object_is_type(v, json_type_string)) {
+      text = strdup(json_object_get_string(v));
+      if (text != NULL && strlen(text) > EVENT_AGENT_TEXT_CAP) {
+         text[event_payload_utf8_floor(text, EVENT_AGENT_TEXT_CAP)] = '\0';
+      }
+   }
+   return text;
+}
+
+static bool all_ints(struct json_object *arr) {
+   for (size_t j = 0; j < json_object_array_length(arr); j++) {
+      if (!json_object_is_type(json_object_array_get_idx(arr, j), json_type_int)) {
+         return false;
+      }
+   }
+   return true;
+}
+
+char *event_payload_agent(const char *gw_kind,
+                          int64_t gw_seq,
+                          struct json_object *data,
+                          const char *const *fields,
+                          const char *const *scrubbed) {
+   struct json_object *root = json_object_new_object();
+   if (root == NULL) {
+      return NULL;
+   }
+   json_object_object_add(root, "gw", json_object_new_string(gw_kind ? gw_kind : ""));
+   json_object_object_add(root, "gw_seq", json_object_new_int64(gw_seq));
+   for (size_t i = 0; data != NULL && fields != NULL && fields[i] != NULL; i++) {
+      struct json_object *v = NULL;
+      if (!json_object_object_get_ex(data, fields[i], &v) || v == NULL) {
+         continue;
+      }
+      if (json_object_is_type(v, json_type_int) || json_object_is_type(v, json_type_double) ||
+          json_object_is_type(v, json_type_boolean) ||
+          (json_object_is_type(v, json_type_array) && all_ints(v))) {
+         json_object_object_add(root, fields[i], json_object_get(v));
+         continue;
+      }
+      char *text = agent_field_text(v);
+      if (text == NULL) {
+         continue;
+      }
+      for (size_t k = 0; scrubbed != NULL && scrubbed[k] != NULL; k++) {
+         if (strcmp(fields[i], scrubbed[k]) == 0) {
+            char *clean = redact_runs(text);
+            free(text);
+            text = clean;
+            break;
+         }
+      }
+      if (text != NULL) {
+         json_object_object_add(root, fields[i], json_object_new_string(text));
+         free(text);
+      }
+   }
+   const char *rendered = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
+   char *out = rendered ? strdup(rendered) : NULL;
+   json_object_put(root);
+   return out;
+}
+
 char *event_payload_status(bool generating) {
    struct json_object *root = json_object_new_object();
    if (root == NULL) {
