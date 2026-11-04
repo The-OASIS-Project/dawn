@@ -347,8 +347,29 @@ static void test_delegate_then_confirm_starts_in_order(void) {
    json_object_put(sent);
 }
 
+/* A question first: the yes two turns later still starts it; a turn that
+ * read the agent's report can't confirm. */
+static void test_confirm_in_a_later_turn(void) {
+   char *preview = call("delegate", "{\"repo\":\"dawn\",\"task\":\"t\"}");
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   free(preview);
+   g_turn++; /* the user asks something */
+   g_turn++; /* then reads the agent's report and says yes in that turn */
+   char *list = call("list", NULL);
+   free(list);
+   char *r = call("confirm_delegate", args);
+   TEST_ASSERT_TRUE(is_error(r));
+   free(r);
+   g_turn++; /* yes, in a turn of its own */
+   r = call("confirm_delegate", args);
+   TEST_ASSERT_FALSE(is_error(r));
+   free(r);
+   TEST_ASSERT_EQUAL_STRING("running", g_status);
+}
+
 /* A confirm in the turn that proposed it, or for another id, starts nothing. */
-static void test_confirm_needs_the_next_turn_and_the_id(void) {
+static void test_confirm_needs_a_later_turn_and_the_id(void) {
    char *preview = call("delegate", "{\"repo\":\"dawn\",\"task\":\"t\"}");
    const unsigned id = preview_id(preview);
    free(preview);
@@ -528,7 +549,8 @@ int main(void) {
    TEST_ASSERT_EQUAL_INT(0, g_meta.init());
    UNITY_BEGIN();
    RUN_TEST(test_delegate_then_confirm_starts_in_order);
-   RUN_TEST(test_confirm_needs_the_next_turn_and_the_id);
+   RUN_TEST(test_confirm_needs_a_later_turn_and_the_id);
+   RUN_TEST(test_confirm_in_a_later_turn);
    RUN_TEST(test_unknown_repo_is_refused_before_staging);
    RUN_TEST(test_refused_start_fails_the_job);
    RUN_TEST(test_lost_start_answer_is_retried_then_stopped);

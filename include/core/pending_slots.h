@@ -65,11 +65,14 @@ typedef struct {
    void *base;
    size_t stride;
    int count;
-   int ttl_sec; /* an item older than this has expired */
+   int ttl_sec;     /* an item older than this has expired */
+   int later_turns; /* 0: confirmed in the user's next turn; N: in any of the next N */
 } pending_slots_t;
 
 /** A pending_slots_t over the array @p arr (whose element type passed
- *  PENDING_ITEM_CHECK, and which passed PENDING_ARRAY_CHECK). */
+ *  PENDING_ITEM_CHECK, and which passed PENDING_ARRAY_CHECK).  Its items are
+ *  confirmed only in the user's next turn; for one whose preview the user may
+ *  ask about first, set .later_turns to how many turns it stays open. */
 #define PENDING_SLOTS_TABLE(arr, ttl)                                                            \
    {                                                                                             \
       .base = (arr), .stride = sizeof((arr)[0]), .count = (int)(sizeof(arr) / sizeof((arr)[0])), \

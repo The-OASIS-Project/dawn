@@ -161,7 +161,12 @@ pending_find_rc_t pending_slots_take(const pending_slots_t *slots,
    if (rc != PENDING_FOUND) {
       return rc;
    }
-   const turn_origin_rc_t check = turn_origin_check(&s->origin, current);
+   turn_origin_rc_t check = turn_origin_check(&s->origin, current);
+   if (check == TURN_ORIGIN_NOT_NEXT && slots->later_turns > 0 &&
+       current->turn_number > s->origin.turn_number &&
+       current->turn_number - s->origin.turn_number <= (uint32_t)slots->later_turns) {
+      check = TURN_ORIGIN_OK; /* one of the next few turns of its session */
+   }
    if (orc) {
       *orc = check;
    }

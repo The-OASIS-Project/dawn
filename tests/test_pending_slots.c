@@ -197,6 +197,35 @@ static void test_take_checks_the_turn(void) {
                                                            &out, sizeof(out), &orc));
 }
 
+/* A table with later_turns takes its item in any later turn of the session,
+ * never in the turn that made it or another session's. */
+static void test_later_turns(void) {
+   static item_t items[SLOTS];
+   const pending_slots_t later_slots = { .base = items,
+                                         .stride = sizeof(items[0]),
+                                         .count = SLOTS,
+                                         .ttl_sec = TTL,
+                                         .later_turns = 3 };
+   memset(items, 0, sizeof(items));
+   const turn_origin_t made = origin(7, 500, 1);
+   item_t *it = (item_t *)pending_slots_stage(&later_slots, &made, 1, KIND_CALL, 1000, NULL);
+   TEST_ASSERT_NOT_NULL(it);
+   const uint32_t id = it->hdr.item_id;
+   item_t out;
+   turn_origin_rc_t orc = TURN_ORIGIN_OK;
+   TEST_ASSERT_EQUAL_INT(PENDING_NOT_NOW, pending_slots_take(&later_slots, &made, 1, KIND_CALL, id,
+                                                             1001, &out, sizeof(out), &orc));
+   const turn_origin_t elsewhere = origin(8, 600, 3);
+   TEST_ASSERT_EQUAL_INT(PENDING_NONE, pending_slots_take(&later_slots, &elsewhere, 1, KIND_CALL,
+                                                          id, 1001, &out, sizeof(out), &orc));
+   const turn_origin_t too_late = origin(7, 650, 5);
+   TEST_ASSERT_EQUAL_INT(PENDING_NOT_NOW, pending_slots_take(&later_slots, &too_late, 1, KIND_CALL,
+                                                             id, 1001, &out, sizeof(out), &orc));
+   const turn_origin_t two_later = origin(7, 700, 3);
+   TEST_ASSERT_EQUAL_INT(PENDING_FOUND, pending_slots_take(&later_slots, &two_later, 1, KIND_CALL,
+                                                           id, 1001, &out, sizeof(out), &orc));
+}
+
 /* Staging clears every expired item first, and replaces this session's own
  * expired one; drop with nothing staged is harmless. */
 static void test_expired_swept_on_stage(void) {
@@ -290,6 +319,7 @@ int main(void) {
    RUN_TEST(test_drop_and_origin);
    RUN_TEST(test_item_id_binds_the_confirm);
    RUN_TEST(test_take_checks_the_turn);
+   RUN_TEST(test_later_turns);
    RUN_TEST(test_expired_swept_on_stage);
    RUN_TEST(test_twice_in_one_turn);
    RUN_TEST(test_drop_keeps_this_turns_item);

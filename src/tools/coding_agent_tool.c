@@ -55,6 +55,7 @@
 
 #define CA_PENDING_DELEGATE 1
 #define CA_PENDING_TTL_SEC 600
+#define CA_CONFIRM_TURNS 3 /* turns after the preview that may confirm it */
 #define CA_PENDING_MAX 8
 #define CA_REPO_MAX 64
 #define CA_TASK_MAX 4000          /* the task text sent (the gateway caps what it stores too) */
@@ -78,7 +79,15 @@ PENDING_ITEM_CHECK(ca_pending_t);
 static ca_pending_t s_pending[CA_PENDING_MAX];
 static pthread_mutex_t s_pending_mutex = PTHREAD_MUTEX_INITIALIZER;
 PENDING_ARRAY_CHECK(s_pending);
-static const pending_slots_t s_pending_slots = PENDING_SLOTS_TABLE(s_pending, CA_PENDING_TTL_SEC);
+/* One of the next few turns may confirm: the user may ask about the task
+ * before agreeing.  The id binds the confirm to the task they were shown. */
+static const pending_slots_t s_pending_slots = {
+   .base = s_pending,
+   .stride = sizeof(s_pending[0]),
+   .count = CA_PENDING_MAX,
+   .ttl_sec = CA_PENDING_TTL_SEC,
+   .later_turns = CA_CONFIRM_TURNS,
+};
 
 /* The turn, per session, in which list or status returned the agent's words
  * (guarded by s_pending_mutex). */
@@ -424,6 +433,11 @@ static char *handle_confirm_delegate(struct json_object *details,
    const uint32_t id = details_id(details);
    if (id == 0) {
       return tool_pending_missing_id("coding task");
+   }
+   /* Not in a turn that read the agent's report: a yes there could be its words. */
+   if (turn_read_agent_text(origin)) {
+      return error_result("This turn read the coding agent's report, so the task can't be "
+                          "confirmed in it. Ask the user again.");
    }
    ca_pending_t p;
    turn_origin_rc_t orc = TURN_ORIGIN_OK;
