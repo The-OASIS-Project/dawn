@@ -34,12 +34,13 @@ ProtectHome=true
 PrivateTmp=true
 ProtectSystem=full
 ReadWritePaths=/var/lib/dawn-gateway /var/lib/dawn-agent
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
 ProtectControlGroups=true
-LockPersonality=true
-RestrictRealtime=true
+# No ProtectKernelTunables/Modules/Logs, LockPersonality or RestrictRealtime: for a
+# service with a User=, each of them turns on NoNewPrivileges, and the gateway runs
+# every agent and git command as dawn-agent through sudo (agent-gateway.sudoers).
+# What sudo (or anything exploiting it) can ever hold instead: switching users and
+# PAM's limits and audit, nothing more (no modules, mounts or /proc/sys writes).
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE CAP_SYS_RESOURCE
 
 [Install]
 WantedBy=multi-user.target
