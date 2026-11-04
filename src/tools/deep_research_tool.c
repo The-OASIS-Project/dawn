@@ -351,7 +351,7 @@ int research_spawn_run(int user_id,
     * stamp must fail the start CLOSED: an unmarked research job is plain-resumable
     * and a plain resume would corrupt the run.  The run row doesn't exist yet, so
     * only the job row needs retiring. */
-   if (conv_db_job_set_kind(conv_id, "research") != AUTH_DB_SUCCESS) {
+   if (conv_db_job_set_kind(conv_id, JOB_KIND_RESEARCH) != AUTH_DB_SUCCESS) {
       job_manager_set_terminal(conv_id, user_id, "failed", "failed to mark research job",
                                time(NULL), 0);
       job_manager_mark_dirty();

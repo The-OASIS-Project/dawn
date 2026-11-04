@@ -93,6 +93,7 @@ void session_release(session_t *s) {
 
 /* Opt-in stale row, so one test can drive the boot interrupted-scan. */
 static bool g_stale_enabled = false;
+static const char *g_stale_kind = ""; /* the stale row's job_kind */
 #define STUB_STALE_ID 999
 
 int conv_db_job_scan_active(job_record_t *out, int max, int *count_out) {
@@ -104,6 +105,7 @@ int conv_db_job_scan_active(job_record_t *out, int max, int *count_out) {
       snprintf(out[0].title, sizeof(out[0].title), "stale");
       snprintf(out[0].on_complete, sizeof(out[0].on_complete), "reinvoke_parent");
       snprintf(out[0].job_status, sizeof(out[0].job_status), "running");
+      snprintf(out[0].job_kind, sizeof(out[0].job_kind), "%s", g_stale_kind);
       out[0].parent_id = 42;
       n = 1;
    }
@@ -246,22 +248,27 @@ int webui_broadcast_job_notification(int user_id, const char *text, int64_t conv
 /* job_update_emit() reads the row back before broadcasting it; these tests
  * exercise pool logic, not the WS frames, so the read reports "not a job" and
  * the emit is a no-op. */
+static job_record_t g_get_row; /* id 0 = no such job */
+
 int conv_db_job_get(int64_t conv_id, int user_id, job_record_t *out) {
-   (void)conv_id;
-   (void)user_id;
-   (void)out;
-   return AUTH_DB_NOT_FOUND;
+   if (g_get_row.id == 0 || conv_id != g_get_row.id) {
+      return AUTH_DB_NOT_FOUND;
+   }
+   if (user_id != g_get_row.user_id) {
+      return AUTH_DB_FORBIDDEN;
+   }
+   *out = g_get_row;
+   return AUTH_DB_SUCCESS;
 }
 
-/* job_manager_cancel_or_retire()'s not-running branch probes the row's status to
- * decide between "retire a queued row" and "already terminal".  These tests only
- * exercise the running-job path (the pool), so report no such job. */
-int conv_db_job_get_status(int64_t conv_id, int user_id, char *status_out, size_t n) {
+int conv_db_job_set_terminal_if_active(int64_t conv_id,
+                                       const char *status,
+                                       const char *error,
+                                       time_t at) {
    (void)conv_id;
-   (void)user_id;
-   if (status_out && n > 0) {
-      status_out[0] = '\0';
-   }
+   (void)status;
+   (void)error;
+   (void)at;
    return AUTH_DB_NOT_FOUND;
 }
 
@@ -363,6 +370,7 @@ void setUp(void) {
    g_missed_inserts = 0;
    g_terminal_n = 0;
    g_stale_enabled = false;
+   g_stale_kind = "";
    atomic_store(&g_emit_alert_calls, 0);
    atomic_store(&g_emit_alert_rc, SUCCESS);
    atomic_store(&g_emit_alert_block, false);
@@ -479,6 +487,70 @@ static void test_for_each_session(void) {
    s_visited = 0;
    job_manager_for_each_session(count_visit, NULL);
    TEST_ASSERT_EQUAL_INT(0, s_visited);
+}
+
+static int64_t s_hook_conv;
+static int s_hook_user;
+static void coding_cancel(int64_t conv_id, int user_id) {
+   s_hook_conv = conv_id;
+   s_hook_user = user_id;
+}
+
+/* Boot with stale coding row (the stub's one stale row, made a coding job). */
+static int boot_with_stale_coding_row(void) {
+   job_manager_shutdown();
+   g_stale_enabled = true;
+   g_stale_kind = JOB_KIND_CODING;
+   g_terminal_n = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, job_manager_init());
+   return g_terminal_n;
+}
+
+/* Without the coding tool (no hook) nothing would ever end a coding row: a
+ * cancel ends it here, quietly, and a restart interrupts it.  Runs before any
+ * test registers the hook (the table has no unregister). */
+static void test_coding_row_without_its_tool_is_ended_here(void) {
+   memset(&g_get_row, 0, sizeof(g_get_row));
+   g_get_row.id = 78;
+   g_get_row.user_id = 5;
+   snprintf(g_get_row.job_kind, sizeof(g_get_row.job_kind), "%s", JOB_KIND_CODING);
+   snprintf(g_get_row.job_status, sizeof(g_get_row.job_status), "running");
+   TEST_ASSERT_EQUAL_INT(JOB_CANCEL_RETIRED, job_manager_cancel_or_retire(78, 5, NULL, 0));
+   TEST_ASSERT_TRUE(stub_was_fired(78));
+   memset(&g_get_row, 0, sizeof(g_get_row));
+
+   TEST_ASSERT_EQUAL_INT(1, boot_with_stale_coding_row());
+   TEST_ASSERT_EQUAL_STRING("interrupted", g_terminal[0].status);
+}
+
+/* With its tool, a restart leaves a coding row to the tool (its gateway still
+ * runs it).  Runs after the hook is registered. */
+static void test_boot_leaves_coding_rows_to_their_tool(void) {
+   TEST_ASSERT_EQUAL_INT(0, boot_with_stale_coding_row());
+}
+
+/* A kind with a cancel hook has no worker here: an active row goes to the
+ * hook; an ended one, or another user's, doesn't. */
+static void test_cancel_routes_a_kind_to_its_hook(void) {
+   TEST_ASSERT_EQUAL_INT(SUCCESS, job_manager_register_kind_cancel(JOB_KIND_CODING, coding_cancel));
+   memset(&g_get_row, 0, sizeof(g_get_row));
+   g_get_row.id = 77;
+   g_get_row.user_id = 5;
+   snprintf(g_get_row.job_kind, sizeof(g_get_row.job_kind), "%s", JOB_KIND_CODING);
+   const char *active[] = { "running", "queued" };
+   for (int i = 0; i < 2; i++) {
+      snprintf(g_get_row.job_status, sizeof(g_get_row.job_status), "%s", active[i]);
+      s_hook_conv = 0;
+      TEST_ASSERT_EQUAL_INT(JOB_CANCEL_SIGNALLED, job_manager_cancel_or_retire(77, 5, NULL, 0));
+      TEST_ASSERT_EQUAL_INT64(77, s_hook_conv);
+      TEST_ASSERT_EQUAL_INT(5, s_hook_user);
+   }
+   s_hook_conv = 0;
+   TEST_ASSERT_EQUAL_INT(JOB_CANCEL_FORBIDDEN, job_manager_cancel_or_retire(77, 6, NULL, 0));
+   snprintf(g_get_row.job_status, sizeof(g_get_row.job_status), "done");
+   TEST_ASSERT_EQUAL_INT(JOB_CANCEL_ALREADY_TERMINAL, job_manager_cancel_or_retire(77, 5, NULL, 0));
+   TEST_ASSERT_EQUAL_INT64(0, s_hook_conv);
+   memset(&g_get_row, 0, sizeof(g_get_row));
 }
 
 static void test_cancel_ownership(void) {
@@ -948,6 +1020,9 @@ int main(void) {
    RUN_TEST(test_resolver);
    RUN_TEST(test_for_each_session);
    RUN_TEST(test_cancel_ownership);
+   RUN_TEST(test_coding_row_without_its_tool_is_ended_here);
+   RUN_TEST(test_cancel_routes_a_kind_to_its_hook);
+   RUN_TEST(test_boot_leaves_coding_rows_to_their_tool);
    RUN_TEST(test_reap_overdue);
    RUN_TEST(test_reap_not_yet_overdue);
    RUN_TEST(test_reap_disabled_when_zero);

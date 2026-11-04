@@ -319,6 +319,16 @@ typedef int (*tool_init_fn)(void);
 typedef int (*tool_start_fn)(void);
 
 /**
+ * @brief Tool stop function type
+ *
+ * Called early in shutdown, after the WebUI stops taking requests and before
+ * background jobs, the database and MQTT are torn down: stop here what start() started (threads
+ * that call into them), and wait for it.  Cleanup comes later.  Must be safe when start() never ran
+ * (a shutdown during startup).
+ */
+typedef void (*tool_stop_fn)(void);
+
+/**
  * @brief Tool cleanup function type
  *
  * Called at shutdown. Tool should free resources.
@@ -577,6 +587,7 @@ typedef struct {
    /* Lifecycle (optional - NULL if not needed) */
    tool_init_fn init;       /**< Called after config parse */
    tool_start_fn start;     /**< Called once the daemon has finished starting */
+   tool_stop_fn stop;       /**< Called early in shutdown; stops what start started */
    tool_cleanup_fn cleanup; /**< Called at shutdown */
 
    /* Callback (required) */
@@ -643,6 +654,13 @@ int tool_registry_init_tools(void);
  * @return 0 on success, non-zero if any tool start fails
  */
 int tool_registry_start_tools(void);
+
+/**
+ * @brief Stop every tool that has a stop function, in reverse registration order.
+ *
+ * Call once, early in shutdown, before job_manager_shutdown() and the database.
+ */
+void tool_registry_stop_tools(void);
 
 /**
  * @brief Lock the registry to prevent further registrations

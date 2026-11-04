@@ -1323,8 +1323,11 @@ int conv_db_create_continuation(int user_id,
 #define JOB_SPAWN_MODE_MAX 16  /**< "detached" (v1) */
 #define JOB_ON_COMPLETE_MAX 24 /**< "reinvoke_parent" (Phase 3) */
 #define JOB_KIND_MAX 16        /**< "research" discriminator; "" = ordinary job */
-#define JOB_DELIVER_TO_MAX 64  /**< messaging channel display_name */
-#define JOB_ERROR_MAX 256      /**< truncated failure reason */
+/* Stored job_kind values (append only). */
+#define JOB_KIND_RESEARCH "research" /**< a deep-research run (research_worker) */
+#define JOB_KIND_CODING "coding"     /**< a task an agent gateway runs; no DAWN worker */
+#define JOB_DELIVER_TO_MAX 64        /**< messaging channel display_name */
+#define JOB_ERROR_MAX 256            /**< truncated failure reason */
 
 /**
  * @brief A background job's lifecycle row (subset of `conversations` columns).
@@ -1428,6 +1431,21 @@ int conv_db_job_set_terminal(int64_t conv_id,
                              const char *status,
                              const char *error_or_null,
                              time_t finished_at);
+
+/**
+ * @brief System-caller: conv_db_job_set_terminal() only while the job is
+ *        still queued or running.
+ *
+ * For a job whose end can be reported more than once (a coding task's
+ * events replayed after a restart): the first report wins, later ones change
+ * nothing.
+ * @return AUTH_DB_SUCCESS (now terminal), AUTH_DB_NOT_FOUND (already terminal,
+ *         or no such job), AUTH_DB_INVALID or AUTH_DB_FAILURE.
+ */
+int conv_db_job_set_terminal_if_active(int64_t conv_id,
+                                       const char *status,
+                                       const char *error_or_null,
+                                       time_t finished_at);
 
 /**
  * @brief System-caller: set on_complete_fired=1 (idempotency / follow-up guard).

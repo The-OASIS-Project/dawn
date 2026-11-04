@@ -167,6 +167,23 @@ int job_manager_set_terminal(int64_t conv_id,
    return rc;
 }
 
+int job_manager_set_terminal_if_active(int64_t conv_id,
+                                       int user_id,
+                                       const char *status,
+                                       const char *error_or_null,
+                                       time_t finished_at,
+                                       int64_t final_message_id) {
+   int rc = conv_db_job_set_terminal_if_active(conv_id, status, error_or_null, finished_at);
+   if (rc != AUTH_DB_SUCCESS) {
+      return rc; /* already ended (or the write failed): nothing to tell */
+   }
+   conv_event_emit(conv_id, user_id, CONV_EVENT_COMPLETE,
+                   event_payload_complete(status, error_or_null, final_message_id));
+   job_update_emit(conv_id, user_id);
+   job_manager_mark_dirty(); /* the monitor delivers its completion notice */
+   return rc;
+}
+
 void job_update_emit(int64_t conv_id, int user_id) {
    job_update_emit_ex(conv_id, user_id, false);
 }
@@ -229,6 +246,8 @@ static session_t *job_manager_resolve(uint32_t session_id, bool for_reconnect) {
  * Lifecycle
  * ============================================================================= */
 
+static job_kind_cancel_fn kind_cancel_hook(const char *kind);
+
 int job_manager_init(void) {
    pthread_mutex_lock(&s_pool_mutex);
    if (s_initialized) {
@@ -273,14 +292,25 @@ int job_manager_init(void) {
    const time_t pre_boot_ts = s_boot_time - 1;
    job_record_t stale[JOB_BOOT_SCAN_MAX];
    int n_stale = 0;
+   /* A coding job's gateway keeps running it through a DAWN restart; its tool
+    * (cancel hook registered at init) picks it up again.  Without the tool,
+    * nothing would ever end it: interrupt it like the rest. */
+   const bool coding_here = kind_cancel_hook(JOB_KIND_CODING) != NULL;
    if (conv_db_job_scan_active(stale, (int)(sizeof(stale) / sizeof(stale[0])), &n_stale) ==
            AUTH_DB_SUCCESS &&
        n_stale > 0) {
+      int n_marked = 0;
       for (int i = 0; i < n_stale; i++) {
+         if (coding_here && strcmp(stale[i].job_kind, JOB_KIND_CODING) == 0) {
+            continue;
+         }
          job_manager_set_terminal(stale[i].id, stale[i].user_id, "interrupted", "daemon restarted",
                                   pre_boot_ts, 0);
+         n_marked++;
       }
-      OLOG_INFO("job_manager: marked %d interrupted job(s) from a previous run", n_stale);
+      if (n_marked > 0) {
+         OLOG_INFO("job_manager: marked %d interrupted job(s) from a previous run", n_marked);
+      }
    }
 
    /* Reconcile deep-research runs stranded by the same restart: a research job's
@@ -555,6 +585,49 @@ int job_manager_cancel(int64_t conv_id, int user_id) {
    return rc;
 }
 
+/* Cancel hooks for job kinds with no worker in this pool.  Registered at init
+ * and start, read on cancel. */
+#define JOB_KIND_CANCEL_MAX 4
+static struct {
+   char kind[JOB_KIND_MAX];
+   job_kind_cancel_fn fn;
+} s_kind_cancel[JOB_KIND_CANCEL_MAX];
+static pthread_mutex_t s_kind_cancel_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+int job_manager_register_kind_cancel(const char *kind, job_kind_cancel_fn fn) {
+   if (kind == NULL || kind[0] == '\0' || strlen(kind) >= JOB_KIND_MAX || fn == NULL) {
+      return FAILURE;
+   }
+   int rc = FAILURE;
+   pthread_mutex_lock(&s_kind_cancel_mutex);
+   for (int i = 0; i < JOB_KIND_CANCEL_MAX; i++) {
+      if (s_kind_cancel[i].fn == NULL || strcmp(s_kind_cancel[i].kind, kind) == 0) {
+         snprintf(s_kind_cancel[i].kind, sizeof(s_kind_cancel[i].kind), "%s", kind);
+         s_kind_cancel[i].fn = fn;
+         rc = SUCCESS;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_kind_cancel_mutex);
+   return rc;
+}
+
+static job_kind_cancel_fn kind_cancel_hook(const char *kind) {
+   job_kind_cancel_fn fn = NULL;
+   if (kind == NULL || kind[0] == '\0') {
+      return NULL;
+   }
+   pthread_mutex_lock(&s_kind_cancel_mutex);
+   for (int i = 0; i < JOB_KIND_CANCEL_MAX && s_kind_cancel[i].fn != NULL; i++) {
+      if (strcmp(s_kind_cancel[i].kind, kind) == 0) {
+         fn = s_kind_cancel[i].fn;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_kind_cancel_mutex);
+   return fn;
+}
+
 job_cancel_result_t job_manager_cancel_or_retire(int64_t conv_id,
                                                  int user_id,
                                                  char *status_out,
@@ -570,19 +643,34 @@ job_cancel_result_t job_manager_cancel_or_retire(int64_t conv_id,
       return JOB_CANCEL_FORBIDDEN;
    }
 
-   /* Not running.  Either it never reached a worker (queued) or it is already
-    * terminal — the status read is ownership-checked, so a foreign row answers
-    * FORBIDDEN here rather than leaking its state. */
-   char status[JOB_STATUS_MAX];
-   int grc = conv_db_job_get_status(conv_id, user_id, status, sizeof(status));
+   /* No worker here.  It never reached one (queued), it is a kind whose work runs
+    * elsewhere, or it is already terminal — the read is ownership-checked, so a
+    * foreign row answers FORBIDDEN here rather than leaking its state. */
+   job_record_t rec;
+   int grc = conv_db_job_get(conv_id, user_id, &rec);
    if (grc == AUTH_DB_FORBIDDEN) {
       return JOB_CANCEL_FORBIDDEN;
    }
-   if (grc != AUTH_DB_SUCCESS || status[0] == '\0') {
+   if (grc != AUTH_DB_SUCCESS || rec.job_status[0] == '\0') {
       return JOB_CANCEL_NOT_FOUND;
    }
+   const char *status = rec.job_status;
    if (status_out && status_n > 0) {
       snprintf(status_out, status_n, "%s", status);
+   }
+   const bool active = strcmp(status, "queued") == 0 || strcmp(status, "running") == 0;
+   job_kind_cancel_fn hook = active ? kind_cancel_hook(rec.job_kind) : NULL;
+   if (hook != NULL) {
+      hook(conv_id, user_id);
+      return JOB_CANCEL_SIGNALLED;
+   }
+   if (active && strcmp(rec.job_kind, JOB_KIND_CODING) == 0) {
+      /* Its tool isn't here to reach the gateway: end it here (no notice; the
+       * user asked) rather than leave a row nothing will ever end. */
+      job_manager_set_terminal_if_active(conv_id, user_id, "cancelled", "agent gateway unavailable",
+                                         time(NULL), 0);
+      conv_db_job_mark_fired(conv_id);
+      return JOB_CANCEL_RETIRED;
    }
    if (strcmp(status, "queued") == 0) {
       /* No session to signal, so retire the row directly.  mark_fired suppresses
@@ -1264,7 +1352,7 @@ void jobs_monitor_tick(time_t now) {
                   snprintf(it->text, sizeof(it->text), "%s",
                            text); /* owner's speaker: full title */
                } else {
-                  bool research = (strcmp(rows[i].job_kind, "research") == 0);
+                  bool research = (strcmp(rows[i].job_kind, JOB_KIND_RESEARCH) == 0);
                   snprintf(it->text, sizeof(it->text), "%s task finished. Ask me for the result.",
                            research ? "A research" : "A background");
                }

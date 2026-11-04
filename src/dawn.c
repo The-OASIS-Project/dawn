@@ -4261,6 +4261,13 @@ server_shutdown:
    OLOG_INFO("Shutdown: webui_email_exec_stop");
    webui_email_exec_stop();
 #endif
+   /* Tools' own threads (stop hooks) call into jobs and the database: stop them
+    * before either goes. */
+   if (tools_available) {
+      OLOG_INFO("Shutdown: tool_registry_stop_tools");
+      tool_registry_stop_tools();
+   }
+
    /* Background jobs: cancel running jobs before auth/DB teardown (their workers
     * use sessions + conv_db).  Unregisters the resolver + requests cancellation;
     * detached workers observe it and tear down their own sessions. */

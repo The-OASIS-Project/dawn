@@ -285,6 +285,35 @@ static void test_resume_claim_is_exclusive(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(job, alice_id, false));
 }
 
+/* A coding job runs in its gateway, not a DAWN worker: the plain resume never
+ * takes it, whoever asks. */
+static void test_coding_job_is_not_plain_resumable(void) {
+   int64_t cjob = 0;
+   conv_db_create_job(alice_id, "fix the oracle", 0, "detached", "notify", NULL, 1, "task", &cjob);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_kind(cjob, JOB_KIND_CODING));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_running(cjob, 100));
+   conv_db_job_set_terminal(cjob, "failed", "x", 200);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(cjob, alice_id, false));
+   conv_db_job_set_terminal(cjob, "cancelled", NULL, 200);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(cjob, alice_id, true));
+}
+
+/* An end reported twice keeps the first. */
+static void test_terminal_if_active_first_wins(void) {
+   int64_t job = 0;
+   conv_db_create_job(alice_id, "t", 0, "detached", "notify", NULL, 1, "goal", &job);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_job_set_terminal_if_active(job, "cancelled", NULL, 100));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND,
+                         conv_db_job_set_terminal_if_active(job, "done", NULL, 200));
+   job_record_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(job, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("cancelled", r.job_status);
+   TEST_ASSERT_EQUAL_INT(100, (int)r.finished_at);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND,
+                         conv_db_job_set_terminal_if_active(987654, "done", NULL, 1));
+}
+
 /* A job_kind='research' row is NEVER handed to the plain job worker's resume: the
  * research controller drives it, so a plain-worker resume would run the generic
  * loop on a message-less research conversation and corrupt the run (DEEP_RESEARCH
@@ -727,6 +756,8 @@ int main(void) {
    RUN_TEST(test_goal_is_stored_at_create);
    RUN_TEST(test_resume_claim_is_exclusive);
    RUN_TEST(test_research_job_is_not_plain_resumable);
+   RUN_TEST(test_coding_job_is_not_plain_resumable);
+   RUN_TEST(test_terminal_if_active_first_wins);
    RUN_TEST(test_resume_claim_is_ownership_scoped);
    RUN_TEST(test_set_running_loses_to_a_cancel);
    RUN_TEST(test_resume_rejects_non_resumable_states);

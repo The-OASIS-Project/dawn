@@ -407,7 +407,9 @@ database backs (the local owner, watches, interrupted jobs, OTA releases, embedd
 TTS and the WebUI, whose turns have all of that. Last come the inputs that start the moment they
 connect: MQTT's loop and the tools' `start` (the Telegram, Discord and Slack listeners, which take their
 backlog at once), then the scheduler, whose first pass fires the events missed while DAWN was down. No
-thread waits a fixed time for another to be ready.
+thread waits a fixed time for another to be ready. Shutdown mirrors it: once the WebUI has stopped taking
+requests and the LLM thread is joined, the tools' `stop` runs (last registered first), before
+background jobs, the database and MQTT go; the tools' `cleanup` comes last.
 
 **Turn serialization (background-jobs era).** All WebUI LLM turns — user text, push-to-talk
 voice, and background-job re-engagements — funnel through the per-session **turn queue**
@@ -596,6 +598,7 @@ Per-module locks (scoped to a single subsystem):
                                                                      again to delete.  Never run image_store_cleanup / image_store_reclaim_unbound
                                                                      while holding a history_mutex or the auth_db lock
   job_manager::s_pool_mutex (src/core/job_manager.c)       — background-job session pool (REGISTRY tier, like session_manager_rwlock: released before any ref-cond wait, session_free, or conv_db_*/scheduler_* callout)
+  job_manager::s_kind_cancel_mutex (src/core/job_manager.c) — job kinds' cancel hooks (LEAF: held only to register or look up a hook; the hook runs with it released)
   job_reinvoke::s_inflight_mutex (src/core/job_reinvoke.c) — per-parent reinvoke in-flight set (leaf)
   memory_embed_backfill::s_backfill_mutex (src/memory/memory_embed_backfill.c) — embedding-backfill request queue (LEAF; never held across an embed or DB call; joins an already-exited worker while held — safe only because the worker takes no lock after clearing s_backfill_running)
   document_embed_cache::s_cache.mutex (src/tools/document_embed_cache.c) — in-memory document-chunk embeddings (LEAF: never held across a database call; a rebuild reads pages outside it, then installs; scoring holds only this)

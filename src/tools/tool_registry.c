@@ -588,6 +588,27 @@ int tool_registry_start_tools(void) {
    return failures > 0 ? 1 : 0;
 }
 
+void tool_registry_stop_tools(void) {
+   tool_stop_fn stops[TOOL_MAX_REGISTERED];
+   const char *names[TOOL_MAX_REGISTERED];
+   int n = 0;
+   pthread_mutex_lock(&s_registry_mutex);
+   for (int i = 0; i < s_tool_count; i++) {
+      const tool_entry_t *entry = &s_tools[i];
+      if (entry->registered && entry->initialized && entry->metadata.stop) {
+         stops[n] = entry->metadata.stop;
+         names[n] = entry->metadata.name;
+         n++;
+      }
+   }
+   pthread_mutex_unlock(&s_registry_mutex);
+
+   for (int i = n - 1; i >= 0; i--) {
+      OLOG_INFO("Stopping tool: %s", names[i]);
+      stops[i]();
+   }
+}
+
 void tool_registry_shutdown(void) {
    pthread_mutex_lock(&s_registry_mutex);
 
