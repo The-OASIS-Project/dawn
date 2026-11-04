@@ -1,0 +1,207 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * The v114 migration on a v113 database: a note's outside kind filled in from
+ * the research run that filed it and from its gloss fact, a version's from its
+ * document, a rerun leaving rows tagged since alone, and migrated documents and
+ * document_versions tables matching new ones.
+ */
+
+#define AUTH_DB_INTERNAL_ALLOWED
+
+#include <dirent.h>
+#include <libgen.h>
+#include <sqlite3.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include "auth/auth_db.h"
+#include "auth/auth_db_internal.h"
+#include "core/outside_kind.h"
+#include "test_tmp.h"
+#include "unity.h"
+
+static char s_path[TEST_TMP_PATH_MAX];
+static char s_fresh_path[TEST_TMP_PATH_MAX];
+
+static void exec_ok(const char *sql) {
+   char *err = NULL;
+   if (sqlite3_exec(s_db.db, sql, NULL, NULL, &err) != SQLITE_OK) {
+      TEST_FAIL_MESSAGE(err ? err : sql);
+   }
+   sqlite3_free(err);
+}
+
+static int outside_in(const char *table, int id) {
+   char sql[96];
+   snprintf(sql, sizeof(sql), "SELECT outside FROM %s WHERE id = ?", table);
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL));
+   sqlite3_bind_int(st, 1, id);
+   const int v = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int(st, 0) : -1;
+   sqlite3_finalize(st);
+   return v;
+}
+
+/* Notes and documents as a v113 install stored them.
+ *   1 a research run's report filed as a note; 5 one too large for a note.
+ *   2 a note whose gloss learned from an email; 3 one with a clean gloss;
+ *   4 one whose gloss predates the kind (UNKNOWN); 6 an uploaded file.
+ * Versions: 1 of the report, 2 of the clean note, 3 of a deleted note (99),
+ * 4 of a deleted research report (98, its run still naming it). */
+static void seed_v113(void) {
+   exec_ok("PRAGMA foreign_keys=OFF;"
+           "ALTER TABLE documents DROP COLUMN outside;"
+           "ALTER TABLE document_versions DROP COLUMN outside;"
+           "DELETE FROM schema_version;"
+           "INSERT INTO schema_version (version) VALUES (113);"
+           "INSERT INTO users (id, username, password_hash, created_at) VALUES (1, 'jon', 'x', 1);"
+           "INSERT INTO conversations (id, user_id, created_at, updated_at) VALUES "
+           "(10, 1, 1, 1), (11, 1, 1, 1), (12, 1, 1, 1);"
+           "INSERT INTO documents (id, user_id, filename, filepath, filetype, file_hash, "
+           "num_chunks, created_at) VALUES (1, 1, 'Research #1', '', 'note', 'h1', 1, 1),"
+           "(2, 1, 'Tea', '', 'note', 'h2', 1, 1), (3, 1, 'Groceries', '', 'note', 'h3', 1, 1),"
+           "(4, 1, 'Old', '', 'note', 'h4', 1, 1), (5, 1, 'Research #2', '', 'text', 'h5', 3, 1),"
+           "(6, 1, 'a.pdf', 'a.pdf', 'pdf', 'h6', 2, 1);"
+           "INSERT INTO research_runs (conversation_id, user_id, brief, status, report_doc_id, "
+           "created_at) VALUES (10, 1, 'tea', 'done', 1, 1), (11, 1, 'more', 'done', 5, 1), (12, "
+           "1, 'old', 'done', 98, 1);"
+           "INSERT INTO memory_facts (user_id, fact_text, source, note_doc_id, outside) VALUES "
+           "(1, 'g2', 'explicit', 2, 2), (1, 'g3', 'explicit', 3, 0), (1, 'g4', 'explicit', 4, 8),"
+           "(1, 'other', 'explicit', NULL, 1);"
+           "INSERT INTO document_versions (id, document_id, user_id, filename, text, "
+           "archived_at) VALUES (1, 1, 1, 'Research #1', 'old', 1), (2, 3, 1, 'Groceries', "
+           "'eggs', 1), (3, 99, 1, 'Gone', 'x', 1), (4, 98, 1, 'Research #3', 'y', 1);"
+           "PRAGMA foreign_keys=ON;");
+}
+
+/* Each test's database has its own name: the upgrade backs it up under its
+ * name and the second, and two tests can start within one second. */
+static int s_test_no;
+
+/* The database files and pre-upgrade backups a test made. */
+static void remove_db_files(const char *path) {
+   char side[TEST_TMP_PATH_MAX + 8];
+   unlink(path);
+   snprintf(side, sizeof(side), "%s-wal", path);
+   unlink(side);
+   snprintf(side, sizeof(side), "%s-shm", path);
+   unlink(side);
+   char copy[TEST_TMP_PATH_MAX], copy2[TEST_TMP_PATH_MAX], dir[TEST_TMP_PATH_MAX + 16];
+   snprintf(copy, sizeof(copy), "%s", path);
+   snprintf(copy2, sizeof(copy2), "%s", path);
+   snprintf(dir, sizeof(dir), "%s/backups", dirname(copy));
+   const char *base = basename(copy2);
+   DIR *d = opendir(dir);
+   for (struct dirent *e = d ? readdir(d) : NULL; e; e = readdir(d)) {
+      if (strncmp(e->d_name, base, strlen(base)) == 0 && e->d_name[strlen(base)] == '.') {
+         char full[TEST_TMP_PATH_MAX + 300];
+         snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+         unlink(full);
+      }
+   }
+   if (d) {
+      closedir(d);
+   }
+}
+
+void setUp(void) {
+   char name[64];
+   snprintf(name, sizeof(name), "dawn_test_mig_v114_%d.db", ++s_test_no);
+   test_tmp_path(s_path, sizeof(s_path), name);
+   remove_db_files(s_path);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_path));
+   seed_v113();
+   auth_db_shutdown();
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_path)); /* runs v114 */
+}
+
+void tearDown(void) {
+   auth_db_shutdown();
+   remove_db_files(s_path);
+}
+
+static void test_notes_outside_filled_in(void) {
+   TEST_ASSERT_EQUAL_INT64(AUTH_DB_SCHEMA_VERSION,
+                           auth_db_query_int64(s_db.db, "SELECT version FROM schema_version"));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, outside_in("documents", 1));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, outside_in("documents", 2));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 3));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 4));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, outside_in("documents", 5));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 6));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, outside_in("document_versions", 1));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("document_versions", 2));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("document_versions", 3));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, outside_in("document_versions", 4));
+}
+
+/* A rerun (the version held back by a later step) leaves alone what new code
+ * has tagged since. */
+static void test_rerun_keeps_new_tags(void) {
+   exec_ok("UPDATE documents SET outside = 1 WHERE id = 3;"
+           "UPDATE documents SET outside = 0 WHERE id = 1;");
+   exec_ok("UPDATE document_versions SET outside = 2 WHERE id = 3;");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v114(s_db.db));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, outside_in("document_versions", 3));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, outside_in("documents", 3));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 1));
+}
+
+/* The documents and document_versions tables' columns, in a stable order. */
+static char *schema_of(sqlite3 *db) {
+   static const char sql[] =
+       "SELECT group_concat(line, char(10)) FROM (SELECT t.name || ' ' || c.cid || ' ' || c.name "
+       "|| ' ' || c.type || ' ' || c.\"notnull\" || ' ' || COALESCE(c.dflt_value, '-') AS line "
+       "FROM sqlite_master t, pragma_table_info(t.name) c WHERE t.type = 'table' AND t.name IN "
+       "('documents', 'document_versions') ORDER BY t.name, c.cid)";
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(db, sql, -1, &st, NULL));
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   char *out = strdup((const char *)sqlite3_column_text(st, 0));
+   sqlite3_finalize(st);
+   return out;
+}
+
+/* A migrated database and a new one have the same two tables. */
+static void test_migrated_schema_matches_new(void) {
+   char *migrated = schema_of(s_db.db);
+   auth_db_shutdown();
+   remove_db_files(s_fresh_path);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_fresh_path));
+   char *fresh = schema_of(s_db.db);
+   TEST_ASSERT_NOT_NULL(strstr(fresh, "documents 10 outside INTEGER 1 0"));
+   TEST_ASSERT_NOT_NULL(strstr(fresh, "document_versions 6 outside INTEGER 1 0"));
+   TEST_ASSERT_EQUAL_STRING(fresh, migrated);
+   free(migrated);
+   free(fresh);
+   auth_db_shutdown();
+   remove_db_files(s_fresh_path);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_path)); /* for tearDown */
+}
+
+int main(void) {
+   test_tmp_path(s_fresh_path, sizeof(s_fresh_path), "dawn_test_mig_v114_fresh.db");
+   UNITY_BEGIN();
+   RUN_TEST(test_notes_outside_filled_in);
+   RUN_TEST(test_rerun_keeps_new_tags);
+   RUN_TEST(test_migrated_schema_matches_new);
+   return UNITY_END();
+}

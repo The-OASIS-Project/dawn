@@ -150,6 +150,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v111.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v112.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v113.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v114.c
     ${SRC_ROOT}/src/core/tz.c
     ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
@@ -2095,6 +2096,15 @@ dawn_add_unit_test(test_auth_db_migrations_v73
 # category index gone, a migrated schema matching a new one.
 dawn_add_unit_test(test_auth_db_migrations_v113
    SOURCES test_auth_db_migrations_v113.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# v114 on a v113 database: a note's outside kind from its research run and its
+# gloss, a rerun leaving new tags alone, a migrated documents table matching a
+# new one.
+dawn_add_unit_test(test_auth_db_migrations_v114
+   SOURCES test_auth_db_migrations_v114.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)

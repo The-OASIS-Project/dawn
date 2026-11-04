@@ -68,7 +68,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 113
+#define AUTH_DB_SCHEMA_VERSION 114
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -1328,6 +1328,9 @@ int auth_db_migrations_v112(sqlite3 *db);
 /** v113: a fact's origin and every memory row's outside kind (backfilled), and
  *  the consolidation record tables. */
 int auth_db_migrations_v113(sqlite3 *db);
+
+/** v114: documents.outside, a note's outside kind (backfilled). */
+int auth_db_migrations_v114(sqlite3 *db);
 
 /**
  * @brief The v98 rebuild's room check: the bytes it needs free next to the

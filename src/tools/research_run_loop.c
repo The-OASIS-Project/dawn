@@ -52,6 +52,7 @@
 #include "logging.h"
 #include "memory/memory_note_bridge.h"
 #include "prompts.h"
+#include "tools/document_db.h"
 #include "tools/document_index_pipeline.h"
 #include "tools/research_run.h"
 #include "utils/string_utils.h" /* sanitize_utf8_for_json */
@@ -221,6 +222,7 @@ static void research_persist_report_note(int user_id,
       return;
    }
    research_db_run_set_report_doc(run_id, res.doc_id);
+   (void)document_db_set_outside(user_id, res.doc_id, OUTSIDE_RESEARCH, false);
    /* Best-effort memory->note bridge, exactly like do_save_note; never from a
     * private conversation's run (the job inherits its privacy): the gloss is a
     * memory, and nothing private is learned.  Unreadable counts as private. */

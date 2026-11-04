@@ -37,6 +37,7 @@
 
 #include "auth/auth_db_withdraw.h"
 #include "core/embedding_engine.h"
+#include "core/outside_kind.h"
 #include "core/pending_slots.h"
 #include "core/session_prefix.h"
 #include "core/strbuf.h"
@@ -44,6 +45,7 @@
 #include "dawn_error.h"
 #include "llm/llm_tools.h" /* LLM_TOOLS_ARGS_LEN — the upstream tool-arg cap DOCMGMT_SAVE_TEXT_MAX mirrors */
 #include "logging.h"
+#include "memory/memory_extraction_input.h"
 #include "memory/memory_note_bridge.h"
 #include "toml.h"
 #include "tools/document_db.h"
@@ -495,10 +497,14 @@ static char *do_save_note(int user_id, const char *label, const char *text) {
                res.error_msg);
       return strdup(msg);
    }
-   /* Memory→note bridge (v61): refresh the gloss pointer so a fuzzy recall of
+   /* The note's text is what this turn wrote: it carries what the turn read.
+    * Memory→note bridge (v61): refresh the gloss pointer so a fuzzy recall of
     * this note routes to document_read.  Best-effort — never fail the save. */
-   if (res.doc_id > 0)
-      (void)memory_note_bridge_upsert_gloss(user_id, res.doc_id, label);
+   if (res.doc_id > 0) {
+      const int outside = memory_turn_outside(user_id);
+      (void)document_db_set_outside(user_id, res.doc_id, outside, false);
+      (void)memory_note_bridge_upsert_gloss_from(user_id, res.doc_id, label, outside);
+   }
    char msg[DOCMGMT_CONFIRM_MSG_MAX];
    snprintf(msg, sizeof(msg), "%s note '%s'.", overwrite ? "Updated (overwrote existing)" : "Saved",
             label);
@@ -660,6 +666,10 @@ static char *commit_edit(int user_id,
       snprintf(msg, sizeof(msg), TOOL_RESULT_ERROR_MARK "Couldn't apply the edit: %s",
                res.error_msg);
       return strdup(msg);
+   }
+   /* A note keeps what its old text carried, plus what this turn read. */
+   if (is_note) {
+      (void)document_db_set_outside(user_id, doc->id, memory_turn_outside(user_id), true);
    }
    return strdup(ok_msg);
 }
@@ -837,6 +847,12 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
                is_note ? "note" : "document", doc.filename);
       pthread_mutex_lock(&s_edit_mutex);
       char *result = commit_edit(user_id, &doc, is_note, vtext, ok);
+      /* The restored text brings back the kind its version carried. */
+      int outside = OUTSIDE_OTHER;
+      (void)document_db_version_outside(ev[0].id, user_id, &outside);
+      if (is_note) {
+         (void)document_db_set_outside(user_id, doc.id, outside, true);
+      }
       pthread_mutex_unlock(&s_edit_mutex);
       free(vtext);
       return result;
@@ -886,8 +902,15 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
                res.error_msg);
       return strdup(msg);
    }
-   if (as_note && res.doc_id > 0)
-      (void)memory_note_bridge_upsert_gloss(user_id, res.doc_id, fname);
+   /* The note takes back the kind its version carried, with what this turn
+    * read. */
+   if (as_note && res.doc_id > 0) {
+      int outside = OUTSIDE_OTHER;
+      (void)document_db_version_outside(version_id, user_id, &outside);
+      outside = outside_combine(outside, memory_turn_outside(user_id));
+      (void)document_db_set_outside(user_id, res.doc_id, outside, false);
+      (void)memory_note_bridge_upsert_gloss_from(user_id, res.doc_id, fname, outside);
+   }
 
    /* Move the deleted item's surviving snapshots onto the re-created doc so it
     * leaves "Recently deleted" and a repeat restore can't duplicate it (#5). */

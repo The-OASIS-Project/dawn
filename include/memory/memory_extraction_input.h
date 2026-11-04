@@ -67,6 +67,18 @@ int memory_extraction_history_outside(int user_id,
                                       int64_t last_msg_id);
 
 /**
+ * @brief What outside text the running tool call's turn has read, with what its
+ *        conversation read before (its floor): what a memory or a note it
+ *        saves carries, as an extraction batch's rows would
+ *
+ * Defined with the memory tool (memory_callback.c), which reads the turn's
+ * session.  Outside a turn (the scheduler, MQTT), none.
+ *
+ * @return An outside_kind_t; OTHER when what it needs can't be read
+ */
+int memory_turn_outside(int user_id);
+
+/**
  * @brief The messages of @p conversation_history to send for extraction
  *
  * Messages after @p last_msg_id (plus id-less ones: compaction markers, a turn's

@@ -30,6 +30,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/outside_kind.h"
 #include "dawn_error.h"
 #include "memory/memory_stem.h"
 #include "memory/memory_types.h" /* MEMORY_FACT_STEMS_MAX */
@@ -549,6 +550,52 @@ void test_set_num_chunks(void) {
    TEST_ASSERT_EQUAL_INT(FAILURE, document_db_set_num_chunks(doc, -1)); /* invalid count */
 }
 
+
+/* A version records its note's outside kind, and a deleted note recovered
+ * takes it back (a research report stays one; the user's own note stays
+ * theirs). */
+static bool chunk_is_own_note(int64_t chunk_id) {
+   document_chunk_t got;
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(1, &chunk_id, 1, &got, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   return got.own_note;
+}
+
+void test_version_recover_keeps_outside(void) {
+   g_config.documents.version_retention_days = 14;
+   int64_t report = seed_note(1, "Research #1", "tea grows on hills", 24);
+   int64_t own = seed_note(1, "Groceries", "eggs and milk", 25);
+   seed_note(1, "RowidFiller2", "x", 98);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, report, OUTSIDE_RESEARCH, false));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_delete_indexed(report));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_delete_indexed(own));
+
+   document_version_meta_t v[8];
+   int n = 0;
+   document_db_version_list_deleted(1, v, 8, &n);
+   TEST_ASSERT_EQUAL_INT(2, n);
+   for (int i = 0; i < n; i++) {
+      const bool is_report = strcmp(v[i].filename, "Research #1") == 0;
+      int outside = -1;
+      TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_outside(v[i].id, 1, &outside));
+      TEST_ASSERT_EQUAL_INT(is_report ? OUTSIDE_RESEARCH : OUTSIDE_NONE, outside);
+      /* The recover path: re-create the note, then restore the kind. */
+      int64_t again = 0, chunk = 0;
+      const float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+      TEST_ASSERT_EQUAL_INT(SUCCESS,
+                            document_db_create(1, v[i].filename, v[i].filename, "note",
+                                               is_report ? "h-r" : "h-o", 1, false, &again));
+      TEST_ASSERT_EQUAL_INT(SUCCESS,
+                            document_db_chunk_create(again, 0, "body", emb, 4, 1.0f, 0, &chunk));
+      TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, again, outside, false));
+      TEST_ASSERT_EQUAL(!is_report, chunk_is_own_note(chunk));
+   }
+   int outside = -1;
+   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_version_outside(v[0].id, 2, &outside));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_exact_label_ranks_first);
@@ -572,6 +619,7 @@ int main(void) {
    RUN_TEST(test_version_list_deleted);
    RUN_TEST(test_version_undo_round_trip);
    RUN_TEST(test_version_reattach_on_recover);
+   RUN_TEST(test_version_recover_keeps_outside);
    RUN_TEST(test_set_num_chunks);
    return UNITY_END();
 }

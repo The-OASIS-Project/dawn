@@ -64,6 +64,7 @@ static const char *DDL =
    "  num_chunks INTEGER NOT NULL,"
    "  is_global INTEGER DEFAULT 0,"
    "  created_at INTEGER NOT NULL,"
+   "  outside INTEGER NOT NULL DEFAULT 0,"
    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
    ");"
    "CREATE TABLE IF NOT EXISTS document_chunks ("
@@ -75,8 +76,7 @@ static const char *DDL =
    "  embedding_norm REAL NOT NULL,"
    "  created_at INTEGER NOT NULL DEFAULT 0,"
    "  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE"
-   ");"
-   "CREATE TABLE IF NOT EXISTS research_runs (id INTEGER PRIMARY KEY, report_doc_id INTEGER);";
+   ");";
 /* clang-format on */
 
 /* SQL must match auth_db_core.c exactly */
@@ -586,29 +586,62 @@ static void test_chunk_create_and_read(void) {
    TEST_ASSERT_TRUE_MESSAGE(chunks[1].chunk_index == 2, "second paginated chunk is index 2");
 }
 
-/* A note's chunk is the user's own words unless the note is a research
- * report (made from web pages); a document's never is. */
+/* A note's chunk is the user's own words unless its text carries outside text
+ * (a research report, a note written in a turn that read a page); one stored
+ * before the kind was recorded counts as own.  A document's never is. */
 static void test_chunks_by_ids_own_note(void) {
    float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
-   int64_t note = 0, report = 0, doc = 0, ids[3] = { 0 };
+   int64_t note = 0, report = 0, web = 0, old = 0, doc = 0, ids[5] = { 0 };
    document_db_create(1, "Groceries", "", "note", "h-note", 1, false, &note);
    document_db_create(1, "Research #1: Tea", "", "note", "h-report", 1, false, &report);
+   document_db_create(1, "Tea notes", "", "note", "h-web", 1, false, &web);
+   document_db_create(1, "Old note", "", "note", "h-old", 1, false, &old);
    document_db_create(1, "a.pdf", "a.pdf", "pdf", "h-doc", 1, false, &doc);
    document_db_chunk_create(note, 0, "Eggs", emb, 4, 1.0f, 0, &ids[0]);
    document_db_chunk_create(report, 0, "Tea grows", emb, 4, 1.0f, 0, &ids[1]);
-   document_db_chunk_create(doc, 0, "A page", emb, 4, 1.0f, 0, &ids[2]);
-   char sql[96];
-   snprintf(sql, sizeof(sql), "INSERT INTO research_runs (report_doc_id) VALUES (%lld)",
-            (long long)report);
-   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+   document_db_chunk_create(web, 0, "Tea is", emb, 4, 1.0f, 0, &ids[2]);
+   document_db_chunk_create(old, 0, "Milk", emb, 4, 1.0f, 0, &ids[3]);
+   document_db_chunk_create(doc, 0, "A page", emb, 4, 1.0f, 0, &ids[4]);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, report, OUTSIDE_RESEARCH, false));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, web, OUTSIDE_WEB, false));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, old, OUTSIDE_UNKNOWN, false));
 
-   document_chunk_t out[3];
+   document_chunk_t out[5];
    int n = 0;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(1, ids, 3, out, &n));
-   TEST_ASSERT_EQUAL_INT(3, n);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(1, ids, 5, out, &n));
+   TEST_ASSERT_EQUAL_INT(5, n);
    for (int i = 0; i < n; i++) {
-      TEST_ASSERT_EQUAL(out[i].id == ids[0], out[i].own_note);
+      TEST_ASSERT_EQUAL(out[i].id == ids[0] || out[i].id == ids[3], out[i].own_note);
    }
+}
+
+static int doc_outside(int64_t id) {
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db, "SELECT outside FROM documents WHERE id = ?", -1, &st, NULL);
+   sqlite3_bind_int64(st, 1, id);
+   const int v = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int(st, 0) : -1;
+   sqlite3_finalize(st);
+   return v;
+}
+
+/* A save replaces a note's kind; an edit keeps a tainted one (part of the old
+ * text stays) and takes the turn's when that one is; another user's note is
+ * never touched. */
+static void test_set_outside_combine(void) {
+   int64_t note = 0;
+   document_db_create(1, "Tea", "", "note", "h-tea", 1, false, &note);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, note, OUTSIDE_NONE, true));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, doc_outside(note));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, note, OUTSIDE_WEB, true));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, doc_outside(note));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, note, OUTSIDE_NONE, true));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, doc_outside(note));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, note, OUTSIDE_EMAIL, true));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, doc_outside(note));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, note, OUTSIDE_NONE, false));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, doc_outside(note));
+   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_set_outside(2, note, OUTSIDE_WEB, false));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, doc_outside(note));
 }
 
 /* ============================================================================
@@ -818,6 +851,7 @@ int main(void) {
    RUN_TEST(test_find_by_name);
    RUN_TEST(test_chunk_create_and_read);
    RUN_TEST(test_chunks_by_ids_own_note);
+   RUN_TEST(test_set_outside_combine);
    RUN_TEST(test_chunk_read_range);
    RUN_TEST(test_chunk_grep);
    RUN_TEST(test_invalid_params);

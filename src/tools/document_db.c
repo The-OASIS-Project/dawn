@@ -643,9 +643,9 @@ int document_db_chunks_get_by_ids(int user_id,
    sqlite3_stmt *stmt = NULL;
    if (sqlite3_prepare_v2(s_db.db,
                           "SELECT c.id, c.chunk_index, c.text, c.document_id, d.filename, "
-                          "d.filetype, c.created_at, d.filetype = 'note' AND d.id NOT IN "
-                          "(SELECT report_doc_id FROM research_runs WHERE report_doc_id IS NOT "
-                          "NULL) FROM document_chunks c JOIN documents d ON c.document_id = d.id "
+                          "d.filetype, c.created_at, d.filetype = 'note' AND d.outside IN "
+                          "(" OUTSIDE_UNTAINTED_SQL ") FROM document_chunks c JOIN documents d "
+                          "ON c.document_id = d.id "
                           "WHERE (d.user_id = ? OR d.is_global = 1) "
                           "AND c.id IN (SELECT value FROM json_each(?))",
                           -1, &stmt, NULL) != SQLITE_OK) {
@@ -667,7 +667,7 @@ int document_db_chunks_get_by_ids(int user_id,
       col_text_copy(c->doc_filename, sizeof(c->doc_filename), stmt, 4);
       col_text_copy(c->doc_filetype, sizeof(c->doc_filetype), stmt, 5);
       c->created_at = sqlite3_column_int64(stmt, 6);
-      c->own_note = sqlite3_column_int(stmt, 7) != 0; /* a research report reads web pages */
+      c->own_note = sqlite3_column_int(stmt, 7) != 0;
       count++;
    }
    sqlite3_finalize(stmt);
@@ -1129,8 +1129,9 @@ static void version_archive_locked(int64_t doc_id,
 
    sqlite3_stmt *ins = NULL;
    if (sqlite3_prepare_v2(s_db.db,
-                          "INSERT INTO document_versions"
-                          "(document_id, user_id, filename, text, archived_at) VALUES(?,?,?,?,?)",
+                          "INSERT INTO document_versions(document_id, user_id, filename, text, "
+                          "archived_at, outside) VALUES(?1, ?2, ?3, ?4, ?5, COALESCE((SELECT "
+                          "outside FROM documents WHERE id = ?1), 0))",
                           -1, &ins, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(ins, 1, doc_id);
       sqlite3_bind_int(ins, 2, user_id);
@@ -1283,6 +1284,26 @@ int document_db_version_get_text(int64_t version_id,
    }
    if (st)
       sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return result;
+}
+
+int document_db_version_outside(int64_t version_id, int user_id, int *outside_out) {
+   *outside_out = OUTSIDE_OTHER; /* unreadable: outside */
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int result = FAILURE;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT outside FROM document_versions WHERE id = ? AND user_id = ?", -1,
+                          &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, version_id);
+      sqlite3_bind_int(st, 2, user_id);
+      if (sqlite3_step(st) == SQLITE_ROW) {
+         *outside_out = sqlite3_column_int(st, 0);
+         result = SUCCESS;
+      }
+   }
+   sqlite3_finalize(st);
    AUTH_DB_UNLOCK();
    return result;
 }
@@ -1850,6 +1871,39 @@ int document_db_note_update(int user_id,
    AUTH_DB_UNLOCK();
    free(old_text);
    return result;
+}
+
+/* A note's outside kind; see header. */
+int document_db_set_outside(int user_id, int64_t doc_id, int outside, bool combine) {
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int rc = FAILURE;
+   if (combine &&
+       sqlite3_prepare_v2(s_db.db, "SELECT outside FROM documents WHERE id = ? AND user_id = ?", -1,
+                          &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, doc_id);
+      sqlite3_bind_int(st, 2, user_id);
+      /* The stored kind first (the first seen wins); unreadable: outside. */
+      outside = outside_combine(
+          sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int(st, 0) : OUTSIDE_OTHER, outside);
+      sqlite3_finalize(st);
+      st = NULL;
+   }
+   if (sqlite3_prepare_v2(s_db.db, "UPDATE documents SET outside = ? WHERE id = ? AND user_id = ?",
+                          -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, outside);
+      sqlite3_bind_int64(st, 2, doc_id);
+      sqlite3_bind_int(st, 3, user_id);
+      if (sqlite3_step(st) == SQLITE_DONE && sqlite3_changes(s_db.db) == 1) {
+         rc = SUCCESS;
+      }
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SUCCESS) {
+      OLOG_WARNING("document_db: outside kind of note %lld not recorded", (long long)doc_id);
+   }
+   return rc;
 }
 
 /* Rename any note/document in place (content untouched).  See header for the

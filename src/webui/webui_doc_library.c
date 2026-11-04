@@ -35,6 +35,7 @@
 #include "auth/auth_db_withdraw.h"
 #include "blob_store.h" /* BLOB_ID_LEN */
 #include "config/dawn_config.h"
+#include "core/outside_kind.h"
 #include "core/session_prefix.h"
 #include "dawn_error.h"
 #include "logging.h"
@@ -583,8 +584,10 @@ void handle_doc_library_note_update(ws_connection_t *conn, json_object *payload)
                                                               ? result.error_msg
                                                               : document_index_error_string(rc)));
          } else {
-            /* Memory→note bridge (v61): refresh the gloss (label may have changed →
-             * delete+recreate inside the bridge).  Best-effort. */
+            /* The note keeps its outside kind: an edit leaves most of the text
+             * (a research report stays one).  Memory→note bridge (v61): refresh
+             * the gloss (label may have changed → delete+recreate inside the
+             * bridge).  Best-effort. */
             (void)memory_note_bridge_upsert_gloss(conn->auth_user_id, doc_id, label);
             json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
             json_object_object_add(resp_payload, "id", json_object_new_int64(doc_id));
@@ -829,8 +832,14 @@ void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payl
        * has no gloss. */
       bool restored_note = exists ? (strcmp(doc.filetype, "note") == 0 && doc.num_chunks == 1)
                                   : recreated_as_note;
-      if (restored_note)
-         (void)memory_note_bridge_upsert_gloss(conn->auth_user_id, doc_id, label);
+      /* The note takes back the kind the version carried (with its own, kept
+       * in place). */
+      if (restored_note) {
+         int outside = OUTSIDE_OTHER;
+         (void)document_db_version_outside(version_id, conn->auth_user_id, &outside);
+         (void)document_db_set_outside(conn->auth_user_id, doc_id, outside, exists);
+         (void)memory_note_bridge_upsert_gloss_from(conn->auth_user_id, doc_id, label, outside);
+      }
       /* Re-point the deleted item's surviving snapshots onto the re-created doc
        * so it leaves "Recently deleted" and a repeat restore can't dup it (#5). */
       if (deleted_doc_id > 0)

@@ -845,10 +845,7 @@ static int remember_record_source(int64_t fact_id, int user_id, bool created) {
    return where;
 }
 
-/* What outside text the turn a remember runs in has read, with what its
- * conversation read before (the floor): the fact stored carries it, as one
- * extraction stores would.  Outside a turn, none; unreadable, OTHER. */
-static int remember_outside(int user_id) {
+int memory_turn_outside(int user_id) {
    session_t *session = session_get_command_context();
    if (!session) {
       return OUTSIDE_NONE;
@@ -974,7 +971,7 @@ static char *memory_action_remember_single(int user_id,
     * the write), or keep it waiting for one. */
    int64_t fact_id = 0;
    const memory_provenance_t requested = { .origin = MEMORY_ORIGIN_REQUESTED,
-                                           .outside = remember_outside(user_id) };
+                                           .outside = memory_turn_outside(user_id) };
    int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", &requested,
                                          &fact_id);
 
