@@ -76,6 +76,8 @@ typedef struct {
    char doc_filename[DOC_FILENAME_MAX];
    char doc_filetype[DOC_FILETYPE_MAX];
    int64_t created_at; /* v35 — chunk origin timestamp; 0 = unknown */
+   bool own_note;      /* a note of the user's (or DAWN's) own words, not a research report
+                          filed as one; set by document_db_chunks_get_by_ids only */
 } document_chunk_t;
 
 /* v62: one row of a document/note's version history (metadata + text preview).

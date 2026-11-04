@@ -643,8 +643,9 @@ int document_db_chunks_get_by_ids(int user_id,
    sqlite3_stmt *stmt = NULL;
    if (sqlite3_prepare_v2(s_db.db,
                           "SELECT c.id, c.chunk_index, c.text, c.document_id, d.filename, "
-                          "d.filetype, c.created_at "
-                          "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
+                          "d.filetype, c.created_at, d.filetype = 'note' AND d.id NOT IN "
+                          "(SELECT report_doc_id FROM research_runs WHERE report_doc_id IS NOT "
+                          "NULL) FROM document_chunks c JOIN documents d ON c.document_id = d.id "
                           "WHERE (d.user_id = ? OR d.is_global = 1) "
                           "AND c.id IN (SELECT value FROM json_each(?))",
                           -1, &stmt, NULL) != SQLITE_OK) {
@@ -666,6 +667,7 @@ int document_db_chunks_get_by_ids(int user_id,
       col_text_copy(c->doc_filename, sizeof(c->doc_filename), stmt, 4);
       col_text_copy(c->doc_filetype, sizeof(c->doc_filetype), stmt, 5);
       c->created_at = sqlite3_column_int64(stmt, 6);
+      c->own_note = sqlite3_column_int(stmt, 7) != 0; /* a research report reads web pages */
       count++;
    }
    sqlite3_finalize(stmt);

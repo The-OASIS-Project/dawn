@@ -63,7 +63,8 @@ typedef struct {
    float bm25;       /**< normalized keyword score [0, 1]; 0 when not a keyword hit */
    float hybrid;     /**< fused score, the ranking order */
    int label_terms;  /**< distinct query content words found in the document's label */
-   bool is_note;     /**< a note (the user's or DAWN's own text); set with text */
+   bool is_note;     /**< a note in the user's (or DAWN's) own words, not a research
+                          report; set with text */
 } document_ranked_t;
 
 struct document_ranking_store;
