@@ -391,6 +391,11 @@
                if (typeof DawnJobs !== 'undefined') {
                   DawnJobs.handleReconnect();
                }
+               // The Learned tab misses memory_batch frames sent while the socket
+               // was down: its first page again.
+               if (window.DawnMemoryBatches) {
+                  DawnMemoryBatches.handleReconnect();
+               }
                // Recover conversation-list changes missed while the socket was
                // down (the list-changed frame is never replayed). Diffs into the
                // consent pill rather than reordering under the user; on first
@@ -464,6 +469,11 @@
                      type: 'set_active_conversation',
                      payload: { conversation_id: savedConvId },
                   });
+                  // Its memory markers, as a load would ask for them (batches
+                  // recorded or changed while disconnected).
+                  if (window.DawnMemoryMarker) {
+                     DawnMemoryMarker.conversationLoaded(savedConvId);
+                  }
                }
                break;
             case 'config':
@@ -1685,6 +1695,10 @@
          // no-opping the refresh pill, infinite scroll, and reconnect re-sync.
          if (typeof DawnHistory !== 'undefined' && DawnHistory.handleDisconnect) {
             DawnHistory.handleDisconnect();
+         }
+         // Same for the Learned tab's page request.
+         if (window.DawnMemoryBatches) {
+            DawnMemoryBatches.handleDisconnect();
          }
          // Clear the composer working-indicator for the same reason: a socket drop
          // mid-tool-loop would otherwise leave a lit "Using Tools" reactor pinned to

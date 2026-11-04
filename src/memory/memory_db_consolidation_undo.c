@@ -158,7 +158,8 @@ static int load_locked(int user_id, int64_t batch_id, int64_t op_id, undo_row_t 
        s_db.db,
        "SELECT o.op, o.status, COALESCE(o.fact_id, 0), COALESCE(o.other_fact_id, 0), "
        "COALESCE(o.relation_id, 0), COALESCE(o.link_id, 0), o.pre_image, o.post_image, "
-       "COALESCE(o.source_conversation_id, b.conversation_id, 0) FROM memory_consolidation_ops o "
+       "COALESCE(o.source_conversation_id, b.conversation_id, 0), o.seq FROM "
+       "memory_consolidation_ops o "
        "JOIN memory_consolidation_batches b ON b.id = o.batch_id WHERE o.id = ?1 AND o.batch_id = "
        "?2 AND o.user_id = ?3 AND b.user_id = ?3",
        -1, &st, NULL);
@@ -184,6 +185,7 @@ static int load_locked(int user_id, int64_t batch_id, int64_t op_id, undo_row_t 
       r->row.pre_image = pre ? strdup((const char *)pre) : NULL;
       r->row.post_image = post ? strdup((const char *)post) : NULL;
       r->conversation_id = sqlite3_column_int64(st, 8);
+      r->row.seq = sqlite3_column_int(st, 9);
       r->pre = parse_object(r->row.pre_image);
       r->post = parse_object(r->row.post_image);
    }
@@ -790,19 +792,24 @@ static int mark_locked(int user_id, const undo_row_t *r, const char *status) {
                   user_id, r->row.batch_id, 0);
 }
 
-/* An op of another batch recorded after ?2 (batch ?3) and still in effect. */
+/* An op recorded after ?2 (batch ?3, seq ?9) and still in effect: of another
+ * batch, or of the same one after it in the order the batch's undo takes back
+ * (seq, then id, last first), so one undone alone sees its batch's later work
+ * too.  A closed relation of the batch doesn't count: the batch's undo takes
+ * it back last. */
 #define LATER_OP                                                                      \
-   "l.id > ?2 AND l.batch_id != ?3 AND l.status IN ('applied', 'stale') AND l.op != " \
-   "'suggested_forget'"
+   "l.status IN ('applied', 'stale') AND l.op != 'suggested_forget' AND ((l.id > ?2 " \
+   "AND l.batch_id != ?3) OR (l.batch_id = ?3 AND l.op IN (" UNDOABLE_SQL ") AND "    \
+   "l.op != 'closed' AND (l.seq > ?9 OR (l.seq = ?9 AND l.id > ?2))))"
 
-/* Whether a later batch has a hand in what @p r changed: an op of another
- * batch, recorded after it and still in effect (applied, or found changed
- * since and so left as it is), naming the same fact (as its own or its
+/* Whether later work has a hand in what @p r changed: an op recorded after
+ * it (LATER_OP) and still in effect (applied, or found changed since and so
+ * left as it is), naming the same fact (as its own or its
  * counterpart; for a merge, the fact kept too), relation, link or preference.
  * Undoing @p r would take that batch's work back with it (a restatement in
  * the same conversation, a value set back to what it was).  One indexed probe
  * per kind (idx_mco_fact, idx_mco_other, idx_mco_rel); a link or preference
- * reads the ops after @p r by id.  SQLITE_ROW with *later, or the error. */
+ * reads the ops after @p r.  SQLITE_ROW with *later, or the error. */
 static int later_change_locked(int user_id, const undo_row_t *r, bool *later) {
    *later = false;
    sqlite3_stmt *st = NULL;
@@ -839,6 +846,7 @@ static int later_change_locked(int user_id, const undo_row_t *r, bool *later) {
                          is_op(r->row.op, "merged") && r->row.other_fact_id > 0
                              ? r->row.other_fact_id
                              : fact);
+      sqlite3_bind_int(st, 9, r->row.seq);
       rc = sqlite3_step(st);
       *later = rc == SQLITE_ROW && sqlite3_column_int(st, 0) != 0;
    }

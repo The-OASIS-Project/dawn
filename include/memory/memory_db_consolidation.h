@@ -246,7 +246,7 @@ void memory_db_consolidation_ops_free(memory_consolidation_op_row_t *rows, int n
  */
 void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id);
 
-/** Batches a forget's scrub changed, told to the user's tabs: the newest
+/** Batches a forget's or delete's scrub changed, told to the user's tabs: the newest
  *  this many, each once (a tab showing an older one keeps the forgotten text
  *  until it reloads). */
 #define MEMORY_CONSOLIDATION_TOUCHED_MAX 256
@@ -298,6 +298,16 @@ int memory_db_consolidation_drop_conversations_locked(int user_id,
  */
 int memory_db_consolidation_scrub_entities_locked(int user_id,
                                                   memory_consolidation_touched_t *touched);
+
+/**
+ * @brief In a preference delete's transaction (lock held): remove the rows
+ *        that set @p category's value (the record must not keep it)
+ * @param touched The batches whose rows went, added to (may be NULL)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_consolidation_scrub_pref_locked(int user_id,
+                                              const char *category,
+                                              memory_consolidation_touched_t *touched);
 
 /** A stored fact as a reinforce finds it: what undoing the reinforce puts back. */
 typedef struct {

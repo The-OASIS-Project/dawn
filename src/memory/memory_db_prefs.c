@@ -32,6 +32,7 @@
 #include "auth/auth_db_internal.h"
 #include "logging.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_consolidation.h"
 #include "memory/memory_db_internal.h"
 #include "utils/string_utils.h"
 
@@ -279,6 +280,7 @@ int memory_db_pref_delete(int user_id, const char *category) {
       return MEMORY_DB_FAILURE;
    }
 
+   memory_consolidation_touched_t touched = { .n = 0 };
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
    /* The preference and the consolidation record's rows quoting its value go
     * together: the record must not keep what the user deleted. */
@@ -295,19 +297,10 @@ int memory_db_pref_delete(int user_id, const char *category) {
    const int changes = sqlite3_changes(s_db.db);
    sqlite3_reset(stmt);
 
-   if (rc == SQLITE_DONE) {
-      sqlite3_stmt *scrub = NULL;
-      rc = sqlite3_prepare_v2(s_db.db,
-                              "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND op = "
-                              "'pref_set' AND (json_extract(post_image, '$.category') = ?2 OR "
-                              "substr(text, 1, length(?2) + 2) = ?2 || ': ')",
-                              -1, &scrub, NULL);
-      if (rc == SQLITE_OK) {
-         sqlite3_bind_int(scrub, 1, user_id);
-         sqlite3_bind_text(scrub, 2, category, -1, SQLITE_STATIC);
-         rc = sqlite3_step(scrub);
-      }
-      sqlite3_finalize(scrub);
+   if (rc == SQLITE_DONE &&
+       memory_db_consolidation_scrub_pref_locked(user_id, category, &touched) !=
+           MEMORY_DB_SUCCESS) {
+      rc = SQLITE_ERROR;
    }
    if (auth_db_savepoint_end_locked(rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
                                     "pref_delete") != AUTH_DB_SUCCESS) {
@@ -318,5 +311,6 @@ int memory_db_pref_delete(int user_id, const char *category) {
    if (rc != SQLITE_DONE) {
       return MEMORY_DB_FAILURE;
    }
+   memory_consolidation_touched_notify(user_id, &touched);
    return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
 }

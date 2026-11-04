@@ -793,6 +793,28 @@ int memory_db_consolidation_scrub_entities_locked(int user_id,
    return rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
+int memory_db_consolidation_scrub_pref_locked(int user_id,
+                                              const char *category,
+                                              memory_consolidation_touched_t *touched) {
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND op = "
+                               "'pref_set' AND (json_extract(post_image, '$.category') = ?2 OR "
+                               "substr(text, 1, length(?2) + 2) = ?2 || ': ') RETURNING batch_id",
+                               -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_text(st, 2, category, -1, SQLITE_STATIC);
+      rc = step_returning(st, touched);
+   }
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("memory_db: removing a deleted preference's consolidation record failed: %s",
+                 sqlite3_errmsg(s_db.db));
+   }
+   sqlite3_finalize(st);
+   return rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
 /* A candidate set aside lives in its batch's ops: the record outlives it. */
 _Static_assert(MEMORY_CONSOLIDATE_RECORD_DAYS >= MEMORY_CONSOLIDATE_DEFERRED_DAYS,
                "the record must keep a batch as long as its deferred candidates");

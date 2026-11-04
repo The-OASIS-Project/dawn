@@ -79,6 +79,9 @@
       loading: false,
    };
    const pendingForgets = new Set(); /* fact ids a Forget was sent for */
+   /* memory_batch pushes that came while a page was asked for: drawn once it
+    * lands (its response would replace or miss them). */
+   const pushedWhileLoading = new Map(); /* batch_id → batch */
    let liveRegion = null;
 
    function connected() {
@@ -328,7 +331,9 @@
 
    function request(before) {
       if (!connected()) {
-         showTabError('Not connected; try again in a moment');
+         /* A later page keeps what is shown. */
+         if (before) toast('Not connected; try again in a moment', 'error');
+         else showTabError('Not connected; try again in a moment');
          return;
       }
       tab.loading = true;
@@ -407,14 +412,48 @@
       return body;
    }
 
+   /* @p batch drawn in the tab: in place when shown, else where it goes
+    * newest first (one a later page will bring is left to it).  Whether it
+    * was shown already. */
+   function placeInTab(batch) {
+      const body = tabBody();
+      const old = body.querySelector(`.memory-batch[data-batch-id="${batch.batch_id}"]`);
+      if (old) {
+         replaceKeepingFocus(old, renderBatch(batch, { where: 'tab' }));
+         return true;
+      }
+      if (tab.hasMore && batch.batch_id < tab.nextBefore) return false;
+      const older = Array.from(body.querySelectorAll('.memory-batch')).find(
+         (el) => Number(el.dataset.batchId) < batch.batch_id
+      );
+      body.insertBefore(renderBatch(batch, { where: 'tab' }), older || null);
+      return false;
+   }
+
+   /* The pushes held while the page was asked for, drawn over it. */
+   function placePushed() {
+      const pushed = Array.from(pushedWhileLoading.values());
+      pushedWhileLoading.clear();
+      pushed.forEach(placeInTab);
+   }
+
    function handleTabList(payload) {
       tab.loading = false;
-      if (!tab.active) return;
+      if (!tab.active) {
+         pushedWhileLoading.clear();
+         return;
+      }
       const first = payload.before_batch_id == null;
       if (payload.error) {
-         /* A later page failing keeps what is shown. */
-         if (first) showTabError(payload.error);
-         else toast(payload.error, 'error');
+         /* A later page failing keeps what is shown; a retry of the first
+          * brings the pushes with it. */
+         if (first) {
+            pushedWhileLoading.clear();
+            showTabError(payload.error);
+         } else {
+            toast(payload.error, 'error');
+            placePushed();
+         }
          syncLoadMore();
          return;
       }
@@ -428,6 +467,7 @@
       }
       tab.hasMore = !!payload.has_more;
       tab.nextBefore = payload.has_more ? payload.next_before_batch_id : null;
+      placePushed();
       syncLoadMore();
    }
 
@@ -458,15 +498,11 @@
       if (!batch || batch.batch_id == null) return;
       let isNew = true;
       if (tab.active && tab.list) {
-         const old = tab.list.querySelector(`.memory-batch[data-batch-id="${batch.batch_id}"]`);
-         if (old) {
-            isNew = false;
-            replaceKeepingFocus(old, renderBatch(batch, { where: 'tab' }));
+         if (tab.loading) {
+            isNew = !tab.list.querySelector(`.memory-batch[data-batch-id="${batch.batch_id}"]`);
+            pushedWhileLoading.set(batch.batch_id, batch);
          } else {
-            const body = tabBody();
-            const firstBatch = body.querySelector('.memory-batch');
-            const newest = !firstBatch || Number(firstBatch.dataset.batchId) < batch.batch_id;
-            if (newest) body.insertBefore(renderBatch(batch, { where: 'tab' }), firstBatch);
+            isNew = !placeInTab(batch);
          }
       }
       if (window.DawnMemoryMarker) {
@@ -606,6 +642,20 @@
       return enabled;
    }
 
+   /** The socket dropped: a page asked for won't come. */
+   function handleDisconnect() {
+      tab.loading = false;
+      pushedWhileLoading.clear();
+      syncLoadMore();
+   }
+
+   /** The session is back: what changed meanwhile, from its first page. */
+   function handleReconnect() {
+      if (!tab.active || tab.loading) return;
+      request(null);
+      syncLoadMore();
+   }
+
    function init() {
       document.addEventListener('click', (e) => {
          const btn = e.target.closest && e.target.closest('.memory-batch-action[data-action]');
@@ -617,6 +667,8 @@
       init,
       setEnabled,
       isEnabled,
+      handleDisconnect,
+      handleReconnect,
       renderBatch,
       summaryText,
       replaceKeepingFocus,

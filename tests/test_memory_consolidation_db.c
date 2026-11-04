@@ -1239,6 +1239,35 @@ void test_forget_notifies_a_batch_whose_link_names_a_swept_entity(void) {
    TEST_ASSERT_TRUE(notified(batch));
 }
 
+/* An entity deleted (the Graph tab) tells the batch whose link named it. */
+void test_entity_delete_notifies_a_batch_whose_link_names_it(void) {
+   bool created = false;
+   int64_t jon = 0;
+   int64_t js = 0;
+   memory_db_entity_upsert(s_user, "Jonathan Smith", "person", "jonathan smith", &created, &jon);
+   memory_db_entity_upsert(s_user, "J. Smith", "person", "j. smith", &created, &js);
+   int64_t batch = 0;
+   const memory_consolidation_batch_t b = { .user_id = s_user,
+                                            .conversation_id = s_conv,
+                                            .path = "agent",
+                                            .stop = "finished" };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_batch_add(&b, &batch));
+   const memory_consolidation_op_t op = { .batch_id = batch,
+                                          .user_id = s_user,
+                                          .seq = 1,
+                                          .op = "linked",
+                                          .entity_id = js,
+                                          .other_entity_id = jon };
+   int64_t linked = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_op_add(&op, &linked));
+   s_n_notified = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_entity_delete(js, s_user));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE id = ?1", linked,
+                              NULL));
+   TEST_ASSERT_TRUE(notified(batch));
+   TEST_ASSERT_EQUAL_INT(1, s_n_notified);
+}
+
 /* ---- the record: claim, list, caps, prune ---- */
 
 /* A deferred candidate claimed and its row written in one step: a claim that
@@ -1675,8 +1704,10 @@ void test_deleting_a_preference_removes_its_record_rows(void) {
    script(NULL);
    const int64_t batch = run(PREF_REPLY("oat latte"), 0);
    TEST_ASSERT_TRUE(op_of(batch, "pref_set") > 0);
+   s_n_notified = 0;
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_pref_delete(s_user, "coffee"));
    TEST_ASSERT_EQUAL_INT(0, op_of(batch, "pref_set"));
+   TEST_ASSERT_TRUE(notified(batch)); /* its tabs no longer show the value */
 }
 
 void test_a_private_conversations_batch_is_not_listed(void) {
@@ -1819,6 +1850,85 @@ void test_an_add_undo_keeps_an_entity_linked_as_an_alias(void) {
    TEST_ASSERT_EQUAL_INT(1, q("SELECT COUNT(*) FROM memory_entities WHERE id = ?1", jon, NULL));
 }
 
+/* Two candidates of one batch restating one fact, one making it told: the
+ * first undone alone is stale (the second's work stays); the whole batch, the
+ * last first, undoes both. */
+#define TOLD_THEN_SAID                                                                    \
+   "{\"facts\": [{\"text\": \"" CELLO "\", \"subject\": \"Jonathan Smith\", \"source\": " \
+   "\"explicit\"}, {\"text\": \"Jonathan Smith plays cello\", \"subject\": \"Jonathan "   \
+   "Smith\"}]}"
+
+static int64_t told_then_said(int64_t *first, int64_t *second) {
+   const int64_t fact = stored(CELLO, "inferred");
+   script("{\"ops\": [{\"op\": \"merge\", \"from\": \"C1\", \"into\": \"S1\"}], \"finish\": "
+          "true}");
+   const int64_t batch = run(TOLD_THEN_SAID, 0);
+   *first = op_of(batch, "reinforced");
+   *second = q("SELECT id FROM memory_consolidation_ops WHERE batch_id = ?1 AND op = "
+               "'reinforced' AND id != (SELECT MIN(id) FROM memory_consolidation_ops WHERE "
+               "batch_id = ?1 AND op = 'reinforced')",
+               batch, NULL);
+   TEST_ASSERT_TRUE(*first > 0 && *second > 0);
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT source = 'explicit' FROM memory_facts WHERE id = ?1", fact,
+                              NULL));
+   return batch;
+}
+
+void test_an_op_undone_alone_sees_its_batchs_later_restatement(void) {
+   int64_t first = 0;
+   int64_t second = 0;
+   const int64_t batch = told_then_said(&first, &second);
+   assert_stale(batch, first);
+   TEST_ASSERT_EQUAL_STRING("applied", status_of(second));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT source = 'explicit' FROM memory_facts WHERE id = ?1",
+                              current(CELLO), NULL));
+}
+
+void test_a_whole_batch_undo_takes_back_two_restatements_of_one_fact(void) {
+   int64_t first = 0;
+   int64_t second = 0;
+   const int64_t batch = told_then_said(&first, &second);
+   memory_consolidation_outcome_t io;
+   outcome(&io, MEMORY_CONSOLIDATION_UNDO_BATCH, s_user, batch, 0);
+   TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATION_OK, io.status);
+   TEST_ASSERT_EQUAL_INT(2, io.n_undone);
+   TEST_ASSERT_EQUAL_STRING("undone", status_of(first));
+   TEST_ASSERT_EQUAL_STRING("undone", status_of(second));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT source = 'inferred' AND ABS(confidence - 0.7) < 0.001 FROM "
+                              "memory_facts WHERE id = ?1",
+                              current(CELLO), NULL));
+}
+
+/* A Keep that adds an unrelated fact doesn't make the batch's earlier add
+ * stale. */
+void test_a_keep_of_an_unrelated_fact_leaves_the_earlier_add_undoable(void) {
+   const int64_t batch = dropped_batch(0);
+   const int64_t added = op_of(batch, "added");
+   memory_consolidation_outcome_t io;
+   outcome(&io, MEMORY_CONSOLIDATION_KEEP_OP, s_user, batch, op_of(batch, "dropped"));
+   TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATION_OK, io.status);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, undo(batch, added));
+   TEST_ASSERT_EQUAL_INT(0, current(CELLO));
+   TEST_ASSERT_TRUE(current("Jonathan Smith is visiting Lisbon") > 0);
+}
+
+/* An add and the close it made: the add undone alone, then the close. */
+void test_an_add_undone_alone_then_the_close_it_made(void) {
+   const int64_t blue = blue_relation();
+   script(CLOSE_PLAN);
+   const int64_t batch = run(GREEN_REPLY, 0);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, undo(batch, op_of(batch, "added")));
+   TEST_ASSERT_EQUAL_INT(0, current("Jonathan Smith's favorite color is green"));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT valid_to IS NOT NULL FROM memory_relations WHERE id = ?1",
+                              blue, NULL));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, undo(batch, op_of(batch, "closed")));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT valid_to IS NULL FROM memory_relations WHERE id = ?1", blue,
+                              NULL));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT undone_at IS NOT NULL FROM memory_consolidation_batches "
+                              "WHERE id = ?1",
+                              batch, NULL));
+}
+
 /* The plans: one conversation's batches through idx_mcb_conv; a later change
  * on a fact through the fact indexes. */
 static void plan_uses(const char *sql, const char *index) {
@@ -1914,6 +2024,7 @@ int main(void) {
    RUN_TEST(test_conversation_forget_notifies_a_batch_whose_pref_record_it_trims);
    RUN_TEST(test_conversation_forget_notifies_a_batch_whose_reinforce_record_it_changes);
    RUN_TEST(test_forget_notifies_a_batch_whose_link_names_a_swept_entity);
+   RUN_TEST(test_entity_delete_notifies_a_batch_whose_link_names_it);
    RUN_TEST(test_a_row_taking_up_a_deferred_candidate_is_written_with_its_claim);
    RUN_TEST(test_a_row_quoting_a_private_conversation_is_not_written);
    RUN_TEST(test_list_pages_by_batch_id_and_conversation);
@@ -1938,6 +2049,10 @@ int main(void) {
    RUN_TEST(test_a_batch_that_fills_its_record_stops_cleanly);
    RUN_TEST(test_keeping_what_is_already_stored_only_marks_it_kept);
    RUN_TEST(test_an_add_undo_keeps_an_entity_linked_as_an_alias);
+   RUN_TEST(test_an_op_undone_alone_sees_its_batchs_later_restatement);
+   RUN_TEST(test_a_whole_batch_undo_takes_back_two_restatements_of_one_fact);
+   RUN_TEST(test_a_keep_of_an_unrelated_fact_leaves_the_earlier_add_undoable);
+   RUN_TEST(test_an_add_undone_alone_then_the_close_it_made);
    RUN_TEST(test_the_record_queries_use_their_indexes);
    return UNITY_END();
 }

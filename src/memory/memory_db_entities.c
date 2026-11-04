@@ -506,6 +506,7 @@ int memory_db_entity_get_photo(int user_id,
 }
 
 int memory_db_entity_delete(int64_t entity_id, int user_id) {
+   memory_consolidation_touched_t touched = { .n = 0 };
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
    /* One transaction: the entity, its relations, and the consolidation record's
     * rows that name it go together. */
@@ -540,7 +541,7 @@ int memory_db_entity_delete(int64_t entity_id, int user_id) {
    }
    /* The consolidation record mustn't keep its name, or its relations' text. */
    if (rc == SQLITE_DONE && changes > 0 &&
-       memory_db_consolidation_scrub_entities_locked(user_id, NULL) != MEMORY_DB_SUCCESS) {
+       memory_db_consolidation_scrub_entities_locked(user_id, &touched) != MEMORY_DB_SUCCESS) {
       rc = SQLITE_ERROR;
    }
    if (auth_db_txn_end_locked(rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
@@ -557,6 +558,7 @@ int memory_db_entity_delete(int64_t entity_id, int user_id) {
       /* A deleted entity mustn't stay findable from the embedding cache. */
       memory_embeddings_invalidate_entity_cache_for_user(user_id);
    }
+   memory_consolidation_touched_notify(user_id, &touched);
    return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
 }
 
