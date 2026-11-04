@@ -643,11 +643,11 @@ int document_db_chunks_get_by_ids(int user_id,
    sqlite3_stmt *stmt = NULL;
    if (sqlite3_prepare_v2(s_db.db,
                           "SELECT c.id, c.chunk_index, c.text, c.document_id, d.filename, "
-                          "d.filetype, c.created_at, d.filetype = 'note' AND d.outside IN "
-                          "(" OUTSIDE_UNTAINTED_SQL ") FROM document_chunks c JOIN documents d "
-                          "ON c.document_id = d.id "
-                          "WHERE (d.user_id = ? OR d.is_global = 1) "
-                          "AND c.id IN (SELECT value FROM json_each(?))",
+                          "d.filetype, c.created_at, d.filetype = 'note' AND d.user_id = ?1 "
+                          "AND d.outside IN (" OUTSIDE_UNTAINTED_SQL ") "
+                          "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
+                          "WHERE (d.user_id = ?1 OR d.is_global = 1) "
+                          "AND c.id IN (SELECT value FROM json_each(?2))",
                           -1, &stmt, NULL) != SQLITE_OK) {
       OLOG_ERROR("document_db: prepare chunks_get_by_ids failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
@@ -1112,8 +1112,13 @@ int document_db_chunk_search_bm25(int user_id,
  * v62: document_versions — soft-archive of pre-mutation content for undo/restore
  * ============================================================================= */
 
+_Static_assert(OUTSIDE_DOCUMENT == 5, "version_archive_locked's SQL writes this outside kind");
+
 /* Archive the pre-mutation content of a document as a restorable version, then
- * prune that document's history to the keep-last-N cap.  CALLER HOLDS THE LOCK
+ * prune that document's history to the keep-last-N cap.  The version carries
+ * the document's outside kind; a document other than a note is someone else's
+ * text, so its version is at least DOCUMENT (a recovered short one comes back
+ * as a note and must not read as the user's words).  CALLER HOLDS THE LOCK
  * and is inside a transaction (the snapshot must be atomic with the mutation it
  * precedes).  Best-effort: versioning is a safety net, so a failure here is
  * logged and swallowed — it must never abort the mutation.  No-op when
@@ -1131,7 +1136,8 @@ static void version_archive_locked(int64_t doc_id,
    if (sqlite3_prepare_v2(s_db.db,
                           "INSERT INTO document_versions(document_id, user_id, filename, text, "
                           "archived_at, outside) VALUES(?1, ?2, ?3, ?4, ?5, COALESCE((SELECT "
-                          "outside FROM documents WHERE id = ?1), 0))",
+                          "CASE WHEN filetype != 'note' AND outside IN (" OUTSIDE_UNTAINTED_SQL
+                          ") THEN 5 ELSE outside END FROM documents WHERE id = ?1), 0))",
                           -1, &ins, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(ins, 1, doc_id);
       sqlite3_bind_int(ins, 2, user_id);
@@ -1258,16 +1264,19 @@ int document_db_version_get_text(int64_t version_id,
                                  char **text_out,
                                  char *filename_out,
                                  size_t fn_sz,
-                                 int64_t *doc_id_out) {
+                                 int64_t *doc_id_out,
+                                 int *outside_out) {
    if (!text_out)
       return FAILURE;
    *text_out = NULL;
+   if (outside_out)
+      *outside_out = OUTSIDE_OTHER; /* unreadable: outside */
 
    AUTH_DB_LOCK_OR_FAIL();
    sqlite3_stmt *st = NULL;
    int result = FAILURE;
    if (sqlite3_prepare_v2(s_db.db,
-                          "SELECT text, filename, document_id FROM document_versions "
+                          "SELECT text, filename, document_id, outside FROM document_versions "
                           "WHERE id = ? AND user_id = ?",
                           -1, &st, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(st, 1, version_id);
@@ -1279,31 +1288,13 @@ int document_db_version_get_text(int64_t version_id,
             col_text_copy(filename_out, fn_sz, st, 1);
          if (doc_id_out)
             *doc_id_out = sqlite3_column_int64(st, 2);
+         if (outside_out)
+            *outside_out = sqlite3_column_int(st, 3);
          result = *text_out ? SUCCESS : FAILURE;
       }
    }
    if (st)
       sqlite3_finalize(st);
-   AUTH_DB_UNLOCK();
-   return result;
-}
-
-int document_db_version_outside(int64_t version_id, int user_id, int *outside_out) {
-   *outside_out = OUTSIDE_OTHER; /* unreadable: outside */
-   AUTH_DB_LOCK_OR_FAIL();
-   sqlite3_stmt *st = NULL;
-   int result = FAILURE;
-   if (sqlite3_prepare_v2(s_db.db,
-                          "SELECT outside FROM document_versions WHERE id = ? AND user_id = ?", -1,
-                          &st, NULL) == SQLITE_OK) {
-      sqlite3_bind_int64(st, 1, version_id);
-      sqlite3_bind_int(st, 2, user_id);
-      if (sqlite3_step(st) == SQLITE_ROW) {
-         *outside_out = sqlite3_column_int(st, 0);
-         result = SUCCESS;
-      }
-   }
-   sqlite3_finalize(st);
    AUTH_DB_UNLOCK();
    return result;
 }

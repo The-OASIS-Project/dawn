@@ -781,8 +781,9 @@ void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payl
    char *text = NULL;
    char fname[DOC_FILENAME_MAX] = "";
    int64_t doc_id = 0;
+   int outside = OUTSIDE_OTHER; /* read with the text: a restore may prune the version */
    if (document_db_version_get_text(version_id, conn->auth_user_id, &text, fname, sizeof(fname),
-                                    &doc_id) != SUCCESS) {
+                                    &doc_id, &outside) != SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Version not found (or not yours)"));
@@ -835,8 +836,6 @@ void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payl
       /* The note takes back the kind the version carried (with its own, kept
        * in place). */
       if (restored_note) {
-         int outside = OUTSIDE_OTHER;
-         (void)document_db_version_outside(version_id, conn->auth_user_id, &outside);
          (void)document_db_set_outside(conn->auth_user_id, doc_id, outside, exists);
          (void)memory_note_bridge_upsert_gloss_from(conn->auth_user_id, doc_id, label, outside);
       }

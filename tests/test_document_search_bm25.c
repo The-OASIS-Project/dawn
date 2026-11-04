@@ -47,7 +47,11 @@ dawn_config_t g_config;
 
 /* Seed one single-chunk "note": a document whose filename IS the label, plus its
  * one chunk indexed into document_chunks_fts (label + body stemmed). */
-static int64_t seed_note(int user_id, const char *label, const char *body, int idx) {
+static int64_t seed_note_chunk(int user_id,
+                               const char *label,
+                               const char *body,
+                               int idx,
+                               int64_t *chunk_out) {
    char hash[65];
    snprintf(hash, sizeof(hash), "hash_%d", idx);
    int64_t doc_id = 0;
@@ -64,7 +68,14 @@ static int64_t seed_note(int user_id, const char *label, const char *body, int i
    memory_stem_string(label, label_stems, sizeof(label_stems));
    memory_stem_string(body, body_stems, sizeof(body_stems));
    TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunk_index_fts(chunk_id, label_stems, body_stems));
+   if (chunk_out) {
+      *chunk_out = chunk_id;
+   }
    return doc_id;
+}
+
+static int64_t seed_note(int user_id, const char *label, const char *body, int idx) {
+   return seed_note_chunk(user_id, label, body, idx, NULL);
 }
 
 void setUp(void) {
@@ -286,7 +297,8 @@ void test_version_survives_delete(void) {
    TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_list(1, doc, v, 8, &n));
    TEST_ASSERT_EQUAL_INT(1, n);
    char *full = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_get_text(v[0].id, 1, &full, NULL, 0, NULL));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_version_get_text(v[0].id, 1, &full, NULL, 0, NULL, NULL));
    TEST_ASSERT_EQUAL_STRING("content worth keeping", full);
    free(full);
 }
@@ -305,7 +317,8 @@ void test_version_owner_scoped(void) {
    document_db_version_list(2, doc, v, 8, &n2); /* user 2 */
    TEST_ASSERT_EQUAL_INT(0, n2);
    char *full = NULL;
-   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_version_get_text(v[0].id, 2, &full, NULL, 0, NULL));
+   TEST_ASSERT_EQUAL_INT(FAILURE,
+                         document_db_version_get_text(v[0].id, 2, &full, NULL, 0, NULL, NULL));
    TEST_ASSERT_NULL(full);
 }
 
@@ -456,7 +469,8 @@ void test_version_list_deleted(void) {
    TEST_ASSERT_NOT_NULL(strstr(v[0].preview, "important"));
 
    char *full = NULL;
-   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_get_text(v[0].id, 1, &full, NULL, 0, NULL));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_version_get_text(v[0].id, 1, &full, NULL, 0, NULL, NULL));
    TEST_ASSERT_EQUAL_STRING("important content", full);
    free(full);
 
@@ -480,7 +494,7 @@ void test_version_undo_round_trip(void) {
    document_db_version_list(1, doc, v, 8, &n);
    TEST_ASSERT_EQUAL_INT(1, n);
    char *vtext = NULL;
-   document_db_version_get_text(v[0].id, 1, &vtext, NULL, 0, NULL);
+   document_db_version_get_text(v[0].id, 1, &vtext, NULL, 0, NULL, NULL);
    TEST_ASSERT_EQUAL_STRING("ORIGINAL", vtext);
 
    /* Undo: restore the newest version in place. */
@@ -578,7 +592,10 @@ void test_version_recover_keeps_outside(void) {
    for (int i = 0; i < n; i++) {
       const bool is_report = strcmp(v[i].filename, "Research #1") == 0;
       int outside = -1;
-      TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_outside(v[i].id, 1, &outside));
+      char *text = NULL;
+      TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_get_text(v[i].id, 1, &text, NULL, 0, NULL,
+                                                                  &outside));
+      free(text);
       TEST_ASSERT_EQUAL_INT(is_report ? OUTSIDE_RESEARCH : OUTSIDE_NONE, outside);
       /* The recover path: re-create the note, then restore the kind. */
       int64_t again = 0, chunk = 0;
@@ -592,8 +609,81 @@ void test_version_recover_keeps_outside(void) {
       TEST_ASSERT_EQUAL(!is_report, chunk_is_own_note(chunk));
    }
    int outside = -1;
-   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_version_outside(v[0].id, 2, &outside));
+   char *text = NULL;
+   TEST_ASSERT_EQUAL_INT(FAILURE,
+                         document_db_version_get_text(v[0].id, 2, &text, NULL, 0, NULL, &outside));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside);
+}
+
+/* A deleted upload's version is someone else's text: recovered short, it comes
+ * back as a note that doesn't read as the user's own words. */
+void test_version_recover_upload_not_own(void) {
+   g_config.documents.version_retention_days = 14;
+   int64_t pdf = 0, chunk = 0;
+   const float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_create(1, "scan.pdf", "scan.pdf", "pdf", "h-pdf", 1,
+                                                     false, &pdf));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_chunk_create(pdf, 0, "short page", emb, 4, 1.0f, 0, &chunk));
+   seed_note(1, "RowidFiller3", "x", 97);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_delete_indexed(pdf));
+
+   document_version_meta_t v[8];
+   int n = 0;
+   document_db_version_list_deleted(1, v, 8, &n);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   int outside = -1;
+   char *text = NULL;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_version_get_text(v[0].id, 1, &text, NULL, 0, NULL, &outside));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside);
+   /* The recover path: re-create it as a note, then restore the kind. */
+   int64_t again = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_create(1, "scan.pdf", "scan.pdf", "note", "h-pdf2", 1,
+                                                     false, &again));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_chunk_create(again, 0, text, emb, 4, 1.0f, 0, &chunk));
+   free(text);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, again, outside, false));
+   TEST_ASSERT_FALSE(chunk_is_own_note(chunk));
+}
+
+/* Restoring the only kept version of a clean note: the restore archives the
+ * current text, which prunes the version restored from, so its kind is read
+ * with its text first and the note stays the user's own. */
+void test_version_restore_at_cap_keeps_kind(void) {
+   g_config.documents.version_retention_days = 14;
+   g_config.documents.version_keep_per_doc = 1;
+   int64_t chunk_id = 0;
+   int64_t doc = seed_note_chunk(1, "Capped", "FIRST", 26, &chunk_id);
+   const float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_note_update(1, doc, "Capped", "SECOND", emb, 4, 1.0f, "cap1"));
+   document_version_meta_t v[4];
+   int n = 0;
+   document_db_version_list(1, doc, v, 4, &n);
+   TEST_ASSERT_EQUAL_INT(1, n);
+
+   /* The restore: read the version, write its text back, apply its kind. */
+   int outside = -1;
+   char *text = NULL;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_version_get_text(v[0].id, 1, &text, NULL, 0, NULL, &outside));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_note_update(1, doc, "Capped", text, emb, 4, 1.0f, "cap2"));
+   free(text);
+   char *gone = NULL;
+   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_version_get_text(v[0].id, 1, &gone, NULL, 0, NULL,
+                                                               NULL)); /* pruned */
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, doc, outside, true));
+
+   document_chunk_t chunk;
+   int cc = 0;
+   document_db_chunk_read(doc, &chunk, 1, 0, &cc);
+   TEST_ASSERT_EQUAL_STRING("FIRST", chunk.text);
+   TEST_ASSERT_TRUE(chunk_is_own_note(chunk_id)); /* a note edit keeps its chunk id */
+   g_config.documents.version_keep_per_doc = 10;
 }
 
 int main(void) {
@@ -620,6 +710,8 @@ int main(void) {
    RUN_TEST(test_version_undo_round_trip);
    RUN_TEST(test_version_reattach_on_recover);
    RUN_TEST(test_version_recover_keeps_outside);
+   RUN_TEST(test_version_recover_upload_not_own);
+   RUN_TEST(test_version_restore_at_cap_keeps_kind);
    RUN_TEST(test_set_num_chunks);
    return UNITY_END();
 }

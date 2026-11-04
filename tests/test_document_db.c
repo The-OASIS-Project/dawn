@@ -615,6 +615,24 @@ static void test_chunks_by_ids_own_note(void) {
    }
 }
 
+/* A note another user published globally reads as outside text, never as the
+ * reader's own words; its owner still reads it as own. */
+static void test_chunks_by_ids_global_note_not_own(void) {
+   float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+   int64_t note = 0, id = 0;
+   document_db_create(1, "Shared", "", "note", "h-shared", 1, true, &note);
+   document_db_chunk_create(note, 0, "Shared words", emb, 4, 1.0f, 0, &id);
+
+   document_chunk_t out[1];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(2, &id, 1, out, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_FALSE(out[0].own_note);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(1, &id, 1, out, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_TRUE(out[0].own_note);
+}
+
 static int doc_outside(int64_t id) {
    sqlite3_stmt *st = NULL;
    sqlite3_prepare_v2(s_db.db, "SELECT outside FROM documents WHERE id = ?", -1, &st, NULL);
@@ -851,6 +869,7 @@ int main(void) {
    RUN_TEST(test_find_by_name);
    RUN_TEST(test_chunk_create_and_read);
    RUN_TEST(test_chunks_by_ids_own_note);
+   RUN_TEST(test_chunks_by_ids_global_note_not_own);
    RUN_TEST(test_set_outside_combine);
    RUN_TEST(test_chunk_read_range);
    RUN_TEST(test_chunk_grep);

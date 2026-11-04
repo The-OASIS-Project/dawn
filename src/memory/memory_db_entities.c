@@ -564,7 +564,8 @@ int memory_db_entity_delete(int64_t entity_id, int user_id) {
 
 /* An entity (user ?1) nothing names: what keeps it is a fact about it, a
  * relation on either side, an alias either way, a merge proposal, a contact,
- * a consolidation record row, a photo, or being the user's own. */
+ * a consolidation record row or the subject its pre-image holds for an undo
+ * (a malformed pre-image names nothing), a photo, or being the user's own. */
 /* clang-format off */
 #define ENTITY_ORPHAN_SQL \
    "is_user_self = 0 AND canonical_id IS NULL AND photo_id IS NULL " \
@@ -586,7 +587,10 @@ int memory_db_entity_delete(int64_t entity_id, int user_id) {
    "AND id NOT IN (SELECT entity_id FROM memory_consolidation_ops WHERE user_id = ?1 AND " \
    "entity_id IS NOT NULL) " \
    "AND id NOT IN (SELECT other_entity_id FROM memory_consolidation_ops WHERE user_id = ?1 AND " \
-   "other_entity_id IS NOT NULL)"
+   "other_entity_id IS NOT NULL) " \
+   "AND id NOT IN (SELECT s FROM (SELECT CASE WHEN json_valid(pre_image) THEN " \
+   "json_extract(pre_image, '$.subject_entity_id') END AS s FROM memory_consolidation_ops " \
+   "WHERE user_id = ?1 AND status IN ('applied', 'stale')) WHERE s IS NOT NULL)"
 /* clang-format on */
 
 /* Delete user @p user_id's entities that @p sql (binding ?2) picks and

@@ -837,7 +837,9 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
          return strdup(
              "There's no earlier version to undo — it hasn't changed since it was saved.");
       char *vtext = NULL;
-      if (document_db_version_get_text(ev[0].id, user_id, &vtext, NULL, 0, NULL) != SUCCESS ||
+      int outside = OUTSIDE_OTHER; /* read with the text: the undo may prune the version */
+      if (document_db_version_get_text(ev[0].id, user_id, &vtext, NULL, 0, NULL, &outside) !=
+              SUCCESS ||
           !vtext)
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Couldn't read the saved version to undo the change.");
@@ -848,8 +850,6 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
       pthread_mutex_lock(&s_edit_mutex);
       char *result = commit_edit(user_id, &doc, is_note, vtext, ok);
       /* The restored text brings back the kind its version carried. */
-      int outside = OUTSIDE_OTHER;
-      (void)document_db_version_outside(ev[0].id, user_id, &outside);
       if (is_note) {
          (void)document_db_set_outside(user_id, doc.id, outside, true);
       }
@@ -884,8 +884,9 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
                     "recoverable).");
 
    char *text = NULL;
-   if (document_db_version_get_text(version_id, user_id, &text, fname, sizeof(fname), NULL) !=
-           SUCCESS ||
+   int outside = OUTSIDE_OTHER;
+   if (document_db_version_get_text(version_id, user_id, &text, fname, sizeof(fname), NULL,
+                                    &outside) != SUCCESS ||
        !text)
       return strdup(TOOL_RESULT_ERROR_MARK "Couldn't read the saved version to recover it.");
 
@@ -905,8 +906,6 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
    /* The note takes back the kind its version carried, with what this turn
     * read. */
    if (as_note && res.doc_id > 0) {
-      int outside = OUTSIDE_OTHER;
-      (void)document_db_version_outside(version_id, user_id, &outside);
       outside = outside_combine(outside, memory_turn_outside(user_id));
       (void)document_db_set_outside(user_id, res.doc_id, outside, false);
       (void)memory_note_bridge_upsert_gloss_from(user_id, res.doc_id, fname, outside);

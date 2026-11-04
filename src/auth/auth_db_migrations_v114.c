@@ -22,8 +22,10 @@
  * kind a version's document carried, restored with it.  Each table is filled
  * in the run that adds its column: a research run's report is RESEARCH; a
  * note whose gloss fact learned from outside text carries that fact's kind;
- * a version takes its document's kind (when the document is gone, RESEARCH
- * if a research run names it, else 0); the rest stay NONE.
+ * a version takes its document's kind, at least DOCUMENT for a document
+ * other than a note (when the document is gone, RESEARCH if a research run
+ * names it, else DOCUMENT: what it was can't be told, and a deleted upload
+ * recovered as a note must not read as the user's words); the rest stay NONE.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -37,7 +39,7 @@
 #include "core/outside_kind.h"
 #include "logging.h"
 
-_Static_assert(OUTSIDE_RESEARCH == 3, "v114's SQL writes this outside kind");
+_Static_assert(OUTSIDE_RESEARCH == 3 && OUTSIDE_DOCUMENT == 5, "v114's SQL writes these kinds");
 
 /* clang-format off */
 static const char k_fill_documents_sql[] =
@@ -48,9 +50,10 @@ static const char k_fill_documents_sql[] =
     "WHERE outside = 0 AND filetype = 'note' AND EXISTS (SELECT 1 FROM memory_facts f WHERE "
     "f.note_doc_id = documents.id AND f.outside NOT IN (" OUTSIDE_UNTAINTED_SQL "));";
 static const char k_fill_versions_sql[] =
-    "UPDATE document_versions SET outside = COALESCE((SELECT d.outside FROM documents d WHERE "
+    "UPDATE document_versions SET outside = COALESCE((SELECT CASE WHEN d.filetype != 'note' AND "
+    "d.outside IN (" OUTSIDE_UNTAINTED_SQL ") THEN 5 ELSE d.outside END FROM documents d WHERE "
     "d.id = document_versions.document_id), CASE WHEN document_id IN (SELECT report_doc_id "
-    "FROM research_runs WHERE report_doc_id IS NOT NULL) THEN 3 ELSE 0 END);";
+    "FROM research_runs WHERE report_doc_id IS NOT NULL) THEN 3 ELSE 5 END);";
 /* clang-format on */
 
 /* Add @p table's outside column and fill it with @p fill_sql, unless it is

@@ -3561,6 +3561,48 @@ static void test_sweep_removes_only_old_entities_nothing_names(void) {
    TEST_ASSERT_TRUE(entity_exists(self));
 }
 
+/* A reinforcement's undo puts back the fact's old subject, so an entity only
+ * its pre-image names is kept; once the op is undone it no longer holds it. */
+static void test_sweep_keeps_an_entity_a_pre_image_holds(void) {
+   const int64_t held = insert_entity_typed(g_test_user_id, "Old Subject", "person");
+   const int64_t now = (int64_t)time(NULL);
+   char sql[512];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_consolidation_batches (user_id, path, stop, created_at) "
+            "VALUES (%d, 'agent', 'finish', %lld);"
+            "INSERT INTO memory_consolidation_ops (batch_id, user_id, seq, op, pre_image, "
+            "created_at) SELECT MAX(id), %d, 1, 'reinforced', "
+            "'{\"subject_entity_id\":%lld}', %lld FROM memory_consolidation_batches UNION ALL "
+            "SELECT MAX(id), %d, 2, 'added', 'not json', %lld FROM memory_consolidation_batches;"
+            "UPDATE memory_entities SET first_seen = %lld WHERE id = %lld;",
+            g_test_user_id, (long long)now, g_test_user_id, (long long)held, (long long)now,
+            g_test_user_id, (long long)now, (long long)(now - 30 * 86400), (long long)held);
+   exec_sql(sql);
+
+   int deleted = -1;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_sweep_orphans(g_test_user_id, now - 7 * 86400, &deleted));
+   TEST_ASSERT_EQUAL_INT(0, deleted);
+   TEST_ASSERT_TRUE(entity_exists(held));
+
+   exec_sql("UPDATE memory_consolidation_ops SET status = 'undone' WHERE op = 'reinforced'");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_sweep_orphans(g_test_user_id, now - 7 * 86400, &deleted));
+   TEST_ASSERT_EQUAL_INT(1, deleted);
+   TEST_ASSERT_FALSE(entity_exists(held));
+}
+
+/* A user left with only entities is still one the nightly sweep visits. */
+static void test_user_ids_include_one_with_only_entities(void) {
+   insert_entity_typed(g_test_user_id, "Lone Entity", "thing");
+   exec_sql("DELETE FROM memory_facts; DELETE FROM memory_preferences;");
+   int ids[8] = { 0 };
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_get_all_user_ids(ids, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT(g_test_user_id, ids[0]);
+}
+
 static void test_entity_upsert_wrapper_uses_now(void) {
    int64_t before = (int64_t)time(NULL);
    int64_t eid = 0;
@@ -3973,6 +4015,8 @@ int main(void) {
    RUN_TEST(test_entity_upsert_at_overrides_take_effect);
    RUN_TEST(test_entity_upsert_wrapper_uses_now);
    RUN_TEST(test_sweep_removes_only_old_entities_nothing_names);
+   RUN_TEST(test_sweep_keeps_an_entity_a_pre_image_holds);
+   RUN_TEST(test_user_ids_include_one_with_only_entities);
 
    return UNITY_END();
 }

@@ -288,6 +288,10 @@ int document_db_version_list_deleted(int user_id,
  * @param text_out     Heap string on success (caller frees); NULL otherwise.
  * @param filename_out Optional out buffer for the archived filename.
  * @param doc_id_out   Optional out for the original document id.
+ * @param outside_out  Optional out for the outside kind its document carried
+ *                     when archived (document_versions.outside), read with the
+ *                     text: a restore archives and may prune this version
+ *                     before the kind is applied.  OTHER when unreadable.
  * @return SUCCESS (0) / FAILURE (1 = not found / not owned / OOM).
  */
 int document_db_version_get_text(int64_t version_id,
@@ -295,15 +299,8 @@ int document_db_version_get_text(int64_t version_id,
                                  char **text_out,
                                  char *filename_out,
                                  size_t fn_sz,
-                                 int64_t *doc_id_out);
-
-/**
- * @brief The outside kind a version's document carried when it was archived
- *        (document_versions.outside), for restoring it onto the note
- * @param outside_out The kind; OTHER when it can't be read
- * @return SUCCESS (0) / FAILURE (1 = not found / not owned / a database error)
- */
-int document_db_version_outside(int64_t version_id, int user_id, int *outside_out);
+                                 int64_t *doc_id_out,
+                                 int *outside_out);
 
 /**
  * @brief Re-point a deleted doc's version rows onto the doc created on recover.

@@ -64,8 +64,9 @@ static int outside_in(const char *table, int id) {
  *   1 a research run's report filed as a note; 5 one too large for a note.
  *   2 a note whose gloss learned from an email; 3 one with a clean gloss;
  *   4 one whose gloss predates the kind (UNKNOWN); 6 an uploaded file.
- * Versions: 1 of the report, 2 of the clean note, 3 of a deleted note (99),
- * 4 of a deleted research report (98, its run still naming it). */
+ * Versions: 1 of the report, 2 of the clean note, 3 of a deleted item (99),
+ * 4 of a deleted research report (98, its run still naming it), 5 of the
+ * uploaded file. */
 static void seed_v113(void) {
    exec_ok("PRAGMA foreign_keys=OFF;"
            "ALTER TABLE documents DROP COLUMN outside;"
@@ -88,7 +89,8 @@ static void seed_v113(void) {
            "(1, 'other', 'explicit', NULL, 1);"
            "INSERT INTO document_versions (id, document_id, user_id, filename, text, "
            "archived_at) VALUES (1, 1, 1, 'Research #1', 'old', 1), (2, 3, 1, 'Groceries', "
-           "'eggs', 1), (3, 99, 1, 'Gone', 'x', 1), (4, 98, 1, 'Research #3', 'y', 1);"
+           "'eggs', 1), (3, 99, 1, 'Gone', 'x', 1), (4, 98, 1, 'Research #3', 'y', 1), "
+           "(5, 6, 1, 'a.pdf', 'z', 1);"
            "PRAGMA foreign_keys=ON;");
 }
 
@@ -149,8 +151,9 @@ static void test_notes_outside_filled_in(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 6));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, outside_in("document_versions", 1));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("document_versions", 2));
-   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("document_versions", 3));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside_in("document_versions", 3));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, outside_in("document_versions", 4));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside_in("document_versions", 5));
 }
 
 /* A rerun (the version held back by a later step) leaves alone what new code
