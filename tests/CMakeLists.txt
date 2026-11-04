@@ -150,6 +150,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v111.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v112.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v113.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v115.c
     ${SRC_ROOT}/src/core/tz.c
     ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
@@ -2359,6 +2360,14 @@ dawn_add_unit_test(test_coding_agent_tool
 dawn_add_unit_test(test_coding_agent_report
    SOURCES test_coding_agent_report.c
            ${SRC_ROOT}/src/tools/coding_agent_report.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# What DAWN posted into a conversation, told to the next turn.
+dawn_add_unit_test(test_session_posts
+   SOURCES test_session_posts.c
+           ${SRC_ROOT}/src/core/session_posts.c
            ${SRC_ROOT}/src/core/strbuf.c
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)

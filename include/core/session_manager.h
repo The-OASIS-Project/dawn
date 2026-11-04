@@ -617,6 +617,14 @@ typedef struct session {
    // Guarded by history_mutex.
    session_notice_t notices[SESSION_NOTICES_MAX];
    int notice_count;
+   // What DAWN posted into the conversation (a job's report) that this session
+   // has told its turns: posts in posts_told_conv up to posts_told_id
+   // (session_posts_take).  posts_told_by is the turn that told the last
+   // ones (taken back with it: posts_told_prev).  Guarded by history_mutex.
+   int64_t posts_told_conv;
+   int64_t posts_told_id;
+   int64_t posts_told_prev;
+   uint64_t posts_told_by;
    // Facts "remember"ed during a turn whose conversation wasn't known yet; their
    // source is recorded once it is (see session_fact_source_t).  Guarded by
    // history_mutex.

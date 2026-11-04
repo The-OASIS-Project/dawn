@@ -189,6 +189,125 @@ static void test_display_reads_skip_kind_rows(void) {
 
 /* ---- rows DAWN wrote on its own, left out of memory extraction ---- */
 
+static int64_t add_post(int64_t conv, const char *text) {
+   const conv_message_row_t row = { .role = "assistant", .content = text, .unprompted = true };
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, alice_id, &row, &id));
+   return id;
+}
+
+
+/* v115: posts stored before it keep replaying (and are never told in a turn's
+ * context); new ones don't replay.  Run on its own, it marks only what is
+ * there, once. */
+static void test_v115_earlier_posts_keep_replaying(void) {
+   sqlite3 *mem = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_open(":memory:", &mem));
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_exec(mem,
+                                      "CREATE TABLE message_unprompted (message_id INTEGER PRIMARY "
+                                      "KEY); INSERT INTO message_unprompted VALUES (1), (2);",
+                                      NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v115(mem));
+   TEST_ASSERT_EQUAL_INT64(2, raw_int(mem, "SELECT SUM(replayed) FROM message_unprompted"));
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(mem,
+                                                 "INSERT INTO message_unprompted (message_id) "
+                                                 "VALUES (3)",
+                                                 NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v115(mem)); /* a rerun: no change */
+   TEST_ASSERT_EQUAL_INT64(
+       0, raw_int(mem, "SELECT replayed FROM message_unprompted WHERE message_id = 3"));
+   sqlite3_close(mem);
+
+   /* Through the daemon's reads: an earlier post replays and isn't told. */
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   const int64_t question = add_row(conv, "user", "Research it", NULL);
+   const int64_t old_post = add_post(conv, "Research finished.");
+   char sql[96];
+   snprintf(sql, sizeof(sql), "UPDATE message_unprompted SET replayed = 1 WHERE message_id = %lld",
+            (long long)old_post);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+   conv_posted_row_t rows[1];
+   int n = 0;
+   bool more = false;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_posted_after(conv, alice_id, question, 2000, rows, 1, &n, &more));
+   TEST_ASSERT_EQUAL_INT(0, n);
+   replay_t replay = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages_for_llm(conv, alice_id, 0, collect_replay, &replay));
+   TEST_ASSERT_EQUAL_INT(2, replay.count);
+}
+
+/* A post longer than the caller's cap comes back one character over, so the
+ * caller can say it was cut. */
+static void test_post_cut_shows(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   add_post(conv, "abcdefghij");
+   add_post(conv, "abcde");
+   conv_posted_row_t rows[2];
+   int n = 0;
+   bool more = false;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_posted_after(conv, alice_id, 0, 5, rows, 2, &n, &more));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_STRING("abcdef", rows[0].content); /* cut: one over */
+   TEST_ASSERT_EQUAL_STRING("abcde", rows[1].content);  /* whole */
+   conv_db_posted_free(rows, n);
+}
+
+/* DAWN's posts: read after a row, for their owner, a few at a time; left out
+ * of the replay (a turn tells them in its context), still shown. */
+static void test_posts_after_and_not_replayed(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   const int64_t question = add_row(conv, "user", "Fix it", NULL);
+   add_row(conv, "assistant", "Started job #5.", NULL);
+   const int64_t p1 = add_post(conv, "Job #5 is waiting.");
+   const int64_t p2 = add_post(conv, "Job #5 finished.");
+   add_row(conv, "user", "allow it", NULL);
+
+   conv_posted_row_t rows[1];
+   int n = 0;
+   bool more = false;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_posted_after(conv, alice_id, question, 2000, rows, 1, &n, &more));
+   /* The newest one; the earlier one left (more). */
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_TRUE(more);
+   TEST_ASSERT_EQUAL_INT64(p2, rows[0].id);
+   TEST_ASSERT_EQUAL_STRING("Job #5 finished.", rows[0].content);
+   conv_db_posted_free(rows, n);
+   /* Both, oldest first; each cut to its characters. */
+   conv_posted_row_t two[2];
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_posted_after(conv, alice_id, question, 6, two, 2, &n, &more));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_FALSE(more);
+   TEST_ASSERT_EQUAL_INT64(p1, two[0].id);
+   TEST_ASSERT_EQUAL_INT64(p2, two[1].id);
+   TEST_ASSERT_EQUAL_STRING("Job #5 ", two[0].content); /* one over the cap: cut */
+   conv_db_posted_free(two, n);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_posted_after(conv, alice_id, p2, 2000, rows, 1, &n, &more));
+   TEST_ASSERT_EQUAL_INT(0, n);
+   /* Another user's read sees nothing. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_posted_after(conv, bob_id, 0, 2000, rows, 1, &n, &more));
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   replay_t replay = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages_for_llm(conv, alice_id, 0, collect_replay, &replay));
+   TEST_ASSERT_EQUAL_INT(3, replay.count);
+   display_t shown = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages(conv, alice_id, collect_display, &shown));
+   TEST_ASSERT_EQUAL_INT(5, shown.count);
+}
+
 static void test_unprompted_rows(void) {
    int64_t conv = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
@@ -1622,6 +1741,12 @@ static void test_an_unanswered_envelope_is_retracted(void) {
    TEST_ASSERT_EQUAL_INT64(1, raw_int(db, sql)); /* only the question */
    sqlite3_close(db);
 
+   /* A post DAWN made while the attempt ran (a job's notice) doesn't hold it
+    * back either: it isn't replayed, so it can't stand between two envelopes. */
+   const int64_t env5 = add_row(conv, "user", "job results", "envelope");
+   add_post(conv, "Coding job #5 is waiting.");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_retract_envelope(conv, alice_id, env5));
+
    /* An announced change saved after it (carried, naming no question)
     * doesn't hold it back, and stays. */
    const int64_t env3 = add_row(conv, "user", "job results", "envelope");
@@ -1792,6 +1917,9 @@ int main(void) {
    RUN_TEST(test_deleting_a_conversation_drops_its_handles);
    RUN_TEST(test_briefing_marked_extracted);
    RUN_TEST(test_unprompted_rows);
+   RUN_TEST(test_posts_after_and_not_replayed);
+   RUN_TEST(test_v115_earlier_posts_keep_replaying);
+   RUN_TEST(test_post_cut_shows);
    RUN_TEST(test_v109_marks_earlier_posts);
    RUN_TEST(test_messages_fk_children);
    return UNITY_END();

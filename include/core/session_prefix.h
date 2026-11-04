@@ -39,8 +39,8 @@
 extern "C" {
 #endif
 
-struct session;
 struct json_object;
+struct session;
 struct session_prefix_turn;
 
 
@@ -63,6 +63,16 @@ struct session_prefix_turn;
 void session_prefix_apply_turn(struct session *session,
                                const composed_prompt_t *cp,
                                const char *turn_note);
+
+/**
+ * @brief Caller holds history_mutex.  The history this turn's prompt is built
+ *        on (session_prefix_apply_turn's), the conversation it holds into
+ *        @p conv_out (0: none yet; SESSION_HISTORY_CONV_MIXED), and the turn's
+ *        question in it into @p question_out (NULL: none).  Borrowed.
+ */
+struct json_object *session_prefix_turn_history_locked(struct session *session,
+                                                       int64_t *conv_out,
+                                                       struct json_object **question_out);
 
 /**
  * @brief A turn's question was saved to @p conv_id as row @p row_id

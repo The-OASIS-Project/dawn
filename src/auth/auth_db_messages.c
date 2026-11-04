@@ -57,6 +57,14 @@ _Static_assert(IMAGE_FILENAME_MAX <= CONV_IMAGE_FILENAME_MAX,
    "UPDATE images SET retention_policy = 1 WHERE retention_policy = 3 AND source = 5 " \
    "AND user_id = ?2 AND id IN (SELECT value FROM json_each(?1))"
 
+/* A replay leaves out what DAWN posted into the conversation (a job's report, a
+ * channel post): two assistant messages in a row are merged by some providers
+ * and refused by strict chat templates, and the turn after a post tells it in
+ * its own context (conv_db_posted_after()), which replays with its question.
+ * A post stored before that was so (replayed, v115) replays as it did. */
+#define NOT_POSTED_SQL \
+   "AND m.id NOT IN (SELECT message_id FROM message_unprompted WHERE replayed = 0) "
+
 /* Rows the watermark GC clears per statement: each is its own short hold of
  * the database lock, since clearing a row frees its blocks' pages. */
 #define GC_BATCH_ROWS 32
@@ -87,7 +95,8 @@ static const auth_db_stmt_def_t s_msg_stmts[] = {
      "THEN m.llm_blocks END, "
      "m.created_at, m.is_error, m.kind, m.context_of, m.images FROM messages m "
      "INNER JOIN conversations c ON m.conversation_id = c.id "
-     "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 ORDER BY m.id ASC",
+     "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 " NOT_POSTED_SQL
+     "ORDER BY m.id ASC",
      &s_db.stmt_msg_get_llm },
    { "msg_bind_images", IMAGES_BIND_SQL, &s_db.stmt_msg_bind_images },
    { "msg_ref_captures", IMAGES_REF_SQL("source = 5"), &s_db.stmt_msg_ref_captures },
@@ -101,6 +110,16 @@ static const auth_db_stmt_def_t s_msg_stmts[] = {
      "AND m.llm_blocks_len IS NOT NULL "
      "ORDER BY m.id DESC",
      &s_db.stmt_msg_llm_sizes },
+   /* What DAWN posted into a conversation after ?3, newest first (one more
+    * than asked for, so the caller can say earlier ones were left), each cut
+    * to ?5 characters (the caller cuts to its bytes). */
+   { "msg_posted_after",
+     "SELECT m.id, substr(m.content, 1, ?5) FROM messages m "
+     "INNER JOIN conversations c ON m.conversation_id = c.id "
+     "INNER JOIN message_unprompted p ON p.message_id = m.id AND p.replayed = 0 "
+     "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 AND m.kind IS NULL "
+     "ORDER BY m.id DESC LIMIT ?4",
+     &s_db.stmt_msg_posted_after },
    /* The v67 watermark, with a monotonic guard so a stale async compaction
     * can't rewind one a later pass already advanced. */
    { "conv_set_watermark",
@@ -795,6 +814,75 @@ int conv_db_get_messages_for_llm(int64_t conv_id,
    AUTH_DB_UNLOCK();
 
    return (rc == SQLITE_ROW || rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
+int conv_db_posted_after(int64_t conv_id,
+                         int user_id,
+                         int64_t after_id,
+                         int text_max,
+                         conv_posted_row_t *rows,
+                         int max,
+                         int *count_out,
+                         bool *more_out) {
+   if (count_out) {
+      *count_out = 0;
+   }
+   if (more_out) {
+      *more_out = false;
+   }
+   if (conv_id <= 0 || !rows || max <= 0 || !count_out || after_id < 0 || text_max <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = s_db.stmt_msg_posted_after;
+   sqlite3_reset(st);
+   sqlite3_bind_int64(st, 1, conv_id);
+   sqlite3_bind_int(st, 2, user_id);
+   sqlite3_bind_int64(st, 3, after_id);
+   sqlite3_bind_int(st, 4, max + 1);
+   sqlite3_bind_int(st, 5, text_max + 1); /* one over: the caller sees it was cut */
+   int n = 0;
+   int rc;
+   int result = AUTH_DB_SUCCESS;
+   while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+      if (n == max) {
+         if (more_out) {
+            *more_out = true;
+         }
+         break;
+      }
+      const char *content = (const char *)sqlite3_column_text(st, 1);
+      rows[n].id = sqlite3_column_int64(st, 0);
+      rows[n].content = strdup(content ? content : "");
+      if (!rows[n].content) {
+         result = AUTH_DB_FAILURE;
+         break;
+      }
+      n++;
+   }
+   if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
+      result = AUTH_DB_FAILURE;
+   }
+   sqlite3_reset(st);
+   AUTH_DB_UNLOCK();
+   if (result != AUTH_DB_SUCCESS) {
+      conv_db_posted_free(rows, n);
+      n = 0;
+   }
+   for (int i = 0; i < n / 2; i++) { /* read newest first; returned oldest first */
+      const conv_posted_row_t t = rows[i];
+      rows[i] = rows[n - 1 - i];
+      rows[n - 1 - i] = t;
+   }
+   *count_out = n;
+   return result;
+}
+
+void conv_db_posted_free(conv_posted_row_t *rows, int n) {
+   for (int i = 0; rows && i < n; i++) {
+      free(rows[i].content);
+      rows[i].content = NULL;
+   }
 }
 
 /* Clear stored blocks at or below @p watermark in @p conv_id, a batch per lock

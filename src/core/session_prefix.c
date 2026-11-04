@@ -491,6 +491,16 @@ static struct json_object *question_locked(session_t *session, struct json_objec
    return NULL;
 }
 
+struct json_object *session_prefix_turn_history_locked(session_t *session,
+                                                       int64_t *conv_out,
+                                                       struct json_object **question_out) {
+   bool pinned_live = false;
+   struct json_object *hist = *target_locked(session, &pinned_live);
+   *conv_out = hist_conv_locked(session, hist);
+   *question_out = question_locked(session, hist);
+   return hist;
+}
+
 /* Put @p parts in front of @p question's own content (replacing any context
  * a failed earlier attempt of this turn put there), after a compaction's
  * summary when it opens with one. */

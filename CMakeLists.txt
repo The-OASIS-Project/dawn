@@ -861,6 +861,7 @@ list(APPEND DAWN_SOURCES
     src/core/build_focus_block.c
     src/core/prompt_builder.c
     src/core/session_prefix.c
+    src/core/session_posts.c
     src/core/tool_result_store.c
     src/tools/result_read_tool.c
     src/tools/result_read_ops.c
@@ -1017,6 +1018,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v111.c
     src/auth/auth_db_migrations_v112.c
     src/auth/auth_db_migrations_v113.c
+    src/auth/auth_db_migrations_v115.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c

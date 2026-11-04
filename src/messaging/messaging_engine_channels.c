@@ -984,8 +984,8 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
 
    if (rc == MESSAGING_SUCCESS) {
       /* Persist the delivered message to the channel's forever-conversation so
-       * it appears in the WebUI log and is part of the channel's history on the
-       * next turn — symmetric with the inbound reply path (process_inbound).
+       * it appears in the WebUI log and the channel's next turn is told it in
+       * its context (session_posts.c) — symmetric with the inbound reply path.
        * Covers both the messaging.send tool and scheduler fan-out.  The
        * canonical markdown is stored (the WebUI renders it); per-channel
        * formatting was a throwaway copy inside messaging_deliver.  Best-effort:

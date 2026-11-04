@@ -34,6 +34,7 @@
 #include "core/focus/focus_handles.h"
 #include "core/session_compaction.h"
 #include "core/session_manager.h"
+#include "core/session_posts.h"
 #include "core/session_prefix.h"
 #include "core/tool_result_store.h"
 #include "dawn_error.h"
@@ -379,6 +380,7 @@ int session_rollback_turn(session_t *session) {
             session->notices[i].sent = false;
          }
       }
+      session_posts_untell_locked(session);
    } else if (session->turn_user_msg) {
       OLOG_WARNING("Session %u: the turn's question is no longer in its history; nothing "
                    "taken back",

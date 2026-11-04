@@ -473,7 +473,8 @@ int conv_db_retract_envelope(int64_t conv_id, int user_id, int64_t envelope_id) 
                                   "conversation_id = ?1 AND kind = 'envelope'), "
                                   "(SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 "
                                   "AND id > ?2 AND context_of IS NOT ?2 AND "
-                                  "(kind IS NULL OR kind NOT IN " CONV_SCOPED_KINDS_SQL "))",
+                                  "(kind IS NULL OR kind NOT IN " CONV_SCOPED_KINDS_SQL ") "
+                                  "AND id NOT IN (SELECT message_id FROM message_unprompted))",
                                   -1, &st, NULL) == SQLITE_OK
                    ? AUTH_DB_SUCCESS
                    : AUTH_DB_FAILURE;

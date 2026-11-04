@@ -37,6 +37,7 @@
 #include "core/focus/focus_incremental.h"
 #include "core/session_compaction.h"
 #include "core/session_focus.h"
+#include "core/session_posts.h"
 #include "core/session_prefix.h"
 #include "core/session_reaper.h"
 #include "core/tool_result_store.h"
@@ -1619,6 +1620,10 @@ static char *turn_note_with_email(session_t *session, const char *note) {
 }
 
 static int dispatch_with_note(session_t *session, const char *user_turn_text, const char *note);
+static int dispatch_prompt(session_t *session,
+                           const char *user_turn_text,
+                           const char *turn_note,
+                           int user_id);
 
 int session_dispatch_user_turn_ex(session_t *session,
                                   const char *user_turn_text,
@@ -1648,6 +1653,45 @@ static int dispatch_with_note(session_t *session,
     * triggered on first content) and could wipe a mid-turn held-back partial. */
    text_filter_cited_reset(&session->cited_tag_filter);
 
+   /* Re-read user_id under metrics_mutex so satellite rebinds that
+    * occurred since last turn are picked up.  A guest (0: an unmapped
+    * satellite, a local mic with no voice user) gets the base prompt, its
+    * surface's standing directions and the time; the builder adds nothing of
+    * any user's (settings, memory, retrieval are gated on a user). */
+   const int user_id = session_effective_user_id(session);
+
+   /* What DAWN posted into the conversation since (a job's report): told with
+    * this turn's note, so the turn's sizing below counts it. */
+   char *posts = session_posts_take(session, user_id);
+   char *joined = NULL;
+   if (posts != NULL && turn_note == NULL) {
+      joined = posts; /* the note is the posts */
+      turn_note = joined;
+   } else if (posts != NULL) {
+      const size_t len = strlen(turn_note) + 2 + strlen(posts) + 1;
+      joined = malloc(len);
+      if (joined != NULL) {
+         snprintf(joined, len, "%s\n\n%s", turn_note, posts);
+         turn_note = joined;
+      } else {
+         /* Not told after all: the next turn tells them. */
+         pthread_mutex_lock(&session->history_mutex);
+         session_posts_untell_locked(session);
+         pthread_mutex_unlock(&session->history_mutex);
+      }
+      free(posts);
+   }
+   const int rc = dispatch_prompt(session, user_turn_text, turn_note, user_id);
+   free(joined);
+   return rc;
+}
+
+/* dispatch_with_note()'s build: the turn's prompt and context, @p turn_note
+ * with what it was told. */
+static int dispatch_prompt(session_t *session,
+                           const char *user_turn_text,
+                           const char *turn_note,
+                           int user_id) {
    session_prompt_builder_t builder = atomic_load_explicit(&s_prompt_builder, memory_order_acquire);
    if (builder == NULL) {
       /* No builder (a build without one): the base prompt is what a new
@@ -1658,13 +1702,6 @@ static int dispatch_with_note(session_t *session,
       composed_prompt_free(&base);
       return SUCCESS;
    }
-
-   /* Re-read user_id under metrics_mutex so satellite rebinds that
-    * occurred since last turn are picked up.  A guest (0: an unmapped
-    * satellite, a local mic with no voice user) gets the base prompt, its
-    * surface's standing directions and the time; the builder adds nothing of
-    * any user's (settings, memory, retrieval are gated on a user). */
-   const int user_id = session_effective_user_id(session);
 
    composed_prompt_t cp = { 0 };
    if (builder(session, user_id, user_turn_text, &cp) != SUCCESS) {

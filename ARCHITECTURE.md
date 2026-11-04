@@ -242,8 +242,8 @@ Layer 4 (Application) — deps: everything below
 
 **The session unit.** `session_manager.c` (the dispatch), `session_history.c` (history lifecycle),
 `session_prefix.c` (the append-only request: frozen prefix, appended changes and turn context, live withdrawal),
-`session_compaction.c`, `session_focus.c`, `prompt_builder.c` and `session_image_hold.c` call into each other: read
-them as one Layer-2 unit, not as separate modules with a direction between them.
+`session_compaction.c`, `session_focus.c`, `session_posts.c`, `prompt_builder.c` and `session_image_hold.c`
+call into each other: read them as one Layer-2 unit, not as separate modules with a direction between them.
 
 **Deliberate upward calls.** Each goes through a weak symbol or a registered function pointer, never an `#include`:
 
