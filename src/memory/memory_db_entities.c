@@ -540,7 +540,7 @@ int memory_db_entity_delete(int64_t entity_id, int user_id) {
    }
    /* The consolidation record mustn't keep its name, or its relations' text. */
    if (rc == SQLITE_DONE && changes > 0 &&
-       memory_db_consolidation_scrub_entities_locked(user_id) != MEMORY_DB_SUCCESS) {
+       memory_db_consolidation_scrub_entities_locked(user_id, NULL) != MEMORY_DB_SUCCESS) {
       rc = SQLITE_ERROR;
    }
    if (auth_db_txn_end_locked(rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,

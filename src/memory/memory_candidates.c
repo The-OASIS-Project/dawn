@@ -618,6 +618,7 @@ static void store_relation(memory_store_t *st,
                                    (r_obj_id == 0) ? r->object : NULL, fact_id, 0.8f, r->valid_from,
                                    r->valid_to, prov, &rel_id, &created);
       if (created && out->n_new_relations < MEMORY_STORE_NEW_RELATIONS_MAX) {
+         out->new_relation_valid_to[out->n_new_relations] = r->valid_to > 0 ? r->valid_to : 0;
          out->new_relation_ids[out->n_new_relations++] = rel_id;
       } else if (created) {
          out->relations_overflow = true;

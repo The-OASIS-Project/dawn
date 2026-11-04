@@ -977,21 +977,33 @@ static int reinforce(mc_batch_t *b,
    json_object_object_add(pre, "msg_id_start", json_object_new_int64(before.msg_id_start));
    json_object_object_add(pre, "msg_id_end", json_object_new_int64(before.msg_id_end));
    /* More relations created than listed: recorded without its undo. */
+   /* Each with its valid_to as created (one can be created closed). */
    struct json_object *rels = NULL;
+   struct json_object *rels_to = NULL;
    if (!stored || !stored->relations_overflow) {
       rels = json_object_new_array();
+      rels_to = json_object_new_array();
       for (int i = 0; stored && i < stored->n_new_relations; i++) {
          json_object_array_add(rels, json_object_new_int64(stored->new_relation_ids[i]));
+         json_object_array_add(rels_to, json_object_new_int64(stored->new_relation_valid_to[i]));
       }
    }
    json_object_object_add(pre, "relation_ids", rels);
+   json_object_object_add(pre, "relation_valid_to", rels_to);
    char *pre_s = image(pre);
    memory_store_reinforce(b->st, fact_id, told, prov);
+   /* After, with where it is learned from: a source or an origin outside
+    * this set later is another writer's confirmation, not this batch's. */
    memory_consolidation_fact_state_t after;
-   char *post_s = memory_db_consolidation_fact_state(user_id, fact_id, conv, &after) ==
-                          MEMORY_DB_SUCCESS
-                      ? image(state_json(&after))
-                      : NULL;
+   char *post_s = NULL;
+   if (memory_db_consolidation_fact_state(user_id, fact_id, conv, &after) == MEMORY_DB_SUCCESS) {
+      struct json_object *post = state_json(&after);
+      char *sources = memory_db_consolidation_fact_sources(user_id, fact_id);
+      json_object_object_add(post, "sources", sources ? json_tokener_parse(sources) : NULL);
+      json_object_object_add(post, "origin_unsourced", json_object_new_int(after.origin_unsourced));
+      free(sources);
+      post_s = image(post);
+   }
    memory_consolidation_op_t op = { .op = "reinforced",
                                     .fact_id = fact_id,
                                     .outside = p ? p->outside : b->outside,
@@ -1537,10 +1549,13 @@ static void apply_prefs(mc_batch_t *b) {
       memory_db_pref_upsert(in->user_id, category, value, conf, "inferred", in->prov);
       memory_preference_t after;
       if (memory_db_pref_get(in->user_id, category, &after) != MEMORY_DB_SUCCESS ||
-          (had && strcmp(after.value, before.value) == 0 &&
-           after.confidence == before.confidence)) {
+          (had && strcmp(after.value, before.value) == 0 && after.confidence == before.confidence &&
+           after.reinforcement_count == before.reinforcement_count)) {
+         /* Nothing changed (a value outside text may not replace).  A
+          * restatement counts up and adds a source: recorded, so an earlier
+          * batch's undo can't take the value this one confirmed. */
          free(was);
-         continue; /* nothing changed (a value outside text may not replace) */
+         continue;
       }
       struct json_object *pre = was ? json_tokener_parse(was) : NULL;
       free(was);

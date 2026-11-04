@@ -268,19 +268,27 @@ static int undo_added(int user_id,
 }
 
 /* The relations a restatement created, still as it left them: none closed
- * since or said again. */
-static int restatement_relations_unchanged(int user_id, struct json_object *ids, bool *same) {
+ * (or its end changed) since, or said again.  @p ends: each one's valid_to as
+ * created (0: open; rows recorded without them were all created open). */
+static int restatement_relations_unchanged(int user_id,
+                                           struct json_object *ids,
+                                           struct json_object *ends,
+                                           bool *same) {
    *same = true;
    sqlite3_stmt *st = NULL;
    int rc = sqlite3_prepare_v2(s_db.db,
-                               "SELECT mention_count > 1 OR valid_to IS NOT NULL FROM "
+                               "SELECT mention_count > 1 OR COALESCE(valid_to, 0) != ?3 FROM "
                                "memory_relations WHERE user_id = ?1 AND id = ?2",
                                -1, &st, NULL);
    const size_t n = json_object_array_length(ids);
+   const bool have_ends = json_object_is_type(ends, json_type_array) &&
+                          json_object_array_length(ends) == n;
    for (size_t i = 0; rc == SQLITE_OK && i < n && *same; i++) {
       sqlite3_reset(st);
       sqlite3_bind_int(st, 1, user_id);
       sqlite3_bind_int64(st, 2, json_object_get_int64(json_object_array_get_idx(ids, i)));
+      sqlite3_bind_int64(st, 3,
+                         have_ends ? json_object_get_int64(json_object_array_get_idx(ends, i)) : 0);
       const int step = sqlite3_step(st);
       if (step == SQLITE_ROW) {
          *same = sqlite3_column_int(st, 0) == 0;
@@ -293,23 +301,33 @@ static int restatement_relations_unchanged(int user_id, struct json_object *ids,
 }
 
 /* The fact's own source columns, back to @p pre's when they name the
- * reinforcing conversation (a later conversation's reinforce owns them then). */
+ * reinforcing conversation (a later conversation's reinforce owns them then).
+ * A source conversation deleted since, or one a forget cleared (0 marked
+ * source_forgotten), goes as auth_db_conv.c's delete takes it: another of its
+ * sources, no range, and learned outside any conversation when none is left.
+ * An unmarked 0 is a fact that never had one. */
 static int restore_provenance(int user_id, const undo_row_t *r, int64_t own_now) {
    if (own_now != r->conversation_id || get_i64(r->pre, "source_conversation_id") == own_now) {
       return MEMORY_DB_SUCCESS;
    }
    sqlite3_stmt *st = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db,
-                               "UPDATE memory_facts SET source_conversation_id = NULLIF(?3, 0), "
-                               "source_msg_id_start = NULLIF(?4, 0), source_msg_id_end = "
-                               "NULLIF(?5, 0) WHERE user_id = ?1 AND id = ?2",
-                               -1, &st, NULL);
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "UPDATE memory_facts SET source_conversation_id = COALESCE((SELECT id FROM conversations "
+       "WHERE id = ?3), (SELECT MAX(conversation_id) FROM memory_fact_sources WHERE fact_id = "
+       "?2)), source_msg_id_start = (SELECT NULLIF(?4, 0) FROM conversations WHERE id = ?3), "
+       "source_msg_id_end = (SELECT NULLIF(?5, 0) FROM conversations WHERE id = ?3), "
+       "origin_unsourced = CASE WHEN (?3 = 0 AND ?6 = 0) OR EXISTS (SELECT 1 FROM conversations "
+       "WHERE id = ?3) OR EXISTS (SELECT 1 FROM memory_fact_sources WHERE fact_id = ?2) THEN "
+       "origin_unsourced ELSE 1 END WHERE user_id = ?1 AND id = ?2",
+       -1, &st, NULL);
    if (rc == SQLITE_OK) {
       sqlite3_bind_int(st, 1, user_id);
       sqlite3_bind_int64(st, 2, r->row.fact_id);
       sqlite3_bind_int64(st, 3, get_i64(r->pre, "source_conversation_id"));
       sqlite3_bind_int64(st, 4, get_i64(r->pre, "msg_id_start"));
       sqlite3_bind_int64(st, 5, get_i64(r->pre, "msg_id_end"));
+      sqlite3_bind_int(st, 6, has(r->pre, "source_forgotten") ? 1 : 0);
       rc = sqlite3_step(st);
    }
    sqlite3_finalize(st);
@@ -365,14 +383,35 @@ static int take_back_relations(int user_id,
 static int undo_reinforced(int user_id,
                            const undo_row_t *r,
                            memory_consolidation_undo_effect_t *eff) {
+   /* Another writer confirmed it since when it is learned from a
+    * conversation the reinforce left it without (other than this one), or
+    * outside any conversation now and not then (rows recorded without them:
+    * not checked). */
+   struct json_object *post_sources = NULL;
+   const bool checks_sources = json_object_object_get_ex(r->post, "sources", &post_sources) &&
+                               json_object_is_type(post_sources, json_type_array);
    sqlite3_stmt *st = NULL;
-   const int rc = read_row(&st,
-                           "SELECT confidence, source, COALESCE(expires_at, 0), "
-                           "COALESCE(subject_entity_id, 0), superseded_by IS NOT NULL, "
-                           "COALESCE(source_conversation_id, 0) FROM memory_facts WHERE "
-                           "user_id = ?1 AND id = ?2",
-                           user_id, r->row.fact_id);
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT confidence, source, COALESCE(expires_at, 0), COALESCE(subject_entity_id, 0), "
+       "superseded_by IS NOT NULL, COALESCE(source_conversation_id, 0), origin_unsourced, "
+       "EXISTS (SELECT 1 FROM memory_fact_sources s WHERE s.fact_id = f.id AND s.conversation_id "
+       "!= ?3 AND s.conversation_id NOT IN (SELECT value FROM json_each(?4))) FROM memory_facts "
+       "f WHERE user_id = ?1 AND id = ?2",
+       -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_int64(st, 2, r->row.fact_id);
+      sqlite3_bind_int64(st, 3, r->conversation_id);
+      sqlite3_bind_text(st, 4,
+                        checks_sources
+                            ? json_object_to_json_string_ext(post_sources, JSON_C_TO_STRING_PLAIN)
+                            : "[]",
+                        -1, SQLITE_TRANSIENT);
+      rc = sqlite3_step(st);
+   }
    if (rc != SQLITE_ROW) {
+      sqlite3_finalize(st);
       return rc == SQLITE_DONE ? MEMORY_CONSOLIDATION_STALE : MEMORY_DB_FAILURE;
    }
    const double confidence = sqlite3_column_double(st, 0);
@@ -381,13 +420,19 @@ static int undo_reinforced(int user_id,
    const bool stale = sqlite3_column_int(st, 4) ||
                       (post_source && (!source || strcmp(source, post_source) != 0)) ||
                       col_i64(st, 2) != get_i64(r->post, "expires_at") ||
-                      col_i64(st, 3) != get_i64(r->post, "subject_entity_id");
+                      col_i64(st, 3) != get_i64(r->post, "subject_entity_id") ||
+                      (checks_sources && sqlite3_column_int(st, 7) != 0) ||
+                      (has(r->post, "origin_unsourced") &&
+                       sqlite3_column_int(st, 6) > get_i64(r->post, "origin_unsourced"));
    const int64_t own_now = col_i64(st, 5);
    sqlite3_finalize(st);
    struct json_object *rels = NULL;
+   struct json_object *rel_ends = NULL;
    json_object_object_get_ex(r->pre, "relation_ids", &rels);
+   json_object_object_get_ex(r->pre, "relation_valid_to", &rel_ends);
    bool rels_same = true;
-   if (!stale && restatement_relations_unchanged(user_id, rels, &rels_same) != MEMORY_DB_SUCCESS) {
+   if (!stale &&
+       restatement_relations_unchanged(user_id, rels, rel_ends, &rels_same) != MEMORY_DB_SUCCESS) {
       return MEMORY_DB_FAILURE;
    }
    if (stale || !rels_same) {

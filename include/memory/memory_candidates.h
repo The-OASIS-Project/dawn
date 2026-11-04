@@ -168,6 +168,7 @@ typedef struct {
    /* The relations the agent's store created for it (not an open one said
     * again); more than the array holds sets relations_overflow. */
    int64_t new_relation_ids[MEMORY_STORE_NEW_RELATIONS_MAX];
+   int64_t new_relation_valid_to[MEMORY_STORE_NEW_RELATIONS_MAX]; /* each as created (0: open) */
    int n_new_relations;
    bool relations_overflow;
 } memory_store_result_t;

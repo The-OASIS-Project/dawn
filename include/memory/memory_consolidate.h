@@ -161,12 +161,6 @@ typedef struct {
 int memory_consolidate_batch(const memory_consolidate_input_t *in,
                              memory_consolidate_result_t *out);
 
-/**
- * @brief A batch was recorded, undone or changed by a Keep: told to the
- *        user's surfaces.  Weak, a no-op unless the WebUI is built (its
- *        strong override sends memory_batch to every tab of the user).
- */
-void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id);
 
 /** memory_consolidate_keep(): a forgotten record says it; nothing stored. */
 #define MEMORY_CONSOLIDATE_KEEP_FORGOTTEN 9

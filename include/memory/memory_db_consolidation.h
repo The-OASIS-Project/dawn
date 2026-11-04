@@ -239,22 +239,55 @@ int memory_db_consolidation_ops_list(int user_id,
 void memory_db_consolidation_ops_free(memory_consolidation_op_row_t *rows, int n);
 
 /**
+ * @brief A batch was recorded, undone, changed by a Keep or by a forget:
+ *        told to the user's surfaces.  Weak, a no-op unless the WebUI is
+ *        built (its strong override sends memory_batch to every tab of the
+ *        user).
+ */
+void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id);
+
+/** Batches a forget's scrub changed, told to the user's tabs: the newest
+ *  this many, each once (a tab showing an older one keeps the forgotten text
+ *  until it reloads). */
+#define MEMORY_CONSOLIDATION_TOUCHED_MAX 256
+
+typedef struct {
+   int64_t ids[MEMORY_CONSOLIDATION_TOUCHED_MAX];
+   int n;
+} memory_consolidation_touched_t;
+
+/**
  * @brief In a forget's transaction (lock held): remove the op rows that name
  *        a going fact (the ids @p going_sql selects, bound with ?1 = user),
- *        or a relation of one, and the dropped and deferred candidates of
- *        every batch of a conversation that taught one
+ *        or a relation of one, the dropped and deferred candidates with its
+ *        words, and those of every batch of a conversation that taught one
  *
  * Call while the going facts and their sources are still there.
+ * @param touched The batches whose rows went, added to (may be NULL)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_consolidation_scrub_facts_locked(int user_id, const char *going_sql);
+int memory_db_consolidation_scrub_facts_locked(int user_id,
+                                               const char *going_sql,
+                                               memory_consolidation_touched_t *touched);
+
+/**
+ * @brief memory_consolidation_batch_notify for each batch in @p touched.
+ *        Never with the auth_db lock held (the notify takes it, and the
+ *        WebUI's registry lock).
+ */
+void memory_consolidation_touched_notify(int user_id,
+                                         const memory_consolidation_touched_t *touched);
 
 /**
  * @brief In a forget's transaction (lock held): remove the batches (and with
- *        them their ops) of the conversations in @p ids_json (a JSON array)
+ *        them their ops) of the conversations in @p ids_json (a JSON array),
+ *        and the rows other batches made quoting what they taught
+ * @param touched The other batches whose rows changed, added to (may be NULL)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_consolidation_drop_conversations_locked(int user_id, const char *ids_json);
+int memory_db_consolidation_drop_conversations_locked(int user_id,
+                                                      const char *ids_json,
+                                                      memory_consolidation_touched_t *touched);
 
 /**
  * @brief In a forget's transaction or an entity delete (lock held), after its
@@ -263,7 +296,8 @@ int memory_db_consolidation_drop_conversations_locked(int user_id, const char *i
  *        relation's row quotes its subject and object)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_consolidation_scrub_entities_locked(int user_id);
+int memory_db_consolidation_scrub_entities_locked(int user_id,
+                                                  memory_consolidation_touched_t *touched);
 
 /** A stored fact as a reinforce finds it: what undoing the reinforce puts back. */
 typedef struct {
@@ -419,6 +453,12 @@ int memory_db_consolidation_expire_deferred(int64_t older_than, int *count_out);
 char *memory_db_consolidation_merge_image(int user_id, int64_t from, int64_t into);
 
 /**
+ * @brief The conversations fact @p fact_id is learned from, as a JSON array
+ *        (heap); NULL on failure
+ */
+char *memory_db_consolidation_fact_sources(int user_id, int64_t fact_id);
+
+/**
  * @brief Where preference @p category was learned, as a JSON object (heap):
  *        its source conversation and message range, origin_unsourced,
  *        reinforcement_count, updated_at and its source conversations
@@ -426,18 +466,6 @@ char *memory_db_consolidation_merge_image(int user_id, int64_t from, int64_t int
  *        value.  NULL when the user has no such preference or on failure.
  */
 char *memory_db_consolidation_pref_image(int user_id, const char *category);
-
-/**
- * @brief The user's batches (up to @p max ids, newest first) with an op
- *        naming fact @p fact_id or a duplicate merged into it: those a forget
- *        of it changes (past @p max, the older ones aren't returned)
- * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
- */
-int memory_db_consolidation_batches_naming(int user_id,
-                                           int64_t fact_id,
-                                           int64_t *ids,
-                                           int max,
-                                           int *count_out);
 
 /** Days the record keeps a batch and its ops (the nightly prune). */
 #define MEMORY_CONSOLIDATE_RECORD_DAYS 30

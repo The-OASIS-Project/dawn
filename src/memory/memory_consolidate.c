@@ -68,15 +68,6 @@ static char *call_model(struct json_object *history,
    return reply;
 }
 
-/* A no-op unless the WebUI's strong override is linked in. */
-__attribute__((weak)) void memory_consolidation_batch_notify(int user_id,
-                                                             int64_t conversation_id,
-                                                             int64_t batch_id) {
-   (void)user_id;
-   (void)conversation_id;
-   (void)batch_id;
-}
-
 static memory_consolidate_model_fn s_model = call_model;
 static int s_samples = MEMORY_CONSOLIDATE_SAMPLES;
 
@@ -1002,6 +993,8 @@ static int keep_candidate(mc_batch_t *b, const memory_consolidation_keep_t *k) {
    }
    d->outside = k->outside;
    d->prov = *b->in->prov;
+   /* The conversation it came from, so the op the Keep records names it. */
+   d->row.conversation_id = k->conversation_id;
    d->taken = true; /* its status is the Keep's to change */
    d->disp_op = -1;
    return SUCCESS;

@@ -1759,7 +1759,7 @@ void webui_broadcast_memory_proposals_changed(int user_id) {
    }
 }
 
-/* Strong override of the weak no-op in memory_consolidate.c: a batch recorded,
+/* Strong override of the weak no-op in memory_db_consolidation.c: a batch recorded,
  * undone or changed by a Keep goes to every tab of its user as the batch
  * object (memory_batch).  From the extraction thread or the undo worker. */
 void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id) {

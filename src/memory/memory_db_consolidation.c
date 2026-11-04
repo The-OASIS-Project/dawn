@@ -519,9 +519,55 @@ void memory_db_consolidation_ops_free(memory_consolidation_op_row_t *rows, int n
    }
 }
 
+/* A no-op unless the WebUI's strong override is linked in. */
+__attribute__((weak)) void memory_consolidation_batch_notify(int user_id,
+                                                             int64_t conversation_id,
+                                                             int64_t batch_id) {
+   (void)user_id;
+   (void)conversation_id;
+   (void)batch_id;
+}
+
+void memory_consolidation_touched_notify(int user_id, const memory_consolidation_touched_t *t) {
+   for (int i = 0; t && i < t->n; i++) {
+      memory_consolidation_batch_notify(user_id, 0, t->ids[i]);
+   }
+}
+
+/* @p batch_id among the batches a scrub changed: the newest
+ * MEMORY_CONSOLIDATION_TOUCHED_MAX kept, each once. */
+static void touched_add(memory_consolidation_touched_t *t, int64_t batch_id) {
+   if (!t || batch_id <= 0) {
+      return;
+   }
+   int low = 0;
+   for (int i = 0; i < t->n; i++) {
+      if (t->ids[i] == batch_id) {
+         return;
+      }
+      low = t->ids[i] < t->ids[low] ? i : low;
+   }
+   if (t->n < MEMORY_CONSOLIDATION_TOUCHED_MAX) {
+      t->ids[t->n++] = batch_id;
+   } else if (batch_id > t->ids[low]) {
+      t->ids[low] = batch_id;
+   }
+}
+
+/* Step a DELETE ... RETURNING batch_id to its end, each batch into @p t. */
+static int step_returning(sqlite3_stmt *st, memory_consolidation_touched_t *t) {
+   int rc;
+   while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+      touched_add(t, sqlite3_column_int64(st, 0));
+   }
+   return rc;
+}
+
 /* The dropped and deferred candidate rows whose text folds to a going fact's
  * (memory_text_fold), removed.  Lock held. */
-static int scrub_same_words_locked(int user_id, const char *going_sql) {
+static int scrub_same_words_locked(int user_id,
+                                   const char *going_sql,
+                                   memory_consolidation_touched_t *touched) {
    char *sql = NULL;
    if (asprintf(&sql, "SELECT fact_text FROM memory_facts WHERE user_id = ?1 AND id IN (%s)",
                 going_sql) < 0 ||
@@ -556,8 +602,10 @@ static int scrub_same_words_locked(int user_id, const char *going_sql) {
                               -1, &st, NULL);
       sqlite3_stmt *del = NULL;
       if (rc == SQLITE_OK) {
-         rc = sqlite3_prepare_v2(s_db.db, "DELETE FROM memory_consolidation_ops WHERE id = ?1", -1,
-                                 &del, NULL);
+         rc = sqlite3_prepare_v2(s_db.db,
+                                 "DELETE FROM memory_consolidation_ops WHERE id = ?1 RETURNING "
+                                 "batch_id",
+                                 -1, &del, NULL);
       }
       if (rc == SQLITE_OK) {
          sqlite3_bind_int(st, 1, user_id);
@@ -571,7 +619,7 @@ static int scrub_same_words_locked(int user_id, const char *going_sql) {
             if (same) {
                sqlite3_reset(del);
                sqlite3_bind_int64(del, 1, sqlite3_column_int64(st, 0));
-               if (sqlite3_step(del) != SQLITE_DONE) {
+               if (step_returning(del, touched) != SQLITE_DONE) {
                   rc = SQLITE_ERROR;
                   break;
                }
@@ -593,13 +641,15 @@ static int scrub_same_words_locked(int user_id, const char *going_sql) {
    return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_consolidation_scrub_facts_locked(int user_id, const char *going_sql) {
+int memory_db_consolidation_scrub_facts_locked(int user_id,
+                                               const char *going_sql,
+                                               memory_consolidation_touched_t *touched) {
    if (user_id <= 0 || !going_sql) {
       return MEMORY_DB_FAILURE;
    }
    /* Any candidate row with its words (as the forgotten checks fold them),
     * first: the texts are read before the facts go. */
-   if (scrub_same_words_locked(user_id, going_sql) != MEMORY_DB_SUCCESS) {
+   if (scrub_same_words_locked(user_id, going_sql, touched) != MEMORY_DB_SUCCESS) {
       return MEMORY_DB_FAILURE;
    }
    /* The rows naming a going fact or one of its relations, and the candidates
@@ -614,7 +664,7 @@ int memory_db_consolidation_scrub_facts_locked(int user_id, const char *going_sq
        "(SELECT b.id FROM memory_consolidation_batches b WHERE b.user_id = ?1 AND "
        "b.conversation_id IN (SELECT s.conversation_id FROM memory_fact_sources s WHERE "
        "s.fact_id IN (%s) UNION SELECT f.source_conversation_id FROM memory_facts f WHERE "
-       "f.user_id = ?1 AND f.id IN (%s)))))",
+       "f.user_id = ?1 AND f.id IN (%s))))) RETURNING batch_id",
        going_sql, going_sql, going_sql, going_sql, going_sql);
    if (len < 0 || !sql) {
       return MEMORY_DB_FAILURE;
@@ -623,7 +673,7 @@ int memory_db_consolidation_scrub_facts_locked(int user_id, const char *going_sq
    int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL);
    if (rc == SQLITE_OK) {
       sqlite3_bind_int(st, 1, user_id);
-      rc = sqlite3_step(st);
+      rc = step_returning(st, touched);
    }
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("memory_db: removing a forgotten fact's consolidation record failed: %s",
@@ -634,7 +684,9 @@ int memory_db_consolidation_scrub_facts_locked(int user_id, const char *going_sq
    return rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
-int memory_db_consolidation_drop_conversations_locked(int user_id, const char *ids_json) {
+int memory_db_consolidation_drop_conversations_locked(int user_id,
+                                                      const char *ids_json,
+                                                      memory_consolidation_touched_t *touched) {
    if (user_id <= 0 || !ids_json) {
       return MEMORY_DB_FAILURE;
    }
@@ -649,11 +701,13 @@ int memory_db_consolidation_drop_conversations_locked(int user_id, const char *i
 #define PRE_SOURCES "json_each(pre_image, '$.sources')"
 #define PRE_CONV "json_extract(pre_image, '$.source_conversation_id')"
 #define PREF_OPS "user_id = ?1 AND op = 'pref_set' AND "
+/* The other batches whose rows change, for their tabs (the set's own go). */
+#define RET " RETURNING batch_id"
    static const char *const k_sql[] = {
       "DELETE FROM memory_consolidation_batches WHERE user_id = ?1 AND conversation_id IN "
       "(SELECT value FROM json_each(?2))",
       "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND source_conversation_id IN "
-      "(SELECT value FROM json_each(?2))",
+      "(SELECT value FROM json_each(?2))" RET,
       /* The DELETE runs before the two trims: a pre-image whose only source
        * is forgotten would otherwise be trimmed to empty and escape it. */
       "DELETE FROM memory_consolidation_ops WHERE " PREF_OPS "json_extract(pre_image, "
@@ -662,18 +716,34 @@ int memory_db_consolidation_drop_conversations_locked(int user_id, const char *i
       " IN " MEMORY_FORGET_IN_SET " OR EXISTS (SELECT 1 FROM " PRE_SOURCES
       " WHERE value IN " MEMORY_FORGET_IN_SET ")) AND (COALESCE(" PRE_CONV ", 0) = 0 OR " PRE_CONV
       " IN " MEMORY_FORGET_IN_SET ") AND NOT EXISTS (SELECT 1 FROM " PRE_SOURCES
-      " WHERE value NOT IN " MEMORY_FORGET_IN_SET ")))",
+      " WHERE value NOT IN " MEMORY_FORGET_IN_SET ")))" RET,
       "UPDATE memory_consolidation_ops SET pre_image = json_set(pre_image, '$.sources', "
       "json((SELECT json_group_array(value) FROM " PRE_SOURCES
       " WHERE value NOT IN " MEMORY_FORGET_IN_SET "))) WHERE " PREF_OPS
-      "EXISTS (SELECT 1 FROM " PRE_SOURCES " WHERE value IN " MEMORY_FORGET_IN_SET ")",
+      "EXISTS (SELECT 1 FROM " PRE_SOURCES " WHERE value IN " MEMORY_FORGET_IN_SET ")" RET,
+      /* A fact's reinforce quotes where it was learned before too: the row
+       * goes when its undo would leave the fact taught by the set alone (the
+       * set its source then, or a source an earlier forget cleared; this
+       * conversation not one, and none other now), else that source is
+       * cleared and marked forgotten (the undo then takes another). */
+      "DELETE FROM memory_consolidation_ops AS o WHERE o.user_id = ?1 AND o.op = 'reinforced' AND "
+      "(json_extract(o.pre_image, '$.source_conversation_id') IN " MEMORY_FORGET_IN_SET
+      " OR json_extract(o.pre_image, '$.source_forgotten')) AND json_extract(o.pre_image, "
+      "'$.had_source') = 0 AND o.fact_id IN (SELECT f.id FROM "
+      "memory_facts f WHERE f.user_id = ?1 AND f.origin_unsourced = 0 AND NOT EXISTS (SELECT 1 "
+      "FROM memory_fact_sources s WHERE s.fact_id = f.id AND s.conversation_id NOT "
+      "IN " MEMORY_FORGET_IN_SET " AND s.conversation_id != COALESCE(o.source_conversation_id, "
+      "(SELECT b.conversation_id FROM memory_consolidation_batches b WHERE b.id = "
+      "o.batch_id))))" RET,
       "UPDATE memory_consolidation_ops SET pre_image = json_set(pre_image, "
-      "'$.source_conversation_id', 0, '$.msg_id_start', 0, '$.msg_id_end', 0) WHERE " PREF_OPS
-          PRE_CONV " IN " MEMORY_FORGET_IN_SET,
+      "'$.source_conversation_id', 0, '$.msg_id_start', 0, '$.msg_id_end', 0, "
+      "'$.source_forgotten', json('true')) WHERE user_id = ?1 "
+      "AND op IN ('pref_set', 'reinforced') AND " PRE_CONV " IN " MEMORY_FORGET_IN_SET RET,
    };
 #undef PRE_SOURCES
 #undef PRE_CONV
 #undef PREF_OPS
+#undef RET
    sqlite3_stmt *st = NULL;
    int rc = SQLITE_DONE;
    for (size_t i = 0; i < sizeof(k_sql) / sizeof(k_sql[0]) && rc == SQLITE_DONE; i++) {
@@ -681,7 +751,7 @@ int memory_db_consolidation_drop_conversations_locked(int user_id, const char *i
       if (rc == SQLITE_OK) {
          sqlite3_bind_int(st, 1, user_id);
          sqlite3_bind_text(st, 2, ids_json, -1, SQLITE_STATIC);
-         rc = sqlite3_step(st);
+         rc = step_returning(st, touched);
       }
       sqlite3_finalize(st);
       st = NULL;
@@ -694,15 +764,17 @@ int memory_db_consolidation_drop_conversations_locked(int user_id, const char *i
    return rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
-int memory_db_consolidation_scrub_entities_locked(int user_id) {
+int memory_db_consolidation_scrub_entities_locked(int user_id,
+                                                  memory_consolidation_touched_t *touched) {
    /* Two statements: the relation half then uses idx_mco_rel; the entity half
     * scans the user's ops (bounded by the record's retention). */
    static const char *const k_sql[] = {
       "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND op IN ('linked', 'proposed') "
       "AND (entity_id NOT IN (SELECT id FROM memory_entities WHERE user_id = ?1) OR "
-      "other_entity_id NOT IN (SELECT id FROM memory_entities WHERE user_id = ?1))",
+      "other_entity_id NOT IN (SELECT id FROM memory_entities WHERE user_id = ?1)) RETURNING "
+      "batch_id",
       "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND relation_id IS NOT NULL AND "
-      "relation_id NOT IN (SELECT id FROM memory_relations WHERE user_id = ?1)",
+      "relation_id NOT IN (SELECT id FROM memory_relations WHERE user_id = ?1) RETURNING batch_id",
    };
    int rc = SQLITE_DONE;
    for (size_t i = 0; i < sizeof(k_sql) / sizeof(k_sql[0]) && rc == SQLITE_DONE; i++) {
@@ -710,7 +782,7 @@ int memory_db_consolidation_scrub_entities_locked(int user_id) {
       rc = sqlite3_prepare_v2(s_db.db, k_sql[i], -1, &st, NULL);
       if (rc == SQLITE_OK) {
          sqlite3_bind_int(st, 1, user_id);
-         rc = sqlite3_step(st);
+         rc = step_returning(st, touched);
       }
       sqlite3_finalize(st);
    }
@@ -1003,6 +1075,26 @@ char *memory_db_consolidation_merge_image(int user_id, int64_t from, int64_t int
    return out;
 }
 
+char *memory_db_consolidation_fact_sources(int user_id, int64_t fact_id) {
+   AUTH_DB_LOCK_OR_RETURN(NULL);
+   sqlite3_stmt *st = NULL;
+   char *out = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "SELECT json_group_array(s.conversation_id) FROM memory_fact_sources s "
+                          "JOIN memory_facts f ON f.id = s.fact_id WHERE f.id = ?2 AND "
+                          "f.user_id = ?1",
+                          -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_int64(st, 2, fact_id);
+      if (sqlite3_step(st) == SQLITE_ROW) {
+         out = dup_column(st, 0);
+      }
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return out;
+}
+
 char *memory_db_consolidation_pref_image(int user_id, const char *category) {
    AUTH_DB_LOCK_OR_RETURN(NULL);
    sqlite3_stmt *st = NULL;
@@ -1025,40 +1117,6 @@ char *memory_db_consolidation_pref_image(int user_id, const char *category) {
    sqlite3_finalize(st);
    AUTH_DB_UNLOCK();
    return out;
-}
-
-int memory_db_consolidation_batches_naming(int user_id,
-                                           int64_t fact_id,
-                                           int64_t *ids,
-                                           int max,
-                                           int *count_out) {
-   *count_out = 0;
-   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
-   sqlite3_stmt *st = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db,
-                               /* The fact and the duplicates merged into it (a forget
-                                * takes them too), at any depth. */
-                               "WITH RECURSIVE " MEMORY_MERGED_UNDER_CTE(
-                                   "gone", "?2",
-                                   "?1") " SELECT DISTINCT batch_id FROM "
-                                         "memory_consolidation_ops WHERE user_id = ?1 "
-                                         "AND (fact_id IN (SELECT id FROM gone) OR "
-                                         "other_fact_id IN (SELECT id FROM gone)) "
-                                         "ORDER BY batch_id DESC LIMIT ?3",
-                               -1, &st, NULL);
-   int n = 0;
-   if (rc == SQLITE_OK) {
-      sqlite3_bind_int(st, 1, user_id);
-      sqlite3_bind_int64(st, 2, fact_id);
-      sqlite3_bind_int(st, 3, max);
-      while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-         ids[n++] = sqlite3_column_int64(st, 0);
-      }
-   }
-   sqlite3_finalize(st);
-   AUTH_DB_UNLOCK();
-   *count_out = n;
-   return rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
 int memory_db_consolidation_batch_set_stop(int64_t batch_id,

@@ -696,6 +696,194 @@ void test_stale_reinforced_made_told_since(void) {
    assert_stale(batch, op_of(batch, "reinforced"));
 }
 
+/* A fact another writer confirmed since, outside the record (a prompt-path
+ * extraction of another conversation): the undo would demote what it said. */
+void test_stale_reinforced_confirmed_outside_the_record_since(void) {
+   const int64_t fact = stored(CELLO, "inferred");
+   script(NULL);
+   const int64_t batch = run("{\"facts\": [{\"text\": \"" CELLO "\", \"subject\": \"Jonathan "
+                             "Smith\", \"source\": \"explicit\"}]}",
+                             0);
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT source = 'explicit' FROM memory_facts WHERE id = ?1", fact,
+                              NULL));
+   int64_t conv_c = 0;
+   conv_db_create(s_user, "C", &conv_c);
+   memory_db_fact_provenance_extend(fact, s_user, conv_c, 7, 9);
+   assert_stale(batch, op_of(batch, "reinforced"));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT source = 'explicit' FROM memory_facts WHERE id = ?1", fact,
+                              NULL));
+}
+
+/* A restatement whose relation is created already ended: undone, not stale. */
+void test_undo_reinforced_takes_back_a_relation_created_closed(void) {
+   const int64_t fact = stored(CELLO, "inferred");
+   script(NULL);
+   const int64_t batch = run("{\"facts\": [{\"text\": \"" CELLO "\", \"subject\": \"Jonathan "
+                             "Smith\", \"relations\": [{\"subject\": \"Jonathan Smith\", "
+                             "\"predicate\": \"plays\", \"object\": \"cello\", \"valid_from\": "
+                             "\"2019-01-01\", \"valid_to\": \"2020-01-01\"}]}]}",
+                             0);
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT COUNT(*) FROM memory_relations WHERE fact_id = ?1 AND "
+                              "valid_to IS NOT NULL",
+                              fact, NULL));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, undo(batch, op_of(batch, "reinforced")));
+   TEST_ASSERT_EQUAL_INT(0,
+                         q("SELECT COUNT(*) FROM memory_relations WHERE fact_id = ?1", fact, NULL));
+}
+
+/* Conversations made in the order given (older first), the batch's the last. */
+static void convs(int64_t *ids, int n) {
+   for (int i = 0; i < n; i++) {
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Chat", &ids[i]));
+   }
+   s_conv = ids[n - 1];
+}
+
+static int64_t stored_in(int64_t conv, const char *text) {
+   const memory_provenance_t prov = { .conv_id = conv, .msg_id_start = 2, .msg_id_end = 3 };
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_create(s_user, text, 0.7f, "inferred", &prov, &id));
+   return id;
+}
+
+/* The fact's source before the batch is forgotten: its reinforce no longer
+ * quotes it; undone, the fact takes another source, never the forgotten
+ * one.  Taught by the forgotten conversation alone, the row goes. */
+void test_undo_reinforced_after_forgetting_the_old_source(void) {
+   int64_t c[3]; /* C, A, the batch's */
+   convs(c, 3);
+   const int64_t fact = stored_in(c[1], CELLO);
+   memory_db_fact_provenance_extend(fact, s_user, c[0], 5, 6); /* older: A stays its own */
+   script(NULL);
+   const int64_t batch = run(ONE_FACT(CELLO), 0);
+   const int64_t op = op_of(batch, "reinforced");
+   TEST_ASSERT_EQUAL_INT64(c[1], q("SELECT json_extract(pre_image, '$.source_conversation_id') "
+                                   "FROM memory_consolidation_ops WHERE id = ?1",
+                                   op, NULL));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(s_user, &c[1], 1, NULL));
+   TEST_ASSERT_EQUAL_INT64(0, q("SELECT json_extract(pre_image, '$.source_conversation_id') FROM "
+                                "memory_consolidation_ops WHERE id = ?1",
+                                op, NULL));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, undo(batch, op));
+   TEST_ASSERT_EQUAL_INT64(c[0], q("SELECT source_conversation_id FROM memory_facts WHERE id = ?1",
+                                   fact, NULL));
+   for (int i = 1; i < 3; i++) { /* the forgotten one, and the batch's */
+      TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_fact_sources WHERE "
+                                 "conversation_id = ?1",
+                                 c[i], NULL));
+   }
+
+   /* Learned from the forgotten conversation alone before the batch: the
+    * undo would leave it taught by nothing, so the row goes. */
+   const int64_t other = stored_in(c[1], "Jonathan Smith collects stamps");
+   script(NULL);
+   const int64_t second = run(ONE_FACT("Jonathan Smith collects stamps"), 0);
+   const int64_t op2 = op_of(second, "reinforced");
+   TEST_ASSERT_TRUE(op2 > 0);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(s_user, &c[1], 1, NULL));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE id = ?1", op2,
+                              NULL));
+   TEST_ASSERT_EQUAL_INT64(other, current("Jonathan Smith collects stamps"));
+}
+
+/* The fact's source before the batch was deleted since: undone, the fact is
+ * learned outside any conversation, with no source left pointing at it. */
+void test_undo_reinforced_after_deleting_the_old_source(void) {
+   int64_t c[2]; /* A, the batch's */
+   convs(c, 2);
+   const int64_t fact = stored_in(c[0], CELLO);
+   script(NULL);
+   const int64_t batch = run(ONE_FACT(CELLO), 0);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_delete(c[0], s_user));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, undo(batch, op_of(batch, "reinforced")));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT source_conversation_id IS NULL AND source_msg_id_start IS "
+                              "NULL AND origin_unsourced = 1 FROM memory_facts WHERE id = ?1",
+                              fact, NULL));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_fact_sources WHERE fact_id = ?1", fact,
+                              NULL));
+}
+
+/* Both conversations that taught a fact forgotten in turn (A, then C), the
+ * batch only restated it: the second forget re-checks the row the first
+ * cleared, and it goes (its undo would leave a fact taught by nothing). */
+void test_undo_reinforced_after_forgetting_both_teachers(void) {
+   int64_t c[3]; /* C, A, the batch's */
+   convs(c, 3);
+   const int64_t fact = stored_in(c[1], CELLO);
+   memory_db_fact_provenance_extend(fact, s_user, c[0], 5, 6);
+   script(NULL);
+   const int64_t batch = run(ONE_FACT(CELLO), 0);
+   const int64_t op = op_of(batch, "reinforced");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(s_user, &c[1], 1, NULL));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE id = ?1", op,
+                              NULL));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(s_user, &c[0], 1, NULL));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE id = ?1", op,
+                              NULL));
+   TEST_ASSERT_TRUE(current(CELLO) > 0); /* the batch's conversation still teaches it */
+}
+
+/* Forgetting A clears the old source; the other teacher is then deleted: the
+ * undo leaves the fact learned outside any conversation, never orphaned. */
+void test_undo_reinforced_after_forgetting_one_teacher_and_deleting_the_other(void) {
+   int64_t c[3]; /* C, A, the batch's */
+   convs(c, 3);
+   const int64_t fact = stored_in(c[1], CELLO);
+   memory_db_fact_provenance_extend(fact, s_user, c[0], 5, 6);
+   script(NULL);
+   const int64_t batch = run(ONE_FACT(CELLO), 0);
+   const int64_t op = op_of(batch, "reinforced");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(s_user, &c[1], 1, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_delete(c[0], s_user));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, undo(batch, op));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT source_conversation_id IS NULL AND origin_unsourced = 1 FROM "
+                              "memory_facts WHERE id = ?1",
+                              fact, NULL));
+}
+
+/* A taught, B reinforced, C taught after (outside the record), A forgotten:
+ * the row survives, and its undo is stale (C confirmed it since). */
+void test_stale_reinforced_after_forgetting_the_old_source_with_a_later_teacher(void) {
+   int64_t c[2]; /* A, the batch's */
+   convs(c, 2);
+   const int64_t fact = stored_in(c[0], CELLO);
+   script(NULL);
+   const int64_t batch = run(ONE_FACT(CELLO), 0);
+   const int64_t op = op_of(batch, "reinforced");
+   int64_t later = 0;
+   conv_db_create(s_user, "Later", &later);
+   memory_db_fact_provenance_extend(fact, s_user, later, 7, 8);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(s_user, &c[0], 1, NULL));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE id = ?1", op,
+                              NULL));
+   assert_stale(batch, op);
+}
+
+/* Learned outside any conversation since (an import of the same text): the
+ * undo would take back a confirmation that isn't the batch's. */
+void test_stale_reinforced_learned_unsourced_since(void) {
+   const int64_t fact = stored(CELLO, "inferred");
+   script(NULL);
+   const int64_t batch = run(ONE_FACT(CELLO), 0);
+   exec("UPDATE memory_facts SET origin_unsourced = 1");
+   assert_stale(batch, op_of(batch, "reinforced"));
+   TEST_ASSERT_EQUAL_INT(1,
+                         q("SELECT origin_unsourced FROM memory_facts WHERE id = ?1", fact, NULL));
+}
+
+/* Two batches of one conversation say the same preference: the second is
+ * recorded, so undoing the first can't remove what the second confirmed. */
+void test_stale_pref_restated_by_a_later_batch(void) {
+   script(NULL);
+   const int64_t first = run(PREF_REPLY("oat latte"), 0);
+   const int64_t second = run(PREF_REPLY("oat latte"), 0);
+   TEST_ASSERT_TRUE(op_of(second, "pref_set") > 0);
+   assert_stale(first, op_of(first, "pref_set"));
+   memory_preference_t p;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_pref_get(s_user, "coffee", &p));
+}
+
 void test_stale_merged_restored_since(void) {
    const int64_t short_one = stored("Jonathan Smith works at Acme", "explicit");
    script("{\"ops\": [{\"op\": \"merge\", \"from\": \"S1\", \"into\": \"C1\"}], \"finish\": true}");
@@ -885,6 +1073,170 @@ void test_keep_takes_an_expired_deferred_candidate(void) {
    TEST_ASSERT_EQUAL_INT(SUCCESS, memory_consolidate_keep(s_user, batch, deferred, &fact));
    TEST_ASSERT_EQUAL_INT64(current("Jonathan Smith may move to Lisbon"), fact);
    TEST_ASSERT_EQUAL_STRING("kept", status_of(deferred));
+}
+
+/* A candidate another conversation set aside, kept from this batch: the op
+ * the Keep records names where it was learned, so it can be undone. */
+void test_keep_of_another_conversations_candidate_can_be_undone(void) {
+   int64_t conv_a = 0;
+   conv_db_create(s_user, "A", &conv_a);
+   script(NULL);
+   const int64_t batch = run(ONE_FACT(CELLO), 0);
+   const memory_consolidation_op_t op = {
+      .batch_id = batch,
+      .user_id = s_user,
+      .seq = 9,
+      .op = "dropped",
+      .source_conversation_id = conv_a,
+      .text = "Jonathan Smith is visiting Lisbon",
+      .pre_image = "{\"text\": \"Jonathan Smith is visiting Lisbon\", \"subject\": \"Jonathan "
+                   "Smith\"}"
+   };
+   int64_t dropped = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_op_add(&op, &dropped));
+   int64_t fact = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_consolidate_keep(s_user, batch, dropped, &fact));
+   TEST_ASSERT_EQUAL_INT64(conv_a, q("SELECT source_conversation_id FROM memory_facts WHERE id = "
+                                     "?1",
+                                     fact, NULL));
+   const int64_t added = q("SELECT id FROM memory_consolidation_ops WHERE fact_id = ?1 AND op = "
+                           "'added'",
+                           fact, NULL);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, undo(batch, added));
+   TEST_ASSERT_EQUAL_INT(0, current("Jonathan Smith is visiting Lisbon"));
+}
+
+/* ---- a forget tells the tabs of every batch its scrub changed ---- */
+
+#define NOTIFIED_MAX 16
+static int64_t s_notified[NOTIFIED_MAX];
+static int s_n_notified;
+
+void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id) {
+   (void)user_id;
+   (void)conversation_id;
+   if (s_n_notified < NOTIFIED_MAX) {
+      s_notified[s_n_notified++] = batch_id;
+   }
+}
+
+static bool notified(int64_t batch_id) {
+   for (int i = 0; i < s_n_notified; i++) {
+      if (s_notified[i] == batch_id) {
+         return true;
+      }
+   }
+   return false;
+}
+
+static int64_t batch_with(int64_t conv, const char *op, int64_t fact_id, const char *text) {
+   const memory_consolidation_batch_t b = { .user_id = s_user,
+                                            .conversation_id = conv,
+                                            .path = "agent",
+                                            .stop = "finished" };
+   int64_t batch = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_batch_add(&b, &batch));
+   const memory_consolidation_op_t o = { .batch_id = batch,
+                                         .user_id = s_user,
+                                         .seq = 1,
+                                         .op = op,
+                                         .fact_id = fact_id,
+                                         .text = text };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_op_add(&o, NULL));
+   return batch;
+}
+
+/* The batches naming the fact, holding a candidate with its words, or set
+ * aside by a conversation that taught it: each told once; another, not. */
+void test_forget_notifies_every_batch_its_scrub_changed(void) {
+   int64_t taught = 0;
+   int64_t other = 0;
+   conv_db_create(s_user, "Taught", &taught);
+   conv_db_create(s_user, "Other", &other);
+   const int64_t fact = stored(CELLO, "explicit");
+   memory_db_fact_provenance_extend(fact, s_user, taught, 4, 5);
+   const int64_t naming = batch_with(s_conv, "added", fact, CELLO);
+   const int64_t teaching = batch_with(taught, "dropped", 0, "Jonathan Smith hums");
+   const int64_t words = batch_with(other, "deferred", 0, "jonathan smith plays the cello.");
+   const int64_t unrelated = batch_with(other, "dropped", 0, "Jonathan Smith hums");
+   s_n_notified = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(fact, s_user, NULL));
+   TEST_ASSERT_TRUE(notified(naming));
+   TEST_ASSERT_TRUE(notified(teaching));
+   TEST_ASSERT_TRUE(notified(words));
+   TEST_ASSERT_FALSE(notified(unrelated));
+   TEST_ASSERT_EQUAL_INT(3, s_n_notified);
+}
+
+/* A conversation forget that trims another batch's preference record tells
+ * that batch's tabs (its undo changed). */
+void test_conversation_forget_notifies_a_batch_whose_pref_record_it_trims(void) {
+   int64_t conv_a = 0;
+   int64_t conv_b = 0;
+   conv_db_create(s_user, "A", &conv_a);
+   conv_db_create(s_user, "B", &conv_b);
+   const memory_provenance_t prov_a = { .conv_id = conv_a, .msg_id_start = 2, .msg_id_end = 4 };
+   const memory_provenance_t prov_b = { .conv_id = conv_b, .msg_id_start = 5, .msg_id_end = 6 };
+   memory_db_pref_upsert(s_user, "coffee", "oat latte", 0.5f, "inferred", &prov_b);
+   memory_db_pref_upsert(s_user, "coffee", "oat latte", 0.6f, "inferred", &prov_a);
+   script(NULL);
+   const int64_t batch = run(PREF_REPLY("oat latte"), 0);
+   TEST_ASSERT_TRUE(op_of(batch, "pref_set") > 0);
+   s_n_notified = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_conversations_forget(s_user, &conv_a, 1, NULL));
+   TEST_ASSERT_TRUE(op_of(batch, "pref_set") > 0); /* trimmed, not removed */
+   TEST_ASSERT_TRUE(notified(batch));
+}
+
+/* A conversation forget that clears another batch's restatement record (and
+ * one that removes it) tells that batch's tabs. */
+void test_conversation_forget_notifies_a_batch_whose_reinforce_record_it_changes(void) {
+   int64_t c[3]; /* C, A, the batch's */
+   convs(c, 3);
+   const int64_t fact = stored_in(c[1], CELLO);
+   memory_db_fact_provenance_extend(fact, s_user, c[0], 5, 6);
+   script(NULL);
+   const int64_t batch = run(ONE_FACT(CELLO), 0);
+   s_n_notified = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(s_user, &c[1], 1, NULL));
+   TEST_ASSERT_TRUE(notified(batch)); /* cleared */
+   s_n_notified = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_conversations_forget(s_user, &c[0], 1, NULL));
+   TEST_ASSERT_TRUE(notified(batch)); /* removed */
+}
+
+/* A fact forget that sweeps an entity a batch's link names tells that batch. */
+void test_forget_notifies_a_batch_whose_link_names_a_swept_entity(void) {
+   bool created = false;
+   int64_t jon = 0;
+   int64_t lisbon = 0;
+   memory_db_entity_upsert(s_user, "Jonathan Smith", "person", "jonathan smith", &created, &jon);
+   memory_db_entity_upsert(s_user, "Lisbon", "place", "lisbon", &created, &lisbon);
+   const int64_t fact = stored("Jonathan Smith visits Lisbon", "explicit");
+   memory_db_relation_create(s_user, jon, "visits", lisbon, NULL, fact, 0.9f, 0, 0, NULL);
+   int64_t conv_x = 0;
+   conv_db_create(s_user, "X", &conv_x);
+   const memory_consolidation_batch_t b = { .user_id = s_user,
+                                            .conversation_id = conv_x,
+                                            .path = "agent",
+                                            .stop = "finished" };
+   int64_t batch = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_batch_add(&b, &batch));
+   const memory_consolidation_op_t op = { .batch_id = batch,
+                                          .user_id = s_user,
+                                          .seq = 1,
+                                          .op = "linked",
+                                          .entity_id = lisbon,
+                                          .other_entity_id = jon };
+   int64_t linked = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_op_add(&op, &linked));
+   s_n_notified = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(fact, s_user, NULL));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_entities WHERE id = ?1", lisbon, NULL));
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE id = ?1", linked,
+                              NULL));
+   TEST_ASSERT_TRUE(notified(batch));
 }
 
 /* ---- the record: claim, list, caps, prune ---- */
@@ -1536,6 +1888,15 @@ int main(void) {
    RUN_TEST(test_stale_added_another_conversation_taught_it);
    RUN_TEST(test_stale_added_something_since_merged_into_it);
    RUN_TEST(test_stale_reinforced_made_told_since);
+   RUN_TEST(test_stale_reinforced_confirmed_outside_the_record_since);
+   RUN_TEST(test_undo_reinforced_takes_back_a_relation_created_closed);
+   RUN_TEST(test_undo_reinforced_after_forgetting_the_old_source);
+   RUN_TEST(test_undo_reinforced_after_deleting_the_old_source);
+   RUN_TEST(test_undo_reinforced_after_forgetting_both_teachers);
+   RUN_TEST(test_undo_reinforced_after_forgetting_one_teacher_and_deleting_the_other);
+   RUN_TEST(test_stale_reinforced_after_forgetting_the_old_source_with_a_later_teacher);
+   RUN_TEST(test_stale_reinforced_learned_unsourced_since);
+   RUN_TEST(test_stale_pref_restated_by_a_later_batch);
    RUN_TEST(test_stale_merged_restored_since);
    RUN_TEST(test_stale_replaced_replaced_again_since);
    RUN_TEST(test_stale_closed_reopened_since);
@@ -1548,6 +1909,11 @@ int main(void) {
    RUN_TEST(test_keep_stores_a_dropped_candidate_with_the_batch_taint);
    RUN_TEST(test_keep_refuses_what_the_user_forgot);
    RUN_TEST(test_keep_takes_an_expired_deferred_candidate);
+   RUN_TEST(test_keep_of_another_conversations_candidate_can_be_undone);
+   RUN_TEST(test_forget_notifies_every_batch_its_scrub_changed);
+   RUN_TEST(test_conversation_forget_notifies_a_batch_whose_pref_record_it_trims);
+   RUN_TEST(test_conversation_forget_notifies_a_batch_whose_reinforce_record_it_changes);
+   RUN_TEST(test_forget_notifies_a_batch_whose_link_names_a_swept_entity);
    RUN_TEST(test_a_row_taking_up_a_deferred_candidate_is_written_with_its_claim);
    RUN_TEST(test_a_row_quoting_a_private_conversation_is_not_written);
    RUN_TEST(test_list_pages_by_batch_id_and_conversation);

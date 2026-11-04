@@ -55,6 +55,16 @@ bool conn_require_auth(ws_connection_t *conn) {
    return conn->auth_user_id > 0;
 }
 
+/* The batch frame a notify sends its user's tabs (memory_batch's payload), as
+ * webui_broadcasts.c builds it. */
+static json_object *s_notified;
+
+void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id) {
+   (void)conversation_id;
+   json_object_put(s_notified);
+   s_notified = webui_memory_batch_json(user_id, batch_id);
+}
+
 /* ---- fixtures ---- */
 
 static int s_user;
@@ -100,6 +110,8 @@ void setUp(void) {
 void tearDown(void) {
    json_object_put(s_sent);
    s_sent = NULL;
+   json_object_put(s_notified);
+   s_notified = NULL;
    memory_forgotten_free(&s_forgotten);
    memory_consolidate_set_model_fn(NULL);
    auth_db_shutdown();
@@ -402,6 +414,26 @@ void test_an_undo_of_another_users_batch_is_not_found(void) {
    json_object_put(b);
 }
 
+/* A forget sends the tabs the batch it changed, without the forgotten fact. */
+void test_a_forget_sends_the_batch_it_changed(void) {
+   const int64_t batch = run("{\"facts\": [{\"text\": \"Jonathan Smith plays the cello\", "
+                             "\"subject\": \"Jonathan Smith\"}, {\"text\": \"Jonathan Smith "
+                             "visits Lisbon\", \"subject\": \"Jonathan Smith\"}]}",
+                             NULL);
+   json_object *b = webui_memory_batch_json(s_user, batch);
+   const int64_t fact = json_object_get_int64(get(op_named(b, "added"), "fact_id"));
+   json_object_put(b);
+   json_object_put(s_notified);
+   s_notified = NULL;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_forget(fact, s_user, NULL));
+   TEST_ASSERT_NOT_NULL(s_notified);
+   TEST_ASSERT_EQUAL_INT64(batch, json_object_get_int64(get(s_notified, "batch_id")));
+   json_object *ops = get(s_notified, "ops");
+   TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(ops));
+   TEST_ASSERT_NOT_EQUAL(fact,
+                         json_object_get_int64(get(json_object_array_get_idx(ops, 0), "fact_id")));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_the_batch_object_carries_ops_counts_and_actions);
@@ -416,5 +448,6 @@ int main(void) {
    RUN_TEST(test_each_reason_says_who_wrote_it);
    RUN_TEST(test_a_stale_undo_is_reported_with_its_op);
    RUN_TEST(test_an_undo_of_another_users_batch_is_not_found);
+   RUN_TEST(test_a_forget_sends_the_batch_it_changed);
    return UNITY_END();
 }

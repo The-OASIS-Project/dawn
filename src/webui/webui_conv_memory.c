@@ -38,8 +38,6 @@
 #include "core/session_prefix.h"
 #include "dawn_error.h"
 #include "logging.h"
-#include "memory/memory_consolidate.h"
-#include "memory/memory_db_consolidation.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_forget.h"
 #include "webui/webui_internal.h"
@@ -51,12 +49,6 @@ typedef enum {
    CONV_MEMORY_FORGET_ALL,  /* delete every memory of the user */
    CONV_MEMORY_FORGET_FACT, /* delete one fact (conv_id is the fact's id) */
 } conv_memory_op_t;
-
-/* Batches told when a fact a consolidation recorded is forgotten: every one
- * naming it (the record keeps 30 days of batches, so a fact is named by far
- * fewer).  Past this, the oldest are scrubbed all the same; a tab showing one
- * keeps the forgotten text until it reloads. */
-#define FORGET_BATCHES_MAX 256
 
 typedef struct {
    uint32_t session_id; /* looked up again to reply: no reference held while waiting */
@@ -190,21 +182,10 @@ static void send_frame(uint32_t session_id, const char *type, json_object *paylo
  * replaced, current again, in "restored". */
 static void forget_fact(const conv_memory_job_t *job, json_object *payload) {
    memory_forget_result_t fr;
-   /* The batches whose record names it: the forget changes them (their rows
-    * about it go), so their tabs are told. */
-   int64_t batches[FORGET_BATCHES_MAX];
-   int n_batches = 0;
-   if (memory_db_consolidation_batches_naming(job->user_id, job->conv_id, batches,
-                                              FORGET_BATCHES_MAX,
-                                              &n_batches) != MEMORY_DB_SUCCESS) {
-      n_batches = 0;
-   }
+   /* The forget tells the tabs of the batches whose record it changed. */
    conv_db_withdraw_intent_begin(job->user_id); /* the user removing it */
    const int rc = memory_forget_fact(job->user_id, job->conv_id, &fr);
    conv_db_withdraw_intent_end();
-   for (int i = 0; rc == SUCCESS && i < n_batches; i++) {
-      memory_consolidation_batch_notify(job->user_id, 0, batches[i]);
-   }
    json_object_object_add(payload, "fact_id", json_object_new_int64(job->conv_id));
    json_object_object_add(payload, "success", json_object_new_boolean(rc == SUCCESS));
    if (rc == SUCCESS) {
