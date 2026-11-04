@@ -1929,6 +1929,51 @@ void test_an_add_undone_alone_then_the_close_it_made(void) {
                               batch, NULL));
 }
 
+
+#define CELLO_REL(text)                                                                     \
+   "{\"facts\": [{\"text\": \"" text "\", \"subject\": \"Jonathan Smith\", \"relations\": " \
+   "[{\"subject\": \"Jonathan Smith\", \"predicate\": \"plays\", \"object\": \"cello\"}]}]}"
+
+static int64_t plays_relations(void) {
+   return q("SELECT COUNT(*) FROM memory_relations WHERE user_id = ?1 AND relation = 'plays'",
+            s_user, NULL);
+}
+
+/* A restatement's batch, then another conversation's batch teaching @p later. */
+static int64_t restated_then_taught(const char *later, int64_t *batch) {
+   stored(CELLO, "inferred");
+   script(NULL);
+   *batch = run(CELLO_REL(CELLO), 0);
+   const int64_t rein = op_of(*batch, "reinforced");
+   TEST_ASSERT_TRUE(rein > 0);
+   const int64_t first = s_conv;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "C", &s_conv));
+   script(NULL);
+   run(later, 0);
+   s_conv = first;
+   TEST_ASSERT_EQUAL_INT(1, plays_relations());
+   return rein;
+}
+
+/* Another conversation mentioning the relation through another fact makes the
+ * earlier restatement's undo stale. */
+void test_cross_batch_undo_keeps_a_relation_taught_later(void) {
+   int64_t batch = 0;
+   const int64_t rein = restated_then_taught(
+       CELLO_REL("Jonathan Smith practices cello every evening"), &batch);
+   assert_stale(batch, rein);
+   TEST_ASSERT_EQUAL_INT(1, plays_relations());
+}
+
+/* Another conversation restating the fact and its relation makes the earlier
+ * restatement's undo stale. */
+void test_cross_batch_undo_keeps_a_relation_restated_later(void) {
+   int64_t batch = 0;
+   const int64_t rein = restated_then_taught(CELLO_REL(CELLO), &batch);
+   assert_stale(batch, rein);
+   TEST_ASSERT_EQUAL_INT(1, plays_relations());
+}
+
 /* The plans: one conversation's batches through idx_mcb_conv; a later change
  * on a fact through the fact indexes. */
 static void plan_uses(const char *sql, const char *index) {
@@ -2053,6 +2098,8 @@ int main(void) {
    RUN_TEST(test_a_whole_batch_undo_takes_back_two_restatements_of_one_fact);
    RUN_TEST(test_a_keep_of_an_unrelated_fact_leaves_the_earlier_add_undoable);
    RUN_TEST(test_an_add_undone_alone_then_the_close_it_made);
+   RUN_TEST(test_cross_batch_undo_keeps_a_relation_taught_later);
+   RUN_TEST(test_cross_batch_undo_keeps_a_relation_restated_later);
    RUN_TEST(test_the_record_queries_use_their_indexes);
    return UNITY_END();
 }
