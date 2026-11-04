@@ -14,7 +14,12 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Runs in separate thread to avoid blocking main loop
    - Continuous capture from ALSA/PulseAudio device
    - Writes to ring buffer for main loop consumption
-   - Handles capture errors gracefully
+   - When the device goes away (or isn't there at start), writes silence to the ring and reopens
+     the same device by name when it returns, never another one; `"default"` follows the default.
+     TTS playback does the same between utterances (`src/tts/text_to_speech.cpp`)
+- **`src/audio/pulse_stream.c`**: The PulseAudio backend's blocking stream (one mainloop per
+  stream, adapted from libpulse's `simple.c`): a stream on a named device is opened with
+  `PA_STREAM_DONT_MOVE`, so losing the device fails it instead of moving it to the default
 
 - **`common/src/audio/ring_buffer.c`, `common/include/audio/ring_buffer.h`**: Thread-safe circular buffer (shared with satellite)
    - Lock-free or mutex-protected (implementation dependent)

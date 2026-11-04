@@ -437,26 +437,12 @@ The token grants read-only access to non-private images (search results, generat
 
 ### Headless Setup (No Microphone)
 
-If your device has no physical microphone (e.g., a Raspberry Pi used as a WebUI-only server, or a board where you plan to add audio hardware later), the daemon will exit on startup because ALSA cannot open the default capture device.
-
-**Workaround**: Load the kernel dummy sound driver to provide a virtual capture device:
-
-```bash
-# Load the dummy ALSA driver
-sudo modprobe snd-dummy
-
-# Persist across reboots
-echo "snd-dummy" | sudo tee /etc/modules-load.d/snd-dummy.conf
-```
-
-Then configure `dawn.toml` to use the dummy device:
-
-```toml
-[audio]
-capture_device = "plughw:CARD=Dummy,DEV=0"
-```
-
-Voice input still works through the WebUI and DAP2 satellites — only the local microphone path uses the dummy device. When you later connect a USB microphone or audio HAT, update `capture_device` to the real device (use `arecord -L` to list available devices) and remove the snd-dummy module.
+DAWN starts without a microphone or speaker (e.g., a Raspberry Pi used as a WebUI-only server, or a
+board where you plan to add audio hardware later). It logs one warning that the capture (or
+playback) device isn't available and keeps running; voice input still works through the WebUI and
+DAP2 satellites. When you connect a USB microphone or audio HAT, set `capture_device` to it (use
+`arecord -L` to list devices) and restart DAWN once. After that it connects within seconds
+whenever the device is plugged in, and again after each unplug and replug.
 
 > **Tip**: For a dedicated x86_64 server with no local audio hardware at all, consider [server mode](docs/GETTING_STARTED_SERVER.md) which skips local audio initialization entirely.
 
