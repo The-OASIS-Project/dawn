@@ -267,6 +267,62 @@ void test_nothing_similar_is_added_without_a_consolidation_round(void) {
 }
 
 /* With a second sample, its candidates join the first's: here a forgotten one. */
+/* What a batch stores names its conversation and range, so forgetting the
+ * conversation reaches it: the summary and each fact's source row. */
+void test_a_batch_links_what_it_stores_to_its_conversation(void) {
+   const memory_consolidate_result_t res = run(
+       "{\"facts\": [{\"text\": \"Jonathan Smith plays the cello\", \"subject\": "
+       "\"Jonathan Smith\"}], \"summary\": \"Talked about music.\", \"topics\": "
+       "[\"music\"]}",
+       0, 0);
+   TEST_ASSERT_TRUE(res.batch_id > 0);
+   const int64_t summary = q("SELECT summary_id FROM memory_consolidation_batches WHERE id = ?1",
+                             res.batch_id, NULL);
+   TEST_ASSERT_TRUE(summary > 0);
+   TEST_ASSERT_EQUAL_INT64(s_conv,
+                           q("SELECT source_conversation_id FROM memory_summaries WHERE id = ?1",
+                             summary, NULL));
+   TEST_ASSERT_EQUAL_INT64(1, q("SELECT source_msg_id_start FROM memory_summaries WHERE id = ?1",
+                                summary, NULL));
+   TEST_ASSERT_EQUAL_INT64(5, q("SELECT source_msg_id_end FROM memory_summaries WHERE id = ?1",
+                                summary, NULL));
+   const int64_t fact = current("Jonathan Smith plays the cello");
+   TEST_ASSERT_TRUE(fact > 0);
+   TEST_ASSERT_EQUAL_INT64(
+       s_conv, q("SELECT source_conversation_id FROM memory_facts WHERE id = ?1", fact, NULL));
+   char sql[160];
+   snprintf(
+       sql, sizeof(sql),
+       "SELECT COUNT(*) FROM memory_fact_sources WHERE fact_id = ?1 AND conversation_id = %lld",
+       (long long)s_conv);
+   TEST_ASSERT_EQUAL_INT64(1, q(sql, fact, NULL));
+}
+
+static int64_t entity_named(const char *canonical) {
+   return q("SELECT COUNT(*) FROM memory_entities WHERE user_id = ?1 AND canonical_name = ?2",
+            s_user, canonical);
+}
+
+/* An entity the batch created that none of its facts or relations names is
+ * removed at the batch's end; one a relation names stays, and so does an
+ * unnamed one the batch didn't create. */
+void test_a_new_entity_nothing_names_is_removed(void) {
+   bool created = false;
+   int64_t old = 0;
+   memory_db_entity_upsert(s_user, "Old Thing", "thing", "old thing", &created, &old);
+   const memory_consolidate_result_t res = run(
+       "{\"entities\": [{\"name\": \"Acme\", \"type\": \"organization\"}, {\"name\": "
+       "\"Lisbon\", \"type\": \"place\"}], \"facts\": [{\"text\": \"Jonathan Smith works at "
+       "Acme\", \"subject\": \"Jonathan Smith\", \"relations\": [{\"subject\": \"Jonathan "
+       "Smith\", \"predicate\": \"works_at\", \"object\": \"Acme\"}]}]}",
+       0, 0);
+   TEST_ASSERT_TRUE(res.batch_id > 0);
+   TEST_ASSERT_EQUAL_INT64(1, entity_named("acme"));
+   TEST_ASSERT_EQUAL_INT64(1, entity_named("jonathan smith"));
+   TEST_ASSERT_EQUAL_INT64(0, entity_named("lisbon"));
+   TEST_ASSERT_EQUAL_INT64(1, entity_named("old thing"));
+}
+
 void test_same_text_is_reinforced_and_forgotten_text_dropped(void) {
    const int64_t cello = stored("Jonathan Smith plays the cello", "inferred", 0);
    forgot("Jonathan Smith collects stamps");
@@ -1331,6 +1387,8 @@ void test_cancelled_at_shutdown_stores_additions(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_nothing_similar_is_added_without_a_consolidation_round);
+   RUN_TEST(test_a_batch_links_what_it_stores_to_its_conversation);
+   RUN_TEST(test_a_new_entity_nothing_names_is_removed);
    RUN_TEST(test_same_text_is_reinforced_and_forgotten_text_dropped);
    RUN_TEST(test_an_unshown_id_is_named_in_the_repair_and_the_fix_applies);
    RUN_TEST(test_a_failed_repair_applies_only_additions);

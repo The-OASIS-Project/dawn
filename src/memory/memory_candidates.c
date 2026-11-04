@@ -857,6 +857,14 @@ void memory_store_close(memory_store_t *st) {
    if (!st->agent) {
       merge_gate(st->user_id, st->fresh, st->fresh_count);
    }
+   /* The entities the batch created that none of its facts, relations or
+    * links ended up naming: noise nothing would ever remove. */
+   int orphans = 0;
+   if (memory_db_entity_delete_orphans(st->user_id, st->fresh, st->fresh_count, &orphans) ==
+           MEMORY_DB_SUCCESS &&
+       orphans > 0) {
+      OLOG_INFO("memory_extraction: %d new entities nothing named were removed", orphans);
+   }
    if (st->entity_count > 0) {
       memory_embeddings_invalidate_entity_cache_for_user(st->user_id);
    }

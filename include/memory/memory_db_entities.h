@@ -552,6 +552,20 @@ int memory_db_entity_search(int user_id,
 int memory_db_entity_delete(int64_t entity_id, int user_id);
 
 /**
+ * @brief Delete those of @p ids (entities a batch just created) that nothing
+ *        names: no fact, relation, alias, merge proposal, contact or
+ *        consolidation record row; never the user's own entity
+ *
+ * The extraction names every thing it saw as an entity; one no fact or
+ * relation of the batch ended up naming is noise that undo and forget never
+ * reach.  One statement; the entity cache is invalidated when any went.
+ *
+ * @param deleted_out Receives how many went (may be NULL)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_delete_orphans(int user_id, const int64_t *ids, int n, int *deleted_out);
+
+/**
  * @brief Set an entity's photo (image store reference).
  *
  * @param user_id User ID (ownership check)
