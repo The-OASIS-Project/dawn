@@ -194,14 +194,15 @@ class Repos:
       try:
          head = await self.gw("-C", m, "rev-parse", "--verify", "-q", ref)
       except GitError:
-         raise GitError("nothing collected for this task yet")
+         raise GitError("nothing collected for this task: work is collected when a run ends, "
+                        "and only what it committed")
       return head, await self.gw("-C", m, "merge-base", f"refs/heads/{base}", head)
 
    async def changes(self, name: str, task_id: str, base: str) -> dict:
       head, mb = await self.agent_ref(name, task_id, base)
       m = self.mirror(name)
-      numstat = await run(["git", "-C", m, "diff", "--no-ext-diff", "--no-textconv", "--numstat",
-                           "-z", mb, head])
+      numstat = await run(["git", "-C", m, "diff", "--no-ext-diff", "--no-textconv", "-M",
+                           "--numstat", "-z", mb, head])
       files, fields = [], numstat.split(b"\0")
       i = 0
       while i < len(fields) and fields[i]:
@@ -219,17 +220,21 @@ class Repos:
          c["subject"] = c.get("subject", "")[:SUBJECT_CAP]
       return {"head": head, "base": mb, "files": files, "commits": commits}
 
-   async def file(self, name: str, task_id: str, base: str, path: str, view: str) -> dict:
-      """One file: its diff, or its content after (new) or before (old) the task."""
+   async def file(self, name: str, task_id: str, base: str, path: str, view: str,
+                  old_path: str | None = None) -> dict:
+      """One file: its diff, or its content after (new) or before (old) the task.  A
+      renamed file's diff names its old path too, so git pairs the two."""
       head, mb = await self.agent_ref(name, task_id, base)
       p, m = safe_path(path), self.mirror(name)
       if view == "diff":
-         for rev in (mb, head):  # git builds the whole diff in memory: check sizes first
-            size = await self.size_of(m, f"{rev}:{p}")
+         old = safe_path(old_path) if old_path else p
+         # git builds the whole diff in memory: check sizes first
+         for rev, side in ((mb, old), (head, p)):
+            size = await self.size_of(m, f"{rev}:{side}")
             if size > FILE_CAP:
                return {"path": p, "view": view, "too_large": size}
          out = await run(["git", "--literal-pathspecs", "-C", m, "diff", "--no-ext-diff",
-                          "--no-textconv", mb, head, "--", p])
+                          "--no-textconv", "-M", mb, head, "--", *dict.fromkeys((old, p))])
       elif view in ("new", "old"):
          rev = f"{head if view == 'new' else mb}:{p}"
          try:

@@ -112,6 +112,28 @@ int mcp_bridge_call_tool(const char *alias,
       json_object_object_add(ans, "tasks", tasks);
       *result_out = strdup(json_object_to_json_string(ans));
       json_object_put(ans);
+   } else if (strcmp(tool, "task_changes") == 0) {
+      *result_out = strdup(
+          "{\"head\":\"0123456789abcdef\",\"base\":\"fedcba9876543210\",\"files\":["
+          "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3},"
+          "{\"path\":\"logo.png\",\"added\":null,\"removed\":null}],"
+          "\"commits\":[{\"hash\":\"0123456789abcdef\",\"subject\":\"fix the oracle\"}]}");
+   } else if (strcmp(tool, "task_file") == 0 && args_json && strstr(args_json, "big.c")) {
+      /* 300 KB, past a default string buffer's cap. */
+      struct json_object *o = json_object_new_object();
+      char *text = malloc(300 * 1024 + 1);
+      memset(text, 'a', 300 * 1024);
+      text[300 * 1024] = '\0';
+      json_object_object_add(o, "path", json_object_new_string("big.c"));
+      json_object_object_add(o, "text", json_object_new_string(text));
+      *result_out = strdup(json_object_to_json_string(o));
+      json_object_put(o);
+      free(text);
+   } else if (strcmp(tool, "task_file") == 0 && args_json && strstr(args_json, "gone.c")) {
+      *result_out = strdup("{\"path\":\"gone.c\",\"view\":\"new\",\"missing\":true}");
+   } else if (strcmp(tool, "task_file") == 0) {
+      *result_out = strdup(
+          "{\"path\":\"src/a.c\",\"view\":\"diff\",\"text\":\"@@ -1 +1 @@\\n-a\\n+b\\n\"}");
    } else {
       *result_out = strdup("{}");
    }
@@ -582,6 +604,62 @@ static void test_status_shows_recent_steps(void) {
    free(r);
 }
 
+/* changes: files with counts (binary said), commits with short hashes; the
+ * call names the job's task. */
+static void test_changes_lists_files_and_commits(void) {
+   snprintf(g_status, sizeof(g_status), "completed");
+   snprintf(g_kind, sizeof(g_kind), JOB_KIND_CODING);
+   char *out = call("changes", "{\"job\":42}");
+   TEST_ASSERT_FALSE(is_error(out));
+   TEST_ASSERT_NOT_NULL(strstr(out, "2 files changed in 1 commit, head 01234567 on base fedcba98"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "+12 -3  src/a.c"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "binary  logo.png"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "01234567 fix the oracle"));
+   TEST_ASSERT_EQUAL_STRING("task_changes", g_calls[0]);
+   TEST_ASSERT_NOT_NULL(strstr(g_args[0], "job:42"));
+   free(out);
+}
+
+/* file: the diff by default; a missing side said; a file as large as the
+ * gateway sends comes whole; a rename's name is split; a bad view or a job
+ * that isn't the caller's refused before the gateway is asked. */
+static void test_file_views(void) {
+   snprintf(g_status, sizeof(g_status), "completed");
+   snprintf(g_kind, sizeof(g_kind), JOB_KIND_CODING);
+   char *out = call("file", "{\"job\":42,\"path\":\"src/a.c\"}");
+   TEST_ASSERT_NOT_NULL(strstr(out, "Job #42, src/a.c (diff):\n@@ -1 +1 @@"));
+   TEST_ASSERT_NOT_NULL(strstr(g_args[0], "\"view\": \"diff\""));
+   free(out);
+   out = call("file", "{\"job\":42,\"path\":\"gone.c\",\"view\":\"new\"}");
+   TEST_ASSERT_NOT_NULL(strstr(out, "gone.c isn't in the task's version"));
+   TEST_ASSERT_NOT_NULL(strstr(g_args[1], "\"view\": \"new\""));
+   free(out);
+   /* A rename as listed: the new name, or the old one for old. */
+   const int renamed = atomic_load(&g_ncalls);
+   free(call("file", "{\"job\":42,\"path\":\"old.c -> new.c\"}"));
+   TEST_ASSERT_NOT_NULL(strstr(g_args[renamed], "\"path\": \"new.c\""));
+   TEST_ASSERT_NOT_NULL(strstr(g_args[renamed], "\"old_path\": \"old.c\""));
+   out = call("file", "{\"job\":42,\"path\":\"old.c -> new.c\",\"view\":\"old\"}");
+   TEST_ASSERT_NOT_NULL(strstr(g_args[renamed + 1], "\"path\": \"old.c\""));
+   TEST_ASSERT_NULL(strstr(g_args[renamed + 1], "old_path"));
+   free(out);
+   out = call("file", "{\"job\":42,\"path\":\"big.c\"}");
+   TEST_ASSERT_FALSE(is_error(out));
+   TEST_ASSERT_GREATER_THAN(300 * 1024, strlen(out));
+   free(out);
+   const int before = atomic_load(&g_ncalls);
+   out = call("file", "{\"job\":42,\"path\":\"src/a.c\",\"view\":\"blame\"}");
+   TEST_ASSERT_TRUE(is_error(out));
+   free(out);
+   out = call("file", "{\"job\":42,\"path\":\" -> x.c\"}");
+   TEST_ASSERT_TRUE(is_error(out));
+   free(out);
+   out = call("file", "{\"job\":43,\"path\":\"src/a.c\"}");
+   TEST_ASSERT_TRUE(is_error(out));
+   free(out);
+   TEST_ASSERT_EQUAL_INT(before, atomic_load(&g_ncalls));
+}
+
 static void test_list_shows_repos(void) {
    char *r = call("list", NULL);
    TEST_ASSERT_FALSE(is_error(r));
@@ -616,6 +694,8 @@ int main(void) {
    RUN_TEST(test_list_is_bounded_and_whole_characters);
    RUN_TEST(test_lost_claim_cancels_the_started_task);
    RUN_TEST(test_list_shows_repos);
+   RUN_TEST(test_changes_lists_files_and_commits);
+   RUN_TEST(test_file_views);
    RUN_TEST(test_status_shows_recent_steps);
    RUN_TEST(test_needs_the_gateway_grant);
    RUN_TEST(test_cancel_hook_ends_the_row_and_asks_the_gateway);

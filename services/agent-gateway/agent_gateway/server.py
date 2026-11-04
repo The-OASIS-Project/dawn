@@ -173,10 +173,12 @@ def build(runner, cfg) -> MCPServer:
 
    @tool
    async def task_file(dawn_user_id: int, path: str, view: str = "diff",
-                       task_id: str | None = None, client_ref: str | None = None) -> dict:
-      """One file of the task's work: view diff, new (after) or old (before)."""
+                       task_id: str | None = None, client_ref: str | None = None,
+                       old_path: str | None = None) -> dict:
+      """One file of the task's work: view diff, new (after) or old (before).  A renamed
+      file's diff takes its old name as old_path."""
       t = task_of(dawn_user_id, task_id, client_ref)
-      return await runner.repos.file(t["repo"], t["id"], t["base"], path, view)
+      return await runner.repos.file(t["repo"], t["id"], t["base"], path, view, old_path)
 
    @tool
    async def task_tree(dawn_user_id: int, path: str = "", task_id: str | None = None,

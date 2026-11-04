@@ -586,6 +586,14 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    for bad in ("../x", "a/../../b", "a\0b"):
       with pytest.raises(GitError):
          asyncio.run(repos.file("r", "aaaa0001", "main", bad, "new"))
+   # A rename listed by changes: its diff, given both names, is the rename, not a new file.
+   git("mv", "f", "f2", cwd=wt)
+   git("commit", "-qm", "rename f", cwd=wt)
+   asyncio.run(repos.collect("r", "aaaa0001", "agent/aaaa0001-x", "main"))
+   ch = asyncio.run(repos.changes("r", "aaaa0001", "main"))
+   assert "f -> f2" in [f["path"] for f in ch["files"]]
+   moved = asyncio.run(repos.file("r", "aaaa0001", "main", "f2", "diff", "f"))["text"]
+   assert "rename from f" in moved and "new file" not in moved
    # Too large for the viewer: refused before git builds the diff.
    big = tmp_path / "home/work/aaaa0001/big.txt"
    big.write_text("x\n" * 300_000)
