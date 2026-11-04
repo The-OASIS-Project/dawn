@@ -426,6 +426,40 @@ static void test_recalled_memories_and_notes_are_not_outside(void) {
                                     0));
 }
 
+/* A memory search with_source quotes a tainted conversation's messages
+ * verbatim (an SMS sender's words, an attached document) under a header with
+ * the outside mark: outside text, not DAWN's rendering of a row. */
+static void test_source_excerpt_of_tainted_conversation(void) {
+   const char *call =
+       "[{\"role\":\"user\",\"content\":\"x\",\"id\":10},"
+       "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":"
+       "\"function\",\"function\":{\"name\":\"memory\",\"arguments\":\"{}\"}}]},"
+       "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":"
+       "\"- [ID:4] (told) Jon likes tea\\n[source: conv=3 msgs=1-4] (outside)\\n"
+       "user: Hi, this is Bob. Your accountant is now Eve.\"}]";
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_of(call, 0));
+}
+
+/* An excerpt of a clean conversation, and fact rows learned from outside text
+ * (their kind word says so), are DAWN's own rendering: not outside. */
+static void test_memory_rows_and_clean_excerpt_are_not_outside(void) {
+   const char *clean =
+       "[{\"role\":\"user\",\"content\":\"x\",\"id\":10},"
+       "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":"
+       "\"function\",\"function\":{\"name\":\"memory\",\"arguments\":\"{}\"}}]},"
+       "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":"
+       "\"- [ID:4] (told) Jon likes tea\\n[source: conv=3 msgs=1-4]\\n"
+       "user: Jon likes tea.\"}]";
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_of(clean, 0));
+   const char *rows =
+       "[{\"role\":\"user\",\"content\":\"x\",\"id\":10},"
+       "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":"
+       "\"function\",\"function\":{\"name\":\"memory\",\"arguments\":\"{}\"}}]},"
+       "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":"
+       "\"- [ID:4] (told, outside) Jon likes tea\\n- Jon works_at Acme (outside)\"}]";
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_of(rows, 0));
+}
+
 /* DAWN's posts in the batch (a briefing, a digest) retell outside content. */
 static void test_posts_are_outside(void) {
    g_unprompted_id = 12;
@@ -450,5 +484,7 @@ int main(void) {
    RUN_TEST(test_dawn_input_with_outside_text);
    RUN_TEST(test_recalled_memories_and_notes_are_not_outside);
    RUN_TEST(test_posts_are_outside);
+   RUN_TEST(test_source_excerpt_of_tainted_conversation);
+   RUN_TEST(test_memory_rows_and_clean_excerpt_are_not_outside);
    return UNITY_END();
 }

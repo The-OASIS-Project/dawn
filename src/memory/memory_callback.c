@@ -285,7 +285,9 @@ static int append_source_excerpt_from_range(int user_id,
    /* Header — emitted only when we have something to render under it.  It
     * says "outside" when the conversation had read outside text (its floor):
     * the row it backs may be clean while this range, a later mention's, isn't.
-    * Unreadable: outside. */
+    * Unreadable: outside.  The model reads the mark, and so does extraction
+    * (memory_extraction_input.c): a memory result holding such a header
+    * quotes outside text, so its batch reads as tainted. */
    int floor = OUTSIDE_NONE;
    if (conv_db_get_outside(conv_id, user_id, &floor) != AUTH_DB_SUCCESS) {
       floor = OUTSIDE_OTHER;
