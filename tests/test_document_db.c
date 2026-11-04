@@ -64,6 +64,7 @@ static const char *DDL =
    "  num_chunks INTEGER NOT NULL,"
    "  is_global INTEGER DEFAULT 0,"
    "  created_at INTEGER NOT NULL,"
+   "  original_blob_id TEXT DEFAULT NULL,"
    "  outside INTEGER NOT NULL DEFAULT 0,"
    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
    ");"
@@ -86,14 +87,15 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO documents (user_id, filename, filepath, filetype, file_hash, "
-       "num_chunks, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+       "num_chunks, is_global, created_at, original_blob_id, outside) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ?4 = 'note' THEN 0 ELSE 5 END)",
        -1, &s_db.stmt_doc_create, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-                           "num_chunks, is_global, created_at FROM documents WHERE id = ?",
+                           "num_chunks, is_global, created_at, outside FROM documents WHERE id = ?",
                            -1, &s_db.stmt_doc_get, NULL);
    if (rc != SQLITE_OK)
       return -1;
@@ -107,7 +109,7 @@ static int prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-                           "num_chunks, is_global, created_at FROM documents "
+                           "num_chunks, is_global, created_at, outside FROM documents "
                            "WHERE user_id = ? OR is_global = 1 ORDER BY created_at DESC "
                            "LIMIT ? OFFSET ?",
                            -1, &s_db.stmt_doc_list, NULL);
@@ -116,7 +118,7 @@ static int prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT d.id, d.user_id, d.filename, d.filepath, d.filetype, "
-                           "d.file_hash, d.num_chunks, d.is_global, d.created_at, "
+                           "d.file_hash, d.num_chunks, d.is_global, d.created_at, d.outside, "
                            "COALESCE(u.username, '') FROM documents d "
                            "LEFT JOIN users u ON d.user_id = u.id "
                            "ORDER BY d.created_at DESC LIMIT ? OFFSET ?",
@@ -152,7 +154,7 @@ static int prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-                           "num_chunks, is_global, created_at "
+                           "num_chunks, is_global, created_at, outside "
                            "FROM documents "
                            "WHERE (user_id = ? OR is_global = 1) "
                            "AND filename LIKE ? ESCAPE '\\' COLLATE NOCASE "
@@ -588,8 +590,9 @@ static void test_chunk_create_and_read(void) {
 
 /* A note's chunk is the user's own words unless its text carries outside text
  * (a research report, a note written in a turn that read a page); one stored
- * before the kind was recorded counts as own.  A document's never is. */
-static void test_chunks_by_ids_own_note(void) {
+ * before the kind was recorded counts as own.  A document's isn't until the
+ * user marks it as their own. */
+static void test_chunks_by_ids_own(void) {
    float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
    int64_t note = 0, report = 0, web = 0, old = 0, doc = 0, ids[5] = { 0 };
    document_db_create(1, "Groceries", "", "note", "h-note", 1, false, &note);
@@ -611,7 +614,7 @@ static void test_chunks_by_ids_own_note(void) {
    TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(1, ids, 5, out, &n));
    TEST_ASSERT_EQUAL_INT(5, n);
    for (int i = 0; i < n; i++) {
-      TEST_ASSERT_EQUAL(out[i].id == ids[0] || out[i].id == ids[3], out[i].own_note);
+      TEST_ASSERT_EQUAL(out[i].id == ids[0] || out[i].id == ids[3], out[i].own);
    }
 }
 
@@ -627,10 +630,10 @@ static void test_chunks_by_ids_global_note_not_own(void) {
    int n = 0;
    TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(2, &id, 1, out, &n));
    TEST_ASSERT_EQUAL_INT(1, n);
-   TEST_ASSERT_FALSE(out[0].own_note);
+   TEST_ASSERT_FALSE(out[0].own);
    TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(1, &id, 1, out, &n));
    TEST_ASSERT_EQUAL_INT(1, n);
-   TEST_ASSERT_TRUE(out[0].own_note);
+   TEST_ASSERT_TRUE(out[0].own);
 }
 
 static int doc_outside(int64_t id) {
@@ -660,6 +663,48 @@ static void test_set_outside_combine(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, doc_outside(note));
    TEST_ASSERT_EQUAL_INT(FAILURE, document_db_set_outside(2, note, OUTSIDE_WEB, false));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, doc_outside(note));
+}
+
+/* A document other than a note starts as DOCUMENT; marking it own makes its
+ * chunk the user's words whatever its kind was, unmarking makes it DOCUMENT
+ * again, and only its owner can do either (a global one included). */
+static void test_set_own(void) {
+   float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+   int64_t pdf = 0, note = 0, chunk = 0;
+   document_db_create(1, "own.pdf", "own.pdf", "pdf", "h-own", 1, true, &pdf);
+   document_db_create(1, "Own note", "", "note", "h-own-note", 1, false, &note);
+   document_db_chunk_create(pdf, 0, "My words", emb, 4, 1.0f, 0, &chunk);
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, doc_outside(pdf));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, doc_outside(note));
+
+   document_chunk_t out[1];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(1, &chunk, 1, out, &n));
+   TEST_ASSERT_FALSE(out[0].own);
+
+   int outside = -1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_own(1, pdf, true, &outside));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside);
+   document_t d;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(pdf, &d));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, d.outside);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(1, &chunk, 1, out, &n));
+   TEST_ASSERT_TRUE(out[0].own);
+   /* Another user can't mark it, and never reads it as their own. */
+   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_set_own(2, pdf, false, NULL));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, doc_outside(pdf));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(2, &chunk, 1, out, &n));
+   TEST_ASSERT_FALSE(out[0].own);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_own(1, pdf, false, &outside));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside);
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, doc_outside(pdf));
+
+   /* A research report can be marked own too: the user's call. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, note, OUTSIDE_RESEARCH, false));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_own(1, note, true, NULL));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, doc_outside(note));
+   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_set_own(1, 999999, true, NULL));
 }
 
 /* ============================================================================
@@ -868,9 +913,10 @@ int main(void) {
    RUN_TEST(test_global_visibility);
    RUN_TEST(test_find_by_name);
    RUN_TEST(test_chunk_create_and_read);
-   RUN_TEST(test_chunks_by_ids_own_note);
+   RUN_TEST(test_chunks_by_ids_own);
    RUN_TEST(test_chunks_by_ids_global_note_not_own);
    RUN_TEST(test_set_outside_combine);
+   RUN_TEST(test_set_own);
    RUN_TEST(test_chunk_read_range);
    RUN_TEST(test_chunk_grep);
    RUN_TEST(test_invalid_params);

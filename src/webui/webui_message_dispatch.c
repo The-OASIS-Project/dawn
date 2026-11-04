@@ -1366,6 +1366,8 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
       if (payload) {
          handle_doc_library_toggle_global(conn, payload);
       }
+   } else if (strcmp(type, "set_document_own") == 0) {
+      handle_set_document_own(conn, payload);
    } else if (strcmp(type, "doc_library_note_save") == 0) {
       if (payload) {
          handle_doc_library_note_save(conn, payload);

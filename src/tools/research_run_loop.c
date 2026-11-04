@@ -201,6 +201,7 @@ static void research_persist_report_note(int user_id,
       rc = document_index_text(user_id, label, "text", report, strlen(report), false, NULL, &res);
       if (rc == DOC_INDEX_SUCCESS && res.doc_id > 0) {
          research_db_run_set_report_doc(run_id, res.doc_id);
+         (void)document_db_set_outside(user_id, res.doc_id, OUTSIDE_RESEARCH, false);
          OLOG_INFO("research: run %lld report saved as document %lld (%s)", (long long)run_id,
                    (long long)res.doc_id, label);
       } else if (rc == DOC_INDEX_ERROR_DUPLICATE && res.doc_id > 0) {

@@ -155,10 +155,11 @@ static int emit_candidates(document_ranked_t *const *chosen,
       /* Scores are 0..1 and FOCUS_SCORE_NA is a negative sentinel, so a
        * negative cosine (possible with some models) reads as no similarity. */
       const float semantic = c->has_cosine ? fmaxf(c->cosine, 0.0f) : FOCUS_SCORE_NA;
-      /* A note is the user's (or DAWN's) own text: internal, so its line carries
-       * no "outside" kind word and doesn't make the turn read outside text. */
+      /* The reader's own text (a note, or a document they marked as theirs) is
+       * internal, so its line carries no "outside" kind word and doesn't make
+       * the turn read outside text. */
       if (focus_candidate_init(&out[produced], OUTSIDE_MARKER_DOC_SOURCE,
-                               c->is_note ? FOCUS_SOURCE_INTERNAL : FOCUS_SOURCE_EXTERNAL, rendered,
+                               c->is_own ? FOCUS_SOURCE_INTERNAL : FOCUS_SOURCE_EXTERNAL, rendered,
                                item_id, c->created_at, semantic, recency,
                                DOCUMENT_DEFAULT_IMPORTANCE, &truncated_warned) != SUCCESS) {
          OLOG_ERROR("document_adapter: focus_candidate_init failed (chunk_id=%lld)",

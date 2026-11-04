@@ -234,11 +234,11 @@ static void test_document_adapter_shape(void) {
 }
 
 /* A chunk of a document or a research report is outside text and says so; a
- * chunk of the user's own note doesn't. */
-static void test_document_outside_unless_own_note(void) {
+ * chunk of the user's own document (a note, or one they marked) doesn't. */
+static void test_document_outside_unless_own(void) {
    for (int own = 0; own <= 1; own++) {
       seed_chunk(0, 42, 1, "Annual report draft 3", "report", embed_v1, 1700000000);
-      s_ext_mock.chunks[0].own_note = own;
+      s_ext_mock.chunks[0].own = own;
       s_ext_mock.chunk_count = 1;
       s_ext_mock.chunk_dim = EXT_MOCK_DIMS;
       s_ext_mock.embeddings_available = true;
@@ -1319,7 +1319,7 @@ int main(void) {
 
    /* Document adapter happy paths */
    RUN_TEST(test_document_adapter_shape);
-   RUN_TEST(test_document_outside_unless_own_note);
+   RUN_TEST(test_document_outside_unless_own);
    RUN_TEST(test_document_no_embedding_without_keyword_hits);
    RUN_TEST(test_document_cap_honoring);
    RUN_TEST(test_document_relevance_gate);

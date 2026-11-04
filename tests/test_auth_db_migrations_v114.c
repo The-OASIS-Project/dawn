@@ -17,9 +17,9 @@
  * the project author(s).
  *
  * The v114 migration on a v113 database: a note's outside kind filled in from
- * the research run that filed it and from its gloss fact, a version's from its
- * document, a rerun leaving rows tagged since alone, and migrated documents and
- * document_versions tables matching new ones.
+ * the research run that filed it and from its gloss fact, any other
+ * document's as DOCUMENT, a version's from its document, a rerun leaving rows tagged since alone,
+ * and migrated documents and document_versions tables matching new ones.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -148,7 +148,7 @@ static void test_notes_outside_filled_in(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 3));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 4));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, outside_in("documents", 5));
-   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 6));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside_in("documents", 6)); /* not a note */
    TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, outside_in("document_versions", 1));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("document_versions", 2));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside_in("document_versions", 3));

@@ -64,6 +64,8 @@ typedef struct {
    bool is_global;
    int64_t created_at;
    char owner_name[65]; /* Populated only by document_db_list_all (JOIN) */
+   int outside;         /* outside_kind_t of its text (documents.outside): NONE for
+                           the user's own words (a note, or one the user marked) */
 } document_t;
 
 typedef struct {
@@ -76,8 +78,9 @@ typedef struct {
    char doc_filename[DOC_FILENAME_MAX];
    char doc_filetype[DOC_FILETYPE_MAX];
    int64_t created_at; /* v35 — chunk origin timestamp; 0 = unknown */
-   bool own_note;      /* a note of the user's (or DAWN's) own words, no outside text
-                          (documents.outside); set by document_db_chunks_get_by_ids only */
+   bool own;           /* the reader's own document of their (or DAWN's) own words, no
+                          outside text (documents.outside); set by
+                          document_db_chunks_get_by_ids only */
 } document_chunk_t;
 
 /* v62: one row of a document/note's version history (metadata + text preview).
@@ -429,18 +432,36 @@ int document_db_note_update(int user_id,
                             const char *new_hash);
 
 /**
- * @brief Record the outside kind a note's text carries (documents.outside,
+ * @brief Record the outside kind a document's text carries (documents.outside,
  *        outside_kind_t): a research report's, or one written in a turn that
  *        read outside text
  *
  * @param user_id Owner (gate)
- * @param doc_id  Note document id
+ * @param doc_id  Document id
  * @param outside The kind of the text just written
  * @param combine True for an edit that keeps part of the old text: the stored
  *                kind and @p outside read together (outside_combine)
  * @return SUCCESS, or FAILURE when not owned / a database error
  */
 int document_db_set_outside(int user_id, int64_t doc_id, int outside, bool combine);
+
+/**
+ * @brief Mark a document as the user's own text, or not (documents.outside):
+ *        own sets NONE whatever it was, since the user vouches for the text;
+ *        not own sets DOCUMENT.  A recalled chunk of an own document reads as
+ *        the user's words.
+ *
+ * Only the user sets this, from the document library (set_document_own).  No
+ * tool action may call it: a model steered by outside text must not be able
+ * to vouch for that text.
+ *
+ * @param user_id Owner (gate: another user's document, global or not, is refused)
+ * @param doc_id  Document id
+ * @param own     True: the user's own words
+ * @param outside_out Optional: the kind stored
+ * @return SUCCESS, or FAILURE when not owned / a database error
+ */
+int document_db_set_own(int user_id, int64_t doc_id, bool own, int *outside_out);
 
 /**
  * @brief Rename a note OR document in place, without touching its content.

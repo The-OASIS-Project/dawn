@@ -1023,6 +1023,10 @@
                if (typeof DawnDocLibrary !== 'undefined')
                   DawnDocLibrary.handleToggleGlobalResponse(msg.payload);
                break;
+            case 'set_document_own_response':
+               if (typeof DawnDocLibrary !== 'undefined')
+                  DawnDocLibrary.handleSetOwnResponse(msg.payload);
+               break;
             case 'doc_library_note_save_response':
                if (typeof DawnDocLibrary !== 'undefined')
                   DawnDocLibrary.handleNoteSaveResponse(msg.payload);

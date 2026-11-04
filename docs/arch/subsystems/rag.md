@@ -86,6 +86,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 - **doc-library.js / doc-library.css** (`www/`): WebUI frontend
    - Drag-and-drop upload with progress indicator
    - Document list with type badges, chunk counts, delete confirmation
+   - Per-document "My own text" switch on the user's own documents (see below)
    - Admin controls: "All Users" toggle, global upload checkbox, per-document globe toggle
    - Owner badge (username) on documents in admin "All Users" view
    - SVG globe icon with filled/stroke states for global visibility
@@ -98,12 +99,26 @@ Two tables in `auth.db`:
 
 ```sql
 documents (id, user_id, filename, filepath, filetype, file_hash,
-           num_chunks, is_global, created_at)
+           num_chunks, is_global, created_at, original_blob_id, outside)
 
 document_chunks (id, document_id, chunk_index, text, embedding, embedding_norm)
 ```
 
 Indexes: `idx_doc_chunks_doc`, `idx_documents_user`, `idx_documents_hash`.
+
+### Whose words a document holds
+
+`documents.outside` (v114, `outside_kind_t`) says whether a document's text is the user's own
+words.  A chunk focus recalls into a turn counts as the user's words only when the reader owns
+the document and its kind is NONE (or UNKNOWN); any other chunk is marked outside text, so the
+memory batch that turn feeds is tainted ("document") and can't overwrite what the user told DAWN.
+A note starts NONE; every other document (an upload, an attachment, saved text) starts DOCUMENT;
+a research report is RESEARCH.  The user flips it with the panel's **My own text** switch
+(`set_document_own`, `document_db_set_own`): on sets NONE whatever it was, off sets DOCUMENT.
+Only the user sets it; `document_manage` has no action for it, since a model steered by outside
+text must not be able to vouch for that text.  An edit or undo keeps the stored kind combined with
+what the turn read, so an own document edited in a turn that read a page is no longer own.  A
+version keeps its document's kind and gives it back on restore.
 
 ## Configuration
 

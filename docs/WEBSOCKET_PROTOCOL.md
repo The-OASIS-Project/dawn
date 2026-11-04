@@ -1124,7 +1124,8 @@ messages: they never appear in `messages`, the history, or what the model is sen
   `messaging` (a message from a chat channel) · `document` · `mcp` (an MCP server's result) ·
   `other` (any other tool's result, DAWN's own posts, a device's data).  Show it once per batch
   ("Read outside text: an email").  A memory DAWN recalled into the conversation doesn't count,
-  whatever it was learned from, and neither does a note.
+  whatever it was learned from, and neither does the user's own document (a note, or one marked
+  My own text: see Document Library).
 - `counts`: the batch's ops by kind (a link that became a proposal counts as `proposed`); refused
   ops count in `refused` only and are not listed.
 
@@ -1315,6 +1316,36 @@ Response: `delete_all_memories_response` with `success` and `error` on failure. 
 waits for a memory extraction in progress; if one doesn't finish in time it fails with "Memory is still
 being saved; try again in a minute" and nothing is deleted. On success the user's conversations count as
 extracted, so their memories aren't learned again from them.
+
+---
+
+### Document Library (Authenticated)
+
+The library panel's other requests (`doc_library_*`) are described in
+`include/webui/webui_doc_library.h`; this section covers whose words a document holds.
+
+In `doc_library_list_response`, each row of a document the requester owns carries:
+- `outside`: the outside kind of its text (`outside_kind_t`, `include/core/outside_kind.h`):
+  `0` the user's own words, `5` a document (every upload, attachment or saved text until the user
+  marks it), `3` a research report; a note written in a turn that read outside text carries that
+  text's kind.
+- `own`: whether a chunk of it recalled into a turn counts as the user's own words (`outside` is
+  0 or 8).  A note starts own, anything else not.  Rows of another user's document (a global one,
+  or the admin All Users view) carry neither, and show no switch.
+
+#### `set_document_own`
+Mark one of the user's documents as their own text, or not.  Own sets `outside` to 0 whatever it
+was (the user vouches for the text, a research report included); not own sets 5.  Only the
+document's owner can, from the panel: no tool action sets it.
+```json
+{"type": "set_document_own", "payload": {"document_id": 42, "own": true}}
+```
+Response:
+```json
+{"type": "set_document_own_response", "payload": {"document_id": 42, "own": true, "outside": 0}}
+```
+or `{"document_id": 42, "error": "..."}` (a missing field, or not the user's document).  An edit
+in a turn that read outside text can make an own document not own again; the next list shows it.
 
 ---
 
@@ -2946,6 +2977,7 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `list_memory_batches` | `list_memory_batches_response` |
 | `undo_memory_batch` | `undo_memory_batch_response` (when the worker ends) |
 | `keep_memory_op` | `keep_memory_op_response` (when the worker ends) |
+| `set_document_own` | `set_document_own_response` |
 | `music_subscribe` | `music_state` |
 | `music_control` | `music_state` |
 | `music_search` | `music_search_response` |

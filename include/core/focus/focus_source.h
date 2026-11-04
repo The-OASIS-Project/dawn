@@ -142,7 +142,8 @@ typedef struct {
                                      framework sets "outside" on every item
                                      not of the INTERNAL tier, unless its
                                      adapter set the item's source_type to
-                                     INTERNAL (the user's own text: a note) */
+                                     INTERNAL (a document marked as the
+                                     user's own; notes by default) */
 } focus_candidate_t;
 
 /* =============================================================================

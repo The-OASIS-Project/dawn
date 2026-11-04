@@ -72,7 +72,7 @@ static void col_text_copy(char *dst, size_t dst_size, sqlite3_stmt *stmt, int co
 /* =============================================================================
  * Helper: populate document_t from a SELECT row
  * Columns: id, user_id, filename, filepath, filetype, file_hash,
- *          num_chunks, is_global, created_at
+ *          num_chunks, is_global, created_at, outside
  * ============================================================================= */
 
 static void row_to_document(sqlite3_stmt *stmt, document_t *doc) {
@@ -85,6 +85,7 @@ static void row_to_document(sqlite3_stmt *stmt, document_t *doc) {
    doc->num_chunks = sqlite3_column_int(stmt, 6);
    doc->is_global = sqlite3_column_int(stmt, 7) != 0;
    doc->created_at = sqlite3_column_int64(stmt, 8);
+   doc->outside = sqlite3_column_int(stmt, 9);
 }
 
 /* =============================================================================
@@ -102,6 +103,10 @@ int document_db_create(int user_id,
    return document_db_create_ex(user_id, filename, filepath, filetype, file_hash, num_chunks,
                                 is_global, NULL, id_out);
 }
+
+/* doc_create (auth_db_statements.c) gives a document other than a note this
+ * kind until the user marks it as their own. */
+_Static_assert(OUTSIDE_DOCUMENT == 5, "doc_create's SQL writes this outside kind");
 
 int document_db_create_ex(int user_id,
                           const char *filename,
@@ -244,7 +249,7 @@ int document_db_list_all(document_t *out, int limit, int offset, int *count_out)
    while (count < limit && sqlite3_step(stmt) == SQLITE_ROW) {
       row_to_document(stmt, &out[count]);
       /* Column 9 = COALESCE(u.username, '') from the JOIN */
-      col_text_copy(out[count].owner_name, sizeof(out[count].owner_name), stmt, 9);
+      col_text_copy(out[count].owner_name, sizeof(out[count].owner_name), stmt, 10);
       count++;
    }
 
@@ -643,7 +648,7 @@ int document_db_chunks_get_by_ids(int user_id,
    sqlite3_stmt *stmt = NULL;
    if (sqlite3_prepare_v2(s_db.db,
                           "SELECT c.id, c.chunk_index, c.text, c.document_id, d.filename, "
-                          "d.filetype, c.created_at, d.filetype = 'note' AND d.user_id = ?1 "
+                          "d.filetype, c.created_at, d.user_id = ?1 "
                           "AND d.outside IN (" OUTSIDE_UNTAINTED_SQL ") "
                           "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
                           "WHERE (d.user_id = ?1 OR d.is_global = 1) "
@@ -667,7 +672,7 @@ int document_db_chunks_get_by_ids(int user_id,
       col_text_copy(c->doc_filename, sizeof(c->doc_filename), stmt, 4);
       col_text_copy(c->doc_filetype, sizeof(c->doc_filetype), stmt, 5);
       c->created_at = sqlite3_column_int64(stmt, 6);
-      c->own_note = sqlite3_column_int(stmt, 7) != 0;
+      c->own = sqlite3_column_int(stmt, 7) != 0;
       count++;
    }
    sqlite3_finalize(stmt);
@@ -1112,15 +1117,13 @@ int document_db_chunk_search_bm25(int user_id,
  * v62: document_versions — soft-archive of pre-mutation content for undo/restore
  * ============================================================================= */
 
-_Static_assert(OUTSIDE_DOCUMENT == 5, "version_archive_locked's SQL writes this outside kind");
-
 /* Archive the pre-mutation content of a document as a restorable version, then
  * prune that document's history to the keep-last-N cap.  The version carries
- * the document's outside kind; a document other than a note is someone else's
- * text, so its version is at least DOCUMENT (a recovered short one comes back
- * as a note and must not read as the user's words).  CALLER HOLDS THE LOCK
- * and is inside a transaction (the snapshot must be atomic with the mutation it
- * precedes).  Best-effort: versioning is a safety net, so a failure here is
+ * the document's outside kind (a document other than a note is DOCUMENT unless
+ * the user marked it as their own), so a recovered one, even a short one that
+ * comes back as a note, reads as the user's words only when it did.  CALLER
+ * HOLDS THE LOCK and is inside a transaction (the snapshot must be atomic with
+ * the mutation it precedes).  Best-effort: versioning is a safety net, so a failure here is
  * logged and swallowed — it must never abort the mutation.  No-op when
  * versioning is disabled (version_retention_days <= 0). */
 static void version_archive_locked(int64_t doc_id,
@@ -1136,8 +1139,7 @@ static void version_archive_locked(int64_t doc_id,
    if (sqlite3_prepare_v2(s_db.db,
                           "INSERT INTO document_versions(document_id, user_id, filename, text, "
                           "archived_at, outside) VALUES(?1, ?2, ?3, ?4, ?5, COALESCE((SELECT "
-                          "CASE WHEN filetype != 'note' AND outside IN (" OUTSIDE_UNTAINTED_SQL
-                          ") THEN 5 ELSE outside END FROM documents WHERE id = ?1), 0))",
+                          "outside FROM documents WHERE id = ?1), 0))",
                           -1, &ins, NULL) == SQLITE_OK) {
       sqlite3_bind_int64(ins, 1, doc_id);
       sqlite3_bind_int(ins, 2, user_id);
@@ -1864,7 +1866,7 @@ int document_db_note_update(int user_id,
    return result;
 }
 
-/* A note's outside kind; see header. */
+/* A document's outside kind; see header. */
 int document_db_set_outside(int user_id, int64_t doc_id, int outside, bool combine) {
    AUTH_DB_LOCK_OR_FAIL();
    sqlite3_stmt *st = NULL;
@@ -1893,6 +1895,30 @@ int document_db_set_outside(int user_id, int64_t doc_id, int outside, bool combi
    AUTH_DB_UNLOCK();
    if (rc != SUCCESS) {
       OLOG_WARNING("document_db: outside kind of note %lld not recorded", (long long)doc_id);
+   }
+   return rc;
+}
+
+/* The user's own text, or not; see header. */
+int document_db_set_own(int user_id, int64_t doc_id, bool own, int *outside_out) {
+   const int outside = own ? OUTSIDE_NONE : OUTSIDE_DOCUMENT;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int rc = FAILURE;
+   if (user_id > 0 &&
+       sqlite3_prepare_v2(s_db.db, "UPDATE documents SET outside = ? WHERE id = ? AND user_id = ?",
+                          -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, outside);
+      sqlite3_bind_int64(st, 2, doc_id);
+      sqlite3_bind_int(st, 3, user_id);
+      if (sqlite3_step(st) == SQLITE_DONE && sqlite3_changes(s_db.db) == 1) {
+         rc = SUCCESS;
+      }
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc == SUCCESS && outside_out) {
+      *outside_out = outside;
    }
    return rc;
 }
@@ -2070,13 +2096,14 @@ int document_db_find_by_label_exact(int user_id,
    AUTH_DB_LOCK_OR_FAIL();
    sqlite3_stmt *stmt = NULL;
    const char *sql =
-       note_only ? "SELECT id, user_id, filename, filepath, filetype, file_hash, num_chunks, "
-                   "is_global, created_at FROM documents WHERE (user_id = ? OR is_global = 1) "
-                   "AND filename = ? COLLATE NOCASE AND filetype = 'note' "
-                   "ORDER BY created_at DESC LIMIT 1"
-                 : "SELECT id, user_id, filename, filepath, filetype, file_hash, num_chunks, "
-                   "is_global, created_at FROM documents WHERE (user_id = ? OR is_global = 1) "
-                   "AND filename = ? COLLATE NOCASE ORDER BY created_at DESC LIMIT 1";
+       note_only
+           ? "SELECT id, user_id, filename, filepath, filetype, file_hash, num_chunks, "
+             "is_global, created_at, outside FROM documents WHERE (user_id = ? OR is_global = 1) "
+             "AND filename = ? COLLATE NOCASE AND filetype = 'note' "
+             "ORDER BY created_at DESC LIMIT 1"
+           : "SELECT id, user_id, filename, filepath, filetype, file_hash, num_chunks, "
+             "is_global, created_at, outside FROM documents WHERE (user_id = ? OR is_global = 1) "
+             "AND filename = ? COLLATE NOCASE ORDER BY created_at DESC LIMIT 1";
    int result = FAILURE;
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
       sqlite3_bind_int(stmt, 1, user_id);
@@ -2115,7 +2142,7 @@ int document_db_list_filtered(int user_id,
    char sql[512];
    snprintf(sql, sizeof(sql),
             "SELECT id, user_id, filename, filepath, filetype, file_hash, num_chunks, is_global, "
-            "created_at FROM documents WHERE (user_id = ? OR is_global = 1) %s"
+            "created_at, outside FROM documents WHERE (user_id = ? OR is_global = 1) %s"
             "ORDER BY created_at DESC LIMIT ? OFFSET ?",
             filter);
 

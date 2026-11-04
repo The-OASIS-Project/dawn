@@ -537,6 +537,8 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
                      res.error_msg);
             return strdup(msg);
          }
+         /* Its kind and what this turn read, as an edit (commit_edit). */
+         (void)document_db_set_outside(user_id, existing.id, memory_turn_outside(user_id), true);
          char msg[256];
          snprintf(msg, sizeof(msg), "Updated (overwrote existing) document '%s' (%d chunk%s).",
                   title, res.num_chunks, res.num_chunks == 1 ? "" : "s");
@@ -667,10 +669,10 @@ static char *commit_edit(int user_id,
                res.error_msg);
       return strdup(msg);
    }
-   /* A note keeps what its old text carried, plus what this turn read. */
-   if (is_note) {
-      (void)document_db_set_outside(user_id, doc->id, memory_turn_outside(user_id), true);
-   }
+   /* It keeps what its old text carried, plus what this turn read (a document
+    * the user marked as their own is no longer, once this turn's outside text
+    * is in it). */
+   (void)document_db_set_outside(user_id, doc->id, memory_turn_outside(user_id), true);
    return strdup(ok_msg);
 }
 
@@ -850,9 +852,7 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
       pthread_mutex_lock(&s_edit_mutex);
       char *result = commit_edit(user_id, &doc, is_note, vtext, ok);
       /* The restored text brings back the kind its version carried. */
-      if (is_note) {
-         (void)document_db_set_outside(user_id, doc.id, outside, true);
-      }
+      (void)document_db_set_outside(user_id, doc.id, outside, true);
       pthread_mutex_unlock(&s_edit_mutex);
       free(vtext);
       return result;

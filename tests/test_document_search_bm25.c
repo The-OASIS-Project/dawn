@@ -569,12 +569,12 @@ void test_set_num_chunks(void) {
 /* A version records its note's outside kind, and a deleted note recovered
  * takes it back (a research report stays one; the user's own note stays
  * theirs). */
-static bool chunk_is_own_note(int64_t chunk_id) {
+static bool chunk_is_own(int64_t chunk_id) {
    document_chunk_t got;
    int n = 0;
    TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(1, &chunk_id, 1, &got, &n));
    TEST_ASSERT_EQUAL_INT(1, n);
-   return got.own_note;
+   return got.own;
 }
 
 void test_version_recover_keeps_outside(void) {
@@ -607,7 +607,7 @@ void test_version_recover_keeps_outside(void) {
       TEST_ASSERT_EQUAL_INT(SUCCESS,
                             document_db_chunk_create(again, 0, "body", emb, 4, 1.0f, 0, &chunk));
       TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, again, outside, false));
-      TEST_ASSERT_EQUAL(!is_report, chunk_is_own_note(chunk));
+      TEST_ASSERT_EQUAL(!is_report, chunk_is_own(chunk));
    }
    int outside = -1;
    char *text = NULL;
@@ -646,7 +646,7 @@ void test_version_recover_upload_not_own(void) {
                          document_db_chunk_create(again, 0, text, emb, 4, 1.0f, 0, &chunk));
    free(text);
    TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, again, outside, false));
-   TEST_ASSERT_FALSE(chunk_is_own_note(chunk));
+   TEST_ASSERT_FALSE(chunk_is_own(chunk));
 }
 
 /* Restoring the only kept version of a clean note: the restore archives the
@@ -683,7 +683,7 @@ void test_version_restore_at_cap_keeps_kind(void) {
    int cc = 0;
    document_db_chunk_read(doc, &chunk, 1, 0, &cc);
    TEST_ASSERT_EQUAL_STRING("FIRST", chunk.text);
-   TEST_ASSERT_TRUE(chunk_is_own_note(chunk_id)); /* a note edit keeps its chunk id */
+   TEST_ASSERT_TRUE(chunk_is_own(chunk_id)); /* a note edit keeps its chunk id */
 }
 
 int main(void) {

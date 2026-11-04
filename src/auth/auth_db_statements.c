@@ -1143,13 +1143,15 @@ static const auth_db_stmt_def_t s_stmts[] = {
 
    /* Document search statements */
    { "doc_create",
+     /* outside: a note is the user's words (NONE); anything else is DOCUMENT
+      * until the user marks it as their own (document_db_set_own). */
      "INSERT INTO documents (user_id, filename, filepath, filetype, file_hash, "
-     "num_chunks, is_global, created_at, original_blob_id) "
-     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+     "num_chunks, is_global, created_at, original_blob_id, outside) "
+     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ?4 = 'note' THEN 0 ELSE 5 END)",
      &s_db.stmt_doc_create },
    { "doc_get",
      "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-     "num_chunks, is_global, created_at FROM documents WHERE id = ?",
+     "num_chunks, is_global, created_at, outside FROM documents WHERE id = ?",
      &s_db.stmt_doc_get },
    { "doc_get_by_hash",
      "SELECT id FROM documents WHERE file_hash = ? "
@@ -1157,13 +1159,13 @@ static const auth_db_stmt_def_t s_stmts[] = {
      &s_db.stmt_doc_get_by_hash },
    { "doc_list",
      "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-     "num_chunks, is_global, created_at FROM documents "
+     "num_chunks, is_global, created_at, outside FROM documents "
      "WHERE user_id = ? OR is_global = 1 ORDER BY created_at DESC "
      "LIMIT ? OFFSET ?",
      &s_db.stmt_doc_list },
    { "doc_list_all",
      "SELECT d.id, d.user_id, d.filename, d.filepath, d.filetype, "
-     "d.file_hash, d.num_chunks, d.is_global, d.created_at, "
+     "d.file_hash, d.num_chunks, d.is_global, d.created_at, d.outside, "
      "COALESCE(u.username, '') FROM documents d "
      "LEFT JOIN users u ON d.user_id = u.id "
      "ORDER BY d.created_at DESC LIMIT ? OFFSET ?",
@@ -1182,7 +1184,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
      &s_db.stmt_doc_chunk_create },
    { "doc_find_by_name",
      "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-     "num_chunks, is_global, created_at "
+     "num_chunks, is_global, created_at, outside "
      "FROM documents "
      "WHERE (user_id = ? OR is_global = 1) "
      "AND filename LIKE ? ESCAPE '\\' COLLATE NOCASE "

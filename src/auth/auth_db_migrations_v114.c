@@ -16,16 +16,18 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Schema migration v114: documents.outside, the outside kind a note's text
- * carries (core/outside_kind.h), so a chunk recalled into a turn reads as the
- * user's own words only when its note is, and document_versions.outside, the
- * kind a version's document carried, restored with it.  Each table is filled
- * in the run that adds its column: a research run's report is RESEARCH; a
- * note whose gloss fact learned from outside text carries that fact's kind;
- * a version takes its document's kind, at least DOCUMENT for a document
- * other than a note (when the document is gone, RESEARCH if a research run
- * names it, else DOCUMENT: what it was can't be told, and a deleted upload
- * recovered as a note must not read as the user's words); the rest stay NONE.
+ * Schema migration v114: documents.outside, the outside kind a document's
+ * text carries (core/outside_kind.h), so a chunk recalled into a turn reads as
+ * the user's own words only when its document is (a note, or one the user
+ * marks as their own), and document_versions.outside, the kind a version's
+ * document carried, restored with it.  Each table is filled in the run that
+ * adds its column: a research run's report is RESEARCH; a note whose gloss
+ * fact learned from outside text carries that fact's kind; any other document
+ * other than a note is DOCUMENT; the other notes stay NONE.  A version takes
+ * its document's kind, at least DOCUMENT for a document other than a note
+ * (when the document is gone, RESEARCH if a research run names it, else
+ * DOCUMENT: what it was can't be told, and a deleted upload recovered as a
+ * note must not read as the user's words).
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -48,7 +50,8 @@ static const char k_fill_documents_sql[] =
     "UPDATE documents SET outside = (SELECT f.outside FROM memory_facts f WHERE f.note_doc_id = "
     "documents.id AND f.outside NOT IN (" OUTSIDE_UNTAINTED_SQL ") ORDER BY f.id LIMIT 1) "
     "WHERE outside = 0 AND filetype = 'note' AND EXISTS (SELECT 1 FROM memory_facts f WHERE "
-    "f.note_doc_id = documents.id AND f.outside NOT IN (" OUTSIDE_UNTAINTED_SQL "));";
+    "f.note_doc_id = documents.id AND f.outside NOT IN (" OUTSIDE_UNTAINTED_SQL "));"
+    "UPDATE documents SET outside = 5 WHERE outside = 0 AND filetype != 'note';";
 static const char k_fill_versions_sql[] =
     "UPDATE document_versions SET outside = COALESCE((SELECT CASE WHEN d.filetype != 'note' AND "
     "d.outside IN (" OUTSIDE_UNTAINTED_SQL ") THEN 5 ELSE d.outside END FROM documents d WHERE "
