@@ -881,6 +881,20 @@
                   'leave off unless tested: reasoning keeps the server busy longer.',
                advanced: true,
             },
+            consolidator: {
+               type: 'select',
+               label: 'Memory Consolidator',
+               options: ['prompt', 'agent'],
+               default: 'prompt',
+               hint:
+                  'How extracted facts are stored. "prompt": fixed rules (paraphrase merge, ' +
+                  'automatic replace). "agent": the extraction model reads what memory already ' +
+                  'holds near each fact and decides, one reply per conversation: add, merge, ' +
+                  'replace, close a relation, or set aside. Each batch is recorded with what it ' +
+                  'changed. Costs about 2x the extraction tokens per conversation (two model ' +
+                  'calls).',
+               advanced: true,
+            },
             silent_observe_provider: {
                type: 'select',
                label: 'Silent-Observe Provider',

@@ -155,7 +155,7 @@ These are model files required at runtime, not source dependencies:
 
 All dependencies are compatible with GPLv3:
 - MIT, BSD, Apache 2.0 - Permissive, GPL-compatible
-- LGPL (incl. GMime, libical) - Compatible when dynamically linked
+- LGPL (incl. GMime, libical) - Compatible when dynamically linked; `src/audio/pulse_stream.c`, adapted from libpulse, is used under the GPLv3+ (LGPL-2.1 §3)
 - EPL (Mosquitto) - Compatible via explicit dual-license (EDL)
 - espeak-ng GPL 3.0 - Same license as project
 - AGPL-3.0 (MuPDF) — Compatible, project is GPLv3
@@ -182,8 +182,9 @@ See `GETTING_STARTED.md` for full installation instructions.
 
 ## Architectural Influences
 
-These are not runtime dependencies — no third-party code is linked, bundled, or executed at runtime from these sources. Listed for attribution because portions of DAWN's design (algorithms, prompt text, scoring formulas) are adapted from them.
+Listed for attribution because portions of DAWN's design or code (algorithms, prompt text, scoring formulas, an adapted source file) come from them; see `NOTICE`.
 
 | Project | License | Source | Adapted into |
 |---------|---------|--------|--------------|
+| [PulseAudio](https://gitlab.freedesktop.org/pulseaudio/pulseaudio) `src/pulse/simple.c` | LGPL 2.1+ (used under GPLv3+) | © 2004-2009 Lennart Poettering, © 2006-2007 Pierre Ossman for Cendio AB | `src/audio/pulse_stream.c`: the PulseAudio backend's blocking stream, adapted from `pa_simple` so a stream on a named device stays on it (`PA_STREAM_DONT_MOVE`). See `NOTICE`. |
 | [mem0ai/mem0](https://github.com/mem0ai/mem0) | Apache 2.0 | © 2023 Taranjeet Singh | Memory subsystem: BM25 sigmoid normalization (`memory_bm25_*`), extraction prompt specificity rules (`MEMORY_EXTRACTION_PROMPT_TEMPLATE`), additive scoring composition pattern. Per-file `Adapted from mem0ai/mem0` comments mark the borrowing point of use. See `NOTICE` for the full attribution, summary of changes (including deliberate non-adoptions: no-echo rule and spread-attenuated entity boost), and rationale for deviations. See [atlas/dawn/memory/MEM0_ARCHITECTURAL_PARITY.md](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/memory/MEM0_ARCHITECTURAL_PARITY.md) for the planning context (sealed historical reference for the closed program, archived 2026-05-17). |

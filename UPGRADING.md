@@ -12,6 +12,23 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-11-03 — A named audio device is no longer swapped for another
+
+**What changed.** When the microphone or speaker named in `[audio] capture_device` /
+`playback_device` goes away (unplugged, powered off), DAWN no longer carries on with whatever
+device PulseAudio moves it to. It waits, silent, for that device to come back, reconnects by
+itself, and logs one warning when it goes and one line when it's back. DAWN also starts when the
+device is missing, instead of stopping. PulseAudio users can no longer move DAWN's stream on a
+named device to another one in pavucontrol.
+
+**What you need to do.** Nothing, if your devices are named the way you want them. If you relied
+on DAWN falling back to another device, or you route DAWN's audio in pavucontrol, set the device
+to `"default"`. Name devices so they survive replugging: ALSA `plughw:CARD=<name>,DEV=0` rather
+than `hw:1`, PulseAudio the source or sink name rather than its number. If the mic seems dead,
+look for the "not available" or "lost device" warning in the log.
+
+---
+
 ## 2026-10-29 — The local speaker plays its owner's queue
 
 **What changed.** Music on the daemon's own speaker now plays the music queue of the local

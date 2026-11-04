@@ -1001,3 +1001,89 @@ int memory_db_relation_list_with_canonical_roots_by_user(int user_id,
       *count_out = count;
    return MEMORY_DB_SUCCESS;
 }
+
+int memory_db_relation_close(int user_id,
+                             int64_t relation_id,
+                             int64_t valid_to,
+                             int64_t closed_by_fact_id) {
+   if (user_id <= 0 || relation_id <= 0 || valid_to <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+   /* Open only, never before it began, and never more than a day ahead (a
+    * date written in another zone): a close records when a value ended. */
+   if (valid_to > (int64_t)time(NULL) + 86400) {
+      return MEMORY_DB_NOT_FOUND;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "UPDATE memory_relations SET valid_to = ?3, closed_by_fact_id = ?4 "
+                               "WHERE id = ?2 AND user_id = ?1 AND valid_to IS NULL AND "
+                               "(valid_from IS NULL OR valid_from <= ?3)",
+                               -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_int64(st, 2, relation_id);
+      sqlite3_bind_int64(st, 3, valid_to);
+      if (closed_by_fact_id > 0) {
+         sqlite3_bind_int64(st, 4, closed_by_fact_id);
+      } else {
+         sqlite3_bind_null(st, 4);
+      }
+      rc = sqlite3_step(st);
+   }
+   const int changed = rc == SQLITE_DONE ? sqlite3_changes(s_db.db) : 0;
+   if (rc != SQLITE_DONE) {
+      OLOG_WARNING("memory_db: closing relation %lld failed: %s", (long long)relation_id,
+                   sqlite3_errmsg(s_db.db));
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      return MEMORY_DB_FAILURE;
+   }
+   return changed > 0 ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}
+
+int memory_db_relation_list_open(int user_id,
+                                 int64_t subject_entity_id,
+                                 const char *relation,
+                                 memory_relation_t *out,
+                                 int max,
+                                 int *count_out) {
+   *count_out = 0;
+   if (!relation || !out || max <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* idx_memory_relations_subject_open (subject_entity_id, relation) WHERE valid_to IS NULL */
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
+                               "COALESCE(e.name, r.object_value), r.confidence, "
+                               "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
+                               "r.mention_count, r.outside FROM memory_relations r LEFT JOIN "
+                               "memory_entities e ON r.object_entity_id = e.id WHERE "
+                               "r.subject_entity_id = ?2 AND r.relation = ?3 AND r.valid_to IS "
+                               "NULL AND r.user_id = ?1 ORDER BY r.id DESC LIMIT ?4",
+                               -1, &st, NULL);
+   int n = 0;
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_int64(st, 2, subject_entity_id);
+      sqlite3_bind_text(st, 3, relation, -1, SQLITE_STATIC);
+      sqlite3_bind_int(st, 4, max);
+      while ((rc = sqlite3_step(st)) == SQLITE_ROW && n < max) {
+         memset(&out[n], 0, sizeof(out[n]));
+         populate_relation_from_row(st, &out[n]);
+         n++;
+      }
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      return MEMORY_DB_FAILURE;
+   }
+   *count_out = n;
+   return MEMORY_DB_SUCCESS;
+}

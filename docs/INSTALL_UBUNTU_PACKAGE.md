@@ -20,6 +20,30 @@ The install enables the service but doesn't start it. The first start takes a mi
 downloads the speech-recognition and search models (about 180 MB) and creates this host's CA and
 the WebUI's HTTPS certificate. After that, DAWN starts at every boot.
 
+### Checking where a release came from
+
+`SHA256SUMS` shows the download arrived intact. Each release also carries a build attestation:
+GitHub's signed record of the workflow and commit that built each `.deb` and satellite binary. To
+check one (this needs a current `gh` from [cli.github.com](https://cli.github.com); Ubuntu's own
+`gh` package is too old):
+
+```bash
+gh attestation verify dawn_<version>+ubuntu24.04_amd64.deb --repo The-OASIS-Project/dawn \
+   --signer-workflow The-OASIS-Project/dawn/.github/workflows/release.yml \
+   --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners
+```
+
+Use the release's own tag for `vX.Y.Z` (a package's version can differ from it). The same command
+checks the satellite files, `dawn_satellite` and `dawn-satellite-launch`. Keep all three options:
+`--repo` alone would accept an attestation from any workflow on any branch, and `--source-ref` ties
+it to the release tag, which can't be moved.
+
+To check on a machine without internet access, prepare two files while online: download
+`dawn-X.Y.Z.intoto.jsonl` from the same release, and save Sigstore's trust roots with
+`gh attestation trusted-root > trusted_root.jsonl`. Then add
+`--bundle dawn-X.Y.Z.intoto.jsonl --custom-trusted-root trusted_root.jsonl` to the command. Save the
+trust roots again before checking a newer release: Sigstore rotates its keys.
+
 ### Moving from a source install
 
 The package refuses to install beside a source install, and uninstalling one deletes its CA. First

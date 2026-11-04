@@ -692,6 +692,7 @@ set(DAWN_SOURCES
     src/audio/audio_backend.c
     src/audio/audio_alsa.c
     src/audio/audio_pulse.c
+    src/audio/pulse_stream.c
     src/audio/ringtone.c
     # phone_apm.cpp is compiled UNCONDITIONALLY (base sources, NOT AEC_SOURCES):
     # its WebRTC use is fenced behind #ifdef AEC_BACKEND_WEBRTC and it stubs to
@@ -1057,8 +1058,10 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_db_alias_scorer.c
     src/memory/memory_db_alias_cascade.c
     src/memory/memory_db_alias_writes.c
+    src/memory/memory_db_alias_nominate.c
     src/memory/memory_db_provenance.c
     src/memory/memory_db_forget.c
+    src/memory/memory_db_consolidation.c
     src/core/focus/focus_source.c
     src/core/focus/focus_recency.c
     src/core/focus/focus_candidate_helpers.c
@@ -1080,6 +1083,9 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_callback_restore.c
     src/memory/memory_callback_forget.c
     src/memory/memory_extraction.c
+    src/memory/memory_candidates.c
+    src/memory/memory_consolidate.c
+    src/memory/memory_consolidate_ops.c
     src/memory/memory_extraction_queue.c
     src/memory/memory_extraction_slots.c
     src/memory/memory_extraction_input.c
@@ -1286,7 +1292,7 @@ target_link_libraries(dawn uuid)
 # Link audio libraries for runtime backend selection
 # Both backends are statically linked; runtime selection via vtable
 if(HAVE_LOCAL_AUDIO)
-    target_link_libraries(dawn asound pulse-simple pulse)
+    target_link_libraries(dawn asound pulse)
 elseif(NOT SERVER_ONLY)
     message(FATAL_ERROR
         "Audio libraries (ALSA, PulseAudio) not found.\n"

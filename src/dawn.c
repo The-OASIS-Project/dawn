@@ -2400,9 +2400,6 @@ int main(int argc, char *argv[]) {
       audio_capture_ctx = audio_capture_start(pcm_capture_device, 262144, 1);
       if (!audio_capture_ctx) {
          OLOG_ERROR("Failed to start audio capture thread");
-         OLOG_ERROR("  Hint: Check that capture device '%s' exists and isn't in use by another "
-                    "application",
-                    pcm_capture_device);
          return 1;
       }
    } else {

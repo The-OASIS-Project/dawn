@@ -1235,6 +1235,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
                                              "extraction_model",
                                              "extraction_timeout_ms",
                                              "extraction_effort",
+                                             "consolidator",
                                              "paraphrase_dedup_enabled",
                                              "paraphrase_dedup_threshold",
                                              "note_extraction_guard",
@@ -1265,6 +1266,7 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    PARSE_STRING(table, "extraction_model", config->extraction_model);
    PARSE_INT(table, "extraction_timeout_ms", config->extraction_timeout_ms);
    PARSE_STRING(table, "extraction_effort", config->extraction_effort);
+   PARSE_STRING(table, "consolidator", config->consolidator);
    PARSE_BOOL(table, "paraphrase_dedup_enabled", config->paraphrase_dedup_enabled);
    PARSE_DOUBLE(table, "paraphrase_dedup_threshold", config->paraphrase_dedup_threshold);
    CONFIG_CLAMP(config->paraphrase_dedup_threshold, 0.5f, 1.0f);
@@ -1805,6 +1807,12 @@ void config_clamp_memory(memory_config_t *config) {
       OLOG_WARNING("Invalid [memory] extraction_effort '%s'; using 'off'",
                    config->extraction_effort);
       safe_strscpy(config->extraction_effort, "off");
+   }
+
+   /* consolidator: "prompt" or "agent"; anything else is "prompt". */
+   if (strcmp(config->consolidator, "prompt") != 0 && strcmp(config->consolidator, "agent") != 0) {
+      OLOG_WARNING("Invalid [memory] consolidator '%s'; using 'prompt'", config->consolidator);
+      safe_strscpy(config->consolidator, "prompt");
    }
 
    /* Clamp context_budget_tokens to valid range */

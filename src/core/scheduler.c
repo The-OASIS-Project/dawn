@@ -1329,12 +1329,21 @@ static void stop_sound_of(int64_t id) {
    pthread_mutex_unlock(&ringing_mutex);
 }
 
-/** Write volume-scaled PCM to playback stream; returns false if stopped early */
+/** An underrun or a suspend recovered in place, rather than a lost device. */
+static bool playback_recovered(audio_stream_playback_handle_t *pb, ssize_t rc) {
+   int err = (int)(-rc);
+   return (err == AUDIO_ERR_UNDERRUN || err == AUDIO_ERR_SUSPENDED) &&
+          audio_stream_playback_recover(pb, err) == AUDIO_SUCCESS;
+}
+
+/** Write volume-scaled PCM to playback stream; returns false if stopped early,
+ *  or (with @p failed set) if the device failed a write */
 static bool write_scaled_pcm(audio_stream_playback_handle_t *pb,
                              const int16_t *src,
                              size_t samples,
                              float vol_scale,
-                             unsigned mine) {
+                             unsigned mine,
+                             bool *failed) {
    int16_t scaled_buf[1024];
    size_t remaining = samples;
    size_t offset = 0;
@@ -1342,7 +1351,11 @@ static bool write_scaled_pcm(audio_stream_playback_handle_t *pb,
       size_t chunk = remaining > 1024 ? 1024 : remaining;
       for (size_t j = 0; j < chunk; j++)
          scaled_buf[j] = (int16_t)(src[offset + j] * vol_scale);
-      audio_stream_playback_write(pb, scaled_buf, chunk);
+      ssize_t rc = audio_stream_playback_write(pb, scaled_buf, chunk);
+      if (rc < 0 && !playback_recovered(pb, rc)) {
+         *failed = true;
+         return false;
+      }
       offset += chunk;
       remaining -= chunk;
    }
@@ -1387,26 +1400,37 @@ static void play_ring(bool is_alarm, int timeout_sec, unsigned mine) {
    audio_stream_playback_handle_t *pb = audio_stream_playback_open(g_config.audio.playback_device,
                                                                    &params, &hw_params);
 
-   /* Play chime/tone */
+   /* Play chime/tone.  A device that fails a write is gone: the ring carries on
+    * without sound (below) rather than writing to it in a loop. */
+   bool failed = false;
    if (is_alarm && alarm_tone_buf.pcm && pb) {
       /* Looping alarm tone until dismissed or timeout */
       while (!sound_stopped(mine) && (time(NULL) - sound_start) < timeout_sec) {
-         if (!write_scaled_pcm(pb, alarm_tone_buf.pcm, alarm_tone_buf.samples, vol_scale, mine))
+         if (!write_scaled_pcm(pb, alarm_tone_buf.pcm, alarm_tone_buf.samples, vol_scale, mine,
+                               &failed))
             break;
          /* Gap between repetitions */
          size_t gap_samples = (DAWN_CHIME_SAMPLE_RATE * ALARM_GAP_MS) / 1000;
          int16_t silence[512];
          memset(silence, 0, sizeof(silence));
-         while (gap_samples > 0 && !sound_stopped(mine)) {
+         while (gap_samples > 0 && !sound_stopped(mine) && !failed) {
             size_t chunk = gap_samples > 512 ? 512 : gap_samples;
-            audio_stream_playback_write(pb, silence, chunk);
+            ssize_t rc = audio_stream_playback_write(pb, silence, chunk);
+            failed = rc < 0 && !playback_recovered(pb, rc);
             gap_samples -= chunk;
          }
+         if (failed)
+            break;
       }
    } else if (chime_buf.pcm && pb) {
       /* Single chime for timers/reminders */
-      write_scaled_pcm(pb, chime_buf.pcm, chime_buf.samples, vol_scale, mine);
-   } else if (!pb) {
+      write_scaled_pcm(pb, chime_buf.pcm, chime_buf.samples, vol_scale, mine, &failed);
+   }
+   if (failed) {
+      audio_stream_playback_close(pb);
+      pb = NULL;
+   }
+   if (!pb) {
       /* Fallback: sleep for approximate duration if audio backend unavailable */
       OLOG_WARNING("scheduler: audio playback unavailable, sleeping for chime duration");
       if (is_alarm) {
