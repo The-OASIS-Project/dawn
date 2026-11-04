@@ -804,7 +804,11 @@ void test_a_conversation_made_private_loses_its_batches(void) {
    script(NULL, NULL);
    const memory_consolidate_result_t res = run(ONE_FACT("Jonathan Smith plays the cello"), 0, 0);
    TEST_ASSERT_TRUE(res.batch_id > 0);
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(s_conv, s_user, true));
+   conv_db_batches_t gone = { .n = 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(s_conv, s_user, true, &gone));
+   TEST_ASSERT_EQUAL_INT(1, gone.n); /* reported, for the tabs to drop it */
+   TEST_ASSERT_EQUAL_INT64(res.batch_id, gone.ids[0]);
+   TEST_ASSERT_EQUAL_INT(s_user, gone.user_id);
    TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_consolidation_batches WHERE user_id = "
                               "?1",
                               s_user, NULL));
@@ -1221,7 +1225,7 @@ void test_a_link_with_merging_off_is_rejected_and_not_counted(void) {
 static int64_t s_private_conv;
 static void source_goes_private(int call) {
    if (call == 0) {
-      conv_db_set_private(s_private_conv, s_user, true);
+      conv_db_set_private(s_private_conv, s_user, true, NULL);
    }
 }
 
@@ -1316,7 +1320,13 @@ static int64_t drop_a_candidate_from_b(void) {
 
 void test_its_source_made_private_removes_a_row_quoting_a_set_aside_candidate(void) {
    const int64_t batch = drop_a_candidate_from_b();
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(s_private_conv, s_user, true));
+   conv_db_batches_t changed = { .n = 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_set_private(s_private_conv, s_user, true, &changed));
+   /* B's own batch went, and the batch whose row quoted it changed: both reported. */
+   TEST_ASSERT_EQUAL_INT(2, changed.n);
+   TEST_ASSERT_EQUAL_INT64(batch, changed.ids[0]);
+   TEST_ASSERT_TRUE(changed.ids[1] > 0 && changed.ids[1] < batch);
    TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_consolidation_ops WHERE user_id = ?1 "
                               "AND text = ?2",
                               s_user, LISBON));

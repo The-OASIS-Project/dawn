@@ -37,6 +37,7 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
+#include "auth/auth_db_messages.h"
 #include "config/dawn_config.h"
 #include "core/outside_kind.h"
 #include "core/strbuf.h"
@@ -1367,7 +1368,7 @@ void test_a_row_quoting_a_private_conversation_is_not_written(void) {
    conv_db_create(s_user, "B", &conv2);
    script(NULL);
    const int64_t batch = run(ONE_FACT(CELLO), 0);
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(conv2, s_user, true));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(conv2, s_user, true, NULL));
    const memory_consolidation_op_t row = { .batch_id = batch,
                                            .user_id = s_user,
                                            .seq = 9,
@@ -1375,6 +1376,40 @@ void test_a_row_quoting_a_private_conversation_is_not_written(void) {
                                            .text = "quoted",
                                            .source_conversation_id = conv2 };
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_NOT_FOUND, memory_db_consolidation_op_add(&row, NULL));
+}
+
+/* A deleted conversation's batches go by cascade, and so do other batches'
+ * rows quoting it: the delete reports both, the newest first. */
+void test_a_conversation_delete_reports_the_batches_it_took(void) {
+   int64_t quoted = 0;
+   conv_db_create(s_user, "B", &quoted);
+   memory_consolidation_batch_t b = { .user_id = s_user,
+                                      .conversation_id = quoted,
+                                      .path = "agent",
+                                      .stop = "finished" };
+   int64_t own = 0, other = 0, untouched = 0;
+   memory_db_consolidation_batch_add(&b, &own);
+   b.conversation_id = s_conv;
+   memory_db_consolidation_batch_add(&b, &other);
+   memory_db_consolidation_batch_add(&b, &untouched);
+   const memory_consolidation_op_t row = { .batch_id = other,
+                                           .user_id = s_user,
+                                           .seq = 1,
+                                           .op = "dropped",
+                                           .text = "quoted",
+                                           .source_conversation_id = quoted };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_op_add(&row, NULL));
+   conv_db_batches_t gone = { .n = 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_delete_ex(quoted, s_user, false, CONV_IMAGES_KEEP, NULL, &gone));
+   TEST_ASSERT_EQUAL_INT(2, gone.n); /* not the untouched one */
+   TEST_ASSERT_EQUAL_INT64(other, gone.ids[0]);
+   TEST_ASSERT_EQUAL_INT64(own, gone.ids[1]);
+   TEST_ASSERT_EQUAL_INT(s_user, gone.user_id);
+   TEST_ASSERT_EQUAL_INT(0, q("SELECT COUNT(*) FROM memory_consolidation_batches WHERE id = ?1",
+                              own, NULL));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT COUNT(*) FROM memory_consolidation_batches WHERE id = ?1",
+                              untouched, NULL));
 }
 
 void test_list_pages_by_batch_id_and_conversation(void) {
@@ -2135,6 +2170,7 @@ int main(void) {
    RUN_TEST(test_entity_delete_notifies_a_batch_whose_link_names_it);
    RUN_TEST(test_a_row_taking_up_a_deferred_candidate_is_written_with_its_claim);
    RUN_TEST(test_a_row_quoting_a_private_conversation_is_not_written);
+   RUN_TEST(test_a_conversation_delete_reports_the_batches_it_took);
    RUN_TEST(test_list_pages_by_batch_id_and_conversation);
    RUN_TEST(test_target_status_follows_the_counterpart);
    RUN_TEST(test_the_record_caps_text_on_a_character_boundary);

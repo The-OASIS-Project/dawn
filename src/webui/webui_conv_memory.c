@@ -38,6 +38,7 @@
 #include "core/session_prefix.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "memory/memory_db_consolidation.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_forget.h"
 #include "webui/webui_internal.h"
@@ -391,7 +392,8 @@ void handle_set_private(ws_connection_t *conn, struct json_object *payload) {
       }
    }
 
-   int result = conv_db_set_private(conv_id, conn->auth_user_id, is_private);
+   conv_db_batches_t batches = { .n = 0 };
+   int result = conv_db_set_private(conv_id, conn->auth_user_id, is_private, &batches);
    if (result == AUTH_DB_NOT_FOUND) {
       send_error(conn, "set_private_response", conv_id, "Conversation not found");
       return;
@@ -432,6 +434,11 @@ void handle_set_private(ws_connection_t *conn, struct json_object *payload) {
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
+
+   /* Its batches (and its continuations') went from the record: every tab drops them. */
+   for (int i = 0; i < batches.n; i++) {
+      memory_consolidation_batch_notify(conn->auth_user_id, 0, batches.ids[i]);
+   }
 
    /* Going private stops future extraction (for its continuations too).  Report
     * what was already learned, once any extraction in flight has finished, so the

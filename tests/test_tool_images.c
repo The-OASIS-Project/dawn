@@ -53,6 +53,13 @@
 
 dawn_config_t g_config;
 
+/* A conversation delete tells the tabs which memory batches went (none here). */
+void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id) {
+   (void)user_id;
+   (void)conversation_id;
+   (void)batch_id;
+}
+
 /* ---- The turn a tool runs in (session_manager / session_* stubs) ---- */
 
 static session_t *s_ctx;
@@ -793,7 +800,7 @@ static void test_rollback_unbinds_only_its_captures(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, 1, &reply, NULL));
 
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
-                         conv_db_delete_ex(conv, 1, false, CONV_IMAGES_UNBIND, NULL));
+                         conv_db_delete_ex(conv, 1, false, CONV_IMAGES_UNBIND, NULL, NULL));
    TEST_ASSERT_EQUAL_INT(IMAGE_RETAIN_UNBOUND, retention_of(mine.vision_image_id));
    TEST_ASSERT_TRUE(file_exists(mine.vision_image_id));
    TEST_ASSERT_EQUAL_INT(IMAGE_RETAIN_PERMANENT, retention_of(shared.vision_image_id));
