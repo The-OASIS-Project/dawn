@@ -155,9 +155,8 @@ static phone_state_t get_state(void) {
 /**
  * @brief Reverse-lookup a phone number to a contact name.
  *
- * Uses contacts_find with the number as the search term. contacts_find does
- * a LIKE match on entity name, so we search all phone contacts and check
- * value equality. This avoids the O(N) scan of contacts_list.
+ * Matches the number exactly against stored phone values (no normalization
+ * here: callers normalize the incoming number first).
  */
 static void reverse_lookup(int user_id,
                            const char *number,
@@ -172,34 +171,13 @@ static void reverse_lookup(int user_id,
       return;
    }
 
-   /* List phone contacts and match by exact value.
-    * TODO: Add contacts_find_by_value() to contacts_db for O(1) lookup.
-    * For now, paginate through all phone contacts to avoid the 20-contact ceiling. */
-   int offset = 0;
-   const int page_size = 50;
-   const int max_pages = 200; /* hard cap (~10k contacts) so a misbehaving
-                               * contacts_list that ignores offset can't loop
-                               * forever on the event thread */
-   contact_result_t results[50];
-   for (int page = 0; page < max_pages; page++) {
-      int count = 0;
-      contacts_list(user_id, "phone", results, page_size, offset, &count);
-      if (count <= 0) {
-         break;
+   contact_result_t match;
+   int count = 0;
+   if (contacts_find_by_value(user_id, "phone", number, &match, 1, &count) == 0 && count > 0) {
+      snprintf(name_out, name_size, "%s", match.entity_name);
+      if (entity_id_out) {
+         *entity_id_out = match.entity_id;
       }
-      for (int i = 0; i < count; i++) {
-         if (strcmp(results[i].value, number) == 0) {
-            snprintf(name_out, name_size, "%s", results[i].entity_name);
-            if (entity_id_out) {
-               *entity_id_out = results[i].entity_id;
-            }
-            return;
-         }
-      }
-      if (count < page_size) {
-         break; /* no more pages */
-      }
-      offset += count;
    }
 }
 
