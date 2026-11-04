@@ -196,6 +196,19 @@ def test_decision_during_run_is_delivered_at_finish(store):
    assert r.resumed and "42" in r.resumed[0][1]
 
 
+def test_final_report_kept_whole(store):
+   """The agent's final report (what it did, how it checked it) isn't cut at the
+   progress-line cap."""
+   r = runner(store)
+   add_task(store)
+   report = "did it. " * 600 + "Tests: 12 passed."
+
+   class Result:
+      is_error, result, subtype, total_cost_usd = False, report, "success", 0.5
+   asyncio.run(r.finish("t1", Result()))
+   assert store.task("t1")["summary"].endswith("Tests: 12 passed.")
+
+
 def test_blocked_reply_keeps_answer_until_room(store):
    r = runner(store)
    add_task(store)

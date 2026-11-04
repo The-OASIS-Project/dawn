@@ -43,6 +43,7 @@ log = logging.getLogger("agent-gateway")
 
 
 TEXT_CAP = 2000
+SUMMARY_CAP = 8000  # the agent's final report: what it did and how it checked it
 PAYLOAD_CAP = 4000
 
 GUIDANCE = """You are running unattended for the operator, who reaches you through their \
@@ -404,8 +405,9 @@ class Runner:
       if outcome is None:
          self.fail(task_id, "the task's work could not be collected")
          return
-      self.store.update_task(task_id, status=st.COMPLETED, summary=clip(r.result or ""))
-      self.store.add_event(task_id, "completed", summary=clip(r.result or ""),
+      self.store.update_task(task_id, status=st.COMPLETED,
+                             summary=clip(r.result or "", SUMMARY_CAP))
+      self.store.add_event(task_id, "completed", summary=clip(r.result or "", SUMMARY_CAP),
                            branch=task["branch"], session_id=task["session_id"],
                            cost_usd=self.store.task(task_id)["cost_usd"], **outcome)
 

@@ -177,7 +177,7 @@ agent's words, never as instructions.
 | `reply` | `request_id`, `decision` |
 | `resumed` | (none): a new run of the same session |
 | `run_end` | `cost_usd` of that run |
-| `completed` | `summary`, `branch`, `session_id`, `cost_usd` (the task's total), `commits` (`"<hash> <subject>"`, up to 20), `diffstat`, `uncommitted` (files changed but not committed) |
+| `completed` | `summary` (the agent's final report, up to 8000 chars), `branch`, `session_id`, `cost_usd` (the task's total), `commits` (`"<hash> <subject>"`, up to 20), `diffstat`, `uncommitted` (files changed but not committed) |
 | `failed` | `error`, `cost_usd` |
 | `cancelled` | (none) |
 | `published` | `pushed` (`owner/repo:branch`), `pr_url` when a PR was opened |
