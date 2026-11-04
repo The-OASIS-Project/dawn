@@ -1774,7 +1774,9 @@ void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int
    json_object *root = json_object_new_object();
    json_object_object_add(root, "type", json_object_new_string("memory_batch"));
    json_object_object_add(root, "payload", batch);
-   broadcast_json_to_user_ex(user_id, root, true);
+   int sent = broadcast_json_to_user_ex(user_id, root, true);
+   OLOG_INFO("WebUI: Broadcast memory_batch (user=%d batch=%lld) to %d client(s)", user_id,
+             (long long)batch_id, sent);
 }
 
 /*
