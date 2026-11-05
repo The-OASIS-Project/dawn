@@ -30,6 +30,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "core/outside_kind.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -117,7 +119,17 @@ typedef struct {
    int64_t document_id;
    char filename[DOC_FILENAME_MAX]; /* for the citation */
    int num_chunks;                  /* parent doc chunk count — clamps the context window */
+   bool own; /* the reader's own document of their own words (document_is_own) */
 } doc_grep_hit_t;
+
+/**
+ * @brief Whether @p doc is @p user_id's own words: theirs, and carrying no
+ *        outside text (documents.outside NONE or UNKNOWN, as the chunk reads
+ *        decide it).  Another user's document, a shared one included, never is.
+ */
+static inline bool document_is_own(const document_t *doc, int user_id) {
+   return doc && user_id > 0 && doc->user_id == user_id && !outside_is_tainted(doc->outside);
+}
 
 /* =============================================================================
  * Document CRUD

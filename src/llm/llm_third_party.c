@@ -40,6 +40,7 @@ static const struct {
 } k_frames[] = {
    { TOOL_FRAME_EMAIL, THIRD_PARTY_WHAT_EMAIL, OUTSIDE_EMAIL },
    { TOOL_FRAME_WEB, THIRD_PARTY_WHAT_WEB, OUTSIDE_WEB },
+   { TOOL_FRAME_DOCUMENT, THIRD_PARTY_WHAT_DOCUMENT, OUTSIDE_DOCUMENT },
 };
 
 char *llm_third_party_frame(const char *name, const char *tag, const char *body) {

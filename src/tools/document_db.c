@@ -530,6 +530,7 @@ int document_db_chunk_grep(int user_id,
       h->document_id = sqlite3_column_int64(stmt, 1);
       col_text_copy(h->filename, sizeof(h->filename), stmt, 2);
       h->num_chunks = sqlite3_column_int(stmt, 3);
+      h->own = sqlite3_column_int(stmt, 4) != 0;
       count++;
    }
 

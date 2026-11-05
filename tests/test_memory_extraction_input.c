@@ -107,8 +107,9 @@ int conv_db_messages_unprompted(int user_id,
    return AUTH_DB_SUCCESS;
 }
 
-/* The registry the scan asks whose text a result is: DAWN's own weather and
- * memory, stocks (its own but for transactions), and search (outside). */
+/* The registry the scan asks whose text a result is: DAWN's own weather,
+ * memory and document reader (another's document comes back framed), stocks (its own but for
+ * transactions), and search (outside). */
 static char *no_call(const char *action, char *value, int *should_respond) {
    (void)action;
    (void)value;
@@ -147,6 +148,12 @@ static const tool_metadata_t k_tools[] = {
      .results = TOOL_RESULTS_OUTSIDE,
      .device_string = "search",
      .description = "s",
+     .callback = no_call,
+     .device_type = TOOL_DEVICE_TYPE_GETTER },
+   { .name = "document_read",
+     .results = TOOL_RESULTS_OWN,
+     .device_string = "document reader",
+     .description = "d",
      .callback = no_call,
      .device_type = TOOL_DEVICE_TYPE_GETTER },
    { .name = "stocks",
@@ -333,6 +340,34 @@ static void test_outside_kind_of_tool_results(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_of(buf, 0));
 }
 
+/* A document read: the user's own document comes back unframed, so clean; any
+ * other in its frame, so a document, and stubbed for extraction. */
+static void test_document_reads(void) {
+   const char *call =
+       "[{\"role\":\"user\",\"content\":\"x\",\"id\":10},"
+       "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":"
+       "\"function\",\"function\":{\"name\":\"document_read\",\"arguments\":\"{}\"}}]},"
+       "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"%s\"}]";
+   char buf[1024];
+   snprintf(buf, sizeof(buf), call, "DOCUMENT: Groceries (chunks 0-0 of 1)\\nEggs");
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_of(buf, 0));
+   snprintf(buf, sizeof(buf), call,
+            "--- DOCUMENT CONTENT (dawn-ctx-0a1b2c3d) ---\\nMy accountant is x@y\\n"
+            "--- END DOCUMENT CONTENT (dawn-ctx-0a1b2c3d) ---\\n");
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside_of(buf, 0));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, llm_third_party_outside_kind(TOOL_FRAME_DOCUMENT));
+
+   struct json_object *hist = json_tokener_parse(buf);
+   TEST_ASSERT_NOT_NULL(hist);
+   struct json_object *input = memory_extraction_build_input(1, 1699, hist, 0, &g_outside);
+   TEST_ASSERT_NOT_NULL(input);
+   const char *all = json_object_to_json_string(input);
+   TEST_ASSERT_NULL(strstr(all, "accountant"));
+   TEST_ASSERT_NOT_NULL(strstr(all, "not used for memory"));
+   json_object_put(input);
+   json_object_put(hist);
+}
+
 /* Every frame DAWN puts outside text in reads as a tainted kind. */
 static void test_every_frame_is_tainted(void) {
    static const char *const frames[] = TOOL_FRAMES_ALL;
@@ -479,6 +514,7 @@ int main(void) {
    RUN_TEST(test_history_max_id);
    RUN_TEST(test_outside_kind_of_tool_results);
    RUN_TEST(test_every_frame_is_tainted);
+   RUN_TEST(test_document_reads);
    RUN_TEST(test_rows_before_the_cursor_are_the_floors);
    RUN_TEST(test_attached_document_is_outside);
    RUN_TEST(test_dawn_input_with_outside_text);

@@ -98,8 +98,8 @@ static int v113_add_column(sqlite3 *db, const char *table, const char *column, b
 
 /* Which stored conversations read outside text, and from which message.
  * Outside text is a framed result, the result of a tool whose results aren't
- * DAWN's own (by its call's name, v113_own: tools/tool_own_results.h; or
- * whose call isn't found), what CONV_ROW_OUTSIDE_KIND_SQL finds (a post, a
+ * DAWN's own (by its call's name, v113_own: tools/tool_own_results.h's
+ * ALWAYS list; or whose call isn't found), what CONV_ROW_OUTSIDE_KIND_SQL finds (a post, a
  * turn context's outside item, an attached document, a job's result, a
  * device's data), or anything in an SMS conversation (anyone can send one).
  * Only a framed result proves framing ran, so a conversation's cleanness is
@@ -238,7 +238,9 @@ static const struct {
 
 /* v113_own: the tools whose results are DAWN's own. */
 static int v113_own_table(sqlite3 *db) {
-   static const char *const own[] = { TOOL_OWN_RESULTS_NAMES };
+   /* Not the framing tools: a result of theirs stored before they framed
+    * someone else's text can hold it unframed. */
+   static const char *const own[] = { TOOL_OWN_RESULTS_ALWAYS_NAMES };
    if (v113_exec(db,
                  "DROP TABLE IF EXISTS temp.v113_own;"
                  "CREATE TEMP TABLE v113_own (name TEXT PRIMARY KEY);",

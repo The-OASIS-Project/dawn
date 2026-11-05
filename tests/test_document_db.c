@@ -182,21 +182,23 @@ static int prepare_statements(void) {
       return -1;
 
    rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks "
+                           "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks, "
+                           "d.user_id = ?1 AND d.outside IN (" OUTSIDE_UNTAINTED_SQL ") "
                            "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
-                           "WHERE (d.user_id = ? OR d.is_global = 1) "
-                           "AND c.text LIKE ? ESCAPE '\\' "
-                           "ORDER BY c.document_id, c.chunk_index LIMIT ? OFFSET ?",
+                           "WHERE (d.user_id = ?1 OR d.is_global = 1) "
+                           "AND c.text LIKE ?2 ESCAPE '\\' "
+                           "ORDER BY c.document_id, c.chunk_index LIMIT ?3 OFFSET ?4",
                            -1, &s_db.stmt_doc_chunk_grep_ci, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
    rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks "
+                           "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks, "
+                           "d.user_id = ?1 AND d.outside IN (" OUTSIDE_UNTAINTED_SQL ") "
                            "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
-                           "WHERE (d.user_id = ? OR d.is_global = 1) "
-                           "AND instr(c.text, ?) > 0 "
-                           "ORDER BY c.document_id, c.chunk_index LIMIT ? OFFSET ?",
+                           "WHERE (d.user_id = ?1 OR d.is_global = 1) "
+                           "AND instr(c.text, ?2) > 0 "
+                           "ORDER BY c.document_id, c.chunk_index LIMIT ?3 OFFSET ?4",
                            -1, &s_db.stmt_doc_chunk_grep_cs, NULL);
    if (rc != SQLITE_OK)
       return -1;
@@ -707,6 +709,46 @@ static void test_set_own(void) {
    TEST_ASSERT_EQUAL_INT(FAILURE, document_db_set_own(1, 999999, true, NULL));
 }
 
+/* What the document tools frame: a grep hit and a document read as the
+ * reader's own only for their own document of their own words; a document
+ * not marked own, or another user's shared one, isn't. */
+static void test_document_tools_own(void) {
+   float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+   int64_t note = 0, pdf = 0, cid = 0;
+   document_db_create(1, "Own note", "", "note", "h-tool-note", 1, true, &note);
+   document_db_create(1, "upload.pdf", "upload.pdf", "pdf", "h-tool-pdf", 1, false, &pdf);
+   document_db_chunk_create(note, 0, "Owl_Marker_7 in my words", emb, 4, 1.0f, 0, &cid);
+   document_db_chunk_create(pdf, 0, "Owl_Marker_7 in a page", emb, 4, 1.0f, 0, &cid);
+
+   doc_grep_hit_t hits[4];
+   int n = 0;
+   bool more = false;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_chunk_grep(1, "Owl_Marker_7", false, 0, hits, 4, &n, &more));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   for (int i = 0; i < n; i++) {
+      TEST_ASSERT_EQUAL(hits[i].document_id == note, hits[i].own);
+   }
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_chunk_grep(2, "Owl_Marker_7", true, 0, hits, 4, &n, &more));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_FALSE(hits[0].own); /* the shared note isn't user 2's */
+
+   document_t d;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(note, &d));
+   TEST_ASSERT_TRUE(document_is_own(&d, 1));
+   TEST_ASSERT_FALSE(document_is_own(&d, 2));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(pdf, &d));
+   TEST_ASSERT_FALSE(document_is_own(&d, 1));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_own(1, pdf, true, NULL));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(pdf, &d));
+   TEST_ASSERT_TRUE(document_is_own(&d, 1));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_chunk_grep(1, "Owl_Marker_7", true, 0, hits, 4, &n, &more));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_TRUE(hits[0].own && hits[1].own);
+}
+
 /* ============================================================================
  * Test: chunk_read_range — window by chunk_index VALUE, gap-safe
  * ============================================================================ */
@@ -917,6 +959,7 @@ int main(void) {
    RUN_TEST(test_chunks_by_ids_global_note_not_own);
    RUN_TEST(test_set_outside_combine);
    RUN_TEST(test_set_own);
+   RUN_TEST(test_document_tools_own);
    RUN_TEST(test_chunk_read_range);
    RUN_TEST(test_chunk_grep);
    RUN_TEST(test_invalid_params);

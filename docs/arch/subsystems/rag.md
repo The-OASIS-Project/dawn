@@ -120,6 +120,14 @@ text must not be able to vouch for that text.  An edit or undo keeps the stored 
 what the turn read, so an own document edited in a turn that read a page is no longer own.  A
 version keeps its document's kind and gives it back on restore.
 
+The document tools decide the same way.  `document_search`, `document_read` and `document_grep`
+return their text unframed when every document in the result is the reader's own words
+(`document_is_own`; a grep hit carries `own`, a ranked chunk `is_own`), and otherwise put the
+whole result in a `DOCUMENT CONTENT` frame (`llm_tools_result_third_party`), which memory
+extraction reads as a document and sees only as a stub.  The tools declare `TOOL_RESULTS_OWN`, so
+an unframed result leaves the batch clean; `document_manage` returns only names and confirmations
+and is own too.  `document_index` stays outside (it reports on a fetched page).
+
 ## Configuration
 
 ```toml

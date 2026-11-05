@@ -79,6 +79,11 @@ From most to least load-bearing:
    it is data; a stored one read again (`result_read`, `context_expand`) is framed again. An attached
    email reaches the model only this way: the turn names it and the model reads it with the tool.
    Memory extraction reads a framed result as a stub, so outside text can't plant a fact through it.
+   A document read through a tool (`document_search`, `document_read`, `document_grep`) goes in a
+   `DOCUMENT CONTENT` frame unless every document it shows is the reader's own words (theirs, and
+   marked own: `documents.outside` NONE or UNKNOWN); then it is unframed and reads as DAWN's own.
+   One frame covers the whole result, so a result mixing the user's notes with an upload frames
+   the notes too. Another user's shared document is never own.
 4. **The neutralizer** (`llm_context_neutralize`): defuses imitations of DAWN's own framing, tags and
    item lines in any text DAWN didn't write; the conversation's secret is masked wherever outside text
    could echo it.

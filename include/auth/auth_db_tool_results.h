@@ -53,12 +53,13 @@ typedef enum {
 } tool_results_kind_t;
 
 /* The frame a stored result's text goes in when read back (someone else's
- * text: an email, a page), kept in content_kind's upper bits (the kind is the
+ * text: an email, a page, a document), kept in content_kind's upper bits (the kind is the
  * low 4), so a row stored before frames reads as none.  The names are the
  * caller's (core/tool_result_store.c). */
 #define TOOL_RESULTS_FRAME_NONE 0
 #define TOOL_RESULTS_FRAME_EMAIL 1
 #define TOOL_RESULTS_FRAME_WEB 2
+#define TOOL_RESULTS_FRAME_DOCUMENT 3
 #define TOOL_RESULTS_FRAME_MAX 15
 
 /** A result to store. */

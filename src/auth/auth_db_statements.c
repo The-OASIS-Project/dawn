@@ -1212,18 +1212,20 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * case-sensitive uses instr() (literal, no escaping). LIMIT is bound to page+1
     * so the caller can detect "more matches exist" without a COUNT. */
    { "doc_chunk_grep_ci",
-     "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks "
+     "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks, "
+     "d.user_id = ?1 AND d.outside IN (" OUTSIDE_UNTAINTED_SQL ") "
      "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
-     "WHERE (d.user_id = ? OR d.is_global = 1) "
-     "AND c.text LIKE ? ESCAPE '\\' "
-     "ORDER BY c.document_id, c.chunk_index LIMIT ? OFFSET ?",
+     "WHERE (d.user_id = ?1 OR d.is_global = 1) "
+     "AND c.text LIKE ?2 ESCAPE '\\' "
+     "ORDER BY c.document_id, c.chunk_index LIMIT ?3 OFFSET ?4",
      &s_db.stmt_doc_chunk_grep_ci },
    { "doc_chunk_grep_cs",
-     "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks "
+     "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks, "
+     "d.user_id = ?1 AND d.outside IN (" OUTSIDE_UNTAINTED_SQL ") "
      "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
-     "WHERE (d.user_id = ? OR d.is_global = 1) "
-     "AND instr(c.text, ?) > 0 "
-     "ORDER BY c.document_id, c.chunk_index LIMIT ? OFFSET ?",
+     "WHERE (d.user_id = ?1 OR d.is_global = 1) "
+     "AND instr(c.text, ?2) > 0 "
+     "ORDER BY c.document_id, c.chunk_index LIMIT ?3 OFFSET ?4",
      &s_db.stmt_doc_chunk_grep_cs },
 
    /* === v61: document_chunks_fts (BM25 lexical channel) ===
