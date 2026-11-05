@@ -3556,9 +3556,13 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       sqlite3_free(err);
    }
 
-   /* v114: documents.outside, a note's outside kind. */
-   bool v114_ok = (current_version >= 114);
-   if (current_version < 114) {
+   /* v114: documents.outside, a note's outside kind, and documents.own.  Run
+    * on its columns, not only the version: steps developed side by side can
+    * reach a database out of order, so one stamped past 114 by a later step
+    * may still lack them.  Such a database keeps its version (the bump below
+    * never lowers it); a failure here retries on the next start. */
+   bool v114_ok = true;
+   if (current_version < 114 || auth_db_migrations_v114_pending(s_db.db)) {
       v114_ok = auth_db_migrations_v114(s_db.db) == AUTH_DB_SUCCESS;
    }
 

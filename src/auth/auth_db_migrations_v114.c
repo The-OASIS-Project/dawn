@@ -146,6 +146,12 @@ static bool v114_add_own(sqlite3 *db) {
    return true;
 }
 
+bool auth_db_migrations_v114_pending(sqlite3 *db) {
+   return !auth_db_column_exists(db, "documents", "outside") ||
+          !auth_db_column_exists(db, "documents", "own") ||
+          !auth_db_column_exists(db, "document_versions", "outside");
+}
+
 int auth_db_migrations_v114(sqlite3 *db) {
    /* One commit for all, all or nothing; documents first (versions copy it). */
    bool ok = sqlite3_exec(db, "SAVEPOINT v114", NULL, NULL, NULL) == SQLITE_OK;

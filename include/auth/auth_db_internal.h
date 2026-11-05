@@ -1334,6 +1334,10 @@ int auth_db_migrations_v113(sqlite3 *db);
 /** v114: documents.outside, a note's outside kind (backfilled). */
 int auth_db_migrations_v114(sqlite3 *db);
 
+/** Whether any of v114's columns is missing (documents.outside, documents.own,
+ *  document_versions.outside), whatever the stored version says. */
+bool auth_db_migrations_v114_pending(sqlite3 *db);
+
 /**
  * @brief The v98 rebuild's room check: the bytes it needs free next to the
  *        database for a messages table (and its indexes) of @p table_bytes

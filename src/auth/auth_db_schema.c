@@ -1189,8 +1189,11 @@ int auth_db_create_schema(const char *db_path) {
 
    /* Back up the database before any upgrade touches it.  Only for a real
     * version bump on an existing DB (fresh installs have nothing to lose).  A
-    * failed backup ABORTS the upgrade — we never migrate unprotected. */
-   if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
+    * failed backup ABORTS the upgrade — we never migrate unprotected.  A
+    * database stamped past this code that still lacks v114's columns is
+    * migrated too (auth_db_apply_migrations), so it is backed up as well. */
+   if (current_version > 0 &&
+       (current_version < AUTH_DB_SCHEMA_VERSION || auth_db_migrations_v114_pending(s_db.db))) {
       if (auth_db_backup_before_upgrade(db_path, current_version) != AUTH_DB_SUCCESS) {
          OLOG_ERROR("auth_db: aborting upgrade v%d->v%d — pre-upgrade backup failed",
                     current_version, AUTH_DB_SCHEMA_VERSION);

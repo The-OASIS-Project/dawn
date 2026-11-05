@@ -22,7 +22,8 @@
  * conversation holding a framing tool's stored result raised to OTHER, a
  * version's from its document, a rerun leaving rows tagged since alone,
  * documents.own added at 0, and migrated documents and document_versions
- * tables matching new ones.
+ * tables matching new ones.  Also a database a later step stamped past 114
+ * without these columns: still migrated, and its version kept.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -157,15 +158,51 @@ static void remove_db_files(const char *path) {
    }
 }
 
+/* Pre-upgrade backups of the test database taken from @p version. */
+static int backups_from(int version) {
+   char copy[TEST_TMP_PATH_MAX], copy2[TEST_TMP_PATH_MAX], dir[TEST_TMP_PATH_MAX + 16];
+   char prefix[TEST_TMP_PATH_MAX + 16];
+   snprintf(copy, sizeof(copy), "%s", s_path);
+   snprintf(copy2, sizeof(copy2), "%s", s_path);
+   snprintf(dir, sizeof(dir), "%s/backups", dirname(copy));
+   snprintf(prefix, sizeof(prefix), "%s.v%d-", basename(copy2), version);
+   int n = 0;
+   DIR *d = opendir(dir);
+   for (struct dirent *e = d ? readdir(d) : NULL; e; e = readdir(d)) {
+      n += strncmp(e->d_name, prefix, strlen(prefix)) == 0;
+   }
+   if (d) {
+      closedir(d);
+   }
+   return n;
+}
+
+/* A v113 database as seed_v113() leaves it, then stamped @p version; a
+ * stamp past 114 comes from a later step that added
+ * message_unprompted.replayed and none of v114's columns.  Then reopened,
+ * which runs the migrations. */
+static void open_seeded(int version) {
+   auth_db_shutdown();
+   remove_db_files(s_path);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_path));
+   seed_v113();
+   if (version > 114) {
+      char sql[128];
+      snprintf(sql, sizeof(sql),
+               "ALTER TABLE message_unprompted ADD COLUMN replayed INTEGER NOT NULL DEFAULT 0;"
+               "UPDATE schema_version SET version = %d;",
+               version);
+      exec_ok(sql);
+   }
+   auth_db_shutdown();
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_path));
+}
+
 void setUp(void) {
    char name[64];
    snprintf(name, sizeof(name), "dawn_test_mig_v114_%d.db", ++s_test_no);
    test_tmp_path(s_path, sizeof(s_path), name);
-   remove_db_files(s_path);
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_path));
-   seed_v113();
-   auth_db_shutdown();
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_path)); /* runs v114 */
+   open_seeded(113); /* runs v114 */
 }
 
 void tearDown(void) {
@@ -227,6 +264,51 @@ static void test_framed_tool_results_and_note_calls(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 11));
 }
 
+/* A database stamped 115 by a later step before v114 reached it: v114 still
+ * runs (columns and fills), after a backup, and the version stays 115. */
+static void test_later_stamp_still_migrated(void) {
+   open_seeded(115);
+   TEST_ASSERT_EQUAL_INT64(115, auth_db_query_int64(s_db.db, "SELECT version FROM schema_version"));
+   TEST_ASSERT_FALSE(auth_db_migrations_v114_pending(s_db.db));
+   TEST_ASSERT_TRUE(auth_db_column_exists(s_db.db, "message_unprompted", "replayed"));
+   TEST_ASSERT_EQUAL_INT(1, backups_from(115));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, outside_in("documents", 1));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, outside_in("documents", 2));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside_in("documents", 6));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_in("documents", 10));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_in("conversations", 14));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, outside_in("document_versions", 4));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside_in("document_versions", 6));
+   TEST_ASSERT_EQUAL_INT64(0, auth_db_query_int64(s_db.db, "SELECT COUNT(*) FROM documents "
+                                                           "WHERE own != 0"));
+}
+
+/* Reopening a complete database, at 114 or stamped 115, changes nothing and
+ * takes no backup. */
+static void test_reopen_complete_changes_nothing(void) {
+   for (int version = 114; version <= 115; version++) {
+      if (version == 115) {
+         open_seeded(115);
+      }
+      exec_ok("UPDATE documents SET outside = 0 WHERE id = 1;"
+              "UPDATE documents SET outside = 1, own = 1 WHERE id = 3;"
+              "UPDATE document_versions SET outside = 2 WHERE id = 3;"
+              "UPDATE conversations SET outside = 0 WHERE id = 14;");
+      const int before = backups_from(version);
+      auth_db_shutdown();
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_path));
+      TEST_ASSERT_EQUAL_INT64(version,
+                              auth_db_query_int64(s_db.db, "SELECT version FROM schema_version"));
+      TEST_ASSERT_EQUAL_INT(before, backups_from(version));
+      TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 1));
+      TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, outside_in("documents", 3));
+      TEST_ASSERT_EQUAL_INT64(1, auth_db_query_int64(s_db.db, "SELECT own FROM documents "
+                                                              "WHERE id = 3"));
+      TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, outside_in("document_versions", 3));
+      TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("conversations", 14));
+   }
+}
+
 /* The documents and document_versions tables' columns, in a stable order. */
 static char *schema_of(sqlite3 *db) {
    static const char sql[] =
@@ -267,6 +349,8 @@ int main(void) {
    RUN_TEST(test_reused_id_not_inherited);
    RUN_TEST(test_rerun_keeps_new_tags);
    RUN_TEST(test_framed_tool_results_and_note_calls);
+   RUN_TEST(test_later_stamp_still_migrated);
+   RUN_TEST(test_reopen_complete_changes_nothing);
    RUN_TEST(test_migrated_schema_matches_new);
    return UNITY_END();
 }
