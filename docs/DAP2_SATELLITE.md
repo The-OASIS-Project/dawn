@@ -79,15 +79,15 @@ build attestation ([INSTALL_UBUNTU_PACKAGE.md](INSTALL_UBUNTU_PACKAGE.md#checkin
 ### Fetching models
 
 ```bash
-sudo dawn-satellite-fetch-models                 # VAD + Piper TTS + Vosk-small (matches the shipped config)
-sudo dawn-satellite-fetch-models --asr whisper --whisper-model base   # use Whisper instead
+sudo dawn-satellite-fetch-models                 # VAD + Piper TTS + Whisper base (matches the shipped config)
+sudo dawn-satellite-fetch-models --whisper-model tiny   # a smaller Whisper model (set [asr] model_path to match)
 ```
 
 Models are fetched (not bundled) so the package stays small and you accept their licenses. The helper
 downloads straight from upstream over HTTPS — Silero VAD + the Piper "Alba" voice from the DAWN repo,
-and your chosen ASR (Vosk from alphacephei.com, or Whisper from HuggingFace) — into
-`/var/lib/dawn-satellite/models`. Pick the ASR that matches `[asr] engine` in `satellite.toml`
-(default `vosk`), then `systemctl restart dawn-satellite`.
+and the Whisper model from HuggingFace — into `/var/lib/dawn-satellite/models`. The packaged binary is
+built with Whisper only, so keep `[asr] engine = "whisper"` in `satellite.toml`; then
+`systemctl restart dawn-satellite`.
 
 ## Over-the-air updates (OTA)
 
@@ -702,7 +702,8 @@ Run the project-root helper to download ASR models. The script places models und
 | Pi Zero / Zero 2 W | Not supported | 512MB RAM is too tight for simultaneous VAD + ASR + TTS |
 | Pi 3B (1GB) | Not recommended | CPU is too slow for a responsive voice pipeline |
 | Pi 4 (2GB) | Vosk small | `vosk-small` fits the memory budget; Whisper tiny pushes RAM too close to the limit |
-| Pi 4 (4–8GB) | Vosk small (default), Whisper tiny-q5_1 (optional) | Pi 4 CPU limits whisper.cpp tiny-q5_1 to RTF ~0.9 (≈4s finalize). Vosk streaming is noticeably snappier |
+| Pi 4 (4GB) | Vosk small (default), Whisper tiny-q5_1 (optional) | Pi 4 CPU limits whisper.cpp tiny-q5_1 to RTF ~0.9 (≈4s finalize). Vosk streaming is noticeably snappier |
+| Pi 4 (8GB) | Vosk large (default), Whisper tiny-q5_1 (optional) | Pi 4 CPU limits whisper.cpp tiny-q5_1 to RTF ~0.9 (≈4s finalize). Vosk streaming is noticeably snappier |
 | Pi 5 (4GB) | Whisper tiny-q5_1 | Pi 5 CPU hits RTF ~0.3 (≈1s finalize for a 3s utterance); quality beats Vosk small |
 | Pi 5 (8GB) | Whisper tiny-q5_1 (default) or base | `tiny-q5_1` is the installer default; `base` is viable on 8GB — measured RTF 0.65 (JFK, beam=5) / 0.20 (greedy, 15s real speech). Sustained continuous transcription can thermal-throttle per [ACM 2025](https://dl.acm.org/doi/10.1145/3769102.3774244); intermittent voice-command workloads are fine with active cooling |
 

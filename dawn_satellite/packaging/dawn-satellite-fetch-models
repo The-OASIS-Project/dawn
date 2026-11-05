@@ -44,7 +44,7 @@ while [ $# -gt 0 ]; do
       --whisper-model) WHISPER_MODEL="${2:-}"; shift 2 ;;
       --accept) ACCEPT=1; shift ;;
       -h | --help)
-         sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+         sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
          exit 0
          ;;
       *) die "unknown option: $1 (try --help)" ;;
