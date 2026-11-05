@@ -582,7 +582,8 @@ void test_version_recover_keeps_outside(void) {
    int64_t report = seed_note(1, "Research #1", "tea grows on hills", 24);
    int64_t own = seed_note(1, "Groceries", "eggs and milk", 25);
    seed_note(1, "RowidFiller2", "x", 98);
-   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, report, OUTSIDE_RESEARCH, false));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, report, OUTSIDE_RESEARCH, false, OUTSIDE_NONE));
    TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_delete_indexed(report));
    TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_delete_indexed(own));
 
@@ -606,7 +607,8 @@ void test_version_recover_keeps_outside(void) {
                                                is_report ? "h-r" : "h-o", 1, false, &again));
       TEST_ASSERT_EQUAL_INT(SUCCESS,
                             document_db_chunk_create(again, 0, "body", emb, 4, 1.0f, 0, &chunk));
-      TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, again, outside, false));
+      TEST_ASSERT_EQUAL_INT(SUCCESS,
+                            document_db_set_outside(1, again, outside, false, OUTSIDE_NONE));
       TEST_ASSERT_EQUAL(!is_report, chunk_is_own(chunk));
    }
    int outside = -1;
@@ -645,14 +647,14 @@ void test_version_recover_upload_not_own(void) {
    TEST_ASSERT_EQUAL_INT(SUCCESS,
                          document_db_chunk_create(again, 0, text, emb, 4, 1.0f, 0, &chunk));
    free(text);
-   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, again, outside, false));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, again, outside, false, OUTSIDE_NONE));
    TEST_ASSERT_FALSE(chunk_is_own(chunk));
 }
 
-/* A deleted document the user marked as their own, re-created as a document
- * (too long for a note): it starts as DOCUMENT; the version's kind, applied
- * (with the turn's, by the recover tool; as is, by the panel's restore),
- * brings it back as the user's own. */
+/* A deleted document the user vouched for, re-created as a document (too long
+ * for a note): it starts as DOCUMENT; the version keeps its kind (DOCUMENT)
+ * but not the vouch, so applying it (with the turn's, by the recover tool; as
+ * is, by the panel's restore) brings it back not own. */
 static int64_t deleted_own_document(int *outside_out, char **text_out) {
    g_config.documents.version_retention_days = 14;
    int64_t doc = 0, chunk = 0;
@@ -670,7 +672,7 @@ static int64_t deleted_own_document(int *outside_out, char **text_out) {
    TEST_ASSERT_EQUAL_INT(1, n);
    TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_version_get_text(v[0].id, 1, text_out, NULL, 0, NULL,
                                                                outside_out));
-   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, *outside_out);
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, *outside_out);
    return doc;
 }
 
@@ -687,32 +689,29 @@ static int64_t recreated_document(const char *text, const char *hash, int64_t *c
    return again;
 }
 
-void test_version_recover_long_document_keeps_own(void) {
+void test_version_recover_long_document_drops_own(void) {
    int outside = -1;
    char *text = NULL;
    deleted_own_document(&outside, &text);
    int64_t chunk = 0;
    int64_t again = recreated_document(text, "h-own2", &chunk);
    /* The recover tool: the version's kind with a clean turn's. */
-   TEST_ASSERT_EQUAL_INT(
-       SUCCESS, document_db_set_outside(1, again, outside_combine(outside, OUTSIDE_NONE), false));
-   TEST_ASSERT_TRUE(chunk_is_own(chunk));
-   /* A turn that read a page: not the user's own words. */
-   TEST_ASSERT_EQUAL_INT(
-       SUCCESS, document_db_set_outside(1, again, outside_combine(outside, OUTSIDE_WEB), false));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, again, outside_combine(outside, OUTSIDE_NONE),
+                                                 false, OUTSIDE_NONE));
    TEST_ASSERT_FALSE(chunk_is_own(chunk));
    free(text);
 }
 
-void test_version_restore_long_document_keeps_own(void) {
+void test_version_restore_long_document_drops_own(void) {
    int outside = -1;
    char *text = NULL;
    deleted_own_document(&outside, &text);
    int64_t chunk = 0;
    int64_t again = recreated_document(text, "h-own3", &chunk);
    /* The panel's restore: the version's kind, not combined (nothing was kept). */
-   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, again, outside, false));
-   TEST_ASSERT_TRUE(chunk_is_own(chunk));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, again, outside, false, OUTSIDE_NONE));
+   TEST_ASSERT_FALSE(chunk_is_own(chunk));
    free(text);
 }
 
@@ -744,7 +743,7 @@ void test_version_restore_at_cap_keeps_kind(void) {
    TEST_ASSERT_EQUAL_INT(FAILURE, document_db_version_get_text(v[0].id, 1, &gone, NULL, 0, NULL,
                                                                NULL)); /* pruned */
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside);
-   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, doc, outside, true));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, doc, outside, true, OUTSIDE_NONE));
 
    document_chunk_t chunk;
    int cc = 0;
@@ -779,8 +778,8 @@ int main(void) {
    RUN_TEST(test_version_recover_keeps_outside);
    RUN_TEST(test_version_recover_upload_not_own);
    RUN_TEST(test_version_restore_at_cap_keeps_kind);
-   RUN_TEST(test_version_recover_long_document_keeps_own);
-   RUN_TEST(test_version_restore_long_document_keeps_own);
+   RUN_TEST(test_version_recover_long_document_drops_own);
+   RUN_TEST(test_version_restore_long_document_drops_own);
    RUN_TEST(test_set_num_chunks);
    return UNITY_END();
 }

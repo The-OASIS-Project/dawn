@@ -43,7 +43,9 @@
  * the version was archived.  Otherwise (the document gone, or the id reused)
  * it is RESEARCH if a research run names the id, else DOCUMENT: what it was
  * can't be told, and a deleted upload recovered as a note must not read as
- * the user's words.
+ * the user's words.  documents.own, the user's vouch for a document's text
+ * (kept apart from where it came from), starts at 0 everywhere: a note is
+ * the user's own through its kind already.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -129,10 +131,25 @@ static bool v114_add_outside(sqlite3 *db, const char *table, const char *fill_sq
    return true;
 }
 
+/* Add documents.own (0 for every row), unless it is there. */
+static bool v114_add_own(sqlite3 *db) {
+   if (auth_db_column_exists(db, "documents", "own")) {
+      return true;
+   }
+   char *errmsg = NULL;
+   if (sqlite3_exec(db, "ALTER TABLE documents ADD COLUMN own INTEGER NOT NULL DEFAULT 0", NULL,
+                    NULL, &errmsg) != SQLITE_OK) {
+      OLOG_ERROR("auth_db: v114 migration (documents own) failed: %s", errmsg ? errmsg : "unknown");
+      sqlite3_free(errmsg);
+      return false;
+   }
+   return true;
+}
+
 int auth_db_migrations_v114(sqlite3 *db) {
-   /* One commit for both, all or nothing; documents first (versions copy it). */
+   /* One commit for all, all or nothing; documents first (versions copy it). */
    bool ok = sqlite3_exec(db, "SAVEPOINT v114", NULL, NULL, NULL) == SQLITE_OK;
-   ok = ok && v114_add_outside(db, "documents", k_fill_documents_sql) &&
+   ok = ok && v114_add_outside(db, "documents", k_fill_documents_sql) && v114_add_own(db) &&
         v114_add_outside(db, "document_versions", k_fill_versions_sql);
    if (!ok) {
       sqlite3_exec(db, "ROLLBACK TO v114", NULL, NULL, NULL);

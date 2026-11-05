@@ -810,9 +810,11 @@ static const char *SCHEMA_SQL =
      * blob to the orphan sweep.  Migrated DBs get a plain TEXT column (SQLite
      * can't ALTER-add an FK) with the link enforced in C. */
     "  original_blob_id TEXT DEFAULT NULL,"
-    /* outside (v114): the outside kind a note's text carries (outside_kind_t):
-     * a research report's, or one saved in a turn that read outside text. */
+    /* outside (v114): where its text came from (outside_kind_t): a research
+     * report, an upload, or a note saved in a turn that read outside text.
+     * own (v114): the user vouched for its text as their own words. */
     "  outside INTEGER NOT NULL DEFAULT 0,"
+    "  own INTEGER NOT NULL DEFAULT 0,"
     "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "  FOREIGN KEY(original_blob_id) REFERENCES blobs(id) ON DELETE SET NULL"
     ");"

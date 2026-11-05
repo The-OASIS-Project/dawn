@@ -21,7 +21,8 @@
  * document's as DOCUMENT, a note's from the conversations that saved it, a
  * conversation holding a framing tool's stored result raised to OTHER, a
  * version's from its document, a rerun leaving rows tagged since alone,
- * and migrated documents and document_versions tables matching new ones.
+ * documents.own added at 0, and migrated documents and document_versions
+ * tables matching new ones.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -75,6 +76,7 @@ static int outside_in(const char *table, int id) {
  * the WebUI. */
 static void seed_v113(void) {
    exec_ok("PRAGMA foreign_keys=OFF;"
+           "ALTER TABLE documents DROP COLUMN own;"
            "ALTER TABLE documents DROP COLUMN outside;"
            "ALTER TABLE document_versions DROP COLUMN outside;"
            "DELETE FROM schema_version;"
@@ -185,6 +187,9 @@ static void test_notes_outside_filled_in(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside_in("document_versions", 3));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, outside_in("document_versions", 4));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside_in("document_versions", 5));
+   /* No document starts vouched for. */
+   TEST_ASSERT_EQUAL_INT64(0, auth_db_query_int64(s_db.db, "SELECT COUNT(*) FROM documents "
+                                                           "WHERE own != 0"));
 }
 
 /* A version older than the document now holding its id was another's: it
@@ -245,6 +250,7 @@ static void test_migrated_schema_matches_new(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_fresh_path));
    char *fresh = schema_of(s_db.db);
    TEST_ASSERT_NOT_NULL(strstr(fresh, "documents 10 outside INTEGER 1 0"));
+   TEST_ASSERT_NOT_NULL(strstr(fresh, "documents 11 own INTEGER 1 0"));
    TEST_ASSERT_NOT_NULL(strstr(fresh, "document_versions 6 outside INTEGER 1 0"));
    TEST_ASSERT_EQUAL_STRING(fresh, migrated);
    free(migrated);

@@ -502,7 +502,7 @@ static char *do_save_note(int user_id, const char *label, const char *text) {
     * this note routes to document_read.  Best-effort — never fail the save. */
    if (res.doc_id > 0) {
       const int outside = memory_turn_outside(user_id);
-      (void)document_db_set_outside(user_id, res.doc_id, outside, false);
+      (void)document_db_set_outside(user_id, res.doc_id, outside, false, outside);
       (void)memory_note_bridge_upsert_gloss_from(user_id, res.doc_id, label, outside);
    }
    char msg[DOCMGMT_CONFIRM_MSG_MAX];
@@ -538,7 +538,8 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
             return strdup(msg);
          }
          /* Its kind and what this turn read, as an edit (commit_edit). */
-         (void)document_db_set_outside(user_id, existing.id, memory_turn_outside(user_id), true);
+         const int turn = memory_turn_outside(user_id);
+         (void)document_db_set_outside(user_id, existing.id, turn, true, turn);
          char msg[256];
          snprintf(msg, sizeof(msg), "Updated (overwrote existing) document '%s' (%d chunk%s).",
                   title, res.num_chunks, res.num_chunks == 1 ? "" : "s");
@@ -669,10 +670,10 @@ static char *commit_edit(int user_id,
                res.error_msg);
       return strdup(msg);
    }
-   /* It keeps what its old text carried, plus what this turn read (a document
-    * the user marked as their own is no longer, once this turn's outside text
-    * is in it). */
-   (void)document_db_set_outside(user_id, doc->id, memory_turn_outside(user_id), true);
+   /* It keeps what its old text carried, plus what this turn read (the user's
+    * vouch for it goes, once this turn's outside text is in it). */
+   const int turn = memory_turn_outside(user_id);
+   (void)document_db_set_outside(user_id, doc->id, turn, true, turn);
    return strdup(ok_msg);
 }
 
@@ -856,8 +857,9 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
                is_note ? "note" : "document", doc.filename);
       pthread_mutex_lock(&s_edit_mutex);
       char *result = commit_edit(user_id, &doc, is_note, vtext, ok);
-      /* The restored text brings back the kind its version carried. */
-      (void)document_db_set_outside(user_id, doc.id, outside, true);
+      /* The restored text brings back the kind its version carried (commit_edit
+       * handled the turn's). */
+      (void)document_db_set_outside(user_id, doc.id, outside, true, OUTSIDE_NONE);
       pthread_mutex_unlock(&s_edit_mutex);
       free(vtext);
       return result;
@@ -911,8 +913,9 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
    /* The item takes back the kind its version carried, with what this turn
     * read; a note also gets its gloss back. */
    if (res.doc_id > 0) {
-      outside = outside_combine(outside, memory_turn_outside(user_id));
-      (void)document_db_set_outside(user_id, res.doc_id, outside, false);
+      const int turn = memory_turn_outside(user_id);
+      outside = outside_combine(outside, turn);
+      (void)document_db_set_outside(user_id, res.doc_id, outside, false, turn);
       if (as_note)
          (void)memory_note_bridge_upsert_gloss_from(user_id, res.doc_id, fname, outside);
    }

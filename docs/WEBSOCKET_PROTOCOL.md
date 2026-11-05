@@ -1325,27 +1325,30 @@ The library panel's other requests (`doc_library_*`) are described in
 `include/webui/webui_doc_library.h`; this section covers whose words a document holds.
 
 In `doc_library_list_response`, each row of a document the requester owns carries:
-- `outside`: the outside kind of its text (`outside_kind_t`, `include/core/outside_kind.h`):
-  `0` the user's own words, `5` a document (every upload, attachment or saved text until the user
-  marks it), `3` a research report; a note written in a turn that read outside text carries that
-  text's kind.
-- `own`: whether a chunk of it recalled into a turn counts as the user's own words (`outside` is
-  0 or 8).  A note starts own, anything else not.  Rows of another user's document (a global one,
-  or the admin All Users view) carry neither, and show no switch.
+- `outside`: where its text came from (`outside_kind_t`, `include/core/outside_kind.h`): `0` the
+  user's own words, `5` a document (every upload, attachment or saved text), `3` a research
+  report; a note written in a turn that read outside text carries that text's kind.
+- `own`: whether a chunk of it recalled into a turn counts as the user's own words: the user
+  vouched for it (`set_document_own`), or `outside` is 0 or 8.  A note starts own, anything else
+  not.  The panel's switch shows this value.  Rows of another user's document (a global one, or
+  the admin All Users view) carry neither, and show no switch.
 
 #### `set_document_own`
-Mark one of the user's documents as their own text, or not.  Own sets `outside` to 0 whatever it
-was (the user vouches for the text, a research report included); not own sets 5.  Only the
-document's owner can, from the panel: no tool action sets it.
+Vouch for one of the user's documents as their own text, or take it back.  On sets the vouch and
+keeps `outside` as it is (a research report stays 3, an attachment 5).  Off clears the vouch, and
+an `outside` of 0 or 8 becomes 5 (the user says it isn't their words); any other kind stays.  So
+the response's `own` is the value asked for.  Only the document's owner can, from the panel: no
+tool action sets it.
 ```json
 {"type": "set_document_own", "payload": {"document_id": 42, "own": true}}
 ```
 Response:
 ```json
-{"type": "set_document_own_response", "payload": {"document_id": 42, "own": true, "outside": 0}}
+{"type": "set_document_own_response", "payload": {"document_id": 42, "own": true, "outside": 5}}
 ```
-or `{"document_id": 42, "error": "..."}` (a missing field, or not the user's document).  An edit
-in a turn that read outside text can make an own document not own again; the next list shows it.
+or `{"document_id": 42, "error": "..."}` (a missing field, or not the user's document).  A save,
+edit or append by the model in a turn that read outside text clears the vouch; the next list
+shows it.  A deleted document recovered comes back without it.
 
 ---
 

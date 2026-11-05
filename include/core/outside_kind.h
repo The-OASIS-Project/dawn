@@ -64,6 +64,13 @@ typedef enum {
 _Static_assert(OUTSIDE_NONE == 0 && OUTSIDE_UNKNOWN == 8, "OUTSIDE_UNTAINTED_SQL names these");
 #endif
 
+/**
+ * SQL: a row read as the user's own words, from its vouch column @p own and
+ * its kind column @p outside: the user vouched for its text, or it carries no
+ * outside text.
+ */
+#define OUTSIDE_OWN_SQL(own, outside) "(" own " = 1 OR " outside " IN (" OUTSIDE_UNTAINTED_SQL "))"
+
 /** Whether @p v marks outside text (any kind but NONE and UNKNOWN). */
 static inline bool outside_is_tainted(int v) {
    return v != OUTSIDE_NONE && v != OUTSIDE_UNKNOWN;

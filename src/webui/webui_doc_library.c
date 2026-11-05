@@ -206,8 +206,8 @@ void handle_doc_library_list(ws_connection_t *conn, json_object *payload) {
           * panel shows the "My own text" switch where these are present). */
          if (docs[i].user_id == conn->auth_user_id) {
             json_object_object_add(doc, "outside", json_object_new_int(docs[i].outside));
-            json_object_object_add(doc, "own",
-                                   json_object_new_boolean(!outside_is_tainted(docs[i].outside)));
+            json_object_object_add(
+                doc, "own", json_object_new_boolean(document_is_own(&docs[i], conn->auth_user_id)));
          }
          /* Documents (not notes) may have a stored original file: surface its blob id +
           * a has_original flag so a client can fetch/download the original. Notes carry
@@ -517,11 +517,12 @@ void handle_set_document_own(ws_connection_t *conn, json_object *payload) {
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Document not found (or not yours)"));
    } else {
-      json_object_object_add(resp_payload, "own",
-                             json_object_new_boolean(!outside_is_tainted(outside)));
+      /* Off leaves no untainted kind, so it reads as own exactly when asked. */
+      const bool own = json_object_get_boolean(own_obj);
+      json_object_object_add(resp_payload, "own", json_object_new_boolean(own));
       json_object_object_add(resp_payload, "outside", json_object_new_int(outside));
       OLOG_INFO("doc_library: user %d marked document %lld %s", conn->auth_user_id,
-                (long long)doc_id, outside_is_tainted(outside) ? "not own" : "own");
+                (long long)doc_id, own ? "own" : "not own");
    }
 
    json_object_object_add(response, "payload", resp_payload);
@@ -632,10 +633,10 @@ void handle_doc_library_note_update(ws_connection_t *conn, json_object *payload)
                                                               ? result.error_msg
                                                               : document_index_error_string(rc)));
          } else {
-            /* The note keeps its outside kind: an edit leaves most of the text
-             * (a research report stays one).  Memory→note bridge (v61): refresh
-             * the gloss (label may have changed → delete+recreate inside the
-             * bridge).  Best-effort. */
+            /* The note keeps its outside kind and the user's vouch: an edit
+             * leaves most of the text (a research report stays one).
+             * Memory→note bridge (v61): refresh the gloss (label may have
+             * changed → delete+recreate inside the bridge).  Best-effort. */
             (void)memory_note_bridge_upsert_gloss(conn->auth_user_id, doc_id, label);
             json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
             json_object_object_add(resp_payload, "id", json_object_new_int64(doc_id));
@@ -883,7 +884,7 @@ void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payl
                                   : recreated_as_note;
       /* It takes back the kind the version carried (with its own, kept in
        * place), a document re-created from it too. */
-      (void)document_db_set_outside(conn->auth_user_id, doc_id, outside, exists);
+      (void)document_db_set_outside(conn->auth_user_id, doc_id, outside, exists, OUTSIDE_NONE);
       if (restored_note) {
          (void)memory_note_bridge_upsert_gloss_from(conn->auth_user_id, doc_id, label, outside);
       }

@@ -66,9 +66,10 @@ void handle_doc_library_index(ws_connection_t *conn, json_object *payload);
 void handle_doc_library_toggle_global(ws_connection_t *conn, json_object *payload);
 
 /**
- * @brief Mark one of the user's documents as their own text, or not
- *        (document_db_set_own): a recalled chunk of an own document reads as
- *        the user's words.  Only the user sets this; no tool can.
+ * @brief Vouch for one of the user's documents as their own text, or take it
+ *        back (document_db_set_own; its outside kind is kept): a recalled
+ *        chunk of an own document reads as the user's words.  Only the user
+ *        sets this; no tool can.
  * Payload: { "document_id": <id>, "own": true/false }
  * Response type: set_document_own_response
  *   { "document_id", "own", "outside" } or { "document_id", "error" }
