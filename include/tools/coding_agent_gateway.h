@@ -33,9 +33,12 @@
 extern "C" {
 #endif
 
-/** The gateway's name for DAWN's job @p conv_id: "job:<id>". */
-#define CODING_AGENT_CLIENT_REF_FMT "job:%lld"
-#define CODING_AGENT_REF_MAX 32
+/** The gateway's name for DAWN's job @p conv_id: "job:<id>.<created_at>".  The
+ * job's creation time is in it so a job id handed out again (a database restored
+ * from a backup) never names a task an earlier job started. */
+#define CODING_AGENT_CLIENT_REF_PREFIX "job:"
+#define CODING_AGENT_CLIENT_REF_FMT CODING_AGENT_CLIENT_REF_PREFIX "%lld.%lld"
+#define CODING_AGENT_REF_MAX 48
 
 /** coding_gateway_call() results. */
 #define CODING_GW_OK 0      /**< SUCCESS: *out holds the answer */
@@ -50,7 +53,7 @@ const char *coding_gateway_alias(void);
  *
  * @param user_id The user it acts for (sent as dawn_user_id), or 0 for a
  *                call that names no user.
- * @param args    Arguments; consumed.
+ * @param args    Arguments; consumed.  NULL (a caller couldn't build them) fails.
  * @param out     CODING_GW_OK: the gateway's JSON answer (caller puts).
  * @param err     Otherwise: why, in DAWN's words, the gateway's reason (one
  *                line, cut on a whole character) after them; caller frees.
@@ -65,11 +68,20 @@ int coding_gateway_call(int user_id,
 /** The string @p key of a gateway answer's object @p o, or "" (missing, null). */
 const char *coding_gateway_jstr(struct json_object *o, const char *key);
 
-/** DAWN's client_ref for job @p conv_id into @p out (CODING_AGENT_REF_MAX). */
-void coding_gateway_ref(int64_t conv_id, char *out, size_t out_len);
+/**
+ * @brief DAWN's client_ref for job @p conv_id into @p out (CODING_AGENT_REF_MAX).
+ * @return false when the job's row can't be read (then there is no name to send).
+ */
+bool coding_gateway_ref(int64_t conv_id, char *out, size_t out_len);
 
-/** The job id in a client_ref DAWN gave, or 0. */
-int64_t coding_gateway_ref_job(const char *client_ref);
+/**
+ * @brief The job a client_ref names in this database.
+ * @param job_out Its id, or 0: not DAWN's name, no such job, or a later job given
+ *                the same id (a restored database).
+ * @return SUCCESS, or FAILURE when the job's row couldn't be read (*job_out 0;
+ *         the task may still be a live job's).
+ */
+int coding_gateway_ref_job(const char *client_ref, int64_t *job_out);
 
 /** Room for coding_gateway_request_line()'s line. */
 #define CODING_GATEWAY_REQUEST_LINE_MAX 320
@@ -90,6 +102,9 @@ bool coding_gateway_request_line(struct json_object *req, char *out, size_t out_
 
 /** Ask the gateway to stop job @p conv_id's task (it may already be gone). */
 void coding_gateway_cancel(int user_id, int64_t conv_id);
+
+/** Ask the gateway to stop the task named @p client_ref. */
+void coding_gateway_cancel_ref(int user_id, const char *client_ref);
 
 /**
  * @brief coding_gateway_cancel() on a short-lived thread, for a caller that

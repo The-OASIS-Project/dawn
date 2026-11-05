@@ -19,8 +19,9 @@
  * Answering what a coding task waits on.  Allowing a host or a tool widens
  * what the agent reaches, so it is a preview DAWN renders from the gateway's
  * open request and the user's yes (approve, then confirm_approve), for that
- * task only.  Declining and answering a question reach no further, so they
- * act at once.
+ * task or, when the user asks, every task on its repo.  Declining and
+ * answering a question reach no further, so they act at once, as does
+ * removing a standing approval (grants lists them).
  */
 
 #include <json-c/json.h>
@@ -61,8 +62,13 @@ typedef struct {
    char value[CR_VALUE_MAX];
    char line[CODING_GATEWAY_REQUEST_LINE_MAX]; /* what it asks, in DAWN's words */
    char title[CONV_TITLE_MAX];
+   /* The job's repo ("" when it can't be shown: then only this task), and
+    * whether the preview allows it for every task there. */
+   char repo[CODING_AGENT_REPO_MAX];
+   bool for_repo;
    /* Staged by DAWN when the job started waiting, not asked for: confirmed
-    * only by the user's very next message, in that conversation. */
+    * only by the user's very next message, in that conversation.  DAWN's
+    * question offers both scopes; the confirm names the one chosen. */
    bool unasked;
    int64_t conv;
 } cr_pending_t;
@@ -116,6 +122,62 @@ static bool kind_in(const char *kind, const char *const *kinds) {
 static int64_t request_id(struct json_object *req) {
    struct json_object *jid = NULL;
    return json_object_object_get_ex(req, "id", &jid) ? json_object_get_int64(jid) : 0;
+}
+
+bool coding_agent_repo_name_ok(const char *repo) {
+   const size_t n = repo ? strlen(repo) : 0;
+   return n > 0 && n < CODING_AGENT_REPO_MAX &&
+          strspn(repo, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-") == n &&
+          strcmp(repo, ".") != 0 && strcmp(repo, "..") != 0;
+}
+
+/* @p repo when coding_agent_repo_name_ok(), else "". */
+static void copy_repo(char *out, size_t out_len, const char *repo) {
+   snprintf(out, out_len, "%s", coding_agent_repo_name_ok(repo) ? repo : "");
+}
+
+/* The scope a call names ({"scope": "task"|"repo"}): SUCCESS with *repo_out,
+ * or FAILURE for anything else.  Absent: @p dflt. */
+static int parse_scope(struct json_object *details, bool dflt, bool *repo_out) {
+   struct json_object *js = NULL;
+   if (!json_object_object_get_ex(details, "scope", &js)) {
+      *repo_out = dflt;
+      return SUCCESS;
+   }
+   const char *s = json_object_get_string(js);
+   if (s != NULL && (strcmp(s, "task") == 0 || strcmp(s, "repo") == 0)) {
+      *repo_out = strcmp(s, "repo") == 0;
+      return SUCCESS;
+   }
+   return FAILURE;
+}
+
+/* What a confirm of @p p allows: the preview's scope, or for DAWN's own
+ * question the one the user chose.  NULL, or the error result. */
+static char *confirm_scope(const cr_pending_t *p, struct json_object *details, bool *repo_out) {
+   bool repo = false;
+   if (parse_scope(details, p->for_repo, &repo) != SUCCESS) {
+      return coding_agent_error("scope is 'task' or 'repo'.");
+   }
+   if (!p->unasked && repo != p->for_repo) {
+      return coding_agent_error("Confirm what the preview showed; for the other scope, call "
+                                "approve again with it.");
+   }
+   if (repo && p->repo[0] == '\0') {
+      return coding_agent_error("That job's repo can't be named, so it can be allowed for "
+                                "this task only.");
+   }
+   *repo_out = repo;
+   return NULL;
+}
+
+/* "for this task only" or "for every task on <repo>" into @p out. */
+static void scope_text(char *out, size_t out_len, bool repo, const char *name) {
+   if (repo) {
+      snprintf(out, out_len, "for every task on %s", name);
+   } else {
+      snprintf(out, out_len, "for this task only");
+   }
 }
 
 /* The open request of one of @p kinds that the call names ({"request": N}),
@@ -190,6 +252,10 @@ static int reply(int user_id,
                  size_t next_len,
                  char **err) {
    struct json_object *args = coding_agent_job_args(job);
+   if (args == NULL) {
+      *err = strdup("Couldn't read the coding job.");
+      return CODING_GW_FAILED;
+   }
    json_object_object_add(args, "request_id", json_object_new_int64(rid));
    if (decision != NULL) {
       json_object_object_add(args, "decision", json_object_new_string(decision));
@@ -216,21 +282,52 @@ static int reply(int user_id,
 
 static const char *const k_reach[] = { "domain", "tool", NULL };
 
+static const cr_pending_t *approval_live_locked(uint32_t sid, time_t now);
+
 char *coding_requests_approve(struct json_object *details,
                               int user_id,
                               const turn_origin_t *origin) {
-   /* Not in a turn that read the agent's words (a question it asks can try to
-    * steer an approval): the waiting notice already names what it asks. */
-   if (coding_agent_turn_read(origin)) {
-      return coding_agent_error("This turn read the coding agent's words, so an approval can't be "
-                                "proposed in it. Tell the user what the job waits on, and let them "
-                                "ask for it.");
-   }
+   /* A preview may follow reading the agent's words: it shows only the checked
+    * host or tool, and allows nothing.  Its confirm needs the user's yes in a
+    * turn that read none (confirm_approve). */
    const int64_t job = coding_agent_details_job(details);
    job_record_t rec;
    char *bad = coding_agent_check_job(job, user_id, &rec);
    if (bad != NULL) {
       return bad;
+   }
+   /* The message answering DAWN's own question (same job and request, or its
+    * approval number given as the request, in that conversation) confirms
+    * that, not a new preview. */
+   struct json_object *jreq = NULL;
+   const int64_t named = json_object_object_get_ex(details, "request", &jreq)
+                             ? json_object_get_int64(jreq)
+                             : 0;
+   session_t *ctx = session_get_command_context();
+   const int64_t conv = ctx ? session_turn_conversation(ctx) : 0;
+   uint32_t asked = 0;
+   char asked_line[CODING_GATEWAY_REQUEST_LINE_MAX] = "";
+   pthread_mutex_lock(&s_pending_mutex);
+   const cr_pending_t *live = approval_live_locked(origin->session_id, pending_slots_now());
+   if (live != NULL && live->unasked && live->job == job && live->conv == conv &&
+       origin->turn_number == live->hdr.origin.turn_number + 1 &&
+       (named == 0 || named == live->request_id || named == (int64_t)live->hdr.item_id)) {
+      asked = live->hdr.item_id;
+      safe_strscpy(asked_line, live->line);
+   }
+   pthread_mutex_unlock(&s_pending_mutex);
+   if (asked != 0) {
+      char msg[CODING_GATEWAY_REQUEST_LINE_MAX + 256];
+      snprintf(msg, sizeof(msg),
+               "DAWN already asked the user about this (approval %u: %s): if their message "
+               "agrees, call confirm_approve {\"id\": %u} (with \"scope\": \"repo\" if they "
+               "chose every task on the repo).",
+               (unsigned)asked, asked_line, (unsigned)asked);
+      return coding_agent_error(msg);
+   }
+   bool for_repo = false;
+   if (parse_scope(details, false, &for_repo) != SUCCESS) {
+      return coding_agent_error("scope is 'task' (the default) or 'repo'.");
    }
    char *err = NULL;
    struct json_object *ans = fetch_open(user_id, job, &err);
@@ -248,6 +345,13 @@ char *coding_requests_approve(struct json_object *details,
       return coding_agent_error("DAWN can't check what that request asks for, so it can't be "
                                 "approved here; decline it, or answer the agent another way.");
    }
+   char repo[CODING_AGENT_REPO_MAX];
+   copy_repo(repo, sizeof(repo), coding_gateway_jstr(json_object_object_get(ans, "task"), "repo"));
+   if (for_repo && repo[0] == '\0') {
+      json_object_put(ans);
+      return coding_agent_error("That job's repo can't be named, so it can be allowed for this "
+                                "task only.");
+   }
    pending_stage_rc_t rc = PENDING_STAGED;
    pthread_mutex_lock(&s_pending_mutex);
    cr_pending_t *p = (cr_pending_t *)pending_slots_stage(&s_pending_slots, origin, user_id,
@@ -261,19 +365,23 @@ char *coding_requests_approve(struct json_object *details,
       safe_strscpy(p->value, coding_gateway_jstr(json_object_object_get(req, "payload"), "value"));
       safe_strscpy(p->line, line);
       safe_strscpy(p->title, rec.title);
+      safe_strscpy(p->repo, repo);
+      p->for_repo = for_repo;
    }
    pthread_mutex_unlock(&s_pending_mutex);
    json_object_put(ans);
    if (id == 0) {
       return tool_pending_stage_refusal(rc, "approval");
    }
+   char scope[CODING_AGENT_REPO_MAX + 32];
+   scope_text(scope, sizeof(scope), for_repo, repo);
    strbuf_t sb;
    strbuf_init(&sb, 512);
    strbuf_appendf(&sb,
-                  "About to allow coding job #%lld (%s) to %s, for this task only. Ask the user "
-                  "to confirm; if they say yes in their reply, call coding_agent with action "
-                  "'confirm_approve' and arguments {\"id\": %u} (this one only).",
-                  (long long)job, rec.title, line, (unsigned)id);
+                  "About to allow coding job #%lld (%s) to %s, %s. Ask the user to confirm; if "
+                  "they say yes in their reply, call coding_agent with action 'confirm_approve' "
+                  "and arguments {\"id\": %u} (this one only).",
+                  (long long)job, rec.title, line, scope, (unsigned)id);
    return strbuf_steal(&sb);
 }
 
@@ -291,11 +399,23 @@ char *coding_requests_confirm_approve(struct json_object *details,
    }
    cr_pending_t p;
    turn_origin_rc_t orc = TURN_ORIGIN_OK;
+   bool for_repo = false;
+   char *bad = NULL;
    pthread_mutex_lock(&s_pending_mutex);
-   const pending_find_rc_t rc = pending_slots_take(&s_pending_slots, origin, user_id,
-                                                   CR_PENDING_APPROVE, id, pending_slots_now(), &p,
-                                                   sizeof(p), &orc);
+   /* A scope the approval can't take is refused first, leaving it to answer. */
+   pending_slot_t *slot = NULL;
+   if (pending_slots_find(&s_pending_slots, origin, user_id, CR_PENDING_APPROVE, id,
+                          pending_slots_now(), &slot) == PENDING_FOUND) {
+      bad = confirm_scope((const cr_pending_t *)slot, details, &for_repo);
+   }
+   const pending_find_rc_t rc = bad ? PENDING_FOUND
+                                    : pending_slots_take(&s_pending_slots, origin, user_id,
+                                                         CR_PENDING_APPROVE, id,
+                                                         pending_slots_now(), &p, sizeof(p), &orc);
    pthread_mutex_unlock(&s_pending_mutex);
+   if (bad != NULL) {
+      return bad;
+   }
    if (rc != PENDING_FOUND) {
       return tool_pending_take_refusal(rc, orc, "approval");
    }
@@ -330,14 +450,18 @@ char *coding_requests_confirm_approve(struct json_object *details,
       return coding_agent_error("That request isn't open any more; nothing was allowed.");
    }
    char next[CR_NEXT_MAX];
-   if (reply(user_id, p.job, p.request_id, "allow", NULL, next, sizeof(next), &err) !=
-       CODING_GW_OK) {
+   if (reply(user_id, p.job, p.request_id, for_repo ? "always_repo" : "allow", NULL, next,
+             sizeof(next), &err) != CODING_GW_OK) {
       return coding_agent_error_free(err);
    }
    turn_origin_note_answered(session_get_command_context(), p.hdr.origin.turn_number);
-   char buf[CONV_TITLE_MAX + CODING_GATEWAY_REQUEST_LINE_MAX + CR_NEXT_MAX + 96];
-   snprintf(buf, sizeof(buf), "Allowed: coding job #%lld (%s) may now %s, for this task. %s",
-            (long long)p.job, p.title, p.line, next);
+   char scope[CODING_AGENT_REPO_MAX + 32];
+   scope_text(scope, sizeof(scope), for_repo, p.repo);
+   char buf[CONV_TITLE_MAX + CODING_GATEWAY_REQUEST_LINE_MAX + CR_NEXT_MAX + CODING_AGENT_REPO_MAX +
+            160];
+   snprintf(buf, sizeof(buf), "Allowed: coding job #%lld (%s) may now %s, %s. %s%s",
+            (long long)p.job, p.title, p.line, scope, next,
+            for_repo ? " It stands until removed (grants lists it; revoke_grant removes it)." : "");
    return strdup(buf);
 }
 
@@ -357,6 +481,7 @@ uint32_t coding_requests_stage_unasked(session_t *session,
                                        int64_t job,
                                        int64_t conv,
                                        const char *title,
+                                       const char *repo,
                                        struct json_object *req,
                                        char *line,
                                        size_t line_len,
@@ -395,6 +520,7 @@ uint32_t coding_requests_stage_unasked(session_t *session,
                       coding_gateway_jstr(json_object_object_get(req, "payload"), "value"));
          safe_strscpy(p->line, line);
          safe_strscpy(p->title, title ? title : "");
+         copy_repo(p->repo, sizeof(p->repo), repo ? repo : "");
          p->unasked = true;
          p->conv = conv;
       }
@@ -417,11 +543,11 @@ void coding_requests_drop_unasked(uint32_t id) {
 int coding_requests_describe(const char *value, char *out, size_t out_len, int *valid_for_sec) {
    struct json_object *details = tool_parse_details(value, true);
    const uint32_t id = coding_agent_details_id(details);
-   json_object_put(details);
    turn_origin_t origin;
    int n = -1;
    snprintf(out, out_len, "that approval isn't waiting any more; ask for it again");
    if (id == 0 || !turn_origin_capture(&origin)) {
+      json_object_put(details);
       return FAILURE;
    }
    pthread_mutex_lock(&s_pending_mutex);
@@ -429,11 +555,19 @@ int coding_requests_describe(const char *value, char *out, size_t out_len, int *
    if (pending_slots_find(&s_pending_slots, &origin, tool_get_current_user_id(), CR_PENDING_APPROVE,
                           id, pending_slots_now(), &slot) == PENDING_FOUND) {
       const cr_pending_t *p = (const cr_pending_t *)slot;
-      n = snprintf(out, out_len, "allow coding job #%lld (%s) to %s, for this task only",
-                   (long long)p->job, p->title, p->line);
-      *valid_for_sec = pending_slots_valid_for(&s_pending_slots, slot, pending_slots_now());
+      bool for_repo = false;
+      char *bad = confirm_scope(p, details, &for_repo);
+      if (bad == NULL) {
+         char scope[CODING_AGENT_REPO_MAX + 32];
+         scope_text(scope, sizeof(scope), for_repo, p->repo);
+         n = snprintf(out, out_len, "allow coding job #%lld (%s) to %s, %s", (long long)p->job,
+                      p->title, p->line, scope);
+         *valid_for_sec = pending_slots_valid_for(&s_pending_slots, slot, pending_slots_now());
+      }
+      free(bad);
    }
    pthread_mutex_unlock(&s_pending_mutex);
+   json_object_put(details);
    return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
 }
 
@@ -507,4 +641,71 @@ char *coding_requests_answer(struct json_object *details, int user_id) {
    strbuf_appendf(&sb, "Sent the answer to coding job #%lld (%s): %s\n%s", (long long)job,
                   rec.title, text, next);
    return strbuf_steal(&sb);
+}
+
+/* ========== standing approvals: list and remove ========== */
+
+char *coding_requests_grants(int user_id) {
+   struct json_object *ans = NULL;
+   char *err = NULL;
+   if (coding_gateway_call(user_id, "grants_list", json_object_new_object(), &ans, &err) !=
+       CODING_GW_OK) {
+      return coding_agent_error_free(err);
+   }
+   struct json_object *grants = json_object_object_get(ans, "grants");
+   const size_t n = json_object_is_type(grants, json_type_array) ? json_object_array_length(grants)
+                                                                 : 0;
+   strbuf_t sb;
+   strbuf_init(&sb, 512);
+   strbuf_append(&sb, n == 0 ? "No standing approvals: coding tasks ask for any host or tool "
+                               "beyond the defaults."
+                             : "Standing approvals (revoke_grant {grant: N} removes one):\n");
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *g = json_object_array_get_idx(grants, i);
+      /* Shown as a request is: a checked host or tool name, or nothing. */
+      struct json_object *req = json_object_new_object();
+      struct json_object *payload = json_object_new_object();
+      json_object_object_add(payload, "value",
+                             json_object_new_string(coding_gateway_jstr(g, "value")));
+      json_object_object_add(req, "kind", json_object_new_string(coding_gateway_jstr(g, "kind")));
+      json_object_object_add(req, "payload", payload);
+      char line[CODING_GATEWAY_REQUEST_LINE_MAX];
+      if (!coding_gateway_request_line(req, line, sizeof(line))) {
+         snprintf(line, sizeof(line), "something DAWN can't show");
+      }
+      json_object_put(req);
+      const char *repo = coding_gateway_jstr(g, "repo");
+      const bool named = coding_agent_repo_name_ok(repo);
+      strbuf_appendf(&sb, "- grant %lld: %s, for %s%s\n", (long long)request_id(g), line,
+                     repo[0] == '\0' ? "every repo"
+                     : named         ? "every task on "
+                                     : "a repo DAWN can't show",
+                     named ? repo : "");
+   }
+   json_object_put(ans);
+   return strbuf_steal(&sb);
+}
+
+char *coding_requests_revoke(struct json_object *details, int user_id) {
+   struct json_object *jg = NULL;
+   const int64_t grant = json_object_object_get_ex(details, "grant", &jg)
+                             ? json_object_get_int64(jg)
+                             : 0;
+   if (grant <= 0) {
+      return coding_agent_error("revoke_grant needs {\"grant\": N} (grants lists them).");
+   }
+   struct json_object *args = json_object_new_object();
+   json_object_object_add(args, "grant_id", json_object_new_int64(grant));
+   struct json_object *ans = NULL;
+   char *err = NULL;
+   const int rc = coding_gateway_call(user_id, "grant_revoke", args, &ans, &err);
+   json_object_put(ans);
+   if (rc != CODING_GW_OK) {
+      return coding_agent_error_free(err);
+   }
+   free(err);
+   char buf[128];
+   snprintf(buf, sizeof(buf), "Removed standing approval %lld (grants shows what still stands).",
+            (long long)grant);
+   return strdup(buf);
 }

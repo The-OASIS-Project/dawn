@@ -31,6 +31,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "dawn_error.h"
 #include "logging.h"
@@ -76,6 +77,10 @@ int coding_gateway_call(int user_id,
                         char **err) {
    *out = NULL;
    *err = NULL;
+   if (args == NULL) {
+      *err = strdup("Couldn't read the coding job.");
+      return CODING_GW_FAILED;
+   }
    const char *alias = coding_gateway_alias();
    if (alias == NULL) {
       json_object_put(args);
@@ -127,8 +132,14 @@ const char *coding_gateway_jstr(struct json_object *o, const char *key) {
    return json_object_get_string(v);
 }
 
-void coding_gateway_ref(int64_t conv_id, char *out, size_t out_len) {
-   snprintf(out, out_len, CODING_AGENT_CLIENT_REF_FMT, (long long)conv_id);
+bool coding_gateway_ref(int64_t conv_id, char *out, size_t out_len) {
+   int64_t created = 0;
+   if (conv_db_get_created_at(conv_id, &created) != AUTH_DB_SUCCESS) {
+      out[0] = '\0';
+      return false;
+   }
+   snprintf(out, out_len, CODING_AGENT_CLIENT_REF_FMT, (long long)conv_id, (long long)created);
+   return true;
 }
 
 #define CG_HOST_MAX 253
@@ -191,39 +202,61 @@ bool coding_gateway_request_line(struct json_object *req, char *out, size_t out_
    return true;
 }
 
-int64_t coding_gateway_ref_job(const char *client_ref) {
+int coding_gateway_ref_job(const char *client_ref, int64_t *job_out) {
+   *job_out = 0;
    long long id = 0;
-   char tail;
-   return client_ref && sscanf(client_ref, CODING_AGENT_CLIENT_REF_FMT "%c", &id, &tail) == 1 &&
-                  id > 0
-              ? (int64_t)id
-              : 0;
+   if (client_ref == NULL || sscanf(client_ref, CODING_AGENT_CLIENT_REF_PREFIX "%lld", &id) != 1 ||
+       id <= 0) {
+      return SUCCESS;
+   }
+   int64_t created = 0;
+   const int rc = conv_db_get_created_at(id, &created);
+   if (rc == AUTH_DB_NOT_FOUND) {
+      return SUCCESS;
+   }
+   if (rc != AUTH_DB_SUCCESS) {
+      return FAILURE;
+   }
+   /* Exactly the name DAWN gives that job, nothing that merely parses as it. */
+   char ref[CODING_AGENT_REF_MAX];
+   snprintf(ref, sizeof(ref), CODING_AGENT_CLIENT_REF_FMT, id, (long long)created);
+   if (strcmp(ref, client_ref) == 0) {
+      *job_out = (int64_t)id;
+   }
+   return SUCCESS;
 }
 
 void coding_gateway_cancel(int user_id, int64_t conv_id) {
    char ref[CODING_AGENT_REF_MAX];
-   coding_gateway_ref(conv_id, ref, sizeof(ref));
+   if (!coding_gateway_ref(conv_id, ref, sizeof(ref))) {
+      OLOG_WARNING("coding_agent: can't name job %lld's task; it wasn't asked to stop",
+                   (long long)conv_id);
+      return;
+   }
+   coding_gateway_cancel_ref(user_id, ref);
+}
+
+void coding_gateway_cancel_ref(int user_id, const char *client_ref) {
    struct json_object *args = json_object_new_object();
-   json_object_object_add(args, "client_ref", json_object_new_string(ref));
+   json_object_object_add(args, "client_ref", json_object_new_string(client_ref));
    struct json_object *ans = NULL;
    char *err = NULL;
    if (coding_gateway_call(user_id, "task_cancel", args, &ans, &err) != CODING_GW_OK) {
-      OLOG_WARNING("coding_agent: cancel of job %lld: %s", (long long)conv_id,
-                   err ? err : "failed");
+      OLOG_WARNING("coding_agent: cancel of task %s: %s", client_ref, err ? err : "failed");
    }
    json_object_put(ans);
    free(err);
 }
 
 typedef struct {
-   int64_t conv_id;
+   char ref[CODING_AGENT_REF_MAX];
    int user_id;
 } gw_cancel_t;
 
 static void *cancel_thread(void *arg) {
    gw_cancel_t c = *(gw_cancel_t *)arg;
    free(arg);
-   coding_gateway_cancel(c.user_id, c.conv_id);
+   coding_gateway_cancel_ref(c.user_id, c.ref);
    atomic_fetch_sub(&s_in_flight, 1);
    return NULL;
 }
@@ -246,7 +279,15 @@ void coding_gateway_cancel_async(int user_id, int64_t conv_id) {
       OLOG_WARNING("coding_agent: couldn't ask the gateway to stop job %lld", (long long)conv_id);
       return;
    }
-   c->conv_id = conv_id;
+   /* Named now: the job's row may be deleted right after this returns. */
+   if (!coding_gateway_ref(conv_id, c->ref, sizeof(c->ref))) {
+      free(c);
+      pthread_attr_destroy(&attr);
+      atomic_fetch_sub(&s_in_flight, 1);
+      OLOG_WARNING("coding_agent: can't name job %lld's task; it wasn't asked to stop",
+                   (long long)conv_id);
+      return;
+   }
    c->user_id = user_id;
    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
    pthread_t th;

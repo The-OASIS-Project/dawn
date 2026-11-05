@@ -58,7 +58,7 @@
 #define CW_SERVER_TIMEOUT_S 30 /* [[mcp.server]] request_timeout_seconds when unset */
 #define CW_BACKOFF_S 30        /* after the gateway didn't answer; doubled each time */
 #define CW_BACKOFF_MAX_S 300
-#define CW_RECANCEL_MAX 32 /* jobs whose task was asked to stop again */
+#define CW_RECANCEL_MAX 32 /* tasks asked to stop again */
 #define CW_SCAN_MAX 64     /* open coding jobs checked at start */
 #define CW_NOTICE_MAX (CONV_TITLE_MAX + CODING_GATEWAY_REQUEST_LINE_MAX + 128)
 #define CW_CURSOR_SUFFIX ".cursor"
@@ -76,7 +76,7 @@ static char s_alias[MCP_SERVER_ALIAS_MAX];
 static time_t s_started_at;
 
 /* The watcher thread's own (and a test's): no lock. */
-static int64_t s_recancelled[CW_RECANCEL_MAX];
+static char s_recancelled[CW_RECANCEL_MAX][CODING_AGENT_REF_MAX];
 static int s_recancel_next;
 
 /* ========== Events onto jobs ========== */
@@ -120,20 +120,19 @@ static bool is_working(const char *kind) {
           strcmp(kind, "started") == 0 || strcmp(kind, "resumed") == 0;
 }
 
-/* Ask the gateway once more to stop job @p job's task: DAWN ended or dropped
- * the job, yet its task still reports.  Once per job while it stays in the
- * table's last CW_RECANCEL_MAX. */
-static void recancel(int user_id, int64_t job) {
+/* Ask the gateway once more to stop the task @p ref: DAWN ended or dropped its
+ * job (or it names no job of this database), yet it still reports.  Once per
+ * task while it stays in the table's last CW_RECANCEL_MAX. */
+static void recancel(int user_id, const char *ref) {
    for (int i = 0; i < CW_RECANCEL_MAX; i++) {
-      if (s_recancelled[i] == job) {
+      if (strcmp(s_recancelled[i], ref) == 0) {
          return;
       }
    }
-   s_recancelled[s_recancel_next] = job;
+   snprintf(s_recancelled[s_recancel_next], CODING_AGENT_REF_MAX, "%s", ref);
    s_recancel_next = (s_recancel_next + 1) % CW_RECANCEL_MAX;
-   OLOG_INFO("coding_agent: job %lld has ended here; asking the gateway to stop its task",
-             (long long)job);
-   coding_gateway_cancel(user_id, job);
+   OLOG_INFO("coding_agent: task %s has no open job here; asking the gateway to stop it", ref);
+   coding_gateway_cancel_ref(user_id, ref);
 }
 
 /* The job's end from the gateway's word for it: done, or failed with why.  A
@@ -164,10 +163,16 @@ static bool still_waiting(int user_id,
                           int64_t job,
                           char *asks,
                           size_t asks_len,
+                          char *repo,
+                          size_t repo_len,
                           struct json_object **first_out) {
    *first_out = NULL;
+   repo[0] = '\0';
    char ref[CODING_AGENT_REF_MAX];
-   coding_gateway_ref(job, ref, sizeof(ref));
+   if (!coding_gateway_ref(job, ref, sizeof(ref))) {
+      asks[0] = '\0';
+      return true; /* unknown: say it */
+   }
    struct json_object *args = json_object_new_object();
    json_object_object_add(args, "client_ref", json_object_new_string(ref));
    struct json_object *ans = NULL;
@@ -183,6 +188,8 @@ static bool still_waiting(int user_id,
       }
       if (waiting) {
          *first_out = json_object_get(json_object_array_get_idx(pending, 0));
+         const char *r = coding_gateway_jstr(json_object_object_get(ans, "task"), "repo");
+         snprintf(repo, repo_len, "%s", coding_agent_repo_name_ok(r) ? r : ""); /* never cut */
       }
    }
    json_object_put(ans);
@@ -196,6 +203,7 @@ static void notify_waiting(int user_id,
                            int64_t job,
                            const job_record_t *rec,
                            const char *asks,
+                           const char *repo,
                            struct json_object *first) {
    char *title = llm_context_neutralize(rec->title);
    const char *shown = title ? title : rec->title;
@@ -218,14 +226,20 @@ static void notify_waiting(int user_id,
                            ? webui_find_reinvoke_viewer(rec->parent_id, user_id)
                            : NULL;
    if (viewer != NULL) {
-      approval = coding_requests_stage_unasked(viewer, user_id, job, rec->parent_id, shown, first,
-                                               line, sizeof(line), &already, &staged_turn);
+      approval = coding_requests_stage_unasked(viewer, user_id, job, rec->parent_id, shown, repo,
+                                               first, line, sizeof(line), &already, &staged_turn);
    }
    if (approval != 0) {
-      const int n = snprintf(ask, sizeof(ask),
-                             "Coding job #%lld (%s) is waiting: it wants to %s. Allow it for "
-                             "this task? (approval %u)",
-                             (long long)job, shown, line, (unsigned)approval);
+      /* Offered for the repo only under a name DAWN would grant it for. */
+      const bool named = coding_agent_repo_name_ok(repo);
+      const int n = named ? snprintf(ask, sizeof(ask),
+                                     "Coding job #%lld (%s) is waiting: it wants to %s. Allow "
+                                     "it for this task, or for every task on %s? (approval %u)",
+                                     (long long)job, shown, line, repo, (unsigned)approval)
+                          : snprintf(ask, sizeof(ask),
+                                     "Coding job #%lld (%s) is waiting: it wants to %s. Allow "
+                                     "it for this task? (approval %u)",
+                                     (long long)job, shown, line, (unsigned)approval);
       if (n < 0 || (size_t)n >= sizeof(ask)) {
          coding_requests_drop_unasked(approval); /* its id would be cut off */
          approval = 0;
@@ -262,19 +276,24 @@ void coding_watch_apply(struct json_object *event) {
       }
       return; /* a system event: nobody's job */
    }
-   const int64_t job = coding_gateway_ref_job(coding_gateway_jstr(event, "client_ref"));
+   const char *ref = coding_gateway_jstr(event, "client_ref");
    struct json_object *juser = NULL;
    const int user_id = json_object_object_get_ex(event, "dawn_user_id", &juser)
                            ? json_object_get_int(juser)
                            : 0;
-   if (job <= 0 || user_id <= 0) {
+   if (user_id <= 0 ||
+       strncmp(ref, CODING_AGENT_CLIENT_REF_PREFIX, strlen(CODING_AGENT_CLIENT_REF_PREFIX)) != 0) {
       return; /* a task DAWN didn't start */
    }
+   int64_t job = 0;
+   if (coding_gateway_ref_job(ref, &job) != SUCCESS) {
+      return; /* can't tell whose it is: leave it */
+   }
    job_record_t rec;
-   const int rc = conv_db_job_get(job, user_id, &rec);
+   const int rc = job > 0 ? conv_db_job_get(job, user_id, &rec) : AUTH_DB_NOT_FOUND;
    if (rc == AUTH_DB_NOT_FOUND) {
       if (is_working(kind)) {
-         recancel(user_id, job); /* its job was deleted */
+         recancel(user_id, ref); /* its job was deleted, or is a later one's id */
       }
       return;
    }
@@ -283,7 +302,7 @@ void coding_watch_apply(struct json_object *event) {
    }
    if (strcmp(rec.job_status, "queued") != 0 && strcmp(rec.job_status, "running") != 0) {
       if (is_working(kind)) {
-         recancel(user_id, job); /* DAWN ended it; its task runs on */
+         recancel(user_id, ref); /* DAWN ended it; its task runs on */
       }
       return;
    }
@@ -301,10 +320,11 @@ void coding_watch_apply(struct json_object *event) {
       }
    }
    char asks[CODING_GATEWAY_REQUEST_LINE_MAX] = "";
+   char repo[CODING_AGENT_REPO_MAX] = "";
    struct json_object *first = NULL;
    if (strcmp(kind, "input_required") == 0 &&
-       still_waiting(user_id, job, asks, sizeof(asks), &first)) {
-      notify_waiting(user_id, job, &rec, asks, first);
+       still_waiting(user_id, job, asks, sizeof(asks), repo, sizeof(repo), &first)) {
+      notify_waiting(user_id, job, &rec, asks, repo, first);
       json_object_put(first);
    } else if (is_end(kind)) {
       end_job(job, user_id, kind, json_object_object_get(event, "data"));
@@ -372,7 +392,9 @@ static void cursor_save(int64_t seq) {
 /* One open coding job, after the missed events: what the stream can't say. */
 static int reconcile_job(const job_record_t *rec) {
    char ref[CODING_AGENT_REF_MAX];
-   coding_gateway_ref(rec->id, ref, sizeof(ref));
+   if (!coding_gateway_ref(rec->id, ref, sizeof(ref))) {
+      return FAILURE;
+   }
    struct json_object *args = json_object_new_object();
    json_object_object_add(args, "client_ref", json_object_new_string(ref));
    struct json_object *ans = NULL;
@@ -388,8 +410,8 @@ static int reconcile_job(const job_record_t *rec) {
    struct json_object *task = json_object_object_get(ans, "task");
    const bool queued = strcmp(rec->job_status, "queued") == 0;
    if (!json_object_is_type(task, json_type_object)) {
-      /* No task.  One still starting (DAWN stopped mid-start) is stopped when it
-       * exists; either way the job is over. */
+      /* No task: its start never reached the gateway (the gateway records a
+       * task before answering).  Stopped anyway in case the answer was lost. */
       job_manager_set_terminal_if_active(rec->id, rec->user_id, "failed",
                                          queued ? "it never reached the gateway"
                                                 : "the gateway has no record of it",

@@ -155,13 +155,13 @@ char *coding_delegate_propose(struct json_object *details,
    if (budget < 0.0) {
       return coding_agent_error("budget_usd can't be negative (0 or none: the gateway's default).");
    }
-   /* Not in the turn that read the agent's report: a task the model composed
-    * from it would be proposed before the user has seen it. */
-   if (coding_agent_turn_read(origin)) {
-      return coding_agent_error(
-          "This turn read the coding agent's report, so a new task can't be "
-          "proposed in it. Tell the user what you would ask the agent to do, and "
-          "let them ask for it.");
+   /* A proposal may follow reading the agent's reports: it starts nothing, and
+    * its confirm needs the user's yes in a turn that read none.  But it may not
+    * replace one the user has already seen: their yes would land on the new one. */
+   if (coding_agent_turn_read(origin) && coding_delegate_live(origin->session_id)) {
+      return coding_agent_error("A task is already waiting for the user's answer; it can't be "
+                                "replaced in a turn that read the coding agent's report. Ask "
+                                "the user about the waiting one first.");
    }
    /* The repo must be one the gateway works in. */
    struct json_object *agents = NULL;
@@ -234,7 +234,10 @@ static int start_task(int user_id,
                       size_t branch_len,
                       char **err) {
    char ref[CODING_AGENT_REF_MAX];
-   coding_gateway_ref(conv_id, ref, sizeof(ref));
+   if (!coding_gateway_ref(conv_id, ref, sizeof(ref))) {
+      *err = strdup("Couldn't read the coding job.");
+      return CODING_GW_FAILED;
+   }
    int rc = CODING_GW_FAILED;
    for (int attempt = 0; attempt < 2 && rc == CODING_GW_FAILED; attempt++) {
       free(*err);
@@ -301,7 +304,7 @@ char *coding_delegate_confirm(struct json_object *details,
    char branch[CA_BRANCH_MAX] = "";
    char *err = NULL;
    if (start_task(user_id, conv_id, &p, branch, sizeof(branch), &err) != CODING_GW_OK) {
-      /* Refused, or still no answer: it may have started anyway, so stop it. */
+      /* Refused, or no answer: one whose answer was lost may exist, so stop it. */
       coding_agent_end_quietly(conv_id, user_id, "failed", "the gateway didn't start it");
       coding_gateway_cancel(user_id, conv_id);
       return coding_agent_error_free(err);

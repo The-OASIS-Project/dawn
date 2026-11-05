@@ -51,7 +51,7 @@
 #define CR_KIND_MAX 16                     /* a gateway end: completed, failed, cancelled */
 #define CR_LINE_MAX (CONV_TITLE_MAX + 256) /* a fixed line: the title plus DAWN's words */
 #define CR_REPORT_MAX (16 * 1024)          /* the agent's words put to the take */
-#define CR_FACTS_MAX 256
+#define CR_FACTS_MAX 512     /* DAWN's facts line: branch, checks, uncommitted, cost */
 #define CR_STOP_WAIT_MS 5000 /* stop's wait for report-backs in flight */
 #define CR_STOP_POLL_MS 50
 
@@ -85,6 +85,25 @@ static char *field_text(struct json_object *data, const char *key) {
    return strbuf_steal(&sb);
 }
 
+/* The build and test commands the gateway saw the agent run, one per line with
+ * the outcome the gateway recorded, or "ran" when the line's exit status wasn't
+ * the command's own (piped, backgrounded); "" when none. */
+static char *checks_text(struct json_object *data) {
+   struct json_object *checks = json_object_object_get(data, "checks");
+   strbuf_t sb;
+   strbuf_init(&sb, 256);
+   for (size_t i = 0;
+        json_object_is_type(checks, json_type_array) && i < json_object_array_length(checks); i++) {
+      struct json_object *c = json_object_array_get_idx(checks, i);
+      struct json_object *ok = json_object_object_get(c, "ok");
+      const char *outcome = !json_object_is_type(ok, json_type_boolean) ? "ran"
+                            : json_object_get_boolean(ok)               ? "succeeded"
+                                                                        : "failed";
+      strbuf_appendf(&sb, "- %s: %s\n", outcome, coding_gateway_jstr(c, "command"));
+   }
+   return strbuf_steal(&sb);
+}
+
 /* The agent's words for the take (its report, commits, changed files), cut and
  * framed AGENT CONTENT; NULL when there's no report, or the injection filter
  * flags it (the fixed line then). */
@@ -92,9 +111,11 @@ static char *framed_report(struct json_object *data) {
    char *summary = field_text(data, "summary");
    char *commits = field_text(data, "commits");
    char *diffstat = field_text(data, "diffstat");
+   char *checks = checks_text(data);
    char *framed = NULL;
    if (summary && summary[0] != '\0' && !memory_filter_check_injection_commands(summary) &&
-       !(commits && memory_filter_check_injection_commands(commits))) {
+       !(commits && memory_filter_check_injection_commands(commits)) &&
+       !(checks && memory_filter_check_injection_commands(checks))) {
       strbuf_t sb;
       strbuf_init(&sb, strlen(summary) + 256);
       strbuf_appendf(&sb, "Report:\n%s\n", summary);
@@ -103,6 +124,9 @@ static char *framed_report(struct json_object *data) {
       }
       if (diffstat && diffstat[0] != '\0') {
          strbuf_appendf(&sb, "Changed:\n%s\n", diffstat);
+      }
+      if (checks && checks[0] != '\0') {
+         strbuf_appendf(&sb, "Build and test commands it ran:\n%s", checks);
       }
       char *body = strbuf_steal(&sb);
       if (body != NULL && strlen(body) > CR_REPORT_MAX) {
@@ -116,6 +140,7 @@ static char *framed_report(struct json_object *data) {
    free(summary);
    free(commits);
    free(diffstat);
+   free(checks);
    return framed;
 }
 
@@ -137,6 +162,32 @@ static void facts(char *out, size_t len, struct json_object *data) {
       } else {
          strbuf_append(&sb, " Nothing was left uncommitted.");
       }
+   }
+   /* What the gateway saw, not what the agent says it ran. */
+   struct json_object *checks = json_object_object_get(data, "checks");
+   const size_t n = json_object_is_type(checks, json_type_array) ? json_object_array_length(checks)
+                                                                 : 0;
+   if (n > 0) {
+      size_t passed = 0, failed = 0;
+      for (size_t i = 0; i < n; i++) {
+         struct json_object *ok = json_object_object_get(json_object_array_get_idx(checks, i),
+                                                         "ok");
+         if (json_object_is_type(ok, json_type_boolean)) {
+            passed += json_object_get_boolean(ok);
+            failed += !json_object_get_boolean(ok);
+         }
+      }
+      strbuf_appendf(&sb,
+                     " Of the last %zu build or test command%s the gateway saw it run (each "
+                     "by its last run), %zu succeeded and %zu failed",
+                     n, n == 1 ? "" : "s", passed, failed);
+      if (n > passed + failed) {
+         strbuf_appendf(&sb,
+                        "; %zu had no exit status of their own (piped or in the "
+                        "background)",
+                        n - passed - failed);
+      }
+      strbuf_append(&sb, ".");
    }
    if (json_object_object_get_ex(data, "cost_usd", &v) && json_object_get_double(v) > 0.0) {
       strbuf_appendf(&sb, " It cost $%.2f.", json_object_get_double(v));

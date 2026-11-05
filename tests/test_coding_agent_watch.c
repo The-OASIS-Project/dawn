@@ -130,18 +130,22 @@ uint32_t coding_requests_stage_unasked(struct session *session,
                                        int64_t job,
                                        int64_t conv,
                                        const char *title,
+                                       const char *repo,
                                        struct json_object *req,
                                        char *line,
                                        size_t line_len,
                                        bool *already_out,
                                        uint32_t *turn_out) {
-   (void)session, (void)user_id, (void)job, (void)conv, (void)title;
+   (void)session, (void)user_id, (void)job, (void)conv, (void)title, (void)repo;
    *already_out = false;
    *turn_out = 3;
    if (g_staged_id != 0) {
       coding_gateway_request_line(req, line, line_len);
    }
    return g_staged_id;
+}
+bool coding_agent_repo_name_ok(const char *repo) {
+   return repo && repo[0] != '\0' && strchr(repo, '/') == NULL;
 }
 bool coding_gateway_request_line(struct json_object *req, char *out, size_t out_len) {
    struct json_object *payload = json_object_object_get(req, "payload");
@@ -207,17 +211,34 @@ const char *coding_gateway_jstr(struct json_object *o, const char *key) {
    }
    return json_object_get_string(v);
 }
-void coding_gateway_ref(int64_t conv_id, char *out, size_t out_len) {
-   snprintf(out, out_len, CODING_AGENT_CLIENT_REF_FMT, (long long)conv_id);
+static bool g_read_fails; /* the job's row can't be read */
+bool coding_gateway_ref(int64_t conv_id, char *out, size_t out_len) {
+   snprintf(out, out_len, CODING_AGENT_CLIENT_REF_FMT, (long long)conv_id,
+            (long long)g_row.created_at);
+   return true;
 }
-int64_t coding_gateway_ref_job(const char *client_ref) {
-   long long id = 0;
-   char tail;
-   return client_ref && sscanf(client_ref, CODING_AGENT_CLIENT_REF_FMT "%c", &id, &tail) == 1 ? id
-                                                                                              : 0;
+/* As the real one: the job only when the name is exactly its row's. */
+int coding_gateway_ref_job(const char *client_ref, int64_t *job_out) {
+   *job_out = 0;
+   if (g_read_fails) {
+      return FAILURE;
+   }
+   char ref[CODING_AGENT_REF_MAX];
+   snprintf(ref, sizeof(ref), CODING_AGENT_CLIENT_REF_FMT, (long long)g_row.id,
+            (long long)g_row.created_at);
+   if (g_row_exists && client_ref && strcmp(client_ref, ref) == 0) {
+      *job_out = g_row.id;
+   }
+   return SUCCESS;
 }
 void coding_gateway_cancel(int user_id, int64_t conv_id) {
    (void)user_id, (void)conv_id;
+   atomic_fetch_add(&g_cancels, 1);
+}
+static char g_cancelled_ref[CODING_AGENT_REF_MAX];
+void coding_gateway_cancel_ref(int user_id, const char *client_ref) {
+   (void)user_id;
+   snprintf(g_cancelled_ref, sizeof(g_cancelled_ref), "%s", client_ref);
    atomic_fetch_add(&g_cancels, 1);
 }
 int coding_gateway_call(int user_id,
@@ -240,9 +261,13 @@ int coding_gateway_call(int user_id,
    /* task_events: one completion, then nothing new. */
    usleep(10 * 1000);
    if (atomic_fetch_add(&g_polls, 1) == 0 && g_events_on) {
-      *out = json_tokener_parse("{\"events\":[{\"seq\":5,\"task_id\":\"t1\",\"client_ref\":"
-                                "\"job:42\",\"dawn_user_id\":5,\"kind\":\"completed\","
-                                "\"data\":{\"summary\":\"done\"}}],\"last_seq\":5}");
+      char buf[256];
+      snprintf(buf, sizeof(buf),
+               "{\"events\":[{\"seq\":5,\"task_id\":\"t1\",\"client_ref\":"
+               "\"job:42.%lld\",\"dawn_user_id\":5,\"kind\":\"completed\","
+               "\"data\":{\"summary\":\"done\"}}],\"last_seq\":5}",
+               (long long)g_row.created_at);
+      *out = json_tokener_parse(buf);
    } else {
       *out = json_tokener_parse("{\"events\":[],\"last_seq\":5}");
    }
@@ -278,6 +303,7 @@ static void row(const char *status, const char *kind) {
    snprintf(g_row.job_kind, sizeof(g_row.job_kind), "%s", kind);
    snprintf(g_row.title, sizeof(g_row.title), "fix the oracle");
    g_row.parent_id = 7;
+   g_row.created_at = 1000;
    g_row_exists = true;
 }
 
@@ -291,13 +317,14 @@ void setUp(void) {
    g_viewer = false;
    g_staged_id = 0;
    atomic_store(&g_cancels, 0);
+   g_read_fails = false;
 }
 
 void tearDown(void) {
 }
 
 static void test_steps_go_into_the_job(void) {
-   apply("progress", "job:42", 5);
+   apply("progress", "job:42.1000", 5);
    TEST_ASSERT_EQUAL_INT(1, g_events);
    TEST_ASSERT_EQUAL_STRING(CONV_EVENT_AGENT_STEP, g_last_kind);
    TEST_ASSERT_NOT_NULL(strstr(g_last_payload, "\"gw\":\"progress\""));
@@ -307,23 +334,23 @@ static void test_steps_go_into_the_job(void) {
 }
 
 static void test_ends(void) {
-   apply("completed", "job:42", 5);
+   apply("completed", "job:42.1000", 5);
    TEST_ASSERT_EQUAL_STRING("done", g_end);
    TEST_ASSERT_EQUAL_INT(1, g_reports); /* reported once, */
    TEST_ASSERT_EQUAL_STRING("completed", g_report_kind);
-   apply("completed", "job:42", 5); /* not again on a replay */
+   apply("completed", "job:42.1000", 5); /* not again on a replay */
    TEST_ASSERT_EQUAL_INT(1, g_reports);
    setUp();
-   apply("failed", "job:42", 5);
+   apply("failed", "job:42.1000", 5);
    TEST_ASSERT_EQUAL_STRING("failed", g_end);
    TEST_ASSERT_EQUAL_STRING("failed", g_report_kind);
    setUp();
-   apply("cancelled", "job:42", 5); /* not asked for here */
+   apply("cancelled", "job:42.1000", 5); /* not asked for here */
    TEST_ASSERT_EQUAL_STRING("failed", g_end);
    TEST_ASSERT_EQUAL_STRING("cancelled", g_report_kind);
    TEST_ASSERT_EQUAL_STRING("stopped at the gateway", g_end_why);
    setUp();
-   apply("input_required", "job:42", 5);
+   apply("input_required", "job:42.1000", 5);
    TEST_ASSERT_EQUAL_INT(1, g_notices);
    /* What it asks, in DAWN's words, and the same line in its conversation. */
    TEST_ASSERT_EQUAL_STRING("Coding job #42 (fix the oracle) is waiting: it wants to reach the "
@@ -334,10 +361,10 @@ static void test_ends(void) {
    TEST_ASSERT_EQUAL_STRING(CONV_EVENT_AGENT_REQUEST, g_last_kind);
    TEST_ASSERT_EQUAL_STRING("", g_end);
    g_pending = false; /* replayed after the answer: no notice */
-   apply("input_required", "job:42", 5);
+   apply("input_required", "job:42.1000", 5);
    TEST_ASSERT_EQUAL_INT(1, g_notices);
-   apply("started", "job:42", 5); /* state only */
-   apply("whatever_new", "job:42", 5);
+   apply("started", "job:42.1000", 5); /* state only */
+   apply("whatever_new", "job:42.1000", 5);
    TEST_ASSERT_EQUAL_STRING(CONV_EVENT_AGENT_REQUEST, g_last_kind);
 }
 
@@ -349,7 +376,7 @@ static void test_dawn_asks_with_a_viewer(void) {
    g_staged_id = 4;
    g_dropped = 0;
    g_still_idle = true;
-   apply("input_required", "job:42", 5);
+   apply("input_required", "job:42.1000", 5);
    TEST_ASSERT_EQUAL_STRING("Coding job #42 (fix the oracle) is waiting: it wants to reach the "
                             "host pypi.org. Allow it for this task? (approval 4)",
                             g_posted);
@@ -360,11 +387,11 @@ static void test_dawn_asks_with_a_viewer(void) {
    TEST_ASSERT_EQUAL_INT(0, g_dropped);
    /* A message on its way when it was posted: the approval goes. */
    g_still_idle = false;
-   apply("input_required", "job:42", 5);
+   apply("input_required", "job:42.1000", 5);
    TEST_ASSERT_EQUAL_INT(1, g_dropped);
    /* Nothing staged (busy, or another preview open): the plain notice. */
    g_staged_id = 0;
-   apply("input_required", "job:42", 5);
+   apply("input_required", "job:42.1000", 5);
    TEST_ASSERT_NULL(strstr(g_posted, "approval"));
 }
 
@@ -372,11 +399,11 @@ static void test_dawn_asks_with_a_viewer(void) {
  * (once): DAWN ended it, by a cancel or otherwise. */
 static void test_ended_job_takes_nothing_and_its_task_is_stopped(void) {
    row("failed", JOB_KIND_CODING);
-   apply("completed", "job:42", 5);
+   apply("completed", "job:42.1000", 5);
    TEST_ASSERT_EQUAL_INT(0, atomic_load(&g_cancels)); /* an end needs nothing */
    row("cancelled", JOB_KIND_CODING);
-   apply("progress", "job:42", 5);
-   apply("tool", "job:42", 5);
+   apply("progress", "job:42.1000", 5);
+   apply("tool", "job:42.1000", 5);
    TEST_ASSERT_EQUAL_INT(0, g_events);
    TEST_ASSERT_EQUAL_INT(1, atomic_load(&g_cancels));
 }
@@ -384,19 +411,40 @@ static void test_ended_job_takes_nothing_and_its_task_is_stopped(void) {
 /* A deleted job's task is stopped; its end needs nothing. */
 static void test_deleted_job(void) {
    g_row_exists = false;
-   apply("completed", "job:43", 5);
+   apply("completed", "job:43.1000", 5);
    TEST_ASSERT_EQUAL_INT(0, atomic_load(&g_cancels));
-   apply("progress", "job:43", 5);
+   apply("progress", "job:43.1000", 5);
    TEST_ASSERT_EQUAL_INT(1, atomic_load(&g_cancels));
+}
+
+/* A task named for an earlier job given the same id (a restored database)
+ * takes nothing from the job now holding it, and is stopped. */
+static void test_task_of_an_earlier_job_with_the_id(void) {
+   apply("progress", "job:42.999", 5);
+   apply("completed", "job:42.999", 5);
+   TEST_ASSERT_EQUAL_INT(0, g_events);
+   TEST_ASSERT_EQUAL_STRING("", g_end);
+   TEST_ASSERT_EQUAL_INT(1, atomic_load(&g_cancels));
+   TEST_ASSERT_EQUAL_STRING("job:42.999", g_cancelled_ref);
+}
+
+/* A task whose job can't be read is left alone: it may be a live job's. */
+static void test_unreadable_job_is_left_alone(void) {
+   g_read_fails = true;
+   apply("progress", "job:42.1000", 5);
+   apply("completed", "job:42.1000", 5);
+   TEST_ASSERT_EQUAL_INT(0, g_events);
+   TEST_ASSERT_EQUAL_STRING("", g_end);
+   TEST_ASSERT_EQUAL_INT(0, atomic_load(&g_cancels));
 }
 
 /* Another user's job, a job of another kind, a task DAWN didn't start, and a
  * system event are all left alone. */
 static void test_not_ours(void) {
-   apply("completed", "job:42", 6);
+   apply("completed", "job:42.1000", 6);
    apply("completed", "other-ref", 5);
    row("running", "");
-   apply("completed", "job:42", 5);
+   apply("completed", "job:42.1000", 5);
    struct json_object *sys = json_tokener_parse(
        "{\"task_id\":\"\",\"kind\":\"update\",\"data\":{\"result\":\"updated\"}}");
    coding_watch_apply(sys);
@@ -544,6 +592,8 @@ int main(void) {
    RUN_TEST(test_dawn_asks_with_a_viewer);
    RUN_TEST(test_ended_job_takes_nothing_and_its_task_is_stopped);
    RUN_TEST(test_deleted_job);
+   RUN_TEST(test_task_of_an_earlier_job_with_the_id);
+   RUN_TEST(test_unreadable_job_is_left_alone);
    RUN_TEST(test_not_ours);
    RUN_TEST(test_agent_payload);
    RUN_TEST(test_thread_catches_up_then_saves_the_cursor);

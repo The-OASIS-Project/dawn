@@ -152,7 +152,10 @@ static void report(const char *kind, const char *data_json, int expect_posts) {
 
 static const char *k_done = "{\"summary\":\"Did it.\",\"branch\":\"agent/x\","
                             "\"commits\":[\"ab12 fix x\",\"cd34 add test\"],"
-                            "\"uncommitted\":0,\"cost_usd\":1.07}";
+                            "\"uncommitted\":0,\"cost_usd\":1.07,"
+                            "\"checks\":[{\"command\":\"make tests-ci\",\"ok\":true},"
+                            "{\"command\":\"make | tail\",\"ok\":null},"
+                            "{\"command\":\"ctest -L ci\",\"ok\":false}]}";
 
 void setUp(void) {
    g_parent = 7;
@@ -177,6 +180,12 @@ static void test_completed_posts_the_take(void) {
    TEST_ASSERT_NOT_NULL(strstr(g_ask, "ab12 fix x\ncd34 add test"));
    TEST_ASSERT_NOT_NULL(strstr(g_ask, "Nothing was left uncommitted."));
    TEST_ASSERT_NOT_NULL(strstr(g_ask, "It cost $1.07."));
+   /* What the gateway saw, in DAWN's words; the commands themselves framed. */
+   TEST_ASSERT_NOT_NULL(strstr(g_ask, "Of the last 3 build or test commands the gateway saw it "
+                                      "run (each by its last run), 1 succeeded and 1 failed; 1 "
+                                      "had no exit status"));
+   TEST_ASSERT_NOT_NULL(strstr(g_ask, "- failed: ctest -L ci"));
+   TEST_ASSERT_NOT_NULL(strstr(g_ask, "- ran: make | tail"));
 }
 
 /* The task record (after a restart) has no counts: none are claimed. */
@@ -184,6 +193,9 @@ static void test_only_facts_that_came(void) {
    report("completed", "{\"summary\":\"Did it.\",\"branch\":\"agent/x\"}", 1);
    TEST_ASSERT_NULL(strstr(g_ask, "uncommitted"));
    TEST_ASSERT_NULL(strstr(g_ask, "cost"));
+   TEST_ASSERT_NULL(strstr(g_ask, "build or test")); /* no checks: no claim either way */
+   report("completed", "{\"summary\":\"Did it.\",\"branch\":\"agent/x\",\"checks\":[]}", 1);
+   TEST_ASSERT_NULL(strstr(g_ask, "build or test"));
 }
 
 /* No take (failed, empty, cut off): DAWN's fixed line. */

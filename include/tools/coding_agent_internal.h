@@ -45,6 +45,13 @@ extern "C" {
 /** @p text as an error result (TOOL_RESULT_ERROR_MARK in front); NULL on OOM. */
 char *coding_agent_error(const char *text);
 
+/** Room for a repo's name at the gateway. */
+#define CODING_AGENT_REPO_MAX 64
+
+/** Whether @p repo is a gateway repo name DAWN shows and grants for (letters,
+ *  digits, '.', '_', '-'; not "." or ".."). */
+bool coding_agent_repo_name_ok(const char *repo);
+
 /** coding_agent_error() of @p text, which it frees ("Failed." when NULL). */
 char *coding_agent_error_free(char *text);
 
@@ -119,6 +126,9 @@ char *coding_requests_deny(struct json_object *details, int user_id);
  * holds an approval or delegate preview, or was shown another preview lately
  * (turn_origin_unasked()).  Its confirm takes only that next message.
  *
+ * @param repo        The job's repo at the gateway: DAWN's question offers allowing
+ *                    it for every task there too (only this task when it can't be
+ *                    shown).
  * @param line        Receives what it asks, in DAWN's words (on success).
  * @param already_out Whether this request already waits for the user's
  *                    answer in that session (nothing new to say).
@@ -131,11 +141,19 @@ uint32_t coding_requests_stage_unasked(struct session *session,
                                        int64_t job,
                                        int64_t conv,
                                        const char *title,
+                                       const char *repo,
                                        struct json_object *req,
                                        char *line,
                                        size_t line_len,
                                        bool *already_out,
                                        uint32_t *turn_out);
+
+/** The user's standing approvals (hosts and tools allowed for every task on a
+ *  repo, or on every repo), each with its grant number.  Result: caller frees. */
+char *coding_requests_grants(int user_id);
+
+/** Remove standing approval {grant: N}.  Result: caller frees. */
+char *coding_requests_revoke(struct json_object *details, int user_id);
 
 /** Drop the approval DAWN staged as @p id (its ask couldn't be posted, or the
  *  user's message was on its way when it was). */
