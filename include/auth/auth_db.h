@@ -1573,6 +1573,18 @@ int conv_db_job_bump_reinvoke(int64_t conv_id, int *new_count_out);
 int conv_db_job_reset_for_resume(int64_t conv_id, int user_id, bool allow_cancelled);
 
 /**
+ * @brief Reopen a finished coding job for more work (its agent's session resumes).
+ *
+ * A claim, like conv_db_job_reset_for_resume: one UPDATE takes a coding job of
+ * @p user_id from 'done' or 'failed' to 'queued' (never a cancelled one), clears
+ * job_error, finished_at and on_complete_fired (so its next end is reported),
+ * and sets job_goal to @p goal (what the next end is judged against).
+ * @return AUTH_DB_SUCCESS (claimed), AUTH_DB_NOT_FOUND (absent, not the user's,
+ *         not a coding job, or not done/failed), AUTH_DB_INVALID or AUTH_DB_FAILURE.
+ */
+int conv_db_job_reopen_coding(int64_t conv_id, int user_id, const char *goal);
+
+/**
  * @brief Ownership-scoped: a user's ACTIVE (queued/running) jobs, oldest first.
  *
  * A complete SET, not a page.  job_manager gates every reservation on the global

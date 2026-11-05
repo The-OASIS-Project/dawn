@@ -21,6 +21,8 @@
  * its task at the gateway.
  */
 
+#define _GNU_SOURCE /* strcasestr */
+
 #include <json-c/json.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -46,6 +48,7 @@
 #include "utils/string_utils.h"
 
 #define CA_PENDING_DELEGATE 1
+#define CA_PENDING_REVISE 2
 #define CA_PENDING_TTL_SEC 600
 #define CA_CONFIRM_TURNS 3 /* turns after the preview that may confirm it */
 #define CA_PENDING_MAX 8
@@ -61,6 +64,7 @@ typedef struct {
    char name[CONV_TITLE_MAX]; /* the job's title: the model's short name, else from the task */
    double budget_usd;         /* 0 = the gateway's default */
    int64_t parent_conv;
+   int64_t job; /* a revise: the finished job that gets the work */
 } ca_pending_t;
 
 PENDING_ITEM_CHECK(ca_pending_t);
@@ -130,6 +134,26 @@ static bool has_text(const char *s) {
    return s[strspn(s, " ")] != '\0';
 }
 
+/* A finished coding job of @p user_id the task names ("job 1977", "job #1977"),
+ * or 0: continuing one is revise, since a new task can't see its branch. */
+static int64_t names_finished_job(const char *task, int user_id) {
+   for (const char *p = task; (p = strcasestr(p, "job")) != NULL; p += 3) {
+      const char *q = p + 3;
+      q += strspn(q, " #");
+      if (q == p + 3 || *q < '1' || *q > '9') {
+         continue;
+      }
+      const int64_t job = strtoll(q, NULL, 10);
+      job_record_t rec;
+      if (conv_db_job_get(job, user_id, &rec) == AUTH_DB_SUCCESS &&
+          strcmp(rec.job_kind, JOB_KIND_CODING) == 0 &&
+          (strcmp(rec.job_status, "done") == 0 || strcmp(rec.job_status, "failed") == 0)) {
+         return job;
+      }
+   }
+   return 0;
+}
+
 char *coding_delegate_propose(struct json_object *details,
                               int user_id,
                               int64_t parent_conv,
@@ -154,6 +178,16 @@ char *coding_delegate_propose(struct json_object *details,
    }
    if (budget < 0.0) {
       return coding_agent_error("budget_usd can't be negative (0 or none: the gateway's default).");
+   }
+   const int64_t named = names_finished_job(task, user_id);
+   if (named > 0) {
+      char msg[256];
+      snprintf(msg, sizeof(msg),
+               "This continues coding job #%lld: use revise {\"job\": %lld, \"instructions\": "
+               "...} instead. A new task starts from the repo's base and can't see that job's "
+               "branch or work.",
+               (long long)named, (long long)named);
+      return coding_agent_error(msg);
    }
    /* A proposal may follow reading the agent's reports: it starts nothing, and
     * its confirm needs the user's yes in a turn that read none.  But it may not
@@ -373,6 +407,278 @@ int coding_delegate_describe(const char *value, char *out, size_t out_len, int *
    if (n > 0 && (size_t)n > TOOL_CALL_CHALLENGE_DESC_MAX - 48) {
       snprintf(out, out_len,
                "the task is too long to approve by reply code; the user can ask for it "
+               "again in the WebUI");
+      return FAILURE;
+   }
+   return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+}
+
+/* ========== revise: more work for a finished job ========== */
+
+#define CA_FOLLOW_UP "\n\nFollow-up: "
+#define CA_REVISE_REF_MAX 48
+
+char *coding_revise_propose(struct json_object *details, int user_id, const turn_origin_t *origin) {
+   const int64_t job = coding_agent_details_job(details);
+   job_record_t rec;
+   char *bad = coding_agent_check_job(job, user_id, &rec);
+   if (bad != NULL) {
+      return bad;
+   }
+   const char *text = coding_gateway_jstr(details, "instructions");
+   struct json_object *jbudget = NULL;
+   const double budget = json_object_object_get_ex(details, "budget_usd", &jbudget)
+                             ? json_object_get_double(jbudget)
+                             : 0.0;
+   if (!has_text(text)) {
+      return coding_agent_error("revise needs {\"job\": N, \"instructions\": <the more work>}.");
+   }
+   if (strlen(text) >= CA_TASK_MAX) {
+      return coding_agent_error("Those instructions are too long to send; say them more briefly.");
+   }
+   if (budget < 0.0) {
+      return coding_agent_error("budget_usd can't be negative (0 or none: the gateway's default).");
+   }
+   if (strcmp(rec.job_status, "done") != 0 && strcmp(rec.job_status, "failed") != 0) {
+      char msg[128];
+      snprintf(msg, sizeof(msg),
+               "Coding job #%lld is %s; only a finished (done or failed) job takes more work.",
+               (long long)job, rec.job_status);
+      return coding_agent_error(msg);
+   }
+   /* As delegate: not replacing a draft the user has seen in a turn that read the agent. */
+   if (coding_agent_turn_read(origin) && coding_delegate_live(origin->session_id)) {
+      return coding_agent_error("A coding task is already waiting for the user's answer; it "
+                                "can't be replaced in a turn that read the coding agent's report. "
+                                "Ask the user about the waiting one first.");
+   }
+   pending_stage_rc_t rc = PENDING_STAGED;
+   pthread_mutex_lock(&s_pending_mutex);
+   ca_pending_t *p = (ca_pending_t *)pending_slots_stage(&s_pending_slots, origin, user_id,
+                                                         CA_PENDING_REVISE, pending_slots_now(),
+                                                         &rc);
+   const uint32_t id = p ? p->hdr.item_id : 0;
+   if (p != NULL) {
+      safe_strscpy(p->task, text);
+      safe_strscpy(p->name, rec.title);
+      p->budget_usd = budget;
+      p->job = job;
+   }
+   pthread_mutex_unlock(&s_pending_mutex);
+   if (id == 0) {
+      return tool_pending_stage_refusal(rc, "follow-up");
+   }
+   strbuf_t sb;
+   strbuf_init(&sb, CA_TASK_MAX);
+   strbuf_appendf(&sb, "About to send coding job #%lld (\"%s\") more work, on its branch",
+                  (long long)job, rec.title);
+   if (budget > 0.0) {
+      strbuf_appendf(&sb, ", adding up to $%.2f to its budget", budget);
+   } else {
+      strbuf_append(&sb, ", adding the gateway's usual task budget");
+   }
+   strbuf_appendf(&sb,
+                  ":\n%s\nRead it to the user and ask them to confirm; if they say yes in their "
+                  "reply, call coding_agent with action 'confirm_revise' and arguments "
+                  "{\"id\": %u} (this one only).",
+                  text, (unsigned)id);
+   return strbuf_steal(&sb);
+}
+
+/* The job's goal for its next end: its first goal and this follow-up (only the
+ * latest, so revising often doesn't grow it).  Caller frees. */
+static char *revised_goal(int64_t job, int user_id, const char *text) {
+   char *goal = NULL;
+   if (conv_db_job_get_goal(job, user_id, &goal) != AUTH_DB_SUCCESS) {
+      free(goal);
+      return NULL; /* not losing its first goal */
+   }
+   strbuf_t sb;
+   strbuf_init(&sb, 512);
+   if (goal != NULL) {
+      char *cut = strstr(goal, CA_FOLLOW_UP);
+      if (cut != NULL) {
+         *cut = '\0';
+      }
+      strbuf_append(&sb, goal);
+      free(goal);
+   }
+   strbuf_appendf(&sb, CA_FOLLOW_UP "%s", text);
+   return strbuf_steal(&sb);
+}
+
+/* Send the follow-up to job @p job's task: once more with the same reference
+ * when the first answer was lost (the gateway adds nothing for a repeat). */
+static int revise_task(int user_id, int64_t job, const ca_pending_t *p, char **err) {
+   char ref[CA_REVISE_REF_MAX];
+   snprintf(ref, sizeof(ref), "rev:%lld.%lld.%u", (long long)time(NULL), (long long)p->hdr.made_at,
+            (unsigned)p->hdr.item_id);
+   int rc = CODING_GW_FAILED;
+   for (int attempt = 0; attempt < 2 && rc == CODING_GW_FAILED; attempt++) {
+      free(*err);
+      *err = NULL;
+      struct json_object *args = coding_agent_job_args(job);
+      if (args == NULL) {
+         *err = strdup("Couldn't read the coding job.");
+         return CODING_GW_REFUSED; /* nothing was sent */
+      }
+      json_object_object_add(args, "instructions", json_object_new_string(p->task));
+      json_object_object_add(args, "revise_ref", json_object_new_string(ref));
+      if (p->budget_usd > 0.0) {
+         json_object_object_add(args, "budget_usd", json_object_new_double(p->budget_usd));
+      }
+      struct json_object *ans = NULL;
+      rc = coding_gateway_call(user_id, "task_revise", args, &ans, err);
+      json_object_put(ans);
+   }
+   return rc;
+}
+
+typedef enum {
+   CA_TASK_CLOSED,
+   CA_TASK_OPEN,
+   CA_TASK_UNKNOWN
+} ca_task_state_t;
+
+/* With no answer: whether the task is open at the gateway anyway (the
+ * follow-up got through), or that can't be told either. */
+static ca_task_state_t task_state(int user_id, int64_t job) {
+   struct json_object *ans = NULL;
+   char *err = NULL;
+   ca_task_state_t state = CA_TASK_UNKNOWN;
+   if (coding_gateway_call(user_id, "task_list", coding_agent_job_args(job), &ans, &err) ==
+       CODING_GW_OK) {
+      const char *status = coding_gateway_jstr(json_object_object_get(ans, "task"), "status");
+      state = strcmp(status, "working") == 0 || strcmp(status, "input_required") == 0
+                  ? CA_TASK_OPEN
+                  : CA_TASK_CLOSED;
+   }
+   json_object_put(ans);
+   free(err);
+   return state;
+}
+
+char *coding_revise_confirm(struct json_object *details, int user_id, const turn_origin_t *origin) {
+   const uint32_t id = coding_agent_details_id(details);
+   if (id == 0) {
+      return tool_pending_missing_id("follow-up");
+   }
+   if (coding_agent_turn_read(origin)) {
+      return coding_agent_error("This turn read the coding agent's report, so the follow-up can't "
+                                "be confirmed in it. Ask the user again.");
+   }
+   ca_pending_t p;
+   turn_origin_rc_t orc = TURN_ORIGIN_OK;
+   pthread_mutex_lock(&s_pending_mutex);
+   const pending_find_rc_t rc = pending_slots_take(&s_pending_slots, origin, user_id,
+                                                   CA_PENDING_REVISE, id, pending_slots_now(), &p,
+                                                   sizeof(p), &orc);
+   pthread_mutex_unlock(&s_pending_mutex);
+   if (rc != PENDING_FOUND) {
+      return tool_pending_take_refusal(rc, orc, "follow-up");
+   }
+   turn_origin_note_answered(session_get_command_context(), p.hdr.origin.turn_number);
+
+   job_record_t before;
+   if (conv_db_job_get(p.job, user_id, &before) != AUTH_DB_SUCCESS) {
+      return coding_agent_error("No coding job with that number.");
+   }
+   /* Reopened BEFORE the gateway is asked: the watcher stops a task that reports
+    * while its job isn't open. */
+   char *goal = revised_goal(p.job, user_id, p.task);
+   const int claimed = goal ? conv_db_job_reopen_coding(p.job, user_id, goal) : AUTH_DB_FAILURE;
+   free(goal);
+   if (claimed != AUTH_DB_SUCCESS) {
+      return coding_agent_error(claimed == AUTH_DB_NOT_FOUND
+                                    ? "That job isn't finished any more; nothing was sent."
+                                    : "Couldn't reopen the coding job.");
+   }
+   job_update_emit_ex(p.job, user_id, true);
+   conv_event_emit(p.job, user_id, CONV_EVENT_RESUME, strdup("{\"continued\":true}"));
+
+   char *err = NULL;
+   const int sent = revise_task(user_id, p.job, &p, &err);
+   /* No answer twice: open only if the gateway says its task is.  Unknown too
+    * (it is most likely down, so nothing got through) puts the job back. */
+   const ca_task_state_t state = sent == CODING_GW_FAILED ? task_state(user_id, p.job)
+                                                          : CA_TASK_OPEN;
+   if (sent == CODING_GW_REFUSED || state != CA_TASK_OPEN) {
+      /* Back as it was, with no second notice of its old end. */
+      coding_agent_end_quietly(p.job, user_id, before.job_status,
+                               before.job_error[0] ? before.job_error : NULL);
+      return coding_agent_error_free(err);
+   }
+   free(err);
+   const time_t started = before.started_at ? before.started_at : time(NULL);
+   if (conv_db_job_set_running(p.job, started) != AUTH_DB_SUCCESS) {
+      job_record_t now;
+      const bool read = conv_db_job_get(p.job, user_id, &now) == AUTH_DB_SUCCESS;
+      /* Ended meanwhile: by the new run (a real end, already reported, kept) or
+       * from the task's old end (a reconcile racing this confirm, while the
+       * follow-up runs: opened again rather than let the agent be stopped). */
+      const bool ended = read && (strcmp(now.job_status, "done") == 0 ||
+                                  strcmp(now.job_status, "failed") == 0);
+      if (ended && task_state(user_id, p.job) != CA_TASK_OPEN) {
+         char buf[160];
+         snprintf(buf, sizeof(buf),
+                  "Sent coding job #%lld the follow-up; it has already ended (%s).",
+                  (long long)p.job, now.job_status);
+         return strdup(buf);
+      }
+      char *again = ended ? revised_goal(p.job, user_id, p.task) : NULL;
+      const bool reopened = again &&
+                            conv_db_job_reopen_coding(p.job, user_id, again) == AUTH_DB_SUCCESS &&
+                            conv_db_job_set_running(p.job, started) == AUTH_DB_SUCCESS;
+      free(again);
+      if (!reopened) {
+         coding_gateway_cancel(user_id, p.job);
+         char buf[160];
+         snprintf(buf, sizeof(buf),
+                  "Coding job #%lld changed (%s) while the follow-up was sent, so the agent was "
+                  "stopped; ask again.",
+                  (long long)p.job, read ? now.job_status : "unknown");
+         return coding_agent_error(buf);
+      }
+   }
+   job_update_emit_ex(p.job, user_id, true);
+
+   strbuf_t sb;
+   strbuf_init(&sb, 256);
+   strbuf_appendf(&sb,
+                  "Sent coding job #%lld (\"%s\") the follow-up; its agent picks up on the same "
+                  "branch. The user hears when it needs them or finishes.",
+                  (long long)p.job, p.name);
+   return strbuf_steal(&sb);
+}
+
+/* What confirm_revise, waiting for the user's reply code, sends. */
+int coding_revise_describe(const char *value, char *out, size_t out_len, int *valid_for_sec) {
+   struct json_object *details = tool_parse_details(value, true);
+   const uint32_t id = coding_agent_details_id(details);
+   json_object_put(details);
+   turn_origin_t origin;
+   int n = -1;
+   snprintf(out, out_len, "that follow-up isn't waiting any more; propose it again");
+   if (id == 0 || !turn_origin_capture(&origin)) {
+      return FAILURE;
+   }
+   pthread_mutex_lock(&s_pending_mutex);
+   pending_slot_t *slot = NULL;
+   if (pending_slots_find(&s_pending_slots, &origin, tool_get_current_user_id(), CA_PENDING_REVISE,
+                          id, pending_slots_now(), &slot) == PENDING_FOUND) {
+      const ca_pending_t *p = (const ca_pending_t *)slot;
+      char budget[48] = "the usual task budget";
+      if (p->budget_usd > 0.0) {
+         snprintf(budget, sizeof(budget), "up to $%.2f", p->budget_usd);
+      }
+      n = snprintf(out, out_len, "send coding job #%lld (\"%s\") more work, adding %s: %s",
+                   (long long)p->job, p->name, budget, p->task);
+      *valid_for_sec = pending_slots_valid_for(&s_pending_slots, slot, pending_slots_now());
+   }
+   pthread_mutex_unlock(&s_pending_mutex);
+   if (n > 0 && (size_t)n > TOOL_CALL_CHALLENGE_DESC_MAX - 48) {
+      snprintf(out, out_len,
+               "the follow-up is too long to approve by reply code; the user can ask for it "
                "again in the WebUI");
       return FAILURE;
    }

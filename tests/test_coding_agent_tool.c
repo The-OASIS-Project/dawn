@@ -54,7 +54,12 @@ static bool g_start_fails;
 static int g_start_lost; /* task_start answers lost before one arrives */
 static int g_ntasks;     /* tasks task_list returns */
 static bool g_reachable = true;
-static const char *g_pending = "[]"; /* the task's open requests, as task_list returns them */
+static const char *g_pending = "[]";  /* the task's open requests, as task_list returns them */
+static int g_revise_mode;             /* task_revise: 0 accepted, 1 refused, 2 no answer */
+static bool g_revise_ends_job;        /* the job's old end lands while it is sent */
+static char g_status[JOB_STATUS_MAX]; /* the job row (defined with the job store below) */
+static bool g_list_fails;             /* task_list gets no answer */
+static const char *g_task_status = "working"; /* the task's status, as task_list returns it */
 static const char *g_after_reply = "working"; /* the task's status task_reply returns */
 
 int mcp_bridge_ensure_connected(const char *alias) {
@@ -94,12 +99,27 @@ int mcp_bridge_call_tool(const char *alias,
          return FAILURE; /* no text: no answer */
       }
       *result_out = strdup("{\"id\":\"t1\",\"branch\":\"agent/t1-fix\",\"status\":\"working\"}");
+   } else if (strcmp(tool, "task_revise") == 0) {
+      if (g_revise_ends_job) {
+         snprintf(g_status, sizeof(g_status), "done");
+      }
+      if (g_revise_mode == 1) {
+         *result_out = strdup("the task's clone is gone; start a new task");
+         return FAILURE;
+      }
+      if (g_revise_mode == 2) {
+         return FAILURE; /* no text: no answer */
+      }
+      *result_out = strdup("{\"id\":\"t1\",\"status\":\"working\"}");
    } else if (strcmp(tool, "task_list") == 0 && args_json && strstr(args_json, "client_ref")) {
+      if (g_list_fails) {
+         return FAILURE;
+      }
       char buf[2048];
       snprintf(buf, sizeof(buf),
-               "{\"task\":{\"status\":\"working\",\"client_ref\":\"job:42.1000\","
+               "{\"task\":{\"status\":\"%s\",\"client_ref\":\"job:42.1000\","
                "\"repo\":\"dawn\"},\"pending\":%s}",
-               g_pending);
+               g_task_status, g_pending);
       *result_out = strdup(buf);
    } else if (strcmp(tool, "task_list") == 0 && g_ntasks > 0) {
       /* Each summary ends in a multi-byte character past any excerpt's cut. */
@@ -245,6 +265,26 @@ int job_manager_set_terminal_if_active(int64_t conv_id,
 }
 void job_update_emit(int64_t conv_id, int user_id) {
    (void)conv_id, (void)user_id;
+}
+static int g_resumed_emits;
+void job_update_emit_ex(int64_t conv_id, int user_id, bool resumed) {
+   (void)conv_id, (void)user_id;
+   g_resumed_emits += resumed;
+}
+static char g_goal[512];
+int conv_db_job_get_goal(int64_t conv_id, int user_id, char **out) {
+   (void)conv_id, (void)user_id;
+   *out = strdup(g_goal[0] ? g_goal : "fix the oracle");
+   return AUTH_DB_SUCCESS;
+}
+int conv_db_job_reopen_coding(int64_t conv_id, int user_id, const char *goal) {
+   if (conv_id != 42 || user_id != 5 || strcmp(g_kind, JOB_KIND_CODING) != 0 ||
+       (strcmp(g_status, "done") != 0 && strcmp(g_status, "failed") != 0)) {
+      return AUTH_DB_NOT_FOUND;
+   }
+   snprintf(g_status, sizeof(g_status), "queued");
+   snprintf(g_goal, sizeof(g_goal), "%s", goal);
+   return AUTH_DB_SUCCESS;
 }
 static job_kind_cancel_fn g_hook;
 int job_manager_register_kind_cancel(const char *kind, job_kind_cancel_fn fn) {
@@ -426,6 +466,12 @@ void setUp(void) {
    g_granted = true;
    g_status[0] = '\0';
    g_pending = "[]";
+   g_revise_mode = 0;
+   g_revise_ends_job = false;
+   g_list_fails = false;
+   g_task_status = "working";
+   g_goal[0] = '\0';
+   g_resumed_emits = 0;
    g_after_reply = "working";
    g_turn++;
 }
@@ -860,6 +906,161 @@ static void test_grants_list_and_revoke(void) {
    free(r);
 }
 
+/* revise: a finished job gets more work on its branch on the user's yes; the
+ * job reopens (marked resumed), its goal carries the latest follow-up only, and
+ * the gateway is told once. */
+static void test_revise_then_confirm(void) {
+   coding_job();
+   char *r = call("revise", "{\"job\":42,\"instructions\":\"use Vosk\"}");
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "only a finished"), r); /* still running */
+   free(r);
+   snprintf(g_status, sizeof(g_status), "done");
+   snprintf(g_goal, sizeof(g_goal), "fix the oracle\n\nFollow-up: an older one");
+   char *preview = call("revise", "{\"job\":42,\"instructions\":\"use Vosk\",\"budget_usd\":2}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
+   TEST_ASSERT_NOT_NULL(strstr(preview, "adding up to $2.00 to its budget"));
+   TEST_ASSERT_EQUAL_INT(-1, last_call("task_revise"));
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   free(preview);
+   g_turn++;
+   char out[256];
+   int valid = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         g_meta.describe_call("confirm_revise", args, out, sizeof(out), &valid));
+   TEST_ASSERT_NOT_NULL(strstr(out, "adding up to $2.00: use Vosk"));
+   char *done = call("confirm_revise", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
+   free(done);
+   TEST_ASSERT_EQUAL_STRING("running", g_status);
+   TEST_ASSERT_EQUAL_STRING("fix the oracle\n\nFollow-up: use Vosk", g_goal);
+   TEST_ASSERT_TRUE(g_resumed_emits >= 1);
+   const int c = last_call("task_revise");
+   TEST_ASSERT_NOT_EQUAL(-1, c);
+   TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"instructions\": \"use Vosk\""));
+   TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"revise_ref\": \"rev:"));
+   /* A second yes finds nothing waiting. */
+   r = call("confirm_revise", args);
+   TEST_ASSERT_TRUE(is_error(r));
+   free(r);
+}
+
+/* Refused, or no answer with no open task: the job goes back as it was, with no
+ * second notice; no answer but the task open: the job stays open. */
+static void test_revise_not_sent(void) {
+   coding_job();
+   for (int mode = 1; mode <= 3; mode++) {
+      snprintf(g_status, sizeof(g_status), "failed");
+      g_fired = false;
+      g_revise_mode = mode == 1 ? 1 : 2;
+      g_task_status = mode == 3 ? "input_required" : "failed";
+      char *preview = call("revise", "{\"job\":42,\"instructions\":\"more\"}");
+      char args[48];
+      snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+      free(preview);
+      g_turn++;
+      char *r = call("confirm_revise", args);
+      if (mode < 3) {
+         TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+         TEST_ASSERT_EQUAL_STRING("failed", g_status);
+         TEST_ASSERT_TRUE(g_fired);
+      } else {
+         TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
+         TEST_ASSERT_EQUAL_STRING("running", g_status);
+      }
+      free(r);
+      g_turn++;
+   }
+}
+
+/* Stage a revise of job 42 and return its confirm arguments in @p args. */
+static void stage_revise(char *args, size_t len) {
+   char *preview = call("revise", "{\"job\":42,\"instructions\":\"more\"}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
+   snprintf(args, len, "{\"id\":%u}", preview_id(preview));
+   free(preview);
+}
+
+/* A new task naming a finished job is turned to revise; a running one, or a
+ * number that isn't the user's coding job, isn't. */
+static void test_delegate_naming_a_finished_job(void) {
+   coding_job();
+   snprintf(g_status, sizeof(g_status), "done");
+   char *r = call("delegate", "{\"repo\":\"dawn\",\"task\":\"Follow-up to Job #42: fix it\"}");
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "use revise {\"job\": 42"), r);
+   free(r);
+   r = call("delegate", "{\"repo\":\"dawn\",\"task\":\"fix the jobs 7 queue, job 43 too\"}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
+   free(r);
+}
+
+/* Edges: a job of another user, a cancelled one, a yes in a read turn; a lost
+ * answer retried once with the same ref, then unknown (put back); the old end
+ * landing while it is sent (opened again) vs the new run's own fast end (kept). */
+static void test_revise_edges(void) {
+   coding_job();
+   snprintf(g_status, sizeof(g_status), "cancelled");
+   char *r = call("revise", "{\"job\":42,\"instructions\":\"more\"}");
+   TEST_ASSERT_TRUE(is_error(r));
+   free(r);
+   r = call("revise", "{\"job\":43,\"instructions\":\"more\"}");
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "No coding job"), r);
+   free(r);
+
+   snprintf(g_status, sizeof(g_status), "done");
+   char args[48];
+   stage_revise(args, sizeof(args));
+   g_turn++;
+   free(call("status", "{\"job\":42}")); /* this turn read the agent */
+   r = call("confirm_revise", args);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "can't be confirmed in it"), r);
+   free(r);
+   g_turn++;
+
+   g_revise_mode = 2;
+   g_list_fails = true;
+   stage_revise(args, sizeof(args));
+   g_turn++;
+   const int before = atomic_load(&g_ncalls);
+   r = call("confirm_revise", args);
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+   free(r);
+   int sends[2], n = 0;
+   for (int i = before; i < atomic_load(&g_ncalls) && n < 2; i++) {
+      if (strcmp(g_calls[i], "task_revise") == 0) {
+         sends[n++] = i;
+      }
+   }
+   TEST_ASSERT_EQUAL_INT(2, n); /* retried once... */
+   const char *ref0 = strstr(g_args[sends[0]], "rev:"), *ref1 = strstr(g_args[sends[1]], "rev:");
+   TEST_ASSERT_NOT_NULL(ref0);
+   TEST_ASSERT_NOT_NULL(ref1);
+   TEST_ASSERT_EQUAL_INT(0, strncmp(ref0, ref1, 24)); /* ...with the same ref */
+   TEST_ASSERT_EQUAL_STRING("done", g_status);        /* unknown: put back */
+   g_turn++;
+
+   snprintf(g_status, sizeof(g_status), "done");
+   g_revise_mode = 0;
+   g_list_fails = false;
+   g_revise_ends_job = true;
+   stage_revise(args, sizeof(args));
+   g_turn++;
+   r = call("confirm_revise", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
+   free(r);
+   TEST_ASSERT_EQUAL_STRING("running", g_status); /* the task is open: opened again */
+   g_turn++;
+
+   snprintf(g_status, sizeof(g_status), "done");
+   g_task_status = "failed"; /* the new run failed at once */
+   stage_revise(args, sizeof(args));
+   g_turn++;
+   r = call("confirm_revise", args);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "already ended"), r);
+   free(r);
+   TEST_ASSERT_EQUAL_STRING("done", g_status); /* its real end is kept */
+}
+
 /* A request that closed since the preview (or changed) allows nothing. */
 static void test_confirm_approve_needs_the_request_still_open(void) {
    coding_job();
@@ -1200,6 +1401,10 @@ int main(void) {
    RUN_TEST(test_changes_lists_files_and_commits);
    RUN_TEST(test_file_views);
    RUN_TEST(test_approve_then_confirm_allows);
+   RUN_TEST(test_revise_then_confirm);
+   RUN_TEST(test_revise_not_sent);
+   RUN_TEST(test_revise_edges);
+   RUN_TEST(test_delegate_naming_a_finished_job);
    RUN_TEST(test_approve_for_the_repo);
    RUN_TEST(test_grants_list_and_revoke);
    RUN_TEST(test_confirm_approve_needs_the_request_still_open);

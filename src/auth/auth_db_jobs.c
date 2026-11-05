@@ -572,6 +572,38 @@ int conv_db_job_reset_for_resume(int64_t conv_id, int user_id, bool allow_cancel
    return changed == 1 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
+int conv_db_job_reopen_coding(int64_t conv_id, int user_id, const char *goal) {
+   if (conv_id <= 0 || user_id <= 0 || goal == NULL) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* The status, owner and kind terms are the claim: two confirms of one job
+    * can't both reopen it.  started_at stays: the job's first start. */
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE conversations SET job_status='queued', job_error=NULL, "
+                          "finished_at=0, on_complete_fired=0, job_goal=? "
+                          "WHERE id=? AND user_id=? AND job_kind='" JOB_KIND_CODING
+                          "' AND job_status IN ('done','failed')",
+                          -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("auth_db_jobs: prepare reopen_coding failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_text(st, 1, goal, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(st, 2, conv_id);
+   sqlite3_bind_int(st, 3, user_id);
+   int rc = sqlite3_step(st);
+   int changed = sqlite3_changes(s_db.db);
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("auth_db_jobs: reopen_coding failed for conv %lld", (long long)conv_id);
+      return AUTH_DB_FAILURE;
+   }
+   return changed == 1 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
+}
+
 /* =============================================================================
  * Ownership-checked readers
  * ============================================================================= */

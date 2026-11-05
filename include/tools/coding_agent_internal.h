@@ -92,11 +92,20 @@ char *coding_delegate_confirm(struct json_object *details,
                               int user_id,
                               const turn_origin_t *origin);
 
-/** Whether session @p session_id has a delegate preview waiting for its yes. */
+/** Whether session @p session_id has a delegate or revise preview waiting for its yes. */
 bool coding_delegate_live(uint32_t session_id);
 
 /** describe_call for confirm_delegate (tool_metadata_t.describe_call). */
 int coding_delegate_describe(const char *value, char *out, size_t out_len, int *valid_for_sec);
+
+/** revise: stage more work for a finished job and return the preview the user confirms. */
+char *coding_revise_propose(struct json_object *details, int user_id, const turn_origin_t *origin);
+
+/** confirm_revise: reopen the job and send its task the follow-up. */
+char *coding_revise_confirm(struct json_object *details, int user_id, const turn_origin_t *origin);
+
+/** describe_call for confirm_revise. */
+int coding_revise_describe(const char *value, char *out, size_t out_len, int *valid_for_sec);
 
 /* ---- coding_agent_requests.c ---- */
 

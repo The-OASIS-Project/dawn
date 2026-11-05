@@ -118,9 +118,15 @@ static void append_task(strbuf_t *sb, struct json_object *t, bool full) {
                   coding_gateway_jstr(t, "repo"), coding_gateway_jstr(t, "branch"));
    const char *cost = coding_gateway_jstr(t, "cost_usd");
    if (cost[0] != '\0') {
-      strbuf_appendf(sb, ", spent $%s", cost);
+      strbuf_appendf(sb, ", spent $%.2f", atof(cost));
    }
    strbuf_append(sb, "\n");
+   const char *status = coding_gateway_jstr(t, "status");
+   if (job > 0 && (strcmp(status, "completed") == 0 || strcmp(status, "failed") == 0)) {
+      /* Where the choice is made: continuing this job is revise, not a new task. */
+      strbuf_appendf(sb, "  more work on this job's own branch: revise {\"job\": %lld}\n",
+                     (long long)job);
+   }
    const size_t max = full ? CA_FULL_TEXT : CA_EXCERPT;
    append_excerpt(sb, "task", coding_gateway_jstr(t, "task"), max);
    append_excerpt(sb, "result", coding_gateway_jstr(t, "summary"), max);
@@ -549,6 +555,9 @@ static int coding_agent_describe_call(const char *action,
    if (strcmp(action, "confirm_approve") == 0) {
       return coding_requests_describe(value, out, out_len, valid_for_sec);
    }
+   if (strcmp(action, "confirm_revise") == 0) {
+      return coding_revise_describe(value, out, out_len, valid_for_sec);
+   }
    return TOOL_DESCRIBE_DEFAULT;
 }
 
@@ -570,7 +579,7 @@ static char *coding_agent_callback(const char *action, char *value, int *should_
    if (action == NULL || action[0] == '\0') {
       return coding_agent_error(
           "action is required (list, status, changes, file, delegate, confirm_delegate, "
-          "approve, confirm_approve, deny, answer, grants, revoke_grant).");
+          "revise, confirm_revise, approve, confirm_approve, deny, answer, grants, revoke_grant).");
    }
    const int user_id = tool_get_current_user_id();
    session_t *ctx = session_get_command_context();
@@ -616,6 +625,10 @@ static char *coding_agent_callback(const char *action, char *value, int *should_
                                        &origin);
    } else if (strcmp(action, "confirm_delegate") == 0) {
       result = coding_delegate_confirm(details, user_id, &origin);
+   } else if (strcmp(action, "revise") == 0) {
+      result = coding_revise_propose(details, user_id, &origin);
+   } else if (strcmp(action, "confirm_revise") == 0) {
+      result = coding_revise_confirm(details, user_id, &origin);
    } else if (strcmp(action, "approve") == 0) {
       result = coding_requests_approve(details, user_id, &origin);
    } else if (strcmp(action, "confirm_approve") == 0) {
@@ -631,7 +644,8 @@ static char *coding_agent_callback(const char *action, char *value, int *should_
    } else {
       result = coding_agent_error(
           "Unknown action. Valid: list, status, changes, file, delegate, confirm_delegate, "
-          "approve, confirm_approve, deny, answer, grants, revoke_grant.");
+          "revise, confirm_revise, approve, confirm_approve, deny, answer, grants, "
+          "revoke_grant.");
    }
    json_object_put(details);
    return result;
@@ -673,7 +687,9 @@ static const treg_param_t coding_agent_params[] = {
                       "run), 'file' (one file's "
                       "diff, or the file after or before), 'delegate' (propose a task; nothing "
                       "starts), 'confirm_delegate' (start the proposed task once the user "
-                      "agrees), 'approve' (propose allowing a host or tool a job waits on), "
+                      "agrees), 'revise' (propose more work for a finished job, on its branch), "
+                      "'confirm_revise' (send it once the user agrees), 'approve' (propose "
+                      "allowing a host or tool a job waits on), "
                       "'confirm_approve' (allow it once the user agrees), 'deny' (decline it), "
                       "'answer' (answer the agent's question), 'grants' (the hosts and tools "
                       "allowed for every task on a repo), 'revoke_grant' (remove one).",
@@ -681,8 +697,9 @@ static const treg_param_t coding_agent_params[] = {
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
        .enum_values = { "list", "status", "changes", "file", "delegate", "confirm_delegate",
-                        "approve", "confirm_approve", "deny", "answer", "grants", "revoke_grant" },
-       .enum_count = 12,
+                        "revise", "confirm_revise", "approve", "confirm_approve", "deny", "answer",
+                        "grants", "revoke_grant" },
+       .enum_count = 14,
    },
    {
        .name = "arguments",
@@ -693,9 +710,12 @@ static const treg_param_t coding_agent_params[] = {
                       "the job, 3-6 words, that you and the user call it by), task (the user's "
                       "goal, complete and self-contained since the agent sees only this; add no "
                       "limits, steps or tools the user didn't ask for: the agent works out how), "
-                      "budget_usd (optional)}. confirm_delegate, confirm_approve: {id (the "
-                      "number delegate or approve returned)}; only in the user's reply agreeing "
-                      "to it. approve: {job, request (when the job waits on several), scope "
+                      "budget_usd (optional)}. revise: {job, instructions (the more work, in "
+                      "the user's words; the same agent resumes with what it knows), budget_usd "
+                      "(optional, added to the job's budget)}. confirm_delegate, confirm_revise, "
+                      "confirm_approve: {id (the number delegate, revise or approve returned)}; "
+                      "only in the user's reply agreeing to it. approve: {job, request (when the "
+                      "job waits on several), scope "
                       "('task', the default; 'repo' only when the user asks to allow it for "
                       "every task on the job's repo)}. deny: {job, request}. "
                       "answer: {job, answer (the user's own words), request (optional)}. "
@@ -713,6 +733,8 @@ static const tool_action_kind_entry_t s_action_kinds[] = {
    { "file", TOOL_KIND_READ, NULL, TOOL_FRAME_AGENT },
    { "delegate", TOOL_KIND_PREPARE, "confirm_delegate" },
    { "confirm_delegate", TOOL_KIND_ACT, NULL },
+   { "revise", TOOL_KIND_PREPARE, "confirm_revise" },
+   { "confirm_revise", TOOL_KIND_ACT, NULL },
    { "approve", TOOL_KIND_PREPARE, "confirm_approve" },
    { "confirm_approve", TOOL_KIND_ACT, NULL },
    { "deny", TOOL_KIND_ACT, NULL },
@@ -728,7 +750,10 @@ static const tool_metadata_t coding_agent_metadata = {
    .description =
        "Hands coding work to a coding agent (Claude Code) that works on its own branch in one of "
        "the user's repos, in the background, and asks the user when it needs a decision. Use it "
-       "when the user asks to have code written, fixed, reviewed or changed in a repo. delegate "
+       "when the user asks to have code written, fixed, reviewed or changed in a repo. To "
+       "continue or follow up on an existing job (\"follow up on job N\", \"also fix X\", "
+       "\"now change Y\"), use revise, never delegate: delegate starts a new agent on a fresh "
+       "copy of the repo's base, which can't see the job's branch or work. delegate "
        "(no list needed first: it checks the repo) proposes the task and starts nothing: read the "
        "task to the user, and start it with "
        "confirm_delegate only after they agree. changes and file show the agent's work itself, so "
