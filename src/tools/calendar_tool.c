@@ -641,6 +641,7 @@ static char *handle_add(struct json_object *details, int user_id, const tz_t *zo
                       n.rrule && n.rrule[0] ? n.rrule : "");
    if (uid[0] && pos >= 0 && pos < 640)
       snprintf(buf + pos, 640 - (size_t)pos, "\nUID: %s", uid);
+   llm_tools_result_third_party(TOOL_FRAME_CALENDAR); /* the calendar's name: a sharer's */
    return buf;
 }
 
@@ -888,8 +889,8 @@ static const treg_param_t calendar_params[] = {
 
 /* What an event says (its title, place, who invited) and a calendar's name
  * anyone who shares a calendar or sends an invitation may have written: the
- * reads frame it (TOOL_FRAME_CALENDAR), as does an add's list of calendars to
- * pick from; the rest is the tool's own. */
+ * reads frame it (TOOL_FRAME_CALENDAR), as does an add's reply (it names the
+ * calendar, or the calendars to pick from); the rest is the tool's own. */
 static const tool_action_kind_entry_t s_calendar_action_kinds[] = {
    { "calendars", TOOL_KIND_READ, NULL, TOOL_FRAME_CALENDAR },
    { "today", TOOL_KIND_READ, NULL, TOOL_FRAME_CALENDAR },
