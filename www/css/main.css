@@ -32,6 +32,7 @@
 @import url('components/documents.css');
 @import url('components/history.css');
 @import url('components/memory.css');
+@import url('components/memory-batches.css');
 @import url('components/input.css');
 @import url('components/metrics.css');
 @import url('components/modals.css');

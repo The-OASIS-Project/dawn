@@ -810,6 +810,11 @@ static const char *SCHEMA_SQL =
      * blob to the orphan sweep.  Migrated DBs get a plain TEXT column (SQLite
      * can't ALTER-add an FK) with the link enforced in C. */
     "  original_blob_id TEXT DEFAULT NULL,"
+    /* outside (v114): where its text came from (outside_kind_t): a research
+     * report, an upload, or a note saved in a turn that read outside text.
+     * own (v114): the user vouched for its text as their own words. */
+    "  outside INTEGER NOT NULL DEFAULT 0,"
+    "  own INTEGER NOT NULL DEFAULT 0,"
     "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,"
     "  FOREIGN KEY(original_blob_id) REFERENCES blobs(id) ON DELETE SET NULL"
     ");"
@@ -871,6 +876,9 @@ static const char *SCHEMA_SQL =
     "  filename TEXT NOT NULL,"
     "  text TEXT NOT NULL,"
     "  archived_at INTEGER NOT NULL,"
+    /* outside (v114): the document's outside kind when archived, restored
+     * with it. */
+    "  outside INTEGER NOT NULL DEFAULT 0,"
     "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_doc_versions_doc "
@@ -1181,8 +1189,11 @@ int auth_db_create_schema(const char *db_path) {
 
    /* Back up the database before any upgrade touches it.  Only for a real
     * version bump on an existing DB (fresh installs have nothing to lose).  A
-    * failed backup ABORTS the upgrade — we never migrate unprotected. */
-   if (current_version > 0 && current_version < AUTH_DB_SCHEMA_VERSION) {
+    * failed backup ABORTS the upgrade — we never migrate unprotected.  A
+    * database stamped past this code that still lacks v114's columns is
+    * migrated too (auth_db_apply_migrations), so it is backed up as well. */
+   if (current_version > 0 &&
+       (current_version < AUTH_DB_SCHEMA_VERSION || auth_db_migrations_v114_pending(s_db.db))) {
       if (auth_db_backup_before_upgrade(db_path, current_version) != AUTH_DB_SUCCESS) {
          OLOG_ERROR("auth_db: aborting upgrade v%d->v%d — pre-upgrade backup failed",
                     current_version, AUTH_DB_SCHEMA_VERSION);

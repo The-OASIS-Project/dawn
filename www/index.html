@@ -611,6 +611,19 @@
                >
                   Contacts
                </button>
+               <!-- What memory learned per batch (memory_batches.js); shown when
+                    the daemon advertises memory_batches. -->
+               <button
+                  id="memory-tab-learned"
+                  class="memory-tab"
+                  data-tab="learned"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="memory-list"
+                  hidden
+               >
+                  Learned
+               </button>
             </div>
 
             <div class="memory-search">
@@ -1557,6 +1570,10 @@ Format rules:
                   Share globally (all users)
                </label>
             </div>
+            <p id="doc-library-own-hint" class="doc-library-own-hint hidden">
+               My own text: treat this document's text as my own words when it's recalled; leave off
+               for files from others.
+            </p>
             <div
                id="doc-library-list"
                class="doc-library-list"
@@ -3882,6 +3899,8 @@ token = "eyJ..."</pre
       <script defer src="/js/ui/memory_import.js"></script>
       <script defer src="/js/ui/memory_source.js"></script>
       <script defer src="/js/ui/memory_merged.js"></script>
+      <script defer src="/js/ui/memory_batches.js"></script>
+      <script defer src="/js/ui/memory-marker.js"></script>
       <script defer src="/js/ui/memory.js"></script>
       <script defer src="/js/ui/silent-observe.js"></script>
       <script defer src="/js/ui/context-injection.js"></script>

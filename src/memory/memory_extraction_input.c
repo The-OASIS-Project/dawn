@@ -40,7 +40,6 @@
 #include "logging.h"
 #include "memory/memory_history_loader.h"
 #include "memory/memory_note_guard.h"
-#include "memory/memory_types.h"
 #include "prompts.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
@@ -205,17 +204,35 @@ static bool result_is_own(struct json_object *history, size_t at, const char *id
    return own;
 }
 
-/* Whether @p content (a string or text parts) holds @p needle. */
-static bool content_has(struct json_object *content, const char *needle) {
+/* Whether @p text holds a source excerpt of a conversation that read outside
+ * text: a line "[source: conv=... msgs=...] (outside)" (memory_callback.c),
+ * under which the stored messages are quoted verbatim. */
+static bool text_has_outside_excerpt(const char *text) {
+   static const size_t head = sizeof(OUTSIDE_MARKER_SOURCE_HEAD) - 1;
+   static const size_t mark = sizeof(OUTSIDE_MARKER_MEMORY_MARK) - 1;
+   for (const char *line = text; line && *line;) {
+      const char *end = strchr(line, '\n');
+      const size_t n = end ? (size_t)(end - line) : strlen(line);
+      if (n >= head + mark && strncmp(line, OUTSIDE_MARKER_SOURCE_HEAD, head) == 0 &&
+          memcmp(line + n - mark, OUTSIDE_MARKER_MEMORY_MARK, mark) == 0) {
+         return true;
+      }
+      line = end ? end + 1 : NULL;
+   }
+   return false;
+}
+
+/* Whether a tool result's content (a string, or text parts) holds one. */
+static bool content_has_outside_excerpt(struct json_object *content) {
    if (json_object_is_type(content, json_type_string)) {
-      return strstr(json_object_get_string(content), needle) != NULL;
+      return text_has_outside_excerpt(json_object_get_string(content));
    }
    for (size_t i = 0;
         json_object_is_type(content, json_type_array) && i < json_object_array_length(content);
         i++) {
       struct json_object *text = NULL;
       if (json_object_object_get_ex(json_object_array_get_idx(content, i), "text", &text) &&
-          strstr(json_object_get_string(text), needle)) {
+          text_has_outside_excerpt(json_object_get_string(text))) {
          return true;
       }
    }
@@ -223,9 +240,10 @@ static bool content_has(struct json_object *content, const char *needle) {
 }
 
 /* A tool result's outside kind: its frame's, when DAWN framed it; none for one
- * of DAWN's own tools, unless it is the memory store returning rows learned
- * from outside text (each listed with its kind word); any other tool's (or
- * one whose call isn't found) counts as outside text. */
+ * of DAWN's own tools (the memory store's rows learned from outside text
+ * included: they say so, but are its own rendering of what it stored), unless
+ * it quotes a tainted conversation's messages (a source excerpt); any other
+ * tool's (or one whose call isn't found) counts as outside text. */
 static int result_outside(struct json_object *history,
                           size_t at,
                           const char *call_id,
@@ -234,9 +252,7 @@ static int result_outside(struct json_object *history,
    if (frame) {
       return llm_third_party_outside_kind(frame);
    }
-   if (!result_is_own(history, at, call_id) ||
-       content_has(content, OUTSIDE_MARKER_KIND_SUFFIX ")") ||
-       content_has(content, MEMORY_OUTSIDE_MARK)) {
+   if (!result_is_own(history, at, call_id) || content_has_outside_excerpt(content)) {
       return OUTSIDE_OTHER;
    }
    return OUTSIDE_NONE;
@@ -244,10 +260,13 @@ static int result_outside(struct json_object *history,
 
 /* The outside kind of the turn's items DAWN put in a turn context
  * (focus_incremental.c renders "[M3 source kind date] text", or without the
- * handle when an item has none): an item from an outside source, or a memory
- * learned from outside text, carries "outside" in its kind word.  A document's
- * chunk is a document; anything else OTHER. */
+ * handle when an item has none): an item from an outside source carries
+ * "outside" in its kind word; any document's chunk makes it a document, else
+ * any calendar event a calendar event, else OTHER.  A recalled memory's
+ * "outside" (where it was learned) doesn't count; CONV_ROW_OUTSIDE_KIND_SQL
+ * reads stored rows the same way. */
 static int focus_items_outside(const char *text) {
+   int kind = OUTSIDE_NONE;
    for (const char *line = text; line && *line;) {
       const char *end = strchr(line, '\n');
       const char *close = memchr(line, ']', end ? (size_t)(end - line) : strlen(line));
@@ -258,14 +277,19 @@ static int focus_items_outside(const char *text) {
          char head[160];
          const size_t len = n - 1 < sizeof(head) - 2 ? n - 1 : sizeof(head) - 2;
          snprintf(head, sizeof(head), " %.*s", (int)len, line + 1);
-         if (strstr(head, " " OUTSIDE_MARKER_ITEM_KIND)) {
-            return strstr(head, " " OUTSIDE_MARKER_DOC_SOURCE " ") ? OUTSIDE_DOCUMENT
-                                                                   : OUTSIDE_OTHER;
+         if (strstr(head, " " OUTSIDE_MARKER_ITEM_KIND) &&
+             !strstr(head, " " OUTSIDE_MARKER_MEMORY_SOURCE)) {
+            if (strstr(head, " " OUTSIDE_MARKER_DOC_SOURCE " ")) {
+               return OUTSIDE_DOCUMENT;
+            }
+            kind = strstr(head, " " OUTSIDE_MARKER_CAL_SOURCE " ") ? OUTSIDE_CALENDAR
+                   : kind == OUTSIDE_NONE                          ? OUTSIDE_OTHER
+                                                                   : kind;
          }
       }
       line = end ? end + 1 : NULL;
    }
-   return OUTSIDE_NONE;
+   return kind;
 }
 
 static bool text_has_document(struct json_object *text) {

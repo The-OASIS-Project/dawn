@@ -48,6 +48,7 @@
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "memory/memory_db_consolidation.h"
 #include "messaging/messaging_engine.h"
 #include "messaging/messaging_engine_internal.h"
 #include "messaging/messaging_sender_gate.h"
@@ -286,9 +287,13 @@ int64_t resolve_channel_conversation_id(channel_ref_t *ref,
       bool is_private = true;
       if (!ref->authenticates_sender &&
           conv_db_is_private(existing, user_id, &is_private) == AUTH_DB_SUCCESS && !is_private) {
-         if (conv_db_set_private(existing, user_id, true) == AUTH_DB_SUCCESS) {
+         conv_db_batches_t batches = { .n = 0 };
+         if (conv_db_set_private(existing, user_id, true, &batches) == AUTH_DB_SUCCESS) {
             OLOG_INFO("messaging: %s conversation %lld made private (texts aren't learned)",
                       provider, (long long)existing);
+         }
+         for (int i = 0; i < batches.n; i++) {
+            memory_consolidation_batch_notify(user_id, 0, batches.ids[i]);
          }
       }
       return existing;

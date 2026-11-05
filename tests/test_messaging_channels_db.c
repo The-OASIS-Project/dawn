@@ -71,6 +71,12 @@ void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id
    (void)conv_id;
 }
 
+void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id) {
+   (void)user_id;
+   (void)conversation_id;
+   (void)batch_id;
+}
+
 int messaging_deliver(const messaging_driver_t *drv,
                       int user_id,
                       const char *provider_address,
@@ -388,7 +394,7 @@ static void test_sms_verify(void) {
    bool is_private = false;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(conv, s_user_a, &is_private));
    TEST_ASSERT_TRUE(is_private);
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(conv, s_user_a, false));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(conv, s_user_a, false, NULL));
    TEST_ASSERT_EQUAL_INT64(conv,
                            resolve_channel_conversation_id(&ref, "sms", "+15550001111", NULL));
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(conv, s_user_a, &is_private));

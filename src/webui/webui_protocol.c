@@ -29,6 +29,7 @@
 #include "logging.h"
 #include "utils/string_utils.h"
 #include "webui/webui_email_client.h"
+#include "webui/webui_memory_batches.h"
 
 /* The feature flags, one line in docs/WEBSOCKET_PROTOCOL.md each.  Names are
  * stable snake_case; a flag is never removed while the protocol version
@@ -70,6 +71,8 @@ static const char *const s_features[] = {
 /* The email panel's check (webui_email_panel.c); a build without the panel has
  * none, and the flag isn't advertised. */
 #pragma weak webui_email_client_enabled
+/* Memory's (webui_memory_batches.c): likewise. */
+#pragma weak webui_memory_batches_enabled
 
 /* Flags that depend on how the daemon runs, each with its check.  Same rules
  * as s_features. */
@@ -84,6 +87,10 @@ static const struct {
     * and message id); the model reads it with the email tool, and the question
     * row comes back with email_ref (docs/WEBSOCKET_PROTOCOL.md, Email). */
    { "email_refs", webui_email_client_enabled },
+   /* What memory learned per batch: list_memory_batches, undo_memory_batch,
+    * keep_memory_op, and the memory_batch push (docs/WEBSOCKET_PROTOCOL.md,
+    * Memory, Consolidation).  While memory is enabled. */
+   { "memory_batches", webui_memory_batches_enabled },
 };
 
 static bool append_feature(char *out, size_t size, size_t *len, bool first, const char *name) {
@@ -94,6 +101,26 @@ static bool append_feature(char *out, size_t size, size_t *len, bool first, cons
    return true;
 }
 
+size_t webui_protocol_json_max_len(void) {
+   char head[64];
+   size_t len = (size_t)snprintf(head, sizeof(head), "\"protocol\":%d,\"features\":[",
+                                 WEBUI_PROTOCOL_VERSION);
+   for (size_t i = 0; i < sizeof(s_features) / sizeof(s_features[0]); i++) {
+      len += strlen(s_features[i]) + 3; /* quotes and a comma */
+   }
+   for (size_t i = 0; i < sizeof(s_runtime_features) / sizeof(s_runtime_features[0]); i++) {
+      len += strlen(s_runtime_features[i].name) + 3;
+   }
+   return len + 1; /* the closing bracket (one comma fewer than counted) */
+}
+
+/* Not every flag fit: none are sent (a client then assumes the oldest DAWN). */
+static size_t overflow(char *out) {
+   OLOG_ERROR("webui_protocol: the feature flags don't fit their buffer; none advertised");
+   out[0] = '\0';
+   return 0;
+}
+
 size_t webui_protocol_json_members(char *out, size_t size) {
    if (!out || size == 0) {
       return 0;
@@ -101,15 +128,13 @@ size_t webui_protocol_json_members(char *out, size_t size) {
    size_t len = 0;
    int n = snprintf(out, size, "\"protocol\":%d,\"features\":[", WEBUI_PROTOCOL_VERSION);
    if (n < 0 || (size_t)n >= size) {
-      out[0] = '\0';
-      return 0;
+      return overflow(out);
    }
    len = (size_t)n;
    bool first = true;
    for (size_t i = 0; i < sizeof(s_features) / sizeof(s_features[0]); i++) {
       if (!append_feature(out, size, &len, first, s_features[i])) {
-         out[0] = '\0';
-         return 0;
+         return overflow(out);
       }
       first = false;
    }
@@ -117,14 +142,12 @@ size_t webui_protocol_json_members(char *out, size_t size) {
       if (!s_runtime_features[i].on || !s_runtime_features[i].on())
          continue;
       if (!append_feature(out, size, &len, first, s_runtime_features[i].name)) {
-         out[0] = '\0';
-         return 0;
+         return overflow(out);
       }
       first = false;
    }
    if (len + 2 > size) {
-      out[0] = '\0';
-      return 0;
+      return overflow(out);
    }
    out[len++] = ']';
    out[len] = '\0';

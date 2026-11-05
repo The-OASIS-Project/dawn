@@ -681,7 +681,8 @@ int memory_db_prune_low_confidence(int user_id, float threshold, int *count_out)
 int memory_db_prune_old_summaries(int user_id, int retention_days, int *count_out);
 
 /**
- * @brief Get all user IDs that have memory data
+ * @brief Get all user IDs that have memory data (facts, preferences or
+ *        entities: one left only orphan entities still needs the sweep)
  *
  * @param out_ids Output: array of user IDs (caller allocates)
  * @param max_ids Maximum IDs to return

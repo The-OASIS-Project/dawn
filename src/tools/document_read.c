@@ -32,6 +32,7 @@
 
 #include "core/embedding_engine.h"
 #include "dawn_error.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/document_db.h"
 #include "tools/tool_registry.h"
@@ -99,7 +100,9 @@ static const treg_param_t doc_read_params[] = {
 
 static const tool_metadata_t doc_read_metadata = {
    .name = "document_read",
-   .results = TOOL_RESULTS_OUTSIDE,
+   /* The user's own document reads as theirs; any other is framed as a
+    * document's (TOOL_FRAME_DOCUMENT). */
+   .results = TOOL_RESULTS_OWN,
    .default_kind = TOOL_KIND_READ,
    .device_string = "document reader",
    .description = "Read the contents of a specific saved document or note, page by page. "
@@ -201,6 +204,12 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
                                       "Use document_search to find available documents first.",
                doc_name);
       return strdup(err_buf);
+   }
+
+   /* Someone else's text, framed as such, from here on: every result below
+    * quotes its name or its text. */
+   if (!document_is_own(&doc, user_id)) {
+      llm_tools_result_third_party(TOOL_FRAME_DOCUMENT);
    }
 
    /* Validate start_chunk */

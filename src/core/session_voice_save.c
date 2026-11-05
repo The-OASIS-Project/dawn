@@ -379,7 +379,7 @@ int session_save_voice_conversation(session_t *session, int64_t *conv_id_out) {
        * disk I/O under history_mutex).  Any capture this save bound goes
        * back to unbound for the retry; nothing a reply names, nor anything
        * another conversation names, is touched. */
-      (void)conv_db_delete_ex(conv_id, user_id, false, CONV_IMAGES_UNBIND, NULL);
+      (void)conv_db_delete_ex(conv_id, user_id, false, CONV_IMAGES_UNBIND, NULL, NULL);
       batch_free(&batch);
       free(ids);
       pthread_mutex_unlock(&session->history_mutex);
