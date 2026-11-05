@@ -308,7 +308,7 @@ class Repos:
          await run([*self.run_as, "rm", "-rf", "--one-file-system", self.workdir(task_id)])
 
    async def publish(self, name: str, head: str, branch: str, base: str, token: str,
-                     open_pr: bool, title: str, body: str) -> dict:
+                     open_pr: bool, title: str, body: str, earlier_pr: str | None = None) -> dict:
       """Push `head` (the checked commit itself, not a ref that could move) from the
       mirror to `branch`; optionally open a PR.  The token goes in a header, never
       in argv; no force push."""
@@ -326,8 +326,15 @@ class Repos:
                  f"{head}:refs/heads/{branch}"], env=env)
       result = {"pushed": f"{owner}/{repo}:{branch}"}
       if open_pr:
-         result["pr_url"] = await asyncio.to_thread(
-            open_pull_request, owner, repo, token, branch, base, title, body)
+         try:
+            result["pr_url"] = await asyncio.to_thread(
+               open_pull_request, owner, repo, token, branch, base, title, body)
+         except (OSError, ValueError):
+            # The push went up; one already open for the branch (its state unread)
+            # makes GitHub refuse a second: keep pointing at it.
+            if not earlier_pr:
+               raise
+            result["pr_url"] = earlier_pr
       return result
 
 
@@ -339,3 +346,20 @@ def open_pull_request(owner, repo, token, head, base, title, body) -> str:
                "X-GitHub-Api-Version": "2022-11-28"})
    with urllib.request.urlopen(req, timeout=30) as resp:
       return json.load(resp)["html_url"]
+
+
+def pr_is_open(pr_url: str, token: str) -> bool | None:
+   """Whether the pull request at `pr_url` (https://github.com/o/r/pull/N) is still
+   open: True, False (merged or closed), or None when it can't be read."""
+   m = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)$", pr_url)
+   if not m:
+      return None
+   req = urllib.request.Request(
+      f"https://api.github.com/repos/{m.group(1)}/{m.group(2)}/pulls/{m.group(3)}",
+      headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28"})
+   try:
+      with urllib.request.urlopen(req, timeout=30) as resp:
+         return json.load(resp).get("state") == "open"
+   except (OSError, ValueError):
+      return None

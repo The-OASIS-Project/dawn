@@ -134,6 +134,18 @@ def build(runner, cfg) -> MCPServer:
       return {"tasks": [public(t) for t in store.tasks(dawn_user_id)]}
 
    @tool
+   async def task_revise(dawn_user_id: int, instructions: str, task_id: str | None = None,
+                         client_ref: str | None = None, budget_usd: float | None = None,
+                         revise_ref: str | None = None) -> dict:
+      """More work for a completed or failed task: its agent session resumes on the same
+      branch and clone with `instructions`; `budget_usd` is added to its budget (default:
+      the configured task budget).  A repeated `revise_ref` returns the task and adds
+      nothing (safe to retry)."""
+      t = task_of(dawn_user_id, task_id, client_ref)
+      return public(await runner.revise(t["id"], dawn_user_id, instructions, budget_usd,
+                                        revise_ref))
+
+   @tool
    async def task_reply(dawn_user_id: int, request_id: int, decision: str = "",
                         answer: str | None = None, task_id: str | None = None,
                         client_ref: str | None = None) -> dict:
@@ -158,7 +170,8 @@ def build(runner, cfg) -> MCPServer:
                           title: str | None = None) -> dict:
       """Push a completed task's agent/* branch and optionally open a pull request.  DAWN
       calls this only after the user confirmed, passing the head commit they were shown;
-      a branch that moved since is refused.  A second call returns the first result."""
+      a branch that moved since is refused.  A second call returns the first result while
+      nothing moved; after a revise it pushes the new commits, keeping an open PR."""
       t = task_of(dawn_user_id, task_id, client_ref)
       return await runner.publish(t["id"], dawn_user_id, open_pr, title, head)
 

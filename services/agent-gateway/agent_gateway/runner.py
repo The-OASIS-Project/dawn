@@ -38,7 +38,7 @@ from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKCli
                               SystemMessage, UserMessage)
 
 from . import policy, store as st
-from .repos import GitError, Repos, slug
+from .repos import GitError, Repos, pr_is_open, slug
 
 log = logging.getLogger("agent-gateway")
 
@@ -52,9 +52,10 @@ assistant.  Commits in this task's worktree are pre-approved: commit your work w
 done and tested, with the git identity already configured (never set user.name or \
 user.email yourself).  Never push or open pull requests; the operator publishes.  If \
 something is denied or you need the operator, say so in one line and end your turn: you \
-will be resumed with the answer.  Run each build or test command on its own (not piped, \
-redirected into a pipeline, or followed by other commands in the same call), so its exit \
-status is recorded; a redirect to a log file is fine."""
+will be resumed with the answer.  Run each build or test command as its own Bash call, \
+not piped and with nothing after it (no `; echo $?`, no `&& tail`), so the operator's \
+gateway records its exit status; send its output to a log file and read the log in the \
+next call, e.g. `make -C build tests-ci > build.log 2>&1`, then `tail build.log`."""
 
 TEMPLATE = os.path.join(os.path.dirname(__file__), "CLAUDE.template.md")
 FLOOR = os.path.join(os.path.dirname(__file__), "floor.json")
@@ -163,6 +164,7 @@ class Runner:
       self.clients: dict[str, ClaudeSDKClient] = {}
       self.starting = 0
       self.cloning: dict[str, asyncio.Task] = {}  # tasks whose clone is being made
+      self.pruning: set[str] = set()               # tasks whose clone is being removed
       self.background: set[asyncio.Task] = set()
 
    def soon(self, coro) -> None:
@@ -294,11 +296,17 @@ class Runner:
    async def prune(self) -> None:
       before = time.time() - self.cfg.keep_worktrees_days * 86400
       for task_id in self.store.stale_finished(before):
+         t = self.store.task(task_id)
+         if t["status"] in st.OPEN or t["updated"] >= before:
+            continue  # revised since the list was read
+         self.pruning.add(task_id)
          try:
             await self.repos.remove(task_id)
             self.store.update_task(task_id, worktree="")
          except Exception as e:
             log.warning("could not remove worktree of %s: %s", task_id, e)
+         finally:
+            self.pruning.discard(task_id)
 
    # --- one run ----------------------------------------------------------
 
@@ -496,7 +504,10 @@ class Runner:
       # Each command's last run: a build that failed and was then fixed counts
       # as fixed.
       last: dict[str, object] = {}
-      for e in self.store.task_events(task_id, "check", CHECKS_SCANNED):
+      revised = self.store.task_events(task_id, "revised", 1)
+      since = revised[0]["seq"] if revised else 0  # this work's checks, not an earlier run's
+      for e in (e for e in self.store.task_events(task_id, "check", CHECKS_SCANNED)
+                if e["seq"] > since):
          last.pop(e["data"]["command"], None)
          last[e["data"]["command"]] = e["data"]["ok"]
       checks = [{"command": c, "ok": ok} for c, ok in list(last.items())[-CHECKS_REPORTED:]]
@@ -587,12 +598,46 @@ class Runner:
             self.soon(self.retry_blocked())
       return self.store.task(task_id)
 
+   async def revise(self, task_id: str, dawn_user_id: int, instructions: str,
+                    budget_usd: float | None, revise_ref: str | None) -> dict:
+      """More work for a finished task: its session resumes on the same branch and
+      clone with `instructions`.  A repeated `revise_ref` returns the task and adds
+      nothing (safe to retry)."""
+      t = self.owned(task_id, dawn_user_id)
+      last = self.store.task_events(task_id, "revised", 1)
+      if revise_ref and last and last[0]["data"].get("revise_ref") == revise_ref:
+         return t
+      if not instructions.strip():
+         raise ValueError("empty instructions")
+      if t["status"] not in (st.COMPLETED, st.FAILED):
+         raise ValueError(f"the task is {t['status']}; only a finished one takes more work")
+      if not t["session_id"]:
+         raise ValueError("the task has no session to resume; start a new task")
+      if not t["worktree"] or task_id in self.pruning or not os.path.isdir(t["worktree"]):
+         raise ValueError("the task's clone is gone; start a new task")
+      if budget_usd is not None and budget_usd <= 0:
+         raise ValueError("budget_usd must be positive")
+      added = min(budget_usd or self.cfg.task_budget_usd, self.cfg.task_budget_usd * 4)
+      # Before deliver(): it refuses a task whose spend has reached its budget.
+      self.store.update_task(task_id, status=st.INPUT_REQUIRED, summary=None, error=None,
+                             budget_usd=t["budget_usd"] + added)
+      # Its seq scopes the next completion's build and test checks to this work.
+      self.store.add_event(task_id, "revised", revise_ref=revise_ref, budget_added=added)
+      self.store.add_note(task_id, "The operator asks for more work on this task: " +
+                          instructions)
+      await self.deliver(task_id)
+      return self.store.task(task_id)
+
    async def publish(self, task_id: str, dawn_user_id: int, open_pr: bool, title: str | None,
                      head: str) -> dict:
       """`head` is the commit the user was shown; a branch that moved since is refused."""
       t = self.owned(task_id, dawn_user_id)
-      if t["published"]:
-         return json.loads(t["published"])  # already done: the same answer again
+      prev = json.loads(t["published"]) if t["published"] else None
+      if prev and t["status"] == st.COMPLETED:
+         now, _ = await self.repos.agent_ref(t["repo"], task_id, t["base"])
+         if prev.get("head") == now:
+            return prev  # already done: the same answer again (an older record has no
+                         # head: pushed again, harmless when nothing moved)
       if t["status"] != st.COMPLETED:
          raise ValueError("only a completed task is published")
       now, _ = await self.repos.agent_ref(t["repo"], task_id, t["base"])
@@ -601,9 +646,22 @@ class Runner:
       if not self.cfg.github_token:
          raise ValueError("no GitHub token configured (AGENT_GATEWAY_GITHUB_TOKEN)")
       body = (t["summary"] or "") + f"\n\nTask: {t['task']}"
+      # Revised since it was published: push the new commits; its PR stays while
+      # it is open (a merged or closed one gets a new PR).
+      pr = prev.get("pr_url") if prev else None
+      earlier = None  # what a refused new PR falls back to: one whose state couldn't be read
+      if pr:
+         is_open = await asyncio.to_thread(pr_is_open, pr, self.cfg.github_token)
+         if not is_open:
+            earlier = pr if is_open is None else None
+            pr = None
       res = await self.repos.publish(t["repo"], now, t["branch"], t["base"],
-                                     self.cfg.github_token, open_pr,
-                                     title or t["task"].splitlines()[0][:72], clip(body, 6000))
+                                     self.cfg.github_token, open_pr and not pr,
+                                     title or t["task"].splitlines()[0][:72], clip(body, 6000),
+                                     earlier)
+      if pr:
+         res["pr_url"] = pr
+      res["head"] = now
       self.store.update_task(task_id, published=json.dumps(res))
       self.store.add_event(task_id, "published", **res)
       return res

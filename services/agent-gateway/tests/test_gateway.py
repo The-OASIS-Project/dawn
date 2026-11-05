@@ -21,6 +21,7 @@
 
 import asyncio
 import json
+import time
 import os
 import subprocess
 
@@ -586,6 +587,129 @@ def test_publish_pushes_the_commit_that_was_shown(store):
    store.update_task("t1", status=st.COMPLETED)
    asyncio.run(r.publish("t1", 1, False, None, "ABCDEF1234567890"))
    assert r.repos.pushed == "abcdef1234567890"
+
+
+def test_publish_after_a_revise_pushes_again(store, monkeypatch):
+   """Published, then revised: publishing pushes the new head and keeps an open PR;
+   a merged one gets a new PR."""
+   from agent_gateway import runner as rmod
+   pr_open = [True]
+   monkeypatch.setattr(rmod, "pr_is_open", lambda url, token: pr_open[0])
+   class Moving(FakeRepos):
+      head = "abcdef1234567890"
+      pushes = []
+
+      async def agent_ref(self, name, task_id, base):
+         return self.head, "base000"
+
+      async def publish(self, name, head, branch, base, token, open_pr, *a):
+         self.pushes.append((head, open_pr))
+         return {"pushed": "o/r:b", **({"pr_url": "https://pr/1"} if open_pr else {})}
+   r = runner(store, github_token="tok")
+   r.repos = Moving()
+   add_task(store)
+   store.update_task("t1", status=st.COMPLETED)
+   first = asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890"))
+   again = asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890"))
+   assert again == first and len(r.repos.pushes) == 1          # nothing moved
+   r.repos.head = "1111111111111111"                         # revised: new commits
+   moved = asyncio.run(r.publish("t1", 1, True, None, "1111111111111111"))
+   assert r.repos.pushes[-1] == ("1111111111111111", False)  # pushed, no second PR
+   assert moved["pr_url"] == "https://pr/1" and moved["head"] == "1111111111111111"
+   pr_open[0] = False                                         # merged, then revised again
+   r.repos.head = "2222222222222222"
+   asyncio.run(r.publish("t1", 1, True, None, "2222222222222222"))
+   assert r.repos.pushes[-1] == ("2222222222222222", True)    # a new PR
+   # A record from before heads were kept: pushed again (harmless when unmoved).
+   store.update_task("t1", published=json.dumps({"pushed": "o/r:b"}))
+   asyncio.run(r.publish("t1", 1, True, None, "2222222222222222"))
+   assert len(r.repos.pushes) == 4
+
+
+def test_prune_skips_a_task_revised_since_the_list(store, tmp_path):
+   """A clone listed as stale but revised (still running, or done again) since is kept."""
+   r = runner(store, keep_worktrees_days=1)
+   finished_with_clone(store, tmp_path)
+   removed = []
+
+   class Recording(FakeRepos):
+      async def remove(self, task_id):
+         removed.append(task_id)
+   r.repos = Recording()
+   store.db.execute("UPDATE tasks SET updated = ? WHERE id = 't1'", (time.time() - 3 * 86400,))
+   store.db.commit()
+   listed = store.stale_finished(time.time() - 86400)
+   assert listed == ["t1"]
+   store.stale_finished = lambda before: listed            # the list read before the revise
+   asyncio.run(r.revise("t1", 1, "more", None, "a"))
+   asyncio.run(r.prune())                                  # open now: kept
+   store.update_task("t1", status=st.COMPLETED)            # done again, freshly
+   asyncio.run(r.prune())
+   assert removed == []
+
+
+
+def finished_with_clone(store, tmp_path, status=st.COMPLETED):
+   add_task(store)
+   store.update_task("t1", status=status, session_id="s1", worktree=str(tmp_path),
+                     summary="old report", cost_usd=4.0)
+
+
+def test_revise_resumes_the_session_with_more_budget(store, tmp_path):
+   r = runner(store)
+   finished_with_clone(store, tmp_path)
+   t = asyncio.run(r.revise("t1", 1, "use Vosk instead", None, "job:7.1/1"))
+   assert t["budget_usd"] == pytest.approx(10.0) and t["summary"] is None
+   assert r.resumed and "use Vosk instead" in r.resumed[0][1]
+   # The same ref again (a lost answer, retried): nothing added, not resumed again.
+   del r.running["t1"]
+   again = asyncio.run(r.revise("t1", 1, "use Vosk instead", None, "job:7.1/1"))
+   assert again["budget_usd"] == pytest.approx(10.0) and len(r.resumed) == 1
+
+
+def test_revise_refuses_what_it_cant_resume(store, tmp_path):
+   r = runner(store)
+   finished_with_clone(store, tmp_path, st.CANCELLED)
+   with pytest.raises(ValueError, match="only a finished"):
+      asyncio.run(r.revise("t1", 1, "more", None, "a"))
+   store.update_task("t1", status=st.FAILED, worktree="")
+   with pytest.raises(ValueError, match="clone is gone"):
+      asyncio.run(r.revise("t1", 1, "more", None, "b"))
+   store.update_task("t1", worktree=str(tmp_path), session_id=None)
+   with pytest.raises(ValueError, match="no session"):
+      asyncio.run(r.revise("t1", 1, "more", None, "c"))
+   store.update_task("t1", session_id="s1")
+   with pytest.raises(ValueError):
+      asyncio.run(r.revise("t1", 2, "more", None, "d"))        # another user's
+   with pytest.raises(ValueError):
+      asyncio.run(r.revise("t1", 1, "more", -1.0, "e"))
+   assert r.resumed == []
+
+
+def test_revise_waits_for_room(store, tmp_path):
+   r = runner(store, max_concurrent_tasks=1)
+   finished_with_clone(store, tmp_path)
+   r.running["other"] = object()
+   t = asyncio.run(r.revise("t1", 1, "more", None, "a"))
+   assert t["status"] == st.INPUT_REQUIRED and r.resumed == []
+   del r.running["other"]
+   asyncio.run(r.retry_blocked())
+   assert r.resumed and "more" in r.resumed[0][1]
+
+
+def test_checks_after_a_revise_are_its_own(store, tmp_path):
+   r = runner(store)
+   finished_with_clone(store, tmp_path)
+   store.add_event("t1", "check", command="make", ok=True)   # the earlier run's
+   asyncio.run(r.revise("t1", 1, "more", None, "a"))
+   del r.running["t1"]
+   store.add_event("t1", "check", command="ctest", ok=False)
+
+   class Result:
+      is_error, result, subtype, total_cost_usd = False, "done again", "success", 0.5
+   asyncio.run(r.finish("t1", Result()))
+   done = [e for e in store.events_after(0) if e["kind"] == "completed"][-1]
+   assert done["data"]["checks"] == [{"command": "ctest", "ok": False}]
 
 
 def test_publish_refuses_a_moved_branch(store):
