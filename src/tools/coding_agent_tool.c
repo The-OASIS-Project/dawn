@@ -401,11 +401,14 @@ static void append_file(strbuf_t *sb, struct json_object *f) {
    struct json_object *added = NULL, *removed = NULL;
    json_object_object_get_ex(f, "added", &added);
    json_object_object_get_ex(f, "removed", &removed);
+   struct json_object *prot = json_object_object_get(f, "protected");
+   const char *mark = json_object_get_boolean(prot) ? "  (protected)" : "";
    if (json_object_is_type(added, json_type_int) && json_object_is_type(removed, json_type_int)) {
-      strbuf_appendf(sb, "  +%d -%d  %.*s\n", json_object_get_int(added),
-                     json_object_get_int(removed), CA_PATH_SHOWN, coding_gateway_jstr(f, "path"));
+      strbuf_appendf(sb, "  +%d -%d  %.*s%s\n", json_object_get_int(added),
+                     json_object_get_int(removed), CA_PATH_SHOWN, coding_gateway_jstr(f, "path"),
+                     mark);
    } else {
-      strbuf_appendf(sb, "  binary  %.*s\n", CA_PATH_SHOWN, coding_gateway_jstr(f, "path"));
+      strbuf_appendf(sb, "  binary  %.*s%s\n", CA_PATH_SHOWN, coding_gateway_jstr(f, "path"), mark);
    }
 }
 

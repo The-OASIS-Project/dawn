@@ -86,8 +86,9 @@ static const char *const k_request_fields[] = { "request_id", "request_kind", "v
                                                 "tool",       "input",        "note",
                                                 "error",      "decision",     "request_ids",
                                                 NULL };
-static const char *const k_end_fields[] = { "summary",     "branch", "commits",  "diffstat",
-                                            "uncommitted", "error",  "cost_usd", NULL };
+static const char *const k_end_fields[] = { "summary",         "branch", "commits",  "diffstat",
+                                            "uncommitted",     "error",  "cost_usd", "protected",
+                                            "protected_count", NULL };
 static const char *const k_scrubbed[] = { "brief", "text", "value", "input", NULL };
 
 /* The gateway's kinds DAWN keeps, and where; the rest (started, resumed,

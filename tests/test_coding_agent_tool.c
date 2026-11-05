@@ -157,7 +157,7 @@ int mcp_bridge_call_tool(const char *alias,
    } else if (strcmp(tool, "task_changes") == 0) {
       *result_out = strdup(
           "{\"head\":\"0123456789abcdef\",\"base\":\"fedcba9876543210\",\"files\":["
-          "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3},"
+          "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3,\"protected\":true},"
           "{\"path\":\"logo.png\",\"added\":null,\"removed\":null}],"
           "\"commits\":[{\"hash\":\"0123456789abcdef\",\"subject\":\"fix the oracle\"}]}");
    } else if (strcmp(tool, "task_file") == 0 && args_json && strstr(args_json, "big.c")) {
@@ -732,7 +732,8 @@ static void test_changes_lists_files_and_commits(void) {
    char *out = call("changes", "{\"job\":42}");
    TEST_ASSERT_FALSE(is_error(out));
    TEST_ASSERT_NOT_NULL(strstr(out, "2 files changed in 1 commit, head 01234567 on base fedcba98"));
-   TEST_ASSERT_NOT_NULL(strstr(out, "+12 -3  src/a.c"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "+12 -3  src/a.c  (protected)"));
+   TEST_ASSERT_NULL(strstr(out, "logo.png  (protected)"));
    TEST_ASSERT_NOT_NULL(strstr(out, "binary  logo.png"));
    TEST_ASSERT_NOT_NULL(strstr(out, "01234567 fix the oracle"));
    TEST_ASSERT_EQUAL_STRING("task_changes", g_calls[0]);

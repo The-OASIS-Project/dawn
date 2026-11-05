@@ -51,7 +51,9 @@
 #define CR_KIND_MAX 16                     /* a gateway end: completed, failed, cancelled */
 #define CR_LINE_MAX (CONV_TITLE_MAX + 256) /* a fixed line: the title plus DAWN's words */
 #define CR_REPORT_MAX (16 * 1024)          /* the agent's words put to the take */
-#define CR_FACTS_MAX 512     /* DAWN's facts line: branch, checks, uncommitted, cost */
+#define CR_FACTS_MAX 1024    /* DAWN's facts line: branch, protected, checks, uncommitted, cost */
+#define CR_PROTECTED_SHOWN 5 /* protected paths named in it; the rest counted */
+#define CR_PATH_MAX 120      /* a protected path named in it */
 #define CR_STOP_WAIT_MS 5000 /* stop's wait for report-backs in flight */
 #define CR_STOP_POLL_MS 50
 
@@ -162,6 +164,36 @@ static void facts(char *out, size_t len, struct json_object *data) {
       } else {
          strbuf_append(&sb, " Nothing was left uncommitted.");
       }
+   }
+   /* Paths the agent named: shown only when plainly a path (DAWN's own words). */
+   struct json_object *prot = json_object_object_get(data, "protected");
+   const size_t listed = json_object_is_type(prot, json_type_array) ? json_object_array_length(prot)
+                                                                    : 0;
+   /* The gateway names at most a few; its count is the whole. */
+   struct json_object *jcount = json_object_object_get(data, "protected_count");
+   const int64_t counted = json_object_is_type(jcount, json_type_int)
+                               ? json_object_get_int64(jcount)
+                               : 0;
+   const size_t np = counted > (int64_t)listed ? (size_t)counted : listed;
+   if (np > 0) {
+      strbuf_appendf(&sb, " It changed %zu protected path%s (named by the agent)", np,
+                     np == 1 ? "" : "s");
+      size_t shown = 0;
+      for (size_t i = 0; i < listed && shown < CR_PROTECTED_SHOWN; i++) {
+         const char *p = json_object_get_string(json_object_array_get_idx(prot, i));
+         const size_t pl = p ? strlen(p) : 0;
+         if (pl > 0 && pl <= CR_PATH_MAX &&
+             strspn(p, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-") ==
+                 pl) {
+            strbuf_appendf(&sb, "%s`%s`", shown == 0 ? ": " : ", ", p);
+            shown++;
+         }
+      }
+      if (np > shown) {
+         strbuf_appendf(&sb, "%s%zu %s", shown ? " and " : ": ", np - shown,
+                        shown ? "more" : "not shown");
+      }
+      strbuf_append(&sb, ".");
    }
    /* What the gateway saw, not what the agent says it ran. */
    struct json_object *checks = json_object_object_get(data, "checks");
