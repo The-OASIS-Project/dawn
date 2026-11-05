@@ -17,7 +17,7 @@
  * the project author(s).
  *
  * What outside text (text someone other than the user or DAWN wrote: a page,
- * an email, a document) something carried.  A stored memory row carries the
+ * an email, a document, a calendar event) something carried.  A stored memory row carries the
  * kind its extraction batch read (memory_facts / memory_relations /
  * memory_summaries .outside), so code can keep such rows from acting as the
  * user's own word.
@@ -52,10 +52,11 @@ typedef enum {
    OUTSIDE_MCP = 6,       /**< an MCP server's result */
    OUTSIDE_OTHER = 7,     /**< a tool result of any other tool */
    OUTSIDE_UNKNOWN = 8,   /**< stored before the kind was recorded */
+   OUTSIDE_CALENDAR = 9,  /**< a calendar event's text */
 } outside_kind_t;
 
 /** The highest outside_kind_t value (a stored value above it is invalid). */
-#define OUTSIDE_KIND_MAX OUTSIDE_UNKNOWN
+#define OUTSIDE_KIND_MAX OUTSIDE_CALENDAR
 
 /** The values that are not tainted, as a SQL list: `outside IN (...)`. */
 #define OUTSIDE_UNTAINTED_SQL "0, 8"

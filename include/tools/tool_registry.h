@@ -220,8 +220,9 @@ typedef struct {
 #define TOOL_FRAME_EMAIL "EMAIL CONTENT"
 #define TOOL_FRAME_WEB "WEB CONTENT"
 #define TOOL_FRAME_DOCUMENT "DOCUMENT CONTENT"
+#define TOOL_FRAME_CALENDAR "CALENDAR CONTENT"
 #define TOOL_FRAMES_ALL \
-   { TOOL_FRAME_EMAIL, TOOL_FRAME_WEB, TOOL_FRAME_DOCUMENT }
+   { TOOL_FRAME_EMAIL, TOOL_FRAME_WEB, TOOL_FRAME_DOCUMENT, TOOL_FRAME_CALENDAR }
 
 /** Entries in an action_kinds table: .action_kind_count = TOOL_KIND_COUNT(t) */
 #define TOOL_KIND_COUNT(table) ((int)(sizeof(table) / sizeof((table)[0])))

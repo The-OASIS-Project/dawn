@@ -980,14 +980,16 @@ int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
    " GLOB '* " OUTSIDE_MARKER_ITEM_KIND " [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]]*' OR " \
    "instr(" CONV_TURN_CONTEXT_FOREIGN_SQL(m) ", ' " OUTSIDE_MARKER_ITEM_KIND "]') > 0 THEN " \
    "(CASE WHEN instr(" m ".content, '" OUTSIDE_MARKER_DOC_SOURCE " " OUTSIDE_MARKER_ITEM_KIND \
-   "') > 0 THEN 5 ELSE 7 END) END) " \
+   "') > 0 THEN 5 WHEN instr(" m ".content, '" OUTSIDE_MARKER_CAL_SOURCE " " \
+   OUTSIDE_MARKER_ITEM_KIND "') > 0 THEN 9 ELSE 7 END) END) " \
    "WHEN " m ".kind IS NULL AND instr(" m ".content, '" OUTSIDE_MARKER_DOC_OPEN "') > 0 THEN 5 " \
    "WHEN substr(" m ".content, 1, length('" OUTSIDE_MARKER_JOB_UPDATE "')) = '" \
    OUTSIDE_MARKER_JOB_UPDATE "' THEN 3 " \
    "WHEN substr(" m ".content, 1, length('" OUTSIDE_MARKER_DEVICE_DATA "')) = '" \
    OUTSIDE_MARKER_DEVICE_DATA "' THEN 7 END)"
 /* clang-format on */
-_Static_assert(OUTSIDE_RESEARCH == 3 && OUTSIDE_DOCUMENT == 5 && OUTSIDE_OTHER == 7,
+_Static_assert(OUTSIDE_RESEARCH == 3 && OUTSIDE_DOCUMENT == 5 && OUTSIDE_OTHER == 7 &&
+                   OUTSIDE_CALENDAR == 9,
                "CONV_ROW_OUTSIDE_KIND_SQL writes these outside kinds");
 
 /* The SET clause marking a conversations row extracted up to now (what was

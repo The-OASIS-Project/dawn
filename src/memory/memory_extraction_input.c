@@ -261,10 +261,12 @@ static int result_outside(struct json_object *history,
 /* The outside kind of the turn's items DAWN put in a turn context
  * (focus_incremental.c renders "[M3 source kind date] text", or without the
  * handle when an item has none): an item from an outside source carries
- * "outside" in its kind word; a document's chunk is a document, anything else
- * OTHER.  A recalled memory's "outside" (where it was learned) doesn't count;
- * CONV_ROW_OUTSIDE_KIND_SQL reads stored rows the same way. */
+ * "outside" in its kind word; any document's chunk makes it a document, else
+ * any calendar event a calendar event, else OTHER.  A recalled memory's
+ * "outside" (where it was learned) doesn't count; CONV_ROW_OUTSIDE_KIND_SQL
+ * reads stored rows the same way. */
 static int focus_items_outside(const char *text) {
+   int kind = OUTSIDE_NONE;
    for (const char *line = text; line && *line;) {
       const char *end = strchr(line, '\n');
       const char *close = memchr(line, ']', end ? (size_t)(end - line) : strlen(line));
@@ -277,13 +279,17 @@ static int focus_items_outside(const char *text) {
          snprintf(head, sizeof(head), " %.*s", (int)len, line + 1);
          if (strstr(head, " " OUTSIDE_MARKER_ITEM_KIND) &&
              !strstr(head, " " OUTSIDE_MARKER_MEMORY_SOURCE)) {
-            return strstr(head, " " OUTSIDE_MARKER_DOC_SOURCE " ") ? OUTSIDE_DOCUMENT
-                                                                   : OUTSIDE_OTHER;
+            if (strstr(head, " " OUTSIDE_MARKER_DOC_SOURCE " ")) {
+               return OUTSIDE_DOCUMENT;
+            }
+            kind = strstr(head, " " OUTSIDE_MARKER_CAL_SOURCE " ") ? OUTSIDE_CALENDAR
+                   : kind == OUTSIDE_NONE                          ? OUTSIDE_OTHER
+                                                                   : kind;
          }
       }
       line = end ? end + 1 : NULL;
    }
-   return OUTSIDE_NONE;
+   return kind;
 }
 
 static bool text_has_document(struct json_object *text) {

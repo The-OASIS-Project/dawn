@@ -920,6 +920,8 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
    static const char *const k_web[] = { "web", "content", NULL };
    static const char *const k_end_document[] = { "end", "document", "content", NULL };
    static const char *const k_document[] = { "document", "content", NULL };
+   static const char *const k_end_calendar[] = { "end", "calendar", "content", NULL };
+   static const char *const k_calendar[] = { "calendar", "content", NULL };
    static const char *const k_note[] = { "operator", "note", NULL };
    static const char *const k_updated[] = { "updated", "instructions", NULL };
    static const char *const k_shortened[] = { "tool", "result", "shortened", NULL };
@@ -934,8 +936,8 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
       const char first = letter_at(sh, w, &next);
       /* shaped: only in a frame line's shape (frame_shape_after), for the
        * names ordinary text starts lines with ("Email content", "Web
-       * content", "Document content").  A close's three words aren't prose, so they are defused
-       * in any shape: a tagless frame (a briefing's) can't be ended by
+       * content", "Document content", "Calendar content").  A close's three words aren't prose, so
+       * they are defused in any shape: a tagless frame (a briefing's) can't be ended by
        * "--- END EMAIL CONTENT." either. */
       static const struct {
          const char *const *words;
@@ -954,6 +956,8 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
          { k_web, "- - WEB CONTENT (quoted)", true },
          { k_end_document, "- - END DOCUMENT CONTENT (quoted)", false },
          { k_document, "- - DOCUMENT CONTENT (quoted)", true },
+         { k_end_calendar, "- - END CALENDAR CONTENT (quoted)", false },
+         { k_calendar, "- - CALENDAR CONTENT (quoted)", true },
       };
       for (size_t k = 0; k < sizeof(k_frames) / sizeof(k_frames[0]); k++) {
          if (k_frames[k].words[0][0] != first) {

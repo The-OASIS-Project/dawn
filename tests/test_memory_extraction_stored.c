@@ -100,7 +100,7 @@ static void test_loaded_history_reads_request_context(void) {
                                    .context_of = q,
                                    .content = "[M1 calendar_event outside 2026-10-01] Invite" });
    add(ctx, &(conv_message_row_t){ .role = "assistant", .content = "One invite." });
-   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, stored_outside(ctx));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_CALENDAR, stored_outside(ctx));
 
    add(job, &(conv_message_row_t){ .role = "user", .content = "start it" });
    add(job, &(conv_message_row_t){ .role = "user",
@@ -172,7 +172,7 @@ static void test_compacted_rows_are_read_from_the_database(void) {
    snprintf(live, sizeof(live), k_live, (long long)q2);
    TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, outside_of(mail, json_tokener_parse(live)));
    snprintf(live, sizeof(live), k_live, (long long)q4);
-   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_of(ctx, json_tokener_parse(live)));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_CALENDAR, outside_of(ctx, json_tokener_parse(live)));
 }
 
 int main(void) {

@@ -259,6 +259,17 @@ void test_the_batch_says_what_outside_text_it_read(void) {
    TEST_ASSERT_EQUAL_STRING("web", str(op_named(j, "deferred"), "outside_from"));
    json_object_put(j);
 
+   const memory_consolidation_batch_t cal = { .user_id = s_user,
+                                              .conversation_id = s_conv,
+                                              .path = "agent",
+                                              .stop = "finished",
+                                              .outside = OUTSIDE_CALENDAR };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_consolidation_batch_add(&cal, &batch));
+   j = webui_memory_batch_json(s_user, batch);
+   TEST_ASSERT_NOT_NULL(j);
+   TEST_ASSERT_EQUAL_STRING("calendar", str(j, "outside_from"));
+   json_object_put(j);
+
    const int64_t clean = run(ONE_FACT("Jonathan Smith plays the cello"), NULL);
    j = webui_memory_batch_json(s_user, clean);
    TEST_ASSERT_FALSE(json_object_get_boolean(get(j, "outside")));

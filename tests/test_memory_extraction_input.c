@@ -108,7 +108,7 @@ int conv_db_messages_unprompted(int user_id,
 }
 
 /* The registry the scan asks whose text a result is: DAWN's own weather,
- * memory and document reader (another's document comes back framed), stocks (its own but for
+ * memory, document reader and calendar (outside text comes back framed), stocks (its own but for
  * transactions), and search (outside). */
 static char *no_call(const char *action, char *value, int *should_respond) {
    (void)action;
@@ -154,6 +154,12 @@ static const tool_metadata_t k_tools[] = {
      .results = TOOL_RESULTS_OWN,
      .device_string = "document reader",
      .description = "d",
+     .callback = no_call,
+     .device_type = TOOL_DEVICE_TYPE_GETTER },
+   { .name = "calendar",
+     .results = TOOL_RESULTS_OWN,
+     .device_string = "calendar",
+     .description = "c",
      .callback = no_call,
      .device_type = TOOL_DEVICE_TYPE_GETTER },
    { .name = "stocks",
@@ -356,6 +362,7 @@ static void test_document_reads(void) {
             "--- END DOCUMENT CONTENT (dawn-ctx-0a1b2c3d) ---\\n");
    TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside_of(buf, 0));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, llm_third_party_outside_kind(TOOL_FRAME_DOCUMENT));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_CALENDAR, llm_third_party_outside_kind(TOOL_FRAME_CALENDAR));
 
    struct json_object *hist = json_tokener_parse(buf);
    TEST_ASSERT_NOT_NULL(hist);
@@ -366,6 +373,23 @@ static void test_document_reads(void) {
    TEST_ASSERT_NOT_NULL(strstr(all, "not used for memory"));
    json_object_put(input);
    json_object_put(hist);
+}
+
+/* The calendar's reads come back framed (anyone may write an event), so a
+ * calendar event; its confirmations are its own. */
+static void test_calendar_results(void) {
+   const char *call =
+       "[{\"role\":\"user\",\"content\":\"x\",\"id\":10},"
+       "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":"
+       "\"function\",\"function\":{\"name\":\"calendar\",\"arguments\":\"{}\"}}]},"
+       "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"%s\"}]";
+   char buf[1024];
+   snprintf(buf, sizeof(buf), call, "Event deleted.");
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_of(buf, 0));
+   snprintf(buf, sizeof(buf), call,
+            "--- CALENDAR CONTENT ---\\nToday's events (1):\\n- Lunch\\n"
+            "--- END CALENDAR CONTENT ---\\n");
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_CALENDAR, outside_of(buf, 0));
 }
 
 /* Every frame DAWN puts outside text in reads as a tainted kind. */
@@ -423,9 +447,23 @@ static void test_dawn_input_with_outside_text(void) {
                                     "outside 2026-10-01] A page\"},{\"type\":\"text\",\"text\":"
                                     "\"Hi\"}],\"id\":10}]",
                                     0));
-   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER,
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_CALENDAR,
                          outside_of("[{\"role\":\"user\",\"_kind\":\"turn_context\",\"content\":"
                                     "\"[M4 calendar_event outside 2026-10-01] A meeting\"},"
+                                    "{\"role\":\"user\",\"content\":\"Hi\",\"id\":10}]",
+                                    0));
+   /* Any calendar event outranks another source, and a document both, on any
+    * line (CONV_ROW_OUTSIDE_KIND_SQL decides the same way). */
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_CALENDAR,
+                         outside_of("[{\"role\":\"user\",\"_kind\":\"turn_context\",\"content\":"
+                                    "\"[M3 email_message outside] Hi\\n"
+                                    "[M4 calendar_event outside 2026-10-01] A meeting\"},"
+                                    "{\"role\":\"user\",\"content\":\"Hi\",\"id\":10}]",
+                                    0));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT,
+                         outside_of("[{\"role\":\"user\",\"_kind\":\"turn_context\",\"content\":"
+                                    "\"[M4 calendar_event outside 2026-10-01] A meeting\\n"
+                                    "[M5 document_chunk outside 2026-10-01] A page\"},"
                                     "{\"role\":\"user\",\"content\":\"Hi\",\"id\":10}]",
                                     0));
    TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT,
@@ -515,6 +553,7 @@ int main(void) {
    RUN_TEST(test_outside_kind_of_tool_results);
    RUN_TEST(test_every_frame_is_tainted);
    RUN_TEST(test_document_reads);
+   RUN_TEST(test_calendar_results);
    RUN_TEST(test_rows_before_the_cursor_are_the_floors);
    RUN_TEST(test_attached_document_is_outside);
    RUN_TEST(test_dawn_input_with_outside_text);

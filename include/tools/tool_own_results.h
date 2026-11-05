@@ -40,7 +40,7 @@
  *  (TOOL_FRAME_*): own only in a result stored since they frame it, so the
  *  v113 backfill (rows from before) doesn't count them. */
 #define TOOL_OWN_RESULTS_FRAMED_NAMES \
-   "document_grep", "document_manage", "document_read", "document_search"
+   "calendar", "document_grep", "document_manage", "document_read", "document_search"
 
 /** The names, as an initializer: `{ TOOL_OWN_RESULTS_NAMES }`. */
 #define TOOL_OWN_RESULTS_NAMES TOOL_OWN_RESULTS_ALWAYS_NAMES, TOOL_OWN_RESULTS_FRAMED_NAMES

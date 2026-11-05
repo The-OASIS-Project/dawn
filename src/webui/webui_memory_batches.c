@@ -71,9 +71,11 @@ static json_object *outside_from(int k) {
       [OUTSIDE_WEB] = "web",           [OUTSIDE_EMAIL] = "email",
       [OUTSIDE_RESEARCH] = "research", [OUTSIDE_MESSAGING] = "messaging",
       [OUTSIDE_DOCUMENT] = "document", [OUTSIDE_MCP] = "mcp",
-      [OUTSIDE_OTHER] = "other",
+      [OUTSIDE_OTHER] = "other",       [OUTSIDE_CALENDAR] = "calendar",
    };
-   return outside_is_tainted(k) && k <= OUTSIDE_OTHER ? json_object_new_string(names[k]) : NULL;
+   return outside_is_tainted(k) && k <= OUTSIDE_KIND_MAX && names[k]
+              ? json_object_new_string(names[k])
+              : NULL;
 }
 
 /* What a merge onto @p o's fact brought in: the batch's merged rows whose

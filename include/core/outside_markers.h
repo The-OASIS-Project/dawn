@@ -54,6 +54,9 @@
 /* The source of a document's chunk in a turn context's item header. */
 #define OUTSIDE_MARKER_DOC_SOURCE "document_chunk"
 
+/* The source of a calendar event in a turn context's item header. */
+#define OUTSIDE_MARKER_CAL_SOURCE "calendar_event"
+
 /* What a recalled memory's source in an item header starts with.  Its kind
  * word may say "outside" (where it was learned), but the line is DAWN's own
  * rendering of what it stored under the guard, so it never counts as outside

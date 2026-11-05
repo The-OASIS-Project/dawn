@@ -77,6 +77,7 @@
       research: 'a research report',
       messaging: 'a message',
       document: 'a document',
+      calendar: 'a calendar event',
       mcp: "another tool's result",
       other: "another tool's result",
    };

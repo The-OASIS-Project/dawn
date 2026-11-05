@@ -1121,9 +1121,9 @@ messages: they never appear in `messages`, the history, or what the model is sen
   undone was).
 - `outside`: the batch read outside text (an email, a web page, ...).  `outside_from`: what it
   read, `null` when `outside` is false: `web` · `email` · `research` (a research report) ·
-  `messaging` (a message from a chat channel) · `document` · `mcp` (an MCP server's result) ·
-  `other` (any other tool's result, DAWN's own posts, a device's data).  Show it once per batch
-  ("Read outside text: an email").  A memory DAWN recalled into the conversation doesn't count,
+  `messaging` (a message from a chat channel) · `document` · `calendar` (a calendar event) ·
+  `mcp` (an MCP server's result) · `other` (any other tool's result, DAWN's own posts, a device's
+  data).  Show it once per batch ("Read outside text: an email").  A memory DAWN recalled into the conversation doesn't count,
   whatever it was learned from, and neither does the user's own document (a note, or one marked
   My own text: see Document Library).
 - `counts`: the batch's ops by kind (a link that became a proposal counts as `proposed`); refused
