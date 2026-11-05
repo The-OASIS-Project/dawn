@@ -654,12 +654,14 @@ static int load_editable_text(int user_id,
 
 /* Commit edited text: a single-chunk note goes through the stable-id note update;
  * a multi-chunk document is re-chunked + re-embedded in place.  Both keep doc_id
- * stable and archive the prior content.  Returns the user-facing message. */
+ * stable and archive the prior content.  Returns the user-facing message; into
+ * @p done_out (optional) whether the text was written. */
 static char *commit_edit(int user_id,
                          const document_t *doc,
                          bool is_note,
                          const char *new_text,
-                         const char *ok_msg) {
+                         const char *ok_msg,
+                         bool *done_out) {
    doc_index_result_t res;
    int rc = is_note ? document_note_update(user_id, doc->id, doc->filename, new_text,
                                            strlen(new_text), &res)
@@ -674,6 +676,9 @@ static char *commit_edit(int user_id,
     * vouch for it goes, once this turn's outside text is in it). */
    const int turn = memory_turn_outside(user_id);
    (void)document_db_set_outside(user_id, doc->id, turn, true, turn);
+   if (done_out) {
+      *done_out = true;
+   }
    return strdup(ok_msg);
 }
 
@@ -728,7 +733,7 @@ static char *do_edit(int user_id, const char *label, int64_t id, const char *cha
          char ok[DOCMGMT_CONFIRM_MSG_MAX];
          snprintf(ok, sizeof(ok), "Edited %s '%s' (replaced 1 occurrence).",
                   is_note ? "note" : "document", doc.filename);
-         result = commit_edit(user_id, &doc, is_note, new_text, ok);
+         result = commit_edit(user_id, &doc, is_note, new_text, ok, NULL);
          OLOG_INFO("document_manage edit: %s id=%lld find_len=%zu", is_note ? "note" : "doc",
                    (long long)doc.id, strlen(find));
          free(new_text);
@@ -762,7 +767,7 @@ static char *do_append(int user_id, const char *label, int64_t id, const char *t
          char ok[DOCMGMT_CONFIRM_MSG_MAX];
          snprintf(ok, sizeof(ok), "Appended to %s '%s'.", is_note ? "note" : "document",
                   doc.filename);
-         result = commit_edit(user_id, &doc, is_note, new_text, ok);
+         result = commit_edit(user_id, &doc, is_note, new_text, ok, NULL);
          OLOG_INFO("document_manage append: %s id=%lld add_len=%zu", is_note ? "note" : "doc",
                    (long long)doc.id, strlen(text));
          free(new_text);
@@ -856,10 +861,16 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
       snprintf(ok, sizeof(ok), "Undid the last change to %s '%s' (restored the previous version).",
                is_note ? "note" : "document", doc.filename);
       pthread_mutex_lock(&s_edit_mutex);
-      char *result = commit_edit(user_id, &doc, is_note, vtext, ok);
-      /* The restored text brings back the kind its version carried (commit_edit
-       * handled the turn's). */
-      (void)document_db_set_outside(user_id, doc.id, outside, true, OUTSIDE_NONE);
+      bool done = false;
+      char *result = commit_edit(user_id, &doc, is_note, vtext, ok, &done);
+      /* The restored text replaces the discarded one: it takes the kind its
+       * version carried, with what this turn read.  A failed restore left the
+       * text, so it keeps its kind. */
+      if (done) {
+         const int turn = memory_turn_outside(user_id);
+         (void)document_db_set_outside(user_id, doc.id, outside_combine(outside, turn), false,
+                                       turn);
+      }
       pthread_mutex_unlock(&s_edit_mutex);
       free(vtext);
       return result;

@@ -882,9 +882,9 @@ void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payl
        * has no gloss. */
       bool restored_note = exists ? (strcmp(doc.filetype, "note") == 0 && doc.num_chunks == 1)
                                   : recreated_as_note;
-      /* It takes back the kind the version carried (with its own, kept in
-       * place), a document re-created from it too. */
-      (void)document_db_set_outside(conn->auth_user_id, doc_id, outside, exists, OUTSIDE_NONE);
+      /* It takes back the kind the version carried, replacing the discarded
+       * text's (no turn wrote it); a document re-created from it too. */
+      (void)document_db_set_outside(conn->auth_user_id, doc_id, outside, false, OUTSIDE_NONE);
       if (restored_note) {
          (void)memory_note_bridge_upsert_gloss_from(conn->auth_user_id, doc_id, label, outside);
       }

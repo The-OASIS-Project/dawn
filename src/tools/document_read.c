@@ -206,6 +206,12 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
       return strdup(err_buf);
    }
 
+   /* Someone else's text, framed as such, from here on: every result below
+    * quotes its name or its text. */
+   if (!document_is_own(&doc, user_id)) {
+      llm_tools_result_third_party(TOOL_FRAME_DOCUMENT);
+   }
+
    /* Validate start_chunk */
    if (start_chunk < 0)
       start_chunk = 0;
@@ -256,8 +262,5 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
    }
 
    free(chunks);
-   if (!document_is_own(&doc, user_id)) {
-      llm_tools_result_third_party(TOOL_FRAME_DOCUMENT);
-   }
    return result;
 }

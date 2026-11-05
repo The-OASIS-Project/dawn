@@ -743,13 +743,122 @@ void test_version_restore_at_cap_keeps_kind(void) {
    TEST_ASSERT_EQUAL_INT(FAILURE, document_db_version_get_text(v[0].id, 1, &gone, NULL, 0, NULL,
                                                                NULL)); /* pruned */
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside);
-   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, doc, outside, true, OUTSIDE_NONE));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, doc, outside, false, OUTSIDE_NONE));
 
    document_chunk_t chunk;
    int cc = 0;
    document_db_chunk_read(doc, &chunk, 1, 0, &cc);
    TEST_ASSERT_EQUAL_STRING("FIRST", chunk.text);
    TEST_ASSERT_TRUE(chunk_is_own(chunk_id)); /* a note edit keeps its chunk id */
+}
+
+/* The tool's undo of an edit made in a turn that read an email, to a clean
+ * note: the restored text takes its version's kind with the undoing turn's,
+ * never the discarded edit's.  @return the note's kind after the undo. */
+static int undo_tainted_edit(int turn, const char *hash, int64_t *chunk_out) {
+   g_config.documents.version_retention_days = 14;
+   const float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   int64_t doc = seed_note_chunk(1, "Packing", "socks", 27, chunk_out);
+   TEST_ASSERT_TRUE(chunk_is_own(*chunk_out));
+   /* The edit (commit_edit in a turn that read an email). */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_note_update(1, doc, "Packing", "wire money", emb, 4,
+                                                          1.0f, hash));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, doc, OUTSIDE_EMAIL, true, OUTSIDE_EMAIL));
+   TEST_ASSERT_FALSE(chunk_is_own(*chunk_out));
+
+   /* The undo: the version's text and kind, written back by commit_edit. */
+   document_version_meta_t v[4];
+   int n = 0;
+   document_db_version_list(1, doc, v, 4, &n);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   int outside = -1;
+   char *text = NULL;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_version_get_text(v[0].id, 1, &text, NULL, 0, NULL, &outside));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside);
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_note_update(1, doc, "Packing", text, emb, 4, 1.0f, "undo"));
+   free(text);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, doc, turn, true, turn));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, doc, outside_combine(outside, turn),
+                                                          false, turn));
+   document_t d;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(doc, &d));
+   return d.outside;
+}
+
+void test_version_undo_clean_turn_restores_clean(void) {
+   int64_t chunk = 0;
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, undo_tainted_edit(OUTSIDE_NONE, "ut1", &chunk));
+   TEST_ASSERT_TRUE(chunk_is_own(chunk)); /* the user's own again, as before the edit */
+}
+
+void test_version_undo_tainted_turn_keeps_turn_kind(void) {
+   int64_t chunk = 0;
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, undo_tainted_edit(OUTSIDE_WEB, "ut2", &chunk));
+   TEST_ASSERT_FALSE(chunk_is_own(chunk));
+}
+
+/* An undo whose write fails leaves the text, so its kind stays: the tool
+ * writes the version's kind only once the restore went through. */
+void test_version_undo_failed_keeps_kind(void) {
+   g_config.documents.version_retention_days = 14;
+   const float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   int64_t chunk = 0;
+   int64_t doc = seed_note_chunk(1, "Errands", "post office", 29, &chunk);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_note_update(1, doc, "Errands", "click here", emb, 4,
+                                                          1.0f, "uf1"));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, doc, OUTSIDE_WEB, true, OUTSIDE_WEB));
+   document_version_meta_t v[4];
+   int n = 0;
+   document_db_version_list(1, doc, v, 4, &n);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   int outside = -1;
+   char *text = NULL;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_version_get_text(v[0].id, 1, &text, NULL, 0, NULL, &outside));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside);
+   /* The write fails (here: a document id that isn't there), so no kind is written. */
+   TEST_ASSERT_NOT_EQUAL(SUCCESS, document_db_note_update(1, doc + 1000, "Errands", text, emb, 4,
+                                                          1.0f, "uf2"));
+   free(text);
+   document_t d;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(doc, &d));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, d.outside);
+   document_chunk_t c;
+   int cc = 0;
+   document_db_chunk_read(doc, &c, 1, 0, &cc);
+   TEST_ASSERT_EQUAL_STRING("click here", c.text);
+   TEST_ASSERT_FALSE(chunk_is_own(chunk));
+}
+
+/* The panel's restore of a clean version over text that read outside text:
+ * the version's kind replaces the current one (no turn wrote it). */
+void test_version_panel_restore_replaces_kind(void) {
+   g_config.documents.version_retention_days = 14;
+   const float emb[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+   int64_t chunk = 0;
+   int64_t doc = seed_note_chunk(1, "Chores", "dishes", 28, &chunk);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_note_update(1, doc, "Chores", "click here", emb, 4,
+                                                          1.0f, "pr1"));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, doc, OUTSIDE_WEB, true, OUTSIDE_WEB));
+   document_version_meta_t v[4];
+   int n = 0;
+   document_db_version_list(1, doc, v, 4, &n);
+   TEST_ASSERT_EQUAL_INT(1, n);
+   int outside = -1;
+   char *text = NULL;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_version_get_text(v[0].id, 1, &text, NULL, 0, NULL, &outside));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_note_update(1, doc, "Chores", text, emb, 4, 1.0f, "pr2"));
+   free(text);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, doc, outside, false, OUTSIDE_NONE));
+   document_t d;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(doc, &d));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, d.outside);
+   TEST_ASSERT_TRUE(chunk_is_own(chunk));
 }
 
 int main(void) {
@@ -780,6 +889,10 @@ int main(void) {
    RUN_TEST(test_version_restore_at_cap_keeps_kind);
    RUN_TEST(test_version_recover_long_document_drops_own);
    RUN_TEST(test_version_restore_long_document_drops_own);
+   RUN_TEST(test_version_undo_clean_turn_restores_clean);
+   RUN_TEST(test_version_undo_tainted_turn_keeps_turn_kind);
+   RUN_TEST(test_version_undo_failed_keeps_kind);
+   RUN_TEST(test_version_panel_restore_replaces_kind);
    RUN_TEST(test_set_num_chunks);
    return UNITY_END();
 }
