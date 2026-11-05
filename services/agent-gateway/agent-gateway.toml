@@ -50,3 +50,8 @@ url = "http://127.0.0.1:9750/sse"
 name = "dawn"
 url = "https://github.com/The-OASIS-Project/dawn.git"
 base = "main"
+# Paths flagged to the user when a task changes them (not blocked): `**` any
+# folders, `*` within one.  Unset: .github/**, CLAUDE.md, AGENTS.md, .claude/**.
+protected = [".github/**", "CLAUDE.md", "AGENTS.md", ".claude/**",
+             "services/agent-gateway/**", "scripts/install*", "**/install.sh", "packaging/**",
+             "src/auth/**", "src/core/tool_call_policy.c", "src/tools/coding_agent_*"]

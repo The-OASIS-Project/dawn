@@ -56,6 +56,7 @@ SANDBOX_PLACEHOLDERS = [".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".pro
                         ".claude/.cc-writes"]
 
 SUBJECT_CAP = 200
+PROTECTED_CAP = 20        # protected paths named in a completed event
 FILE_CAP = 512 * 1024     # one file's content or diff in a viewer reply
 TREE_CAP = 2000           # entries in one folder listing
 COMMITS_CAP = 100
@@ -89,6 +90,31 @@ async def run(argv: list[str], cwd: str | None = None, env: dict | None = None,
 
 def text(out: bytes) -> str:
    return out.decode(errors="replace").strip()
+
+
+def glob_re(pattern: str) -> re.Pattern:
+   """A repo path pattern: `**` any number of folders, `*` and `?` within one."""
+   out, i = "", 0
+   while i < len(pattern):
+      if pattern.startswith("**/", i):
+         out, i = out + "(?:.*/)?", i + 3
+      elif pattern.startswith("**", i):
+         out, i = out + ".*", i + 2
+      elif pattern[i] == "*":
+         out, i = out + "[^/]*", i + 1
+      elif pattern[i] == "?":
+         out, i = out + "[^/]", i + 1
+      else:
+         out, i = out + re.escape(pattern[i]), i + 1
+   return re.compile(out, re.DOTALL)
+
+
+def is_protected(path: str, patterns: list[str]) -> bool:
+   """Whether `path` matches a pattern, or carries a control character (no real
+   file needs one, and one could hide a path from the patterns)."""
+   if any(ord(c) < 0x20 or ord(c) == 0x7f for c in path):
+      return True
+   return any(glob_re(p).fullmatch(path) for p in patterns)
 
 
 def safe_path(path: str) -> str:
@@ -212,8 +238,14 @@ class Repos:
          await self.gw("-C", m, "fetch", "-q", f.name, f"+refs/heads/{branch}:{ref}")
       commits = await self.gw("-C", m, "log", "--format=%h %s", f"refs/heads/{base}..{ref}")
       stat = await self.gw("-C", m, "diff", "--shortstat", f"refs/heads/{base}...{ref}")
+      names = await run(["git", "-C", m, "diff", "--no-renames", "--name-only", "-z",
+                         f"refs/heads/{base}...{ref}"])
+      patterns = self.repos[name].get("protected", [])
+      touched = [p for p in names.decode(errors="replace").split("\0")
+                 if p and is_protected(p, patterns)]
       return {"commits": [c[:SUBJECT_CAP] for c in commits.splitlines()[:20]],
-              "diffstat": stat, "uncommitted": len(dirty.splitlines())}
+              "diffstat": stat, "uncommitted": len(dirty.splitlines()),
+              "protected": touched[:PROTECTED_CAP], "protected_count": len(touched)}
 
    # --- reading the agent's work (in the mirror only) -----------------------
 
@@ -240,9 +272,13 @@ class Repos:
             path = f"{fields[i + 1].decode(errors='replace')} -> " \
                    f"{fields[i + 2].decode(errors='replace')}"
             i += 2
+         patterns = self.repos[name].get("protected", [])
          files.append({"path": path, "added": None if added == "-" else int(added),
-                       "removed": None if removed == "-" else int(removed)})
+                       "removed": None if removed == "-" else int(removed),
+                       "protected": any(is_protected(p, patterns)
+                                        for p in path.split(" -> "))})
          i += 1
+      files.sort(key=lambda f: not f["protected"])  # protected first: never cut off a listing
       log = await self.gw("-C", m, "log", "--format=%H%x00%s", f"-{COMMITS_CAP}", f"{mb}..{head}")
       commits = [dict(zip(("hash", "subject"), c.split("\0", 1))) for c in log.splitlines()]
       for c in commits:

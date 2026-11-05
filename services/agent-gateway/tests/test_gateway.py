@@ -757,6 +757,41 @@ def service_umask():
    os.umask(old)
 
 
+def test_protected_patterns():
+   from agent_gateway.repos import is_protected
+   pats = [".github/**", "CLAUDE.md", "**/install.sh", "scripts/install*",
+           "src/tools/coding_agent_*"]
+   for p in (".github/workflows/ci.yml", "CLAUDE.md", "install.sh", "dawn_satellite/install.sh",
+             "scripts/install.sh", "scripts/install-deps", "src/tools/coding_agent_tool.c"):
+      assert is_protected(p, pats), p
+   for p in ("docs/CLAUDE.md", "scripts/lib/install.txt", "src/tools/coding_agent/x.c",
+             "github/x", "src/tools/coding_agent_x/y.c"):
+      assert not is_protected(p, pats), p
+   # A newline (or any control character) can't hide a path; it is flagged itself.
+   assert is_protected(".github/workflows/a\nb.yml", pats)
+   assert is_protected("docs/a\nb.md", pats)
+
+
+def test_repo_protected_list_default_and_checked(tmp_path, monkeypatch):
+   from agent_gateway import config
+   monkeypatch.setenv("AGENT_GATEWAY_TOKEN", "t" * 32)
+   p = tmp_path / "g.toml"
+   p.write_text('[[repos]]\nname = "a"\nurl = "u"\n[[repos]]\nname = "b"\nurl = "u"\n'
+                'protected = ["x/**"]\n')
+   c = config.load(str(p))
+   assert c.repos["a"]["protected"] == config.DEFAULT_PROTECTED
+   assert c.repos["b"]["protected"] == ["x/**"]
+   monkeypatch.setenv("AGENT_GATEWAY_TOKEN", "t" * 32)
+   p.write_text('[[repos]]\nname = "a"\nurl = "u"\nprotected = "x"\n')
+   with pytest.raises(ValueError):
+      config.load(str(p))
+   for bad in ('"/CLAUDE.md"', '".github/"'):
+      monkeypatch.setenv("AGENT_GATEWAY_TOKEN", "t" * 32)
+      p.write_text(f'[[repos]]\nname = "a"\nurl = "u"\nprotected = [{bad}]\n')
+      with pytest.raises(ValueError):
+         config.load(str(p))
+
+
 def test_mirror_clone_collect(tmp_path, service_umask):
    """The gateway's git layer end to end, as one user (sudo is the only
    difference on a real install): mirror, task clone, jailed bundle, collect."""
@@ -770,7 +805,8 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    (home / "work").mkdir(parents=True)
    gitconfig = tmp_path / "gitconfig"
    gitconfig.write_text("")
-   repos = Repos({"r": {"url": str(src), "base": "main"}}, str(tmp_path / "mirrors"),
+   repos = Repos({"r": {"url": str(src), "base": "main", "protected": ["g"]}},
+                 str(tmp_path / "mirrors"),
                  str(home / "work"), [], str(home), str(gitconfig))
    wt = asyncio.run(repos.prepare("r", "main", "agent/aaaa0001-x", "aaaa0001"))
    assert git("-C", wt, "config", "user.email") == "dawn-agent@localhost"
@@ -792,6 +828,7 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    out = asyncio.run(repos.collect("r", "aaaa0001", "agent/aaaa0001-x", "main"))
    assert [c.split(" ", 1)[1] for c in out["commits"]] == ["agent work"]
    assert "1 file changed" in out["diffstat"] and out["uncommitted"] == 1
+   assert out["protected"] == ["g"] and out["protected_count"] == 1
    assert git("-C", str(tmp_path / "mirrors/r.git"), "log", "-1", "--format=%s",
               "refs/agent/aaaa0001") == "agent work"
    from agent_gateway.repos import GitError
@@ -801,6 +838,7 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    # The viewer reads the collected branch in the mirror.
    ch = asyncio.run(repos.changes("r", "aaaa0001", "main"))
    assert [f["path"] for f in ch["files"]] == ["g"] and ch["files"][0]["added"] == 1
+   assert ch["files"][0]["protected"] is True
    assert [c["subject"] for c in ch["commits"]] == ["agent work"]
    diff = asyncio.run(repos.file("r", "aaaa0001", "main", "g", "diff"))
    assert "+y" in diff["text"]

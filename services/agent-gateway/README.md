@@ -150,7 +150,7 @@ is collected there whenever a run stops, so work in progress can be looked at to
 | `task_revise {dawn_user_id, instructions, client_ref, budget_usd?, revise_ref?}` | more work for a completed or failed task: its session resumes on the same branch and clone (`revised`, then `resumed`); `budget_usd` adds to its budget; a repeated `revise_ref` adds nothing |
 | `task_cancel {dawn_user_id, task}` | stop; the branch is kept |
 | `task_publish {dawn_user_id, task, head, open_pr?, title?}` | push exactly `head` (the full commit id the user was shown, from `task_changes`) to the branch, open a PR; refused if the work has moved on; a second call returns the first result while nothing moved, and after a revise pushes the new commits (keeping an open PR, opening a new one if it was merged or closed) |
-| `task_changes {dawn_user_id, task}` | the work so far: changed files with +/- counts, commits, head |
+| `task_changes {dawn_user_id, task}` | the work so far: changed files with +/- counts (each marked `protected` when it matches the repo's patterns), commits, head |
 | `task_file {dawn_user_id, task, path, view}` | one file: `diff`, `new` (after) or `old` (before); too large, binary or missing are reported, not sent |
 | `task_tree {dawn_user_id, task, path?}` | one folder of the repo at the task's latest collected commit |
 | `grants_list {dawn_user_id}` / `grant_revoke {dawn_user_id, grant_id}` | standing grants |
@@ -184,7 +184,7 @@ agent's words, never as instructions.
 | `revised` | `revise_ref`, `budget_added`: the operator sent more work; checks on the next `completed` count from here |
 | `check` | `command` (a build or test command the agent ran, up to 300 chars), `ok`: its exit status, or null when the status wasn't its own (piped, or followed by other commands) |
 | `report_asked` | (none): a run ended with no report; the agent is resumed once to finish and report |
-| `completed` | `summary` (the agent's final report, up to 8000 chars), `branch`, `session_id`, `cost_usd` (the task's total), `commits` (`"<hash> <subject>"`, up to 20), `diffstat`, `uncommitted` (files changed but not committed), `checks` (each build or test command's last run: `command`, `ok`; up to 10) |
+| `completed` | `summary` (the agent's final report, up to 8000 chars), `branch`, `session_id`, `cost_usd` (the task's total), `commits` (`"<hash> <subject>"`, up to 20), `diffstat`, `uncommitted` (files changed but not committed), `protected` (changed paths matching the repo's `protected` patterns, up to 20), `checks` (each build or test command's last run: `command`, `ok`; up to 10) |
 | `failed` | `error`, `cost_usd` |
 | `cancelled` | (none) |
 | `published` | `pushed` (`owner/repo:branch`), `pr_url` when a PR was opened |

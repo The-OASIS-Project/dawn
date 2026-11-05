@@ -66,6 +66,9 @@ SECTIONS = {
 }
 
 
+# Paths flagged when a task changes them, for a repo that names none.
+DEFAULT_PROTECTED = [".github/**", "CLAUDE.md", "AGENTS.md", ".claude/**"]
+
 def load(path: str, **overrides) -> Config:
    with open(path, "rb") as f:
       t = tomllib.load(f)
@@ -82,9 +85,15 @@ def load(path: str, **overrides) -> Config:
          setattr(c, k, v)
    c.cbm_url = t.get("cbm", {}).get("url")
    for r in t.get("repos", []):
-      if set(r) - {"name", "url", "base"} or "name" not in r or "url" not in r:
-         raise ValueError("each [[repos]] needs name and url (and optional base)")
-      c.repos[r["name"]] = {"url": r["url"], "base": r.get("base", "main")}
+      if set(r) - {"name", "url", "base", "protected"} or "name" not in r or "url" not in r:
+         raise ValueError("each [[repos]] needs name and url (optional: base, protected)")
+      protected = r.get("protected", DEFAULT_PROTECTED)
+      if not isinstance(protected, list) or not all(isinstance(p, str) and p and p[0] != "/"
+                                                     and p[-1] != "/" for p in protected):
+         raise ValueError(f"[[repos]] {r['name']}: protected is a list of repo-relative path "
+                          "patterns (no leading or trailing /)")
+      c.repos[r["name"]] = {"url": r["url"], "base": r.get("base", "main"),
+                            "protected": protected}
    if c.auth not in ("subscription", "api_key"):
       raise ValueError("[agent] auth must be 'subscription' or 'api_key'")
    if c.task_budget_usd <= 0 or c.max_concurrent_tasks < 1:
