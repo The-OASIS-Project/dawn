@@ -62,7 +62,12 @@ fi
 chmod 750 "$AGENT_HOME"
 # The gateway reads the agent's clones (to publish) and enters its worktrees.
 usermod -aG dawn-agent dawn
+# The agent user owns these: never follow a link it may have put in their place.
+for d in "$AGENT_HOME/work" "$AGENT_HOME/.cache" "$AGENT_HOME/.cache/repo"; do
+   [ -L "$d" ] && error "$d is a symbolic link; remove it and run again"
+done
 install -d -o dawn-agent -g dawn-agent -m 750 "$AGENT_HOME/work"
+install -d -o dawn-agent -g dawn-agent -m 750 "$AGENT_HOME/.cache" "$AGENT_HOME/.cache/repo"
 # The agent user clones from the mirrors, so it may pass through the state dir
 # (not list it) and read the mirrors through its group.
 install -d -o dawn -g dawn -m 711 "$STATE_DIR"

@@ -36,7 +36,11 @@ keep_worktrees_days = 14     # finished tasks' clones are removed after this
 # (a package registry, the Anthropic API itself) is a way out for data the
 # agent can read: the sandbox limits where, not whether.
 default_domains = ["api.anthropic.com", "pypi.org", "files.pythonhosted.org",
-                   "registry.npmjs.org", "crates.io", "static.crates.io", "index.crates.io"]
+                   "registry.npmjs.org", "crates.io", "static.crates.io", "index.crates.io",
+                   "github.com", "api.github.com", "codeload.github.com",
+                   "raw.githubusercontent.com", "objects.githubusercontent.com",
+                   "release-assets.githubusercontent.com",
+                   "gitlab.freedesktop.org"]
 
 # Code graph for the agent (read tools only), via MCP outside the sandbox.
 [cbm]

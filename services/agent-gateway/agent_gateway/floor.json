@@ -17,6 +17,7 @@
       "Read(~/.claude/.credentials.json)",
       "Read(~/.claude.json)",
       "Read(~/.config/**)",
+      "Read(~/.cache/repo/**)",
       "Read(~/.claude/projects/**)",
       "Read(~/.claude/file-history/**)",
       "Read(~/.claude/todos/**)"

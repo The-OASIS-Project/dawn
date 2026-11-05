@@ -33,10 +33,15 @@
 import asyncio
 import base64
 import json
+import logging
 import os
 import re
 import tempfile
 import urllib.request
+
+log = logging.getLogger("agent-gateway")
+
+SUBMODULE_TIMEOUT_S = 300  # fetching a clone's submodules before its task starts
 
 # Mount points the Claude Code sandbox puts over protected paths (seen with
 # 2.1.317).  They exist only inside the sandbox, but `git add -A` there would
@@ -45,6 +50,7 @@ SANDBOX_PLACEHOLDERS = [".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".pro
                         ".gitconfig", ".gitmodules", ".ripgreprc", ".mcp.json", ".idea",
                         ".vscode", ".claude/agents", ".claude/commands", ".claude/hooks",
                         ".claude/launch.json", ".claude/loop.md", ".claude/output-styles",
+                        ".claude/settings.json",
                         ".claude/routines", ".claude/scheduled", ".claude/scheduled_tasks.json",
                         ".claude/settings.local.json", ".claude/skills", ".claude/workflows",
                         ".claude/.cc-writes"]
@@ -65,7 +71,17 @@ async def run(argv: list[str], cwd: str | None = None, env: dict | None = None,
    proc = await asyncio.create_subprocess_exec(
       *argv, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE if stdin is not None else None,
       stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-   out, err = await proc.communicate(stdin.encode() if stdin is not None else None)
+   try:
+      out, err = await proc.communicate(stdin.encode() if stdin is not None else None)
+   except asyncio.CancelledError:
+      # A timeout or a cancel: stop the child too (sudo passes SIGTERM on; a
+      # SIGKILL to it would orphan what it started).
+      proc.terminate()
+      try:
+         await asyncio.wait_for(proc.wait(), 5)
+      except asyncio.TimeoutError:
+         proc.kill()
+      raise
    if proc.returncode != 0:
       raise GitError(f"{' '.join(argv[-3:])}: {err.decode(errors='replace').strip()[:400]}")
    return out
@@ -148,6 +164,19 @@ class Repos:
       await self.as_agent("git", "-C", w, "config", "user.email", self.identity[1])
       await self.as_agent("tee", "-a", os.path.join(w, ".git", "info", "exclude"),
                           stdin="".join(f"/{p}\n" for p in SANDBOX_PLACEHOLDERS))
+      # Submodules as the base branch names them, fetched before the agent
+      # starts (its sandbox keeps .gitmodules and parts of .git read-only).
+      # Only the base branch's own (not theirs: a third party's .gitmodules
+      # isn't fetched outside the sandbox), and bounded in time.
+      if os.path.exists(os.path.join(w, ".gitmodules")):
+         try:
+            await asyncio.wait_for(
+               self.as_agent("git", "-C", w, "-c", "protocol.file.allow=never",
+                             "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60",
+                             "submodule", "update", "--init", "--depth", "1", "-q"),
+               SUBMODULE_TIMEOUT_S)
+         except (GitError, asyncio.TimeoutError) as e:
+            log.warning("task %s: submodules not fetched: %s", task_id, e or "timed out")
       return w
 
    async def claude_md(self, name: str, base: str) -> str | None:

@@ -29,12 +29,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import time
 
 from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient,
                               PermissionResultAllow, PermissionResultDeny, ResultMessage,
-                              SystemMessage)
+                              SystemMessage, UserMessage)
 
 from . import policy, store as st
 from .repos import GitError, Repos, slug
@@ -51,12 +52,22 @@ assistant.  Commits in this task's worktree are pre-approved: commit your work w
 done and tested, with the git identity already configured (never set user.name or \
 user.email yourself).  Never push or open pull requests; the operator publishes.  If \
 something is denied or you need the operator, say so in one line and end your turn: you \
-will be resumed with the answer."""
+will be resumed with the answer.  Run each build or test command on its own (not piped, \
+redirected into a pipeline, or followed by other commands in the same call), so its exit \
+status is recorded; a redirect to a log file is fine."""
 
 TEMPLATE = os.path.join(os.path.dirname(__file__), "CLAUDE.template.md")
 FLOOR = os.path.join(os.path.dirname(__file__), "floor.json")
 
 CBM_WRITE_TOOLS = ("index_repository", "delete_project", "manage_adr")
+
+# A run is one turn: work left running in the background when it ends is lost,
+# so waiting on it (Monitor) is off, as are background commands (claude-agent-exec).
+NO_BACKGROUND_TOOLS = ("Monitor",)
+
+# Said to the agent once when a run ends with no report.
+REPORT_ASK = ("Your last turn ended without a report.  Finish any step still open (run it in "
+              "the foreground), then report what you did and how you checked it.")
 
 
 class Blocked(ValueError):
@@ -67,7 +78,13 @@ def clip(text: str, cap: int = TEXT_CAP) -> str:
    return text if len(text) <= cap else text[:cap] + " [...]"
 
 
-def floor_settings(agent_home: str, work_dir: str, worktree: str, domains: list[str]) -> str:
+# The repo's tool cache under the agent's home (claude-agent-exec points pip,
+# uv, npm, arduino-cli and ccache there): one directory per repo.
+REPO_CACHE_SUBDIR = ".cache/repo"
+
+
+def floor_settings(agent_home: str, work_dir: str, worktree: str, domains: list[str],
+                   repo: str = "") -> str:
    """The agent's fixed rules plus this run's pieces, passed with every run.
    Command-line settings outrank a repo's own and can't be changed by the
    agent, and a run's sandbox settings would otherwise replace these (seen: a
@@ -80,10 +97,54 @@ def floor_settings(agent_home: str, work_dir: str, worktree: str, domains: list[
    s["permissions"]["deny"] = [r.replace("(~/", "(/" + home) for r in s["permissions"]["deny"]]
    s["sandbox"]["network"]["allowedDomains"] = domains
    fs = s["sandbox"]["filesystem"]
+   # Other tasks' clones and other repos' caches are hidden; its own are not.
    fs["denyRead"] = [p.replace("~/", home, 1) if p.startswith("~/") else p
-                     for p in fs["denyRead"]] + [work_dir]  # and other tasks' clones
+                     for p in fs["denyRead"]] + [work_dir, home + REPO_CACHE_SUBDIR]
    fs["allowRead"] = [worktree]
+   # /tmp: builds and tests expect to write there.  Run as agent-gateway.service
+   # (PrivateTmp), it is the gateway's own /tmp, not the host's; a gateway
+   # started by hand shares the host's.
+   fs["allowWrite"] = ["/tmp"]
+   if re.fullmatch(r"[A-Za-z0-9._-]+", repo) and repo not in (".", ".."):  # its tool cache
+      fs["allowRead"].append(home + REPO_CACHE_SUBDIR + "/" + repo)
+      fs["allowWrite"].append(home + REPO_CACHE_SUBDIR + "/" + repo)
    return json.dumps(s)
+
+
+# A shell command that builds or runs tests: the gateway records whether it
+# succeeded, so a report can say what was checked from what the gateway saw,
+# not only from the agent's words.
+# Checked against each segment of the command line (split at ; & | and
+# parentheses), after any VAR=value prefixes.
+CHECK_SEGMENT = re.compile(
+   r"(make|cmake|ctest|ninja|meson|pytest|tox|python3?\s+-m\s+pytest|cargo\s+(build|test)|"
+   r"go\s+(build|test)|(npm|pnpm|yarn)\s+(run\s+)?test)(\s|$)")
+# A test program run by path (./build-debug/tests/test_x, tests/test_y.sh).
+TEST_PROGRAM = re.compile(r"(^|/)tests?/[^/\s]*test[^/\s]*$|(^|/)test_[^/\s]+$")
+CHECKS_REPORTED = 10  # the last build/test commands a completed event lists
+CHECKS_SCANNED = 100  # recorded runs read to find each command's last
+
+
+def check_command(tool: str, ti: dict) -> tuple[str, bool] | None:
+   """For a Bash call that builds or runs tests: its command, and whether the
+   line's exit status is that command's own (nothing after it, no || before it
+   that could skip it, not run in the background).  Else None."""
+   command = str(ti.get("command", "")) if tool == "Bash" else ""
+   # Quoted text is never a command (a commit message saying "make test").
+   bare = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "''", command)
+   bare = re.sub(r"\d*[<>]&\d*|&>>?", " ", bare)  # 2>&1, &>log: redirections, not separators
+   parts = re.split(r"(&&|\|\||[;&|()\n])", bare)  # segments and the separators between
+   segments = parts[0::2]
+   for i, segment in enumerate(segments):
+      words = segment.split()
+      while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", words[0]):
+         words.pop(0)
+      if words and (CHECK_SEGMENT.match(" ".join(words)) or TEST_PROGRAM.search(words[0])):
+         after = [p for p in parts[2 * i + 1:] if p.strip()]
+         before = parts[1:2 * i:2]
+         own = not after and "||" not in before and not ti.get("run_in_background")
+         return command, own
+   return None
 
 
 def brief(tool: str, ti: dict) -> str:
@@ -101,10 +162,8 @@ class Runner:
       self.running: dict[str, asyncio.Task] = {}
       self.clients: dict[str, ClaudeSDKClient] = {}
       self.starting = 0
+      self.cloning: dict[str, asyncio.Task] = {}  # tasks whose clone is being made
       self.background: set[asyncio.Task] = set()
-      self.inflight: dict[tuple[int, str], asyncio.Future] = {}
-      # Starts cancelled before their task existed: cancelled once it does.
-      self.cancel_on_start: set[tuple[int, str]] = set()
 
    def soon(self, coro) -> None:
       """Run `coro` after the current step; the task is kept until it ends."""
@@ -125,41 +184,15 @@ class Runner:
 
    async def start(self, dawn_user_id: int, repo: str, task: str, budget_usd: float | None,
                    client_ref: str | None) -> dict:
-      if not client_ref:
-         return await self.start_new(dawn_user_id, repo, task, budget_usd, None)
-      # A retried call returns the task the first one started, even mid-start.
-      existing = self.store.task_by_ref(dawn_user_id, client_ref)
-      if existing:
-         return existing
-      key = (dawn_user_id, client_ref)
-      if key in self.inflight:
-         return await asyncio.shield(self.inflight[key])
-      self.inflight[key] = asyncio.get_running_loop().create_future()
-      try:
-         t = await self.start_new(dawn_user_id, repo, task, budget_usd, client_ref)
-         self.inflight[key].set_result(t)
-         return t
-      except BaseException as e:
-         self.inflight[key].set_exception(e)
-         self.inflight[key].exception()  # retrieved here, so never "unhandled"
-         raise
-      finally:
-         del self.inflight[key]
-         self.cancel_on_start.discard(key)
-
-   async def cancel_ref(self, dawn_user_id: int, client_ref: str) -> dict | None:
-      """Cancel the task started as `client_ref`.  One still starting (its caller
-      may have given up waiting) is cancelled as soon as it exists: None."""
-      t = self.store.task_by_ref(dawn_user_id, client_ref)
-      if t:
-         return await self.cancel(t["id"], dawn_user_id)
-      if (dawn_user_id, client_ref) in self.inflight:
-         self.cancel_on_start.add((dawn_user_id, client_ref))
-         return None
-      raise ValueError("no such task")
-
-   async def start_new(self, dawn_user_id: int, repo: str, task: str,
-                       budget_usd: float | None, client_ref: str | None) -> dict:
+      """Record the task and return at once: its clone is made in the background
+      (prepare_and_launch), so the caller hears within a second and never times
+      out on a slow clone.  A repeated `client_ref` returns the task it started.
+      Nothing is awaited between the lookup and the insert, so two calls with one
+      `client_ref` can't both make a task."""
+      if client_ref:
+         existing = self.store.task_by_ref(dawn_user_id, client_ref)
+         if existing:
+            return existing
       if repo not in self.cfg.repos:
          raise ValueError(f"unknown repo '{repo}' (known: {', '.join(self.cfg.repos)})")
       if not task.strip():
@@ -170,29 +203,50 @@ class Runner:
       task_id = secrets.token_hex(4)
       base = self.cfg.repos[repo]["base"]
       branch = f"agent/{task_id}-{slug(task)}"
-      self.starting += 1  # holds the slot across the clone
       budget = min(budget_usd or self.cfg.task_budget_usd, self.cfg.task_budget_usd * 4)
+      self.store.add_task(id=task_id, dawn_user_id=dawn_user_id, agent="claude", repo=repo,
+                          base=base, branch=branch, worktree=self.repos.workdir(task_id),
+                          task=task, budget_usd=budget, client_ref=client_ref)
+      self.starting += 1  # holds the slot across the clone
+      self.cloning[task_id] = asyncio.get_running_loop().create_task(
+         self.prepare_and_launch(task_id))
+      return self.store.task(task_id)
+
+   async def cancel_ref(self, dawn_user_id: int, client_ref: str) -> dict:
+      """Cancel the task started as `client_ref` (one still being cloned too)."""
+      t = self.store.task_by_ref(dawn_user_id, client_ref)
+      if not t:
+         raise ValueError("no such task")
+      return await self.cancel(t["id"], dawn_user_id)
+
+   async def prepare_and_launch(self, task_id: str) -> None:
+      """Clone the task's repo, then start its first run, unless it was
+      cancelled meanwhile.  A clone that fails fails the task."""
+      t = self.store.task(task_id)
       try:
          await self.prune()
-         worktree = await self.repos.prepare(repo, base, branch, task_id)
-         self.store.add_task(id=task_id, dawn_user_id=dawn_user_id, agent="claude",
-                             repo=repo, base=base, branch=branch, worktree=worktree,
-                             task=task, budget_usd=budget, client_ref=client_ref)
-      except Exception:
+         worktree = await self.repos.prepare(t["repo"], t["base"], t["branch"], task_id)
+         self.store.update_task(task_id, worktree=worktree)
+      except Exception as e:
+         # git's own words stay in the log: they may name the remote's URL.
+         log.warning("task %s: could not prepare its clone: %s", task_id, e)
          try:
             await self.repos.remove(task_id)
-         except Exception as e:
-            log.warning("could not remove the half-made worktree %s: %s", task_id, e)
-         raise
+         except Exception as e2:
+            log.warning("could not remove the half-made worktree %s: %s", task_id, e2)
+         if self.store.task(task_id)["status"] in st.OPEN:
+            self.fail(task_id, "could not prepare its clone (the gateway's log says why)")
+         return
       finally:
+         # A cancel stops the clone (its git is killed): the slot frees at once.
+         self.cloning.pop(task_id, None)
          self.starting -= 1
          self.soon(self.retry_blocked())  # a start that runs nothing frees its slot here
-      self.store.add_event(task_id, "started", repo=repo, branch=branch, task=clip(task))
-      if client_ref and (dawn_user_id, client_ref) in self.cancel_on_start:
-         self.finish_cancelled(task_id)  # cancelled while it started: never launched
-      else:
-         self.launch(task_id, task)
-      return self.store.task(task_id)
+      if self.store.task(task_id)["status"] not in st.OPEN:
+         return  # cancelled while it was cloned: never launched
+      self.store.add_event(task_id, "started", repo=t["repo"], branch=t["branch"],
+                           task=clip(t["task"]))
+      self.launch(task_id, t["task"])
 
    def launch(self, task_id: str, prompt: str) -> None:
       self.store.update_task(task_id, status=st.WORKING, error=None)
@@ -299,21 +353,22 @@ class Runner:
          cwd=task["worktree"], cli_path=self.cfg.claude_cli, resume=task["session_id"],
          model=self.cfg.model, permission_mode="acceptEdits",
          setting_sources=[], strict_mcp_config=True, mcp_servers=mcp,
-         disallowed_tools=[f"mcp__cbm__{t}" for t in CBM_WRITE_TOOLS],
+         disallowed_tools=[f"mcp__cbm__{t}" for t in CBM_WRITE_TOOLS] + list(NO_BACKGROUND_TOOLS),
          settings=floor_settings(self.cfg.agent_home, self.cfg.work_dir, task["worktree"],
-                                 domains),
+                                 domains, task["repo"]),
          # The CLI restores a session's running cost on resume, so its budget
          # check is against the whole task: give it the whole budget.
          max_budget_usd=task["budget_usd"],
          can_use_tool=self.permission_handler(task, granted_tools),
          system_prompt={"type": "preset", "preset": "claude_code", "append": system},
-         env={"DAWN_AGENT_AUTH": self.cfg.auth,
+         env={"DAWN_AGENT_AUTH": self.cfg.auth, "DAWN_AGENT_REPO": task["repo"],
               **({"DAWN_AGENT_CLAUDE": self.cfg.claude_bin} if self.cfg.claude_bin else {})},
          stderr=lambda line: log.debug("claude[%s]: %s", task["id"], line))
 
    async def run(self, task_id: str, prompt: str) -> None:
       task = self.store.task(task_id)
       result, costed = None, False
+      checks: dict[str, tuple[str, bool]] = {}  # a build/test call's id -> (command, own status)
       try:
          async with ClaudeSDKClient(options=await self.options(task)) as client:
             self.clients[task_id] = client
@@ -329,6 +384,17 @@ class Runner:
                      elif getattr(b, "name", None):
                         self.store.add_event(task_id, "tool", tool=b.name,
                                              brief=brief(b.name, b.input))
+                        check = check_command(b.name, b.input)
+                        if check:
+                           checks[b.id] = check
+               elif isinstance(m, UserMessage) and isinstance(m.content, list):
+                  for b in m.content:
+                     check = checks.pop(getattr(b, "tool_use_id", None), None)
+                     if check:
+                        command, own = check
+                        # Its outcome only when the status is the command's own.
+                        ok = (not getattr(b, "is_error", False)) if own else None
+                        self.store.add_event(task_id, "check", command=clip(command, 300), ok=ok)
                elif isinstance(m, ResultMessage):
                   result = m
                   self.store.update_task(task_id, session_id=m.session_id)
@@ -368,6 +434,16 @@ class Runner:
       self.store.add_cost(task_id, cost)
       self.store.add_event(task_id, "run_end", cost_usd=cost)
 
+   def ended_the_report_ask(self, task_id: str) -> bool:
+      """Whether the run that just ended is the one started by asking for a
+      report: the only resume since the last ask (a later reply or restart
+      resumes it again, and that run is asked anew)."""
+      asks = self.store.task_events(task_id, "report_asked", 1)
+      resumes = self.store.task_events(task_id, "resumed", 2)
+      if not asks or not resumes or resumes[-1]["seq"] < asks[0]["seq"]:
+         return False
+      return len(resumes) < 2 or resumes[0]["seq"] < asks[0]["seq"]
+
    async def finish(self, task_id: str, r: ResultMessage | None) -> None:
       task = self.store.task(task_id)
       if task["status"] == st.CANCELLED:
@@ -405,11 +481,29 @@ class Runner:
       if outcome is None:
          self.fail(task_id, "the task's work could not be collected")
          return
+      if not (r.result or "").strip():
+         # No report: ask once; the run that was asked ending silent too fails.
+         if self.ended_the_report_ask(task_id):
+            self.fail(task_id, "the agent ended without a report")
+            return
+         self.store.add_event(task_id, "report_asked")
+         self.store.add_note(task_id, REPORT_ASK)
+         self.store.update_task(task_id, status=st.INPUT_REQUIRED)  # retried if no room
+         await self.deliver(task_id)
+         return
       self.store.update_task(task_id, status=st.COMPLETED,
                              summary=clip(r.result or "", SUMMARY_CAP))
+      # Each command's last run: a build that failed and was then fixed counts
+      # as fixed.
+      last: dict[str, object] = {}
+      for e in self.store.task_events(task_id, "check", CHECKS_SCANNED):
+         last.pop(e["data"]["command"], None)
+         last[e["data"]["command"]] = e["data"]["ok"]
+      checks = [{"command": c, "ok": ok} for c, ok in list(last.items())[-CHECKS_REPORTED:]]
       self.store.add_event(task_id, "completed", summary=clip(r.result or "", SUMMARY_CAP),
                            branch=task["branch"], session_id=task["session_id"],
-                           cost_usd=self.store.task(task_id)["cost_usd"], **outcome)
+                           cost_usd=self.store.task(task_id)["cost_usd"], checks=checks,
+                           **outcome)
 
    def fail(self, task_id: str, error: str) -> None:
       self.store.update_task(task_id, status=st.FAILED, error=error)
@@ -467,6 +561,15 @@ class Runner:
       self.finish_cancelled(task_id)
       for p in self.store.pending_requests(task_id):
          self.store.decide_request(p["id"], "cancelled")
+      clone = self.cloning.get(task_id)
+      if clone:
+         clone.cancel()
+         await asyncio.wait([clone], timeout=5)
+         if clone.done() and self.cloning.get(task_id) is clone:
+            # Cancelled before its first step, it never ran its own finally.
+            del self.cloning[task_id]
+            self.starting -= 1
+            self.soon(self.retry_blocked())
       run = self.running.get(task_id)
       if run:
          client = self.clients.get(task_id)

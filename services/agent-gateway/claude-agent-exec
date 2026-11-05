@@ -18,4 +18,34 @@ if [ "$DAWN_AGENT_AUTH" = "api_key" ]; then
    export ANTHROPIC_API_KEY
 fi
 export DISABLE_AUTOUPDATER=1
+# A run is one turn, so nothing may outlive it: no background commands; a
+# foreground one may take up to an hour (a full build or test suite).
+export CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
+export BASH_DEFAULT_TIMEOUT_MS=600000 BASH_MAX_TIMEOUT_MS=3600000
+# A tool cache per repo, the one place outside its clone and /tmp a task may
+# write that outlives it: downloads and build caches kept for the repo's next
+# task (one repo's tasks never see another's).  Each tool is pointed at it by
+# its own variable, never XDG_CACHE_HOME: Claude Code itself, outside the
+# sandbox, keeps its cache there and must not write where a task can plant links.
+case "$DAWN_AGENT_REPO" in
+   *[!A-Za-z0-9._-]*|""|.|..) ;;
+   *)
+      C="$HOME/.cache/repo/$DAWN_AGENT_REPO"
+      mkdir -p "$C/arduino15" "$C/Arduino"
+      export PIP_CACHE_DIR="$C/pip" UV_CACHE_DIR="$C/uv" npm_config_cache="$C/npm"
+      export ARDUINO_DIRECTORIES_DATA="$C/arduino15" ARDUINO_DIRECTORIES_USER="$C/Arduino"
+      export ARDUINO_DIRECTORIES_DOWNLOADS="$C/arduino15/staging"
+      export ARDUINO_BUILD_CACHE_PATH="$C/arduino-build"
+      # No ccache config file is read from the cache (an agent could write one
+      # that runs a command in later builds); paths are taken relative to the
+      # clone, which differs per task.
+      if command -v ccache >/dev/null 2>&1; then
+         export CCACHE_DIR="$C/ccache"
+         mkdir -p "$CCACHE_DIR"
+         export CCACHE_CONFIGPATH=/dev/null CCACHE_BASEDIR="$PWD" CCACHE_NOHASHDIR=1
+         export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
+         export CMAKE_CUDA_COMPILER_LAUNCHER=ccache
+      fi
+      ;;
+esac
 exec "$BIN" "$@"

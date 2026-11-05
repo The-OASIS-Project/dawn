@@ -177,6 +177,14 @@ class Store:
       self.new_event.set()
       return cur.lastrowid
 
+   def task_events(self, task_id: str, kind: str, limit: int) -> list[dict]:
+      """A task's last @limit events of @kind, oldest first, data decoded."""
+      rows = self.db.execute(
+         "SELECT seq, ts, data FROM events WHERE task_id = ? AND kind = ? ORDER BY seq DESC "
+         "LIMIT ?", (task_id, kind, limit)).fetchall()
+      return [{"seq": r["seq"], "ts": r["ts"], "data": json.loads(r["data"])}
+              for r in reversed(rows)]
+
    def events_after(self, after_seq: int, limit: int = 200,
                     max_bytes: int = 256 * 1024) -> list[dict]:
       """Events in order, each with its task's user and client_ref (system events,

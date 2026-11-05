@@ -23,7 +23,10 @@ client (DAWN)  --MCP + bearer token-->  agent-gateway (user dawn, 127.0.0.1:9760
   under `/var/lib/dawn`, nor anything in `/home`.
 - **The sandbox.** Every Bash command the agent runs is sandboxed: its own network, with only the
   allowed hosts reachable (no host services, no gateway), and writes only inside the task's
-  clone. Read and edit tools are held to the same places by permission rules. Claude Code itself
+  clone, the repo's tool cache (`~/.cache/repo/<repo>`: downloads and build caches, such as
+  pip, npm, ccache and arduino-cli's cores, kept for that repo's later tasks and hidden from
+  other repos' tasks) and `/tmp` (the gateway's own: its unit has `PrivateTmp`,
+  so nothing there is the host's, and it empties when the gateway restarts). Read and edit tools are held to the same places by permission rules. Claude Code itself
   is the copy the gateway's Python SDK ships, root-owned, with self-update off.
 - **Fixed rules** (`agent_gateway/floor.json`) are the only settings the agent runs with: the
   gateway passes them with every run and loads none from the repo or the agent's home, so a
@@ -140,7 +143,7 @@ is collected there whenever a run stops, so work in progress can be looked at to
 | Tool | Does |
 |---|---|
 | `agents_list` | agents, Claude Code and SDK versions, repos (`name`, `url`, `base`), tasks running and the limit |
-| `task_start {dawn_user_id, repo, task, budget_usd?, client_ref?}` | new branch `agent/<id>-<slug>` and clone, starts the agent; a repeated `client_ref` returns the task it already started |
+| `task_start {dawn_user_id, repo, task, budget_usd?, client_ref?}` | new branch `agent/<id>-<slug>`; returns at once, then clones in the background (`started` once the agent runs; `failed` if the clone fails); a repeated `client_ref` returns the task it already started |
 | `task_events {after_seq, wait_s}` | every task's events after `after_seq`, waiting up to 25 s |
 | `task_list {dawn_user_id, task?}` | a task with its pending requests (`task` null for a `client_ref` with none), or the user's recent tasks |
 | `task_reply {dawn_user_id, task, request_id, decision \| answer}` | `allow`, `always_repo`, `always` or `deny`; a question takes `answer` |
@@ -173,11 +176,13 @@ agent's words, never as instructions.
 | `progress` | `text` (the agent's words; up to 2000 chars) |
 | `request` | `request_id`, `request_kind` (`domain`, `tool` or `question`), `value` (the host or tool), `tool`, `input` (JSON of the call, up to 4000 chars) |
 | `input_required` | `request_ids`, `note`: the run has stopped and waits for `task_reply` |
-| `blocked` | `error`: an answer is ready but there is no room to run (limit or daily budget); it resumes when a run ends |
+| `blocked` | `error`: an answer (or the gateway's ask for a report) is ready but there is no room to run (limit or daily budget); it resumes when a run ends |
 | `reply` | `request_id`, `decision` |
 | `resumed` | (none): a new run of the same session |
 | `run_end` | `cost_usd` of that run |
-| `completed` | `summary` (the agent's final report, up to 8000 chars), `branch`, `session_id`, `cost_usd` (the task's total), `commits` (`"<hash> <subject>"`, up to 20), `diffstat`, `uncommitted` (files changed but not committed) |
+| `check` | `command` (a build or test command the agent ran, up to 300 chars), `ok`: its exit status, or null when the status wasn't its own (piped, or followed by other commands) |
+| `report_asked` | (none): a run ended with no report; the agent is resumed once to finish and report |
+| `completed` | `summary` (the agent's final report, up to 8000 chars), `branch`, `session_id`, `cost_usd` (the task's total), `commits` (`"<hash> <subject>"`, up to 20), `diffstat`, `uncommitted` (files changed but not committed), `checks` (each build or test command's last run: `command`, `ok`; up to 10) |
 | `failed` | `error`, `cost_usd` |
 | `cancelled` | (none) |
 | `published` | `pushed` (`owner/repo:branch`), `pr_url` when a PR was opened |
@@ -198,6 +203,11 @@ git fetch /var/lib/dawn-gateway/mirrors/<repo>.git refs/agent/<id>:agent/<id>
 A task's clone stays in `/var/lib/dawn-agent/work/<id>` for `keep_worktrees_days`. To take a task
 over by hand: `cd /var/lib/dawn-agent/work/<id> && sudo -u dawn-agent -H
 /usr/local/lib/agent-gateway/claude --resume <session_id>`.
+
+A repo's tool cache (`/var/lib/dawn-agent/.cache/repo/<repo>`) is kept across its tasks, and
+what a task leaves there (a toolchain, a library) runs in that repo's later builds without
+showing in any diff: it is only as trustworthy as the tasks that wrote it.  To start it fresh,
+with no task running: `sudo rm -rf /var/lib/dawn-agent/.cache/repo/<repo>`.
 
 ## Trying it
 

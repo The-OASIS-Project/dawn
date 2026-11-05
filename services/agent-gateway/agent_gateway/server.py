@@ -94,7 +94,9 @@ def build(runner, cfg) -> MCPServer:
                         budget_usd: float | None = None, agent: str = "claude",
                         client_ref: str | None = None) -> dict:
       """Start a task: a new branch and worktree in `repo`, and an agent working on it.
-      A repeated `client_ref` returns the task it already started (safe to retry)."""
+      Returns once the task is recorded; its clone is made in the background (a clone
+      that fails ends the task as failed).  A repeated `client_ref` returns the task it
+      already started (safe to retry)."""
       if agent != "claude":
          raise ValueError("only the 'claude' agent is available")
       return public(await runner.start(dawn_user_id, repo, task, budget_usd, client_ref))
@@ -144,11 +146,9 @@ def build(runner, cfg) -> MCPServer:
    @tool
    async def task_cancel(dawn_user_id: int, task_id: str | None = None,
                          client_ref: str | None = None) -> dict:
-      """Stop a task.  Its branch and worktree are kept.  A task still starting
-      under `client_ref` is stopped as soon as it exists."""
+      """Stop a task (one still being cloned too).  Its branch and worktree are kept."""
       if client_ref and not task_id:
-         t = await runner.cancel_ref(dawn_user_id, client_ref)
-         return public(t) if t else {"client_ref": client_ref, "status": "cancelling"}
+         return public(await runner.cancel_ref(dawn_user_id, client_ref))
       t = task_of(dawn_user_id, task_id, client_ref)
       return public(await runner.cancel(t["id"], dawn_user_id))
 

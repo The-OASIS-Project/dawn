@@ -29,7 +29,7 @@ import pytest
 from agent_gateway import policy, store as st
 from agent_gateway.config import Config
 from agent_gateway.repos import Repos
-from agent_gateway.runner import Runner
+from agent_gateway.runner import NO_BACKGROUND_TOOLS, Runner
 
 
 def test_policy(tmp_path):
@@ -122,6 +122,9 @@ def test_daily_spend(store):
 
 
 class FakeRepos:
+   def workdir(self, task_id):
+      return f"/w/{task_id}"
+
    async def prepare(self, name, base, branch, task_id):
       return f"/w/{task_id}"
 
@@ -154,6 +157,13 @@ class FakeRunner(Runner):
 def runner(store, **cfg):
    cfg.setdefault("repos", {"r": {"url": "u", "base": "main"}})
    return FakeRunner(Config(token="x" * 32, **cfg), store, FakeRepos())
+
+
+async def settle(r):
+   """Let a start's background clone (and what it schedules) finish."""
+   while r.background or r.cloning:
+      await asyncio.gather(*list(r.background), *list(r.cloning.values()),
+                           return_exceptions=True)
 
 
 def test_reply_allow_resumes_with_grant(store):
@@ -209,6 +219,107 @@ def test_final_report_kept_whole(store):
    assert store.task("t1")["summary"].endswith("Tests: 12 passed.")
 
 
+def test_run_without_a_report_is_asked_once(store):
+   """A run that ends with no report isn't done: the agent is asked once to
+   finish and report; a second silent end fails the task."""
+   r = runner(store)
+   add_task(store)
+
+   class Silent:
+      is_error, result, subtype, total_cost_usd = False, "", "success", 0.1
+   asyncio.run(r.finish("t1", Silent()))
+   assert store.task("t1")["status"] != st.COMPLETED
+   assert r.resumed and "without a report" in r.resumed[0][1]
+   del r.running["t1"]                                    # that run ends silently too
+   asyncio.run(r.finish("t1", Silent()))
+   assert store.task("t1")["status"] == st.FAILED
+   assert len(r.resumed) == 1
+
+
+def test_report_ask_is_per_run(store):
+   """Asked once, then resumed for another reason (an answer): a later silent
+   end is asked again, not failed."""
+   r = runner(store)
+   add_task(store)
+
+   class Silent:
+      is_error, result, subtype, total_cost_usd = False, "", "success", 0.1
+   asyncio.run(r.finish("t1", Silent()))                  # asked
+   del r.running["t1"]
+   store.add_note("t1", "the operator's answer")          # its run asked a question...
+   store.update_task("t1", status=st.INPUT_REQUIRED)
+   asyncio.run(r.deliver("t1"))                           # ...and was resumed with the answer
+   del r.running["t1"]
+   asyncio.run(r.finish("t1", Silent()))
+   assert store.task("t1")["status"] != st.FAILED
+   assert len(r.resumed) == 3 and "without a report" in r.resumed[2][1]
+
+
+def test_background_work_is_off():
+   """A run is one turn: nothing may be left running after it."""
+   with open(os.path.join(os.path.dirname(__file__), "..", "claude-agent-exec")) as f:
+      assert "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1" in f.read()
+   assert "Monitor" in NO_BACKGROUND_TOOLS
+
+
+def test_claude_codes_own_cache_stays_out_of_the_tool_cache():
+   """XDG_CACHE_HOME would move Claude Code's own cache (written outside the
+   sandbox) into a folder a task can write."""
+   with open(os.path.join(os.path.dirname(__file__), "..", "claude-agent-exec")) as f:
+      assert "XDG_CACHE_HOME" not in "".join(l for l in f if not l.lstrip().startswith("#"))
+
+
+def test_build_and_test_commands_are_recorded():
+   """A shell command that builds or runs tests counts as a check; its outcome
+   is known only when the line's exit status is that command's own."""
+   from agent_gateway.runner import check_command
+   own = lambda c, **kw: check_command("Bash", {"command": c, **kw})
+   assert own("make -C build-debug -j8 tests-ci") == ("make -C build-debug -j8 tests-ci", True)
+   assert own("cd build && ctest -L ci")[1] is True
+   assert own("cmake --preset debug")[1] is True
+   assert own("python3 -m pytest -q tests")[1] is True
+   assert own("npm run test")[1] is True
+   assert own("CCACHE_DISABLE=1 make -j8")[1] is True
+   assert own("./build-debug/tests/test_contacts_db")[1] is True
+   assert own("tests/test_pentest.sh --section x")[1] is True
+   # Piped, or-ed, followed by something, or in the background: no outcome.
+   assert own("make -j8 2>&1 | tail -40")[1] is False
+   assert own("make -j8 2>&1")[1] is True
+   assert own("cmake --build b >log 2>&1")[1] is True
+   assert own("make || true")[1] is False
+   assert own("false || make")[1] is False
+   assert own("make; echo done")[1] is False
+   assert own("ctest -L ci", run_in_background=True)[1] is False
+   # Not a build or test, quoted text included; a newline separates commands.
+   assert own('git commit -qm "Fix calc (make test passes)"') is None
+   assert own("git commit -m 'fix; make test green'") is None
+   assert own("cd build\nmake")[1] is True
+   assert own("grep -rn make src/") is None
+   assert own("git log --oneline") is None
+   assert own("cat Makefile") is None
+   assert check_command("Read", {"command": "make"}) is None
+
+
+def test_completed_lists_the_checks_it_saw(store):
+   """The completed event carries the build/test commands the gateway saw and
+   whether each succeeded: evidence that isn't the agent's own words."""
+   r = runner(store)
+   add_task(store)
+   store.add_event("t1", "check", command="make tests-ci", ok=False)  # fixed below
+   store.add_event("t1", "check", command="ctest -L ci | tail", ok=None)
+   store.add_event("t1", "check", command="ctest -L ci", ok=False)
+   store.add_event("t1", "check", command="make tests-ci", ok=True)
+
+   class Result:
+      is_error, result, subtype, total_cost_usd = False, "done", "success", 0.5
+   asyncio.run(r.finish("t1", Result()))
+   done = [e for e in store.events_after(0) if e["kind"] == "completed"][-1]
+   # Each command's last run, in the order of those last runs.
+   assert done["data"]["checks"] == [{"command": "ctest -L ci | tail", "ok": None},
+                                     {"command": "ctest -L ci", "ok": False},
+                                     {"command": "make tests-ci", "ok": True}]
+
+
 def test_blocked_reply_keeps_answer_until_room(store):
    r = runner(store)
    add_task(store)
@@ -250,11 +361,16 @@ def test_spent_budget_fails_instead_of_resuming(store):
 
 def test_start_is_idempotent_by_client_ref(store):
    r = runner(store, max_concurrent_tasks=3)
-   a = asyncio.run(r.start(1, "r", "fix it", None, "ref-1"))
-   b = asyncio.run(r.start(1, "r", "fix it", None, "ref-1"))
-   assert a["id"] == b["id"] and len(r.resumed) == 1
-   c = asyncio.run(r.start(2, "r", "fix it", None, "ref-1"))  # another user
-   assert c["id"] != a["id"]
+
+   async def go():
+      a = await r.start(1, "r", "fix it", None, "ref-1")
+      b = await r.start(1, "r", "fix it", None, "ref-1")
+      c = await r.start(2, "r", "fix it", None, "ref-1")  # another user
+      await settle(r)
+      return a, b, c
+   a, b, c = asyncio.run(go())
+   assert a["id"] == b["id"] and c["id"] != a["id"]
+   assert [t for t, _ in r.resumed] == [a["id"], c["id"]]
    with pytest.raises(ValueError):
       asyncio.run(r.start(1, "r", "x", -1.0, None))
 
@@ -275,42 +391,45 @@ def test_cost_is_per_run_when_the_session_reports_totals(store):
    assert store.spent_since(0) == pytest.approx(3.9)
 
 
-def test_retry_during_start_returns_the_same_task(store):
-   class SlowRepos(FakeRepos):
-      async def prepare(self, *a):
-         await asyncio.sleep(0.05)
-         return "/w/x"
+class SlowRepos(FakeRepos):
+   async def prepare(self, *a):
+      await asyncio.sleep(0.05)
+      return "/w/x"
+
+
+def test_start_returns_before_the_clone(store):
+   """The caller hears at once; the agent starts once the clone is made."""
    r = runner(store)
    r.repos = SlowRepos()
 
    async def go():
-      return await asyncio.gather(r.start(1, "r", "fix", None, "ref"),
-                                  r.start(1, "r", "fix", None, "ref"))
-   a, b = asyncio.run(go())
-   assert a["id"] == b["id"] and len(r.resumed) == 1
+      t = await r.start(1, "r", "fix", None, "ref")
+      assert t["status"] == st.WORKING and t["branch"].startswith("agent/")
+      assert r.resumed == [] and r.starting == 1     # still cloning, holding its slot
+      again = await r.start(1, "r", "fix", None, "ref")
+      await settle(r)
+      return t, again
+   t, again = asyncio.run(go())
+   assert again["id"] == t["id"] and [x for x, _ in r.resumed] == [t["id"]]
+   assert r.starting == 0
+   kinds = [e["kind"] for e in store.events_after(0)]
+   assert kinds.count("started") == 1
 
 
-def test_cancel_during_start_stops_the_task_once_it_exists(store):
-   """A caller that gave up waiting on a start cancels it by client_ref; the task
-   the start then makes is cancelled, and a retried start returns it as such."""
-   class SlowRepos(FakeRepos):
-      async def prepare(self, *a):
-         await asyncio.sleep(0.05)
-         return "/w/x"
-
-   class Quiet(FakeRunner):
-      def launch(self, task_id, prompt):  # no run to interrupt
-         self.store.update_task(task_id, status=st.WORKING, error=None)
-   r = Quiet(Config(token="x" * 32, repos={"r": {"url": "u", "base": "main"}}), store,
-             SlowRepos())
+def test_cancel_during_the_clone_never_launches(store):
+   """A task cancelled while its clone is made is never launched, and a retried
+   start returns it as cancelled."""
+   r = runner(store)
+   r.repos = SlowRepos()
 
    async def go():
-      start = asyncio.create_task(r.start(1, "r", "fix", None, "job:7"))
-      await asyncio.sleep(0.01)
-      assert await r.cancel_ref(1, "job:7") is None  # still starting
-      return await start
-   t = asyncio.run(go())
-   assert t["status"] == st.CANCELLED and not r.cancel_on_start
+      t = await r.start(1, "r", "fix", None, "job:7")
+      stopped = await r.cancel_ref(1, "job:7")
+      assert r.starting == 0 and not r.cloning       # the clone is stopped: its slot is free
+      await settle(r)
+      return t, stopped
+   t, stopped = asyncio.run(go())
+   assert stopped["status"] == st.CANCELLED and r.resumed == [] and r.starting == 0
    again = asyncio.run(r.start(1, "r", "fix", None, "job:7"))
    assert again["id"] == t["id"] and again["status"] == st.CANCELLED
    with pytest.raises(ValueError):
@@ -318,8 +437,8 @@ def test_cancel_during_start_stops_the_task_once_it_exists(store):
 
 
 def test_cancelled_start_never_reaches_the_agent(store, monkeypatch):
-   """The real launch path: a start cancelled mid-clone never opens an agent
-   session, and a cancel just after launch stops the run before it does."""
+   """The real launch path: a cancel just after launch stops the run before it
+   opens an agent session."""
    from agent_gateway import runner as rmod
    opened = []
 
@@ -336,31 +455,26 @@ def test_cancelled_start_never_reaches_the_agent(store, monkeypatch):
 
    monkeypatch.setattr(rmod, "ClaudeSDKClient", Client)
 
-   class SlowRepos(FakeRepos):
-      async def prepare(self, *a):
-         await asyncio.sleep(0.05)
-         return "/w/x"
-
    class R(Runner):
       async def options(self, task):
          await asyncio.sleep(0.05)
 
-   r = R(Config(token="x" * 32, repos={"r": {"url": "u", "base": "main"}}), store, SlowRepos())
+   r = R(Config(token="x" * 32, repos={"r": {"url": "u", "base": "main"}}), store, FakeRepos())
 
    async def go():
-      start = asyncio.create_task(r.start(1, "r", "fix", None, "job:7"))
-      await asyncio.sleep(0.01)
-      await r.cancel_ref(1, "job:7")
-      t = await start
-      later = await r.start(1, "r", "fix", None, "job:8")  # launched, agent not yet reached
-      stopped = await r.cancel(later["id"], 1)
-      return t, stopped
-   t, stopped = asyncio.run(go())
-   assert t["status"] == st.CANCELLED and stopped["status"] == st.CANCELLED
-   assert not opened and not r.running and not r.cancel_on_start
+      t = await r.start(1, "r", "fix", None, "job:8")
+      for _ in range(50):                            # launched, agent not yet reached
+         if t["id"] in r.running:
+            break
+         await asyncio.sleep(0.001)
+      stopped = await r.cancel(t["id"], 1)
+      await settle(r)
+      return stopped
+   stopped = asyncio.run(go())
+   assert stopped["status"] == st.CANCELLED and not opened and not r.running
 
 
-def test_failed_start_clears_its_cancel(store):
+def test_failed_clone_fails_the_task(store):
    class Broken(FakeRepos):
       async def prepare(self, *a):
          await asyncio.sleep(0.02)
@@ -369,21 +483,18 @@ def test_failed_start_clears_its_cancel(store):
    r.repos = Broken()
 
    async def go():
-      start = asyncio.create_task(r.start(1, "r", "fix", None, "job:7"))
-      await asyncio.sleep(0.005)
-      await r.cancel_ref(1, "job:7")
-      with pytest.raises(ValueError):
-         await start
-   asyncio.run(go())
-   assert not r.cancel_on_start
+      t = await r.start(1, "r", "fix", None, "job:7")
+      await settle(r)
+      return t
+   t = asyncio.run(go())
+   done = store.task(t["id"])
+   assert done["status"] == st.FAILED and "could not prepare its clone" in done["error"]
+   assert "clone failed" not in done["error"]                # git's words stay in the log
+   assert r.resumed == [] and r.starting == 0
 
 
 def test_cancelled_start_wakes_a_blocked_task(store):
    """A start that runs nothing frees its slot: a task blocked behind it resumes."""
-   class SlowRepos(FakeRepos):
-      async def prepare(self, *a):
-         await asyncio.sleep(0.05)
-         return "/w/x"
    r = FakeRunner(Config(token="x" * 32, repos={"r": {"url": "u", "base": "main"}}), store,
                   SlowRepos())
    add_task(store, "b1")
@@ -391,13 +502,11 @@ def test_cancelled_start_wakes_a_blocked_task(store):
    rid = store.add_request("b1", "question", {"value": "q"})
 
    async def go():
-      start = asyncio.create_task(r.start(1, "r", "fix", None, "job:7"))
-      await asyncio.sleep(0.01)
+      await r.start(1, "r", "fix", None, "job:7")
       await r.reply("b1", 1, rid, "answer", "yes")  # the start holds the only slot
       assert store.task("b1")["status"] == st.INPUT_REQUIRED
       await r.cancel_ref(1, "job:7")
-      await start
-      await asyncio.sleep(0.1)
+      await settle(r)
    asyncio.run(go())
    assert [t for t, _ in r.resumed] == ["b1"]
 
@@ -755,11 +864,21 @@ def test_canary_needs_positive_refusals():
 def test_every_run_carries_the_whole_floor():
    from agent_gateway.runner import floor_settings
    s = json.loads(floor_settings("/var/lib/dawn-agent", "/var/lib/dawn-agent/work",
-                                 "/var/lib/dawn-agent/work/aaaa0001", ["api.anthropic.com"]))
+                                 "/var/lib/dawn-agent/work/aaaa0001", ["api.anthropic.com"], "dawn"))
    fs = s["sandbox"]["filesystem"]
+   # Writable beyond the clone: /tmp and that repo's tool cache; other repos'
+   # caches hidden, its own readable.
+   assert fs["allowWrite"] == ["/tmp", "/var/lib/dawn-agent/.cache/repo/dawn"]
+   assert "/var/lib/dawn-agent/.cache/repo" in fs["denyRead"]
+   assert "/var/lib/dawn-agent/.cache/repo/dawn" in fs["allowRead"]
+   assert "Read(//var/lib/dawn-agent/.cache/repo/**)" in s["permissions"]["deny"]
+   odd = json.loads(floor_settings("/var/lib/dawn-agent", "/w", "/w/a", [], ".."))
+   assert odd["sandbox"]["filesystem"]["allowWrite"] == ["/tmp"]
+   assert odd["sandbox"]["filesystem"]["allowRead"] == ["/w/a"]
    assert "/var/lib/dawn-agent/.claude/.credentials.json" in fs["denyRead"]
    assert "/var/lib/dawn-agent/work" in fs["denyRead"]
-   assert fs["allowRead"] == ["/var/lib/dawn-agent/work/aaaa0001"]
+   assert fs["allowRead"] == ["/var/lib/dawn-agent/work/aaaa0001",
+                             "/var/lib/dawn-agent/.cache/repo/dawn"]
    assert s["disableAllHooks"] and not s["enableAllProjectMcpServers"]
    assert s["sandbox"]["allowUnsandboxedCommands"] is False
    assert "Read(//var/lib/dawn-agent/.claude/.credentials.json)" in s["permissions"]["deny"]
