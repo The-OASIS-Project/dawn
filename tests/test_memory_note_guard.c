@@ -294,6 +294,29 @@ static void test_claude_document_read_result_elided(void) {
    memory_note_guard_free(g);
 }
 
+/* A document_grep result returns note bodies too. */
+static void test_openai_document_grep_result_elided(void) {
+   struct json_object *history = json_object_new_array();
+   struct json_object *a1 = msg_openai_tool_call("call_8", "document_grep",
+                                                 "{\"pattern\":\"engineer\"}");
+   struct json_object *t1 = msg_openai_tool_result("call_8", BIO);
+   json_object_array_add(history, json_object_get(a1));
+   json_object_array_add(history, json_object_get(t1));
+
+   memory_note_guard_t *g = memory_note_guard_create(history);
+   TEST_ASSERT_NOT_NULL(g);
+
+   char *rt1 = redact_to_string(g, t1);
+   TEST_ASSERT_NULL(strstr(rt1, "veteran systems engineer"));
+   TEST_ASSERT_NOT_NULL(strstr(rt1, "content elided"));
+
+   free(rt1);
+   json_object_put(a1);
+   json_object_put(t1);
+   json_object_put(history);
+   memory_note_guard_free(g);
+}
+
 /* The filed body appears in the user turn with different whitespace (newlines,
  * tabs, doubled spaces) than the canonical filed text — still redacted. */
 static void test_whitespace_normalized_match(void) {
@@ -446,6 +469,7 @@ int main(void) {
    RUN_TEST(test_claude_save_note_redacts_body_and_input);
    RUN_TEST(test_openai_document_read_result_elided);
    RUN_TEST(test_claude_document_read_result_elided);
+   RUN_TEST(test_openai_document_grep_result_elided);
    RUN_TEST(test_whitespace_normalized_match);
    RUN_TEST(test_short_body_not_scanned_in_user_message);
    RUN_TEST(test_inert_without_document_tools);

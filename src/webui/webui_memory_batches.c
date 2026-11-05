@@ -73,7 +73,7 @@ static json_object *outside_from(int k) {
       [OUTSIDE_DOCUMENT] = "document", [OUTSIDE_MCP] = "mcp",
       [OUTSIDE_OTHER] = "other",       [OUTSIDE_CALENDAR] = "calendar",
    };
-   return outside_is_tainted(k) && k <= OUTSIDE_KIND_MAX && names[k]
+   return outside_is_tainted(k) && k > 0 && k <= OUTSIDE_KIND_MAX && names[k]
               ? json_object_new_string(names[k])
               : NULL;
 }

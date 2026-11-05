@@ -42,9 +42,6 @@
 #define TOOL_OWN_RESULTS_FRAMED_NAMES \
    "calendar", "document_grep", "document_manage", "document_read", "document_search"
 
-/** The names, as an initializer: `{ TOOL_OWN_RESULTS_NAMES }`. */
-#define TOOL_OWN_RESULTS_NAMES TOOL_OWN_RESULTS_ALWAYS_NAMES, TOOL_OWN_RESULTS_FRAMED_NAMES
-
 /** The tool and action whose results aren't, though the tool's are. */
 #define TOOL_OWN_RESULTS_EXCEPT_TOOL "stocks"
 #define TOOL_OWN_RESULTS_EXCEPT_ACTION "transactions"

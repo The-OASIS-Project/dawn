@@ -37,6 +37,7 @@
 #include "core/strbuf.h"
 #include "core/tz.h"
 #include "core/user_tz.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/calendar_pick.h"
 #include "tools/calendar_rrule.h"
@@ -608,6 +609,7 @@ static char *handle_add(struct json_object *details, int user_id, const tz_t *zo
                "No single writable calendar is named '%s'. Writable calendars: %s. Ask the user "
                "which one, then pass its name.",
                calendar_name ? calendar_name : "", writable[0] ? writable : "(none)");
+      llm_tools_result_third_party(TOOL_FRAME_CALENDAR); /* names a sharer wrote */
       return msg;
    }
    if (rc != CALENDAR_RC_OK)
@@ -884,11 +886,12 @@ static const treg_param_t calendar_params[] = {
  * Tool Metadata
  * ============================================================================= */
 
-/* What an event says (its title, place, who invited) anyone who shares a
- * calendar or sends an invitation may have written: the reads frame it
- * (TOOL_FRAME_CALENDAR); the rest is the tool's own. */
+/* What an event says (its title, place, who invited) and a calendar's name
+ * anyone who shares a calendar or sends an invitation may have written: the
+ * reads frame it (TOOL_FRAME_CALENDAR), as does an add's list of calendars to
+ * pick from; the rest is the tool's own. */
 static const tool_action_kind_entry_t s_calendar_action_kinds[] = {
-   { "calendars", TOOL_KIND_READ, NULL },
+   { "calendars", TOOL_KIND_READ, NULL, TOOL_FRAME_CALENDAR },
    { "today", TOOL_KIND_READ, NULL, TOOL_FRAME_CALENDAR },
    { "range", TOOL_KIND_READ, NULL, TOOL_FRAME_CALENDAR },
    { "next", TOOL_KIND_READ, NULL, TOOL_FRAME_CALENDAR },

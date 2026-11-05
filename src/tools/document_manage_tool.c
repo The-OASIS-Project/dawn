@@ -783,10 +783,15 @@ static char *do_list(int user_id) {
    strbuf_t sb;
    strbuf_init(&sb, 1024);
    strbuf_appendf(&sb, "Stored documents and notes (%d):\n", count);
+   bool others = false;
    for (int i = 0; i < count; i++) {
       bool is_note = (strcmp(docs[i].filetype, "note") == 0);
       strbuf_appendf(&sb, "- [id %lld] %s (%s)\n", (long long)docs[i].id, docs[i].filename,
                      is_note ? "note" : docs[i].filetype);
+      others = others || docs[i].user_id != user_id;
+   }
+   if (others) {
+      llm_tools_result_third_party(TOOL_FRAME_DOCUMENT); /* another's shared names: theirs */
    }
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);

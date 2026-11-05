@@ -18,7 +18,9 @@
  *
  * The v114 migration on a v113 database: a note's outside kind filled in from
  * the research run that filed it and from its gloss fact, any other
- * document's as DOCUMENT, a version's from its document, a rerun leaving rows tagged since alone,
+ * document's as DOCUMENT, a note's from the conversations that saved it, a
+ * conversation holding a framing tool's stored result raised to OTHER, a
+ * version's from its document, a rerun leaving rows tagged since alone,
  * and migrated documents and document_versions tables matching new ones.
  */
 
@@ -66,7 +68,11 @@ static int outside_in(const char *table, int id) {
  *   4 one whose gloss predates the kind (UNKNOWN); 6 an uploaded file.
  * Versions: 1 of the report, 2 of the clean note, 3 of a deleted item (99),
  * 4 of a deleted research report (98, its run still naming it), 5 of the
- * uploaded file, 6 of a deleted upload whose id a later note (7) reuses. */
+ * uploaded file, 6 of a deleted upload whose id a later note (7) reuses.
+ * Conversations: 13 read an email and saved note 8 by name; 14 holds a
+ * calendar result and edited note 10 by id; 15 a weather result; 16 (UNKNOWN)
+ * a document_read result; 17 (clean) saved note 11.  Note 9 was typed in
+ * the WebUI. */
 static void seed_v113(void) {
    exec_ok("PRAGMA foreign_keys=OFF;"
            "ALTER TABLE documents DROP COLUMN outside;"
@@ -80,7 +86,32 @@ static void seed_v113(void) {
            "num_chunks, created_at) VALUES (1, 1, 'Research #1', '', 'note', 'h1', 1, 1),"
            "(2, 1, 'Tea', '', 'note', 'h2', 1, 1), (3, 1, 'Groceries', '', 'note', 'h3', 1, 1),"
            "(4, 1, 'Old', '', 'note', 'h4', 1, 1), (5, 1, 'Research #2', '', 'text', 'h5', 3, 1),"
-           "(6, 1, 'a.pdf', 'a.pdf', 'pdf', 'h6', 2, 1), (7, 1, 'Later', '', 'note', 'h7', 1, 10);"
+           "(6, 1, 'a.pdf', 'a.pdf', 'pdf', 'h6', 2, 1), (7, 1, 'Later', '', 'note', 'h7', 1, 10),"
+           "(8, 1, 'Inbox Note', '', 'note', 'h8', 1, 1), (9, 1, 'Typed', '', 'note', 'h9', 1, 1),"
+           "(10, 1, 'Plans', '', 'note', 'h10', 1, 1), (11, 1, 'Clean', '', 'note', 'h11', 1, 1);"
+           "INSERT INTO conversations (id, user_id, created_at, updated_at, outside) VALUES "
+           "(13, 1, 1, 1, 2), (14, 1, 1, 1, 0), (15, 1, 1, 1, 0), (16, 1, 1, 1, 8), "
+           "(17, 1, 1, 1, 0);"
+           "INSERT INTO messages (id, conversation_id, role, content, tool_calls, tool_call_id, "
+           "created_at) VALUES (1, 13, 'assistant', '', '[{\"id\":\"c1\",\"type\":"
+           "\"function\",\"function\":{\"name\":\"document_manage\",\"arguments\":"
+           "\"{\\\"action\\\":\\\"save_note\\\",\\\"label\\\":\\\"inbox "
+           "note\\\"}\"}}]', NULL, 1), (2, 13, 'tool', 'Saved.', NULL, 'c1', 1),"
+           "(3, 14, 'assistant', '', '[{\"id\":\"c2\",\"function\":{\"name\":"
+           "\"calendar\",\"arguments\":\"{}\"}},{\"id\":\"c3\",\"function\":{"
+           "\"name\":\"document_manage\",\"arguments\":\"{\\\"action\\\":"
+           "\\\"edit\\\",\\\"id\\\":10}\"}}]', NULL, 1),"
+           "(4, 14, 'tool', 'Lunch.', NULL, 'c2', 1),"
+           "(5, 15, 'assistant', '', '[{\"id\":\"c4\",\"function\":{\"name\":"
+           "\"weather\",\"arguments\":\"{}\"}}]', NULL, 1),"
+           "(6, 15, 'tool', 'Sunny.', NULL, 'c4', 1),"
+           "(7, 16, 'assistant', '', '[{\"id\":\"c5\",\"function\":{\"name\":"
+           "\"document_read\",\"arguments\":\"{}\"}}]', NULL, 1),"
+           "(8, 16, 'tool', 'Text.', NULL, 'c5', 1),"
+           "(9, 17, 'assistant', '', '[{\"id\":\"c6\",\"function\":{\"name\":"
+           "\"document_manage\",\"arguments\":\"{\\\"action\\\":\\\"save_note\\\","
+           "\\\"label\\\":\\\"Clean\\\"}\"}}]', NULL, 1),"
+           "(10, 17, 'tool', 'Saved.', NULL, 'c6', 1);"
            "INSERT INTO research_runs (conversation_id, user_id, brief, status, report_doc_id, "
            "created_at) VALUES (10, 1, 'tea', 'done', 1, 1), (11, 1, 'more', 'done', 5, 1), (12, "
            "1, 'old', 'done', 98, 1);"
@@ -176,6 +207,21 @@ static void test_rerun_keeps_new_tags(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 1));
 }
 
+/* A stored result of a tool that frames only others' text raises its
+ * conversation to OTHER; a note takes the floor of the conversation its save,
+ * edit or append ran in; a typed one stays the user's own. */
+static void test_framed_tool_results_and_note_calls(void) {
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, outside_in("conversations", 13)); /* tainted: kept */
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_in("conversations", 14));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("conversations", 15));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_in("conversations", 16));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, outside_in("documents", 8));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 9));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_in("documents", 10));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("conversations", 17)); /* a save: own */
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 11));
+}
+
 /* The documents and document_versions tables' columns, in a stable order. */
 static char *schema_of(sqlite3 *db) {
    static const char sql[] =
@@ -214,6 +260,7 @@ int main(void) {
    RUN_TEST(test_notes_outside_filled_in);
    RUN_TEST(test_reused_id_not_inherited);
    RUN_TEST(test_rerun_keeps_new_tags);
+   RUN_TEST(test_framed_tool_results_and_note_calls);
    RUN_TEST(test_migrated_schema_matches_new);
    return UNITY_END();
 }
