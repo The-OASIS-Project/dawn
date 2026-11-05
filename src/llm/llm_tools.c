@@ -1512,6 +1512,11 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
       return llm_tools_hold_for_reply_code(call, meta, &verdict, effective_device, value_buf,
                                            result);
    }
+   if (decision == TOOL_CALL_ALLOW && verdict.kind == TOOL_KIND_PREPARE) {
+      /* A preview the user may be answering: DAWN stages nothing unasked on it
+       * (turn_origin_unasked). */
+      turn_origin_note_prepare(session_get_command_context());
+   }
    /* Approved by code: only the call the user was shown, resolved and
     * described the same way now as when it was held. */
    if (decision == TOOL_CALL_ALLOW && approved_binding) {

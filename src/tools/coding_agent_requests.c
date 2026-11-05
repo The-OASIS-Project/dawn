@@ -25,12 +25,15 @@
 
 #include <json-c/json.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "auth/auth_db.h"
 #include "core/pending_slots.h"
+#include "core/session_history.h"
+#include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "core/tool_call_challenge.h"
 #include "core/turn_origin.h"
@@ -58,9 +61,16 @@ typedef struct {
    char value[CR_VALUE_MAX];
    char line[CODING_GATEWAY_REQUEST_LINE_MAX]; /* what it asks, in DAWN's words */
    char title[CONV_TITLE_MAX];
+   /* Staged by DAWN when the job started waiting, not asked for: confirmed
+    * only by the user's very next message, in that conversation. */
+   bool unasked;
+   int64_t conv;
 } cr_pending_t;
 
 PENDING_ITEM_CHECK(cr_pending_t);
+/* An approval the user may still answer holds DAWN's unasked ones back. */
+_Static_assert(CR_CONFIRM_TURNS <= TURN_ORIGIN_UNASKED_QUIET_TURNS,
+               "the quiet window must cover the confirm window");
 static cr_pending_t s_pending[CR_PENDING_MAX];
 static pthread_mutex_t s_pending_mutex = PTHREAD_MUTEX_INITIALIZER;
 PENDING_ARRAY_CHECK(s_pending);
@@ -289,6 +299,16 @@ char *coding_requests_confirm_approve(struct json_object *details,
    if (rc != PENDING_FOUND) {
       return tool_pending_take_refusal(rc, orc, "approval");
    }
+   if (p.unasked) {
+      /* DAWN asked, not the user: only their very next message, in the
+       * conversation it was posted in, answers it (taken either way). */
+      session_t *ctx = session_get_command_context();
+      const int64_t conv = ctx ? session_turn_conversation(ctx) : 0;
+      if (origin->turn_number != p.hdr.origin.turn_number + 1 || conv != p.conv) {
+         return coding_agent_error("That approval was for the message right after DAWN posted "
+                                   "it; ask the user again (approve shows it anew).");
+      }
+   }
    /* Still the open request the user was shown: same id, kind and value. */
    char *err = NULL;
    struct json_object *ans = fetch_open(user_id, p.job, &err);
@@ -314,10 +334,83 @@ char *coding_requests_confirm_approve(struct json_object *details,
        CODING_GW_OK) {
       return coding_agent_error_free(err);
    }
+   turn_origin_note_answered(session_get_command_context(), p.hdr.origin.turn_number);
    char buf[CONV_TITLE_MAX + CODING_GATEWAY_REQUEST_LINE_MAX + CR_NEXT_MAX + 96];
    snprintf(buf, sizeof(buf), "Allowed: coding job #%lld (%s) may now %s, for this task. %s",
             (long long)p.job, p.title, p.line, next);
    return strdup(buf);
+}
+
+/* Session @p sid's live approval (caller holds s_pending_mutex), or NULL. */
+static const cr_pending_t *approval_live_locked(uint32_t sid, time_t now) {
+   for (int i = 0; i < CR_PENDING_MAX; i++) {
+      const pending_slot_t *h = &s_pending[i].hdr;
+      if (h->active && h->origin.session_id == sid && now - h->made_at <= s_pending_slots.ttl_sec) {
+         return &s_pending[i];
+      }
+   }
+   return NULL;
+}
+
+uint32_t coding_requests_stage_unasked(session_t *session,
+                                       int user_id,
+                                       int64_t job,
+                                       int64_t conv,
+                                       const char *title,
+                                       struct json_object *req,
+                                       char *line,
+                                       size_t line_len,
+                                       bool *already_out,
+                                       uint32_t *turn_out) {
+   *already_out = false;
+   *turn_out = 0;
+   if (!session || user_id <= 0 || conv <= 0 || !req ||
+       !kind_in(coding_gateway_jstr(req, "kind"), k_reach) ||
+       !coding_gateway_request_line(req, line, line_len) ||
+       coding_delegate_live(session->session_id)) {
+      return 0;
+   }
+   turn_origin_t origin;
+   if (!turn_origin_unasked(session, &origin)) {
+      return 0; /* busy, or a preview the user may still be answering */
+   }
+   *turn_out = origin.turn_number;
+   const time_t now = pending_slots_now();
+   uint32_t id = 0;
+   pthread_mutex_lock(&s_pending_mutex);
+   const cr_pending_t *live = approval_live_locked(session->session_id, now);
+   /* This very request was asked already (a repeated event): nothing new. */
+   *already_out = live != NULL && live->unasked && live->job == job &&
+                  live->request_id == request_id(req);
+   if (live == NULL) {
+      pending_stage_rc_t rc = PENDING_STAGED;
+      cr_pending_t *p = (cr_pending_t *)pending_slots_stage(&s_pending_slots, &origin, user_id,
+                                                            CR_PENDING_APPROVE, now, &rc);
+      if (p != NULL) {
+         id = p->hdr.item_id;
+         p->job = job;
+         p->request_id = request_id(req);
+         safe_strscpy(p->kind, coding_gateway_jstr(req, "kind"));
+         safe_strscpy(p->value,
+                      coding_gateway_jstr(json_object_object_get(req, "payload"), "value"));
+         safe_strscpy(p->line, line);
+         safe_strscpy(p->title, title ? title : "");
+         p->unasked = true;
+         p->conv = conv;
+      }
+   }
+   pthread_mutex_unlock(&s_pending_mutex);
+   return id;
+}
+
+void coding_requests_drop_unasked(uint32_t id) {
+   pthread_mutex_lock(&s_pending_mutex);
+   for (int i = 0; i < CR_PENDING_MAX; i++) {
+      if (s_pending[i].hdr.active && s_pending[i].hdr.item_id == id && s_pending[i].unasked) {
+         memset(&s_pending[i], 0, sizeof(s_pending[i]));
+      }
+   }
+   pthread_mutex_unlock(&s_pending_mutex);
 }
 
 /* What confirm_approve, waiting for the user's reply code, allows. */

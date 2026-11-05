@@ -18,8 +18,9 @@
  *
  * The coding_agent tool's parts (coding_agent_tool.c: the callback, the
  * reads and these helpers; coding_agent_delegate.c: starting a task;
- * coding_agent_requests.c: answering what a task waits on) and what they
- * share.  Not for use outside the tool.
+ * coding_agent_requests.c: answering what a task waits on;
+ * coding_agent_watch.c: the gateway's events) and what they share.  Not for
+ * use outside the tool.
  */
 
 #ifndef CODING_AGENT_INTERNAL_H
@@ -32,6 +33,8 @@
 
 #include "auth/auth_db.h"
 #include "core/turn_origin.h"
+
+struct session;
 
 #ifdef __cplusplus
 extern "C" {
@@ -82,6 +85,9 @@ char *coding_delegate_confirm(struct json_object *details,
                               int user_id,
                               const turn_origin_t *origin);
 
+/** Whether session @p session_id has a delegate preview waiting for its yes. */
+bool coding_delegate_live(uint32_t session_id);
+
 /** describe_call for confirm_delegate (tool_metadata_t.describe_call). */
 int coding_delegate_describe(const char *value, char *out, size_t out_len, int *valid_for_sec);
 
@@ -103,6 +109,37 @@ int coding_requests_describe(const char *value, char *out, size_t out_len, int *
 /** deny: decline the host or tool a job waits on.  One step, no confirm and
  *  no turn check, on purpose: declining reaches no further. */
 char *coding_requests_deny(struct json_object *details, int user_id);
+
+/**
+ * @brief Stage, on DAWN's own initiative, the approval of the host or tool
+ *        request @p req of coding job @p job, for the user to answer in
+ *        @p session's next message in conversation @p conv.
+ *
+ * Only a host or tool DAWN's check passes; not while the session runs a turn,
+ * holds an approval or delegate preview, or was shown another preview lately
+ * (turn_origin_unasked()).  Its confirm takes only that next message.
+ *
+ * @param line        Receives what it asks, in DAWN's words (on success).
+ * @param already_out Whether this request already waits for the user's
+ *                    answer in that session (nothing new to say).
+ * @param turn_out    The session's turn count it was staged at (its answer
+ *                    is the next turn).
+ * @return The approval's id, or 0 when nothing was staged.
+ */
+uint32_t coding_requests_stage_unasked(struct session *session,
+                                       int user_id,
+                                       int64_t job,
+                                       int64_t conv,
+                                       const char *title,
+                                       struct json_object *req,
+                                       char *line,
+                                       size_t line_len,
+                                       bool *already_out,
+                                       uint32_t *turn_out);
+
+/** Drop the approval DAWN staged as @p id (its ask couldn't be posted, or the
+ *  user's message was on its way when it was). */
+void coding_requests_drop_unasked(uint32_t id);
 
 /** answer: send the user's answer to the agent's question.  One step, no
  *  confirm and no turn check, on purpose: an answer only goes back to the

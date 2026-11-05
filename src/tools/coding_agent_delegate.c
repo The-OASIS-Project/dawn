@@ -34,6 +34,7 @@
 #include "core/job_dispatch.h"
 #include "core/job_manager.h"
 #include "core/pending_slots.h"
+#include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "core/tool_call_challenge.h"
 #include "core/turn_origin.h"
@@ -63,6 +64,9 @@ typedef struct {
 } ca_pending_t;
 
 PENDING_ITEM_CHECK(ca_pending_t);
+/* A delegate the user may still answer holds DAWN's unasked items back. */
+_Static_assert(CA_CONFIRM_TURNS <= TURN_ORIGIN_UNASKED_QUIET_TURNS,
+               "the quiet window must cover the confirm window");
 static ca_pending_t s_pending[CA_PENDING_MAX];
 static pthread_mutex_t s_pending_mutex = PTHREAD_MUTEX_INITIALIZER;
 PENDING_ARRAY_CHECK(s_pending);
@@ -75,6 +79,19 @@ static const pending_slots_t s_pending_slots = {
    .ttl_sec = CA_PENDING_TTL_SEC,
    .later_turns = CA_CONFIRM_TURNS,
 };
+
+bool coding_delegate_live(uint32_t session_id) {
+   const time_t now = pending_slots_now();
+   bool live = false;
+   pthread_mutex_lock(&s_pending_mutex);
+   for (int i = 0; i < CA_PENDING_MAX && !live; i++) {
+      const pending_slot_t *h = &s_pending[i].hdr;
+      live = h->active && h->origin.session_id == session_id &&
+             now - h->made_at <= s_pending_slots.ttl_sec; /* as pending_slots */
+   }
+   pthread_mutex_unlock(&s_pending_mutex);
+   return live;
+}
 
 /* ========== delegate: a preview, then the user's yes ========== */
 
@@ -261,6 +278,8 @@ char *coding_delegate_confirm(struct json_object *details,
    if (rc != PENDING_FOUND) {
       return tool_pending_take_refusal(rc, orc, "coding task");
    }
+   /* Answered: the job's requests may be asked about on DAWN's own. */
+   turn_origin_note_answered(session_get_command_context(), p.hdr.origin.turn_number);
 
    /* The job row first: the gateway's task is named after it. */
    const char *title = p.name;

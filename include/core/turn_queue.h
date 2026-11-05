@@ -43,6 +43,7 @@
 #ifndef TURN_QUEUE_H
 #define TURN_QUEUE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -85,6 +86,10 @@ int turn_queue_enqueue(uint32_t session_id,
                        void *work,
                        void (*spawn)(void *work),
                        void (*free_work)(void *work));
+
+/** Whether @p session_id has a turn running or waiting in its queue (from the
+ *  moment it was enqueued, before it begins). */
+bool turn_queue_busy(uint32_t session_id);
 
 /**
  * @brief Called by a turn worker when it finishes: chains the next queued turn

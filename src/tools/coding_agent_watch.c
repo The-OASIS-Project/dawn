@@ -41,11 +41,14 @@
 #include "core/conv_event.h"
 #include "core/event_payload.h"
 #include "core/job_manager.h"
+#include "core/job_reinvoke.h"
 #include "core/job_report.h"
+#include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_context_text.h"
 #include "logging.h"
 #include "tools/coding_agent_gateway.h"
+#include "tools/coding_agent_internal.h"
 #include "tools/coding_agent_report.h"
 #include "tools/mcp_bridge.h"
 #include "utils/string_utils.h"
@@ -154,9 +157,15 @@ static void end_job(int64_t job, int user_id, const char *kind, struct json_obje
 }
 
 /* Whether job @p job's task still waits for the user (a replayed notice of a
- * question already answered says nothing), and what its first request asks
- * into @p asks ("" when unknown or not one DAWN can say). */
-static bool still_waiting(int user_id, int64_t job, char *asks, size_t asks_len) {
+ * question already answered says nothing), what its first request asks into
+ * @p asks ("" when unknown or not one DAWN can say), and that request into
+ * *@p first_out (the caller's; NULL when none). */
+static bool still_waiting(int user_id,
+                          int64_t job,
+                          char *asks,
+                          size_t asks_len,
+                          struct json_object **first_out) {
+   *first_out = NULL;
    char ref[CODING_AGENT_REF_MAX];
    coding_gateway_ref(job, ref, sizeof(ref));
    struct json_object *args = json_object_new_object();
@@ -172,6 +181,9 @@ static bool still_waiting(int user_id, int64_t job, char *asks, size_t asks_len)
           !coding_gateway_request_line(json_object_array_get_idx(pending, 0), asks, asks_len)) {
          asks[0] = '\0';
       }
+      if (waiting) {
+         *first_out = json_object_get(json_object_array_get_idx(pending, 0));
+      }
    }
    json_object_put(ans);
    free(err);
@@ -180,20 +192,64 @@ static bool still_waiting(int user_id, int64_t job, char *asks, size_t asks_len)
 
 /* Tell the user job @p job waits for them: a notice, and a line in DAWN's
  * words in the conversation it came from (where they'd answer). */
-static void notify_waiting(int user_id, int64_t job, const job_record_t *rec, const char *asks) {
+static void notify_waiting(int user_id,
+                           int64_t job,
+                           const job_record_t *rec,
+                           const char *asks,
+                           struct json_object *first) {
    char *title = llm_context_neutralize(rec->title);
+   const char *shown = title ? title : rec->title;
    char text[CW_NOTICE_MAX];
    if (asks[0] != '\0') {
       snprintf(text, sizeof(text), "Coding job #%lld (%s) is waiting: it wants to %s.",
-               (long long)job, title ? title : rec->title, asks);
+               (long long)job, shown, asks);
    } else {
       snprintf(text, sizeof(text), "Coding job #%lld (%s) is waiting for your answer.",
-               (long long)job, title ? title : rec->title);
+               (long long)job, shown);
+   }
+   /* With a tab on the job's conversation, DAWN asks there itself: the user's
+    * next "yes" in it allows it (coding_requests_stage_unasked).  The banner
+    * keeps the plain notice: a yes anywhere else can't answer it. */
+   uint32_t approval = 0, staged_turn = 0;
+   bool already = false;
+   char line[CODING_GATEWAY_REQUEST_LINE_MAX];
+   char ask[CW_NOTICE_MAX];
+   session_t *viewer = (rec->parent_id > 0 && first != NULL)
+                           ? webui_find_reinvoke_viewer(rec->parent_id, user_id)
+                           : NULL;
+   if (viewer != NULL) {
+      approval = coding_requests_stage_unasked(viewer, user_id, job, rec->parent_id, shown, first,
+                                               line, sizeof(line), &already, &staged_turn);
+   }
+   if (approval != 0) {
+      const int n = snprintf(ask, sizeof(ask),
+                             "Coding job #%lld (%s) is waiting: it wants to %s. Allow it for "
+                             "this task? (approval %u)",
+                             (long long)job, shown, line, (unsigned)approval);
+      if (n < 0 || (size_t)n >= sizeof(ask)) {
+         coding_requests_drop_unasked(approval); /* its id would be cut off */
+         approval = 0;
+      }
    }
    free(title);
+   if (already) {
+      session_release(viewer);
+      return; /* asked already (a repeated event): said once is enough */
+   }
    job_notify_user(user_id, text, job, 0);
    if (rec->parent_id > 0) {
-      job_report_post(rec->parent_id, user_id, text);
+      const bool posted = job_report_post(rec->parent_id, user_id, approval ? ask : text) ==
+                          SUCCESS;
+      /* Only for the user's next message: one already on its way (or a post
+       * that didn't land) can't answer it. */
+      turn_origin_t now;
+      if (approval != 0 &&
+          (!posted || !turn_origin_unasked(viewer, &now) || now.turn_number != staged_turn)) {
+         coding_requests_drop_unasked(approval);
+      }
+   }
+   if (viewer != NULL) {
+      session_release(viewer);
    }
 }
 
@@ -245,8 +301,11 @@ void coding_watch_apply(struct json_object *event) {
       }
    }
    char asks[CODING_GATEWAY_REQUEST_LINE_MAX] = "";
-   if (strcmp(kind, "input_required") == 0 && still_waiting(user_id, job, asks, sizeof(asks))) {
-      notify_waiting(user_id, job, &rec, asks);
+   struct json_object *first = NULL;
+   if (strcmp(kind, "input_required") == 0 &&
+       still_waiting(user_id, job, asks, sizeof(asks), &first)) {
+      notify_waiting(user_id, job, &rec, asks, first);
+      json_object_put(first);
    } else if (is_end(kind)) {
       end_job(job, user_id, kind, json_object_object_get(event, "data"));
    }

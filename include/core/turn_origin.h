@@ -31,9 +31,10 @@
  * bridge, not the person typing) confirms nothing: a visual is model-written
  * and can act on load or after any click on the page.
  *
- * Capturing an origin needs the session unit (src/core/session_history.c);
- * checking one needs nothing, so a module that only stores and checks them
- * includes this header alone.
+ * Capturing an origin needs the session unit (src/core/session_history.c), as
+ * do turn_origin_unasked() and the prepare notes below; checking one needs
+ * nothing, so a module that only stores and checks them includes this header
+ * alone.
  */
 
 #ifndef TURN_ORIGIN_H
@@ -157,6 +158,36 @@ static inline const char *turn_origin_retry_hint(turn_origin_rc_t rc) {
  *         that session as its context, but no turn).
  */
 bool turn_origin_capture(turn_origin_t *out);
+
+struct session;
+
+/** Turns after a preview the user was shown in which DAWN stages nothing
+ *  unasked in that session (the user may still be answering it).  At least
+ *  every pending table's later_turns (each such table asserts it). */
+#define TURN_ORIGIN_UNASKED_QUIET_TURNS 3
+
+/**
+ * @brief An origin for an item DAWN stages in @p session on its own, outside
+ *        any turn (a coding job's approval, posted for the user to answer):
+ *        the session's next turn is the one after it.
+ *
+ * Only while the session runs no turn, has no message on its way, and was
+ * shown no preview it may still be answering (TURN_ORIGIN_UNASKED_QUIET_TURNS),
+ * so the user's next "yes" can't have been meant for something else.  Called by code only, never
+ * from a tool call.
+ *
+ * @param out Receives the origin (zeroed on false): a token no turn owns.
+ * @return false when the session is busy or a preview may still be answered.
+ */
+bool turn_origin_unasked(struct session *session, turn_origin_t *out);
+
+/** Note that the running turn of @p session staged a preview (a call the tool
+ *  policy allowed as prepare). */
+void turn_origin_note_prepare(struct session *session);
+
+/** The preview staged in @p session's turn @p made_turn was answered (its
+ *  confirm ran): it no longer holds DAWN's unasked items back. */
+void turn_origin_note_answered(struct session *session, uint32_t made_turn);
 
 #ifdef __cplusplus
 }

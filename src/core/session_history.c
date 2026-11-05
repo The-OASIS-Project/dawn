@@ -37,6 +37,7 @@
 #include "core/session_posts.h"
 #include "core/session_prefix.h"
 #include "core/tool_result_store.h"
+#include "core/turn_queue.h"
 #include "dawn_error.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_context_text.h"
@@ -1593,6 +1594,65 @@ bool turn_origin_capture(turn_origin_t *out) {
    out->from_visual = from_visual;
    out->third_party = third_party;
    return true;
+}
+
+bool turn_origin_unasked(session_t *session, turn_origin_t *out) {
+   if (!out) {
+      return false;
+   }
+   *out = (turn_origin_t){ 0 };
+   if (!session) {
+      return false;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   /* A preview's answer can come in any of the turns after it up to the quiet
+    * count; once they have all run, the next message can't be one. */
+   const bool quiet = !session->prepared_any || session->turn_number - session->last_prepare_turn >=
+                                                    TURN_ORIGIN_UNASKED_QUIET_TURNS;
+   const bool idle = !session->turn_active;
+   const uint32_t number = session->turn_number;
+   pthread_mutex_unlock(&session->history_mutex);
+   /* A message already on its way counts as busy: it was written before
+    * anything DAWN posts now. */
+   if (!idle || !quiet || atomic_load(&session->turn_in_flight) > 0 ||
+       turn_queue_busy(session->session_id)) {
+      return false;
+   }
+   out->session_id = session->session_id;
+   out->turn_token = atomic_fetch_add(&s_turn_tokens, 1) + 1; /* no turn owns it */
+   out->turn_number = number;
+   return true;
+}
+
+void turn_origin_note_prepare(session_t *session) {
+   if (!session) {
+      return;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   /* Previews older than the window can't be answered any more: forget them;
+    * any younger one still counts. */
+   if (!session->prepared_any ||
+       session->turn_number - session->last_prepare_turn >= TURN_ORIGIN_UNASKED_QUIET_TURNS) {
+      session->prepares_open = 0;
+   }
+   session->last_prepare_turn = session->turn_number;
+   session->prepares_open++;
+   session->prepared_any = true;
+   pthread_mutex_unlock(&session->history_mutex);
+}
+
+void turn_origin_note_answered(session_t *session, uint32_t made_turn) {
+   if (!session) {
+      return;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   /* Clear only once every preview still in its window is answered. */
+   if (session->prepared_any &&
+       session->turn_number - made_turn <= TURN_ORIGIN_UNASKED_QUIET_TURNS &&
+       --session->prepares_open <= 0) {
+      session->prepared_any = false;
+   }
+   pthread_mutex_unlock(&session->history_mutex);
 }
 
 /* Caller holds history_mutex.  The running turn's pending slot for @p role. */

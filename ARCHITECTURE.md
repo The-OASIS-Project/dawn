@@ -258,6 +258,7 @@ call into each other: read them as one Layer-2 unit, not as separate modules wit
 | `src/tools/music_tool.c` (the player a session has of its own) | `webui_music.c` (a tab's or a Tier-1 satellite's player) | weak `music_player_for_session` |
 | `src/tools/volume_tool.c` (a session's own client) | `webui_music.c` (a tab's or a satellite's volume) | weak `volume_tool_for_session` |
 | lower-layer broadcasts (scheduler, jobs, calendar, phone, ...) | `webui_broadcasts.c` | weak no-op default, strong WebUI override |
+| `src/core/job_reinvoke.c`, `src/tools/coding_agent_watch.c` (the tab viewing a conversation: a job's follow-up, a coding job's approval) | `webui_broadcasts.c` | weak `webui_find_reinvoke_viewer` |
 | `src/tools/email_service_move.c` (a move or undo changed a mailbox) | `webui_email_changed.c` (email_changed to every tab of the user) | weak `email_changed_notify` |
 | `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |
 | `src/core/job_manager.c` (cancel a job whose work runs outside DAWN) | `coding_agent_tool.c` (asks the agent gateway to stop a coding job's task) | `job_manager_register_kind_cancel` |
@@ -397,6 +398,10 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │  Coding watcher  — one, with an agent gateway declared:│
 │                    long-polls its events onto coding   │
 │                    jobs; cursor file in the data dir;  │
+│                    when a job waits, stages its        │
+│                    approval on the WebUI tab viewing   │
+│                    its chat (history_mutex, then the   │
+│                    tool's pending mutex, never nested);│
 │                    stopped by the tool's stop          │
 │  Coding report   — transient, one per coding job's end │
 │                    with a chat to report into: a       │

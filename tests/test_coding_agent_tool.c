@@ -37,6 +37,7 @@
 #include "core/turn_origin.h"
 #include "dawn_error.h"
 #include "tools/coding_agent_gateway.h"
+#include "tools/coding_agent_internal.h"
 #include "tools/coding_agent_tool.h"
 #include "tools/tool_registry.h"
 #include "unity.h"
@@ -303,10 +304,30 @@ bool scheduled_context_get(int *user_id_out) {
 }
 bool turn_origin_capture(turn_origin_t *out) {
    memset(out, 0, sizeof(*out));
-   out->session_id = 7;
+   out->session_id = g_session->session_id;
    out->turn_token = g_turn;
    out->turn_number = (int)g_turn;
    return true;
+}
+
+/* DAWN's own staging: the session is idle unless a test says otherwise. */
+static bool g_session_busy;
+bool turn_origin_unasked(struct session *session, turn_origin_t *out) {
+   memset(out, 0, sizeof(*out));
+   if (g_session_busy) {
+      return false;
+   }
+   out->session_id = session->session_id;
+   out->turn_token = 9999;
+   out->turn_number = (uint32_t)g_turn;
+   return true;
+}
+
+void turn_origin_note_answered(struct session *session, uint32_t made_turn) {
+   (void)session, (void)made_turn;
+}
+int64_t session_turn_conversation(session_t *session) {
+   return atomic_load(&session->history_conversation_id);
 }
 
 /* --- the watcher (its own test) ------------------------------------------- */
@@ -931,9 +952,75 @@ static void test_delegate_name(void) {
    free(preview);
 }
 
+/* DAWN asks on its own: an approval it staged is allowed by the user's very
+ * next message in that conversation, and by nothing else; none is staged on
+ * a busy session, beside another open preview, or for a question. */
+static void test_unasked_approval(void) {
+   const uint32_t own = g_session->session_id;
+   g_session->session_id = 8; /* a session no other test staged in */
+   atomic_store(&g_session->history_conversation_id, 7);
+   coding_job();
+   char line[CODING_GATEWAY_REQUEST_LINE_MAX];
+   struct json_object *host = json_tokener_parse(HOST_REQ);
+   struct json_object *question = json_tokener_parse(QUESTION_REQ);
+   bool already = false;
+   uint32_t turn = 0;
+
+   TEST_ASSERT_EQUAL_UINT32(0, coding_requests_stage_unasked(g_session, 5, 42, 7, "x", question,
+                                                             line, sizeof(line), &already, &turn));
+   g_session_busy = true;
+   TEST_ASSERT_EQUAL_UINT32(0, coding_requests_stage_unasked(g_session, 5, 42, 7, "x", host, line,
+                                                             sizeof(line), &already, &turn));
+   g_session_busy = false;
+
+   uint32_t id = coding_requests_stage_unasked(g_session, 5, 42, 7, "x", host, line, sizeof(line),
+                                               &already, &turn);
+   TEST_ASSERT_NOT_EQUAL(0, id);
+   TEST_ASSERT_EQUAL_STRING("reach the host `pypi.org`", line);
+   /* One open per session: a second isn't staged on top of it, and the same
+    * request again (a repeated event) is said to be asked already. */
+   TEST_ASSERT_EQUAL_UINT32(0, coding_requests_stage_unasked(g_session, 5, 42, 7, "x", host, line,
+                                                             sizeof(line), &already, &turn));
+   TEST_ASSERT_TRUE(already);
+   g_pending = "[" HOST_REQ "]";
+   char args[48];
+   g_turn++; /* the user's next message */
+   snprintf(args, sizeof(args), "{\"id\":%u}", id);
+   char *r = call("confirm_approve", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
+   free(r);
+
+   /* A message later: refused (and taken). */
+   id = coding_requests_stage_unasked(g_session, 5, 42, 7, "x", host, line, sizeof(line), &already,
+                                      &turn);
+   TEST_ASSERT_NOT_EQUAL(0, id);
+   g_turn += 2;
+   snprintf(args, sizeof(args), "{\"id\":%u}", id);
+   r = call("confirm_approve", args);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "right after DAWN posted"), r);
+   free(r);
+
+   /* Another conversation: refused. */
+   id = coding_requests_stage_unasked(g_session, 5, 42, 7, "x", host, line, sizeof(line), &already,
+                                      &turn);
+   TEST_ASSERT_NOT_EQUAL(0, id);
+   g_turn++;
+   atomic_store(&g_session->history_conversation_id, 9);
+   snprintf(args, sizeof(args), "{\"id\":%u}", id);
+   r = call("confirm_approve", args);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "right after DAWN posted"), r);
+   free(r);
+
+   json_object_put(host);
+   json_object_put(question);
+   atomic_store(&g_session->history_conversation_id, 0);
+   g_session->session_id = own;
+}
+
 int main(void) {
    g_session = calloc(1, sizeof(session_t));
    g_session->type = SESSION_TYPE_WEBUI;
+   g_session->session_id = 7;
    setUp(); /* a declared gateway, so init registers the cancel hook */
    TEST_ASSERT_EQUAL_INT(0, coding_agent_tool_register());
    TEST_ASSERT_EQUAL_INT(0, g_meta.init());
@@ -960,6 +1047,7 @@ int main(void) {
    RUN_TEST(test_delegate_name);
    RUN_TEST(test_request_line_checks_values);
    RUN_TEST(test_reply_says_what_comes_next);
+   RUN_TEST(test_unasked_approval);
    RUN_TEST(test_no_approve_in_a_turn_that_read_the_agent);
    RUN_TEST(test_status_shows_recent_steps);
    RUN_TEST(test_needs_the_gateway_grant);

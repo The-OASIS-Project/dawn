@@ -625,6 +625,13 @@ typedef struct session {
    int64_t posts_told_id;
    int64_t posts_told_prev;
    uint64_t posts_told_by;
+   // The turn a preview was last allowed in, how many previews of the last few
+   // turns aren't answered yet, and whether one ever was (turn_origin_note_prepare):
+   // DAWN stages nothing unasked while one may still be answered.
+   // Guarded by history_mutex.
+   uint32_t last_prepare_turn;
+   int prepares_open;
+   bool prepared_any;
    // Facts "remember"ed during a turn whose conversation wasn't known yet; their
    // source is recorded once it is (see session_fact_source_t).  Guarded by
    // history_mutex.

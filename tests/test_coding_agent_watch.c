@@ -102,6 +102,47 @@ int job_report_post(int64_t parent_conv, int user_id, const char *text) {
 char *llm_context_neutralize(const char *text) {
    return strdup(text);
 }
+/* A tab viewing the job's conversation, and DAWN staging its approval there. */
+static session_t g_viewer_session;
+static bool g_viewer;
+static uint32_t g_staged_id;
+static int g_dropped;
+void coding_requests_drop_unasked(uint32_t id) {
+   (void)id;
+   g_dropped++;
+}
+static bool g_still_idle = true;
+bool turn_origin_unasked(struct session *session, turn_origin_t *out) {
+   (void)session;
+   memset(out, 0, sizeof(*out));
+   out->turn_number = 3;
+   return g_still_idle;
+}
+session_t *webui_find_reinvoke_viewer(int64_t conv_id, int user_id) {
+   (void)conv_id, (void)user_id;
+   return g_viewer ? &g_viewer_session : NULL;
+}
+void session_release(session_t *session) {
+   (void)session;
+}
+uint32_t coding_requests_stage_unasked(struct session *session,
+                                       int user_id,
+                                       int64_t job,
+                                       int64_t conv,
+                                       const char *title,
+                                       struct json_object *req,
+                                       char *line,
+                                       size_t line_len,
+                                       bool *already_out,
+                                       uint32_t *turn_out) {
+   (void)session, (void)user_id, (void)job, (void)conv, (void)title;
+   *already_out = false;
+   *turn_out = 3;
+   if (g_staged_id != 0) {
+      coding_gateway_request_line(req, line, line_len);
+   }
+   return g_staged_id;
+}
 bool coding_gateway_request_line(struct json_object *req, char *out, size_t out_len) {
    struct json_object *payload = json_object_object_get(req, "payload");
    struct json_object *v = json_object_object_get(payload, "value");
@@ -247,6 +288,8 @@ void setUp(void) {
    g_notices = 0;
    g_reports = 0;
    g_pending = true;
+   g_viewer = false;
+   g_staged_id = 0;
    atomic_store(&g_cancels, 0);
 }
 
@@ -296,6 +339,33 @@ static void test_ends(void) {
    apply("started", "job:42", 5); /* state only */
    apply("whatever_new", "job:42", 5);
    TEST_ASSERT_EQUAL_STRING(CONV_EVENT_AGENT_REQUEST, g_last_kind);
+}
+
+/* A tab on the job's conversation: DAWN stages the approval and asks there
+ * itself, naming it for the user's yes; nothing staged (busy, or another
+ * preview open): the plain notice. */
+static void test_dawn_asks_with_a_viewer(void) {
+   g_viewer = true;
+   g_staged_id = 4;
+   g_dropped = 0;
+   g_still_idle = true;
+   apply("input_required", "job:42", 5);
+   TEST_ASSERT_EQUAL_STRING("Coding job #42 (fix the oracle) is waiting: it wants to reach the "
+                            "host pypi.org. Allow it for this task? (approval 4)",
+                            g_posted);
+   /* The banner stays plain: a yes elsewhere can't answer it. */
+   TEST_ASSERT_EQUAL_STRING("Coding job #42 (fix the oracle) is waiting: it wants to reach the "
+                            "host pypi.org.",
+                            g_notice);
+   TEST_ASSERT_EQUAL_INT(0, g_dropped);
+   /* A message on its way when it was posted: the approval goes. */
+   g_still_idle = false;
+   apply("input_required", "job:42", 5);
+   TEST_ASSERT_EQUAL_INT(1, g_dropped);
+   /* Nothing staged (busy, or another preview open): the plain notice. */
+   g_staged_id = 0;
+   apply("input_required", "job:42", 5);
+   TEST_ASSERT_NULL(strstr(g_posted, "approval"));
 }
 
 /* An ended job takes nothing more, and its task, still reporting, is stopped
@@ -471,6 +541,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_steps_go_into_the_job);
    RUN_TEST(test_ends);
+   RUN_TEST(test_dawn_asks_with_a_viewer);
    RUN_TEST(test_ended_job_takes_nothing_and_its_task_is_stopped);
    RUN_TEST(test_deleted_job);
    RUN_TEST(test_not_ours);
