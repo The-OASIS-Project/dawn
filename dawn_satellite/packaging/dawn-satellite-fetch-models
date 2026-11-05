@@ -9,8 +9,9 @@
 # Always fetches:  Silero VAD + the Piper "Alba" TTS voice (committed in the
 #                  DAWN repo; see their *_LICENSE files there).
 # ASR engine (match [asr] engine in /etc/dawn-satellite/satellite.toml):
-#   --asr vosk             Vosk small streaming model (DEFAULT; matches the shipped config)
-#   --asr whisper          Whisper batch model
+#   --asr whisper          Whisper batch model (DEFAULT; matches the shipped config
+#                          and the packaged binary, which is built with Whisper)
+#   --asr vosk             Vosk small streaming model (needs a Vosk build)
 #   --whisper-model SIZE   tiny|base|small|medium (default base; only with --asr whisper)
 #   --accept               skip the license prompt
 #
@@ -28,7 +29,7 @@ DAWN_RAW_BASE="${DAWN_RAW_BASE:-https://github.com/The-OASIS-Project/dawn/raw/${
 HF_WHISPER_BASE="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 VOSK_BASE="https://alphacephei.com/vosk/models"
 
-ASR="vosk"
+ASR="whisper"
 WHISPER_MODEL="base"
 ACCEPT=0
 
@@ -43,7 +44,7 @@ while [ $# -gt 0 ]; do
       --whisper-model) WHISPER_MODEL="${2:-}"; shift 2 ;;
       --accept) ACCEPT=1; shift ;;
       -h | --help)
-         sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+         sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
          exit 0
          ;;
       *) die "unknown option: $1 (try --help)" ;;

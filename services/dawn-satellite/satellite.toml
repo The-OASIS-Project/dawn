@@ -195,16 +195,17 @@ sensitivity = 0.5
 # ASR engine: "whisper" (batch, higher accuracy) or "vosk" (streaming, near-instant)
 # Whisper: accumulates audio, runs inference at end (~4s on Pi 4 for tiny model)
 # Vosk: processes audio incrementally, finalize() returns near-instantly
-engine = "vosk"
+engine = "whisper"
 
 # Model path depends on engine:
 #   Whisper: path to .bin model file
+#     Default: ggml-base.en.bin (what setup_models.sh and dawn-satellite-fetch-models fetch)
 #     Recommended: ggml-tiny.en-q5_1.bin (~30MB, fastest for Pi 4)
 #     Alternative: ggml-tiny.en.bin (~77MB), ggml-tiny.bin (~75MB, multilingual)
 #   Vosk: path to model directory
 #     Recommended: vosk-model-small-en-us-0.15 (~40MB)
 #     Alternative: vosk-model-en-us-0.22 (~1.8GB, better accuracy)
-model_path = "models/vosk-model-small-en-us-0.15"
+model_path = "models/whisper.cpp/ggml-base.en.bin"
 
 # Language code (en, es, fr, de, etc.)
 language = "en"

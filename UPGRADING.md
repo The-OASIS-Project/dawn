@@ -12,6 +12,23 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-11-05 — The Raspberry Pi satellite defaults to Whisper speech recognition
+
+**What changed.** The satellite's default `satellite.toml` now sets `[asr] engine = "whisper"` with
+`model_path = "models/whisper.cpp/ggml-base.en.bin"` (it was Vosk). The `.deb`'s binary has
+always been built with Whisper only, so the old Vosk default made the packaged service exit at
+startup once a Vosk model was present. `dawn-satellite-fetch-models` now fetches Whisper by
+default, and the `.deb` ships the espeak-ng data Piper TTS needs, with `[tts] espeak_data`
+pointing at it.
+
+**What you need to do.** If you installed the `.deb`, run `sudo dawn-satellite-fetch-models` once
+after upgrading to get the Whisper model, then `sudo systemctl restart dawn-satellite`. If you
+edited `/etc/dawn-satellite/satellite.toml`, dpkg asks whether to take the new version: take it, or
+copy the new `[asr]` lines and `espeak_data = "/usr/share/dawn-satellite/espeak-ng-data"` into
+yours. Installs from `scripts/install.sh` keep the engine you chose and need nothing.
+
+---
+
 ## 2026-11-03 — A named audio device is no longer swapped for another
 
 **What changed.** When the microphone or speaker named in `[audio] capture_device` /

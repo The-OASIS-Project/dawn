@@ -199,7 +199,7 @@ parse_args() {
                 echo "  -h, --help           Show this help message"
                 echo ""
                 echo "Installed paths:"
-                echo "  Launcher: $DATA_DIR/bin/dawn-satellite-launch (systemd ExecStart)"
+                echo "  Launcher: $LAUNCH_DIR/dawn-satellite-launch (systemd ExecStart)"
                 echo "  Binary:   $DATA_DIR/bin/dawn_satellite (OTA-updatable)"
                 echo "  Config:   $CONFIG_DIR/satellite.toml"
                 echo "  Data:     $DATA_DIR/"
@@ -233,8 +233,6 @@ find_binary() {
     for path in "${search_paths[@]}"; do
         if [ -f "$path" ]; then
             BINARY_PATH="$path"
-            # The OTA rollback launcher is built alongside the binary.
-            LAUNCHER_PATH="$(dirname "$path")/dawn-satellite-launch"
             log "Found binary: $BINARY_PATH"
             return
         fi
@@ -244,7 +242,7 @@ find_binary() {
 
 Build instructions:
   cd dawn_satellite && mkdir -p build && cd build
-  cmake .. -DENABLE_VOICE=ON -DENABLE_VOSK_ASR=ON
+  cmake .. -DENABLE_VOICE=ON -DENABLE_WHISPER_ASR=ON
   make -j\$(nproc)"
 }
 
@@ -300,6 +298,11 @@ parse_toml_str() {
 install_selected_models() {
     local cfg="$1"
 
+    # Roots a model may resolve into (see the symlink check below).
+    local MODELS_REAL PROJECT_REAL
+    MODELS_REAL=$(realpath -e "$MODELS_DIR") || error "Cannot resolve $MODELS_DIR"
+    PROJECT_REAL=$(realpath -e "$PROJECT_ROOT") || error "Cannot resolve $PROJECT_ROOT"
+
     local -a model_paths=()
     local vad_path asr_path tts_model tts_config
     vad_path=$(parse_toml_str vad model_path "$cfg")
@@ -341,13 +344,21 @@ install_selected_models() {
             continue
         fi
 
-        # Refuse symlinks: we run as root and chmod -R 755 below — a symlink
-        # (at any level of $src) could dereference a sensitive file and
-        # expose it via $DATA_DIR.
-        if [ -L "$src" ]; then
-            warn "Refusing symlink model path: $path"
-            continue
-        fi
+        # Resolve symlinks (at any level of $src) and copy the target only if
+        # it stays inside the models dir or the checkout: setup_models.sh
+        # links models/vosk-model-* -> ../vosk-model-* and models/whisper.cpp
+        # -> ../whisper.cpp/models. We run as root and chmod -R 755 below, so
+        # a link resolving anywhere else could expose a sensitive file via
+        # $DATA_DIR — refuse it.
+        local real
+        real=$(realpath -e "$src" 2>/dev/null) || real=""
+        case "$real" in
+            "$MODELS_REAL"/* | "$PROJECT_REAL"/*) src="$real" ;;
+            *)
+                warn "Refusing model path resolving outside $MODELS_DIR and $PROJECT_ROOT: $path"
+                continue
+                ;;
+        esac
         if [ -d "$src" ] && [ -n "$(find "$src" -type l -print -quit 2>/dev/null)" ]; then
             warn "Refusing model directory containing symlinks: $path"
             continue
@@ -420,6 +431,12 @@ fi
 
 # Find files
 find_binary
+# The OTA rollback launcher is built alongside the binary and is the service's
+# ExecStart: without it the service cannot start, so stop before changing anything.
+LAUNCHER_PATH="$(dirname "$BINARY_PATH")/dawn-satellite-launch"
+if [ ! -f "$LAUNCHER_PATH" ]; then
+    error "OTA launcher not found: $LAUNCHER_PATH (the satellite build produces it next to dawn_satellite; rebuild)"
+fi
 find_models
 find_fonts
 
@@ -501,15 +518,10 @@ chmod 755 "$DATA_DIR/ota/rollback/dawn_satellite"
 # Install the OTA rollback launcher (the systemd ExecStart) to the root-owned,
 # package-layout path /usr/bin — frozen, never OTA-updated, and NOT in the
 # dawn-writable tree so the service can't tamper with its own rollback agent.
-if [ -n "$LAUNCHER_PATH" ] && [ -f "$LAUNCHER_PATH" ]; then
-    log "Installing OTA launcher to $LAUNCH_DIR/dawn-satellite-launch"
-    install -m 755 -o root -g root "$LAUNCHER_PATH" "$LAUNCH_DIR/dawn-satellite-launch"
-    # Drop any pre-migration launcher from the old dawn-writable location.
-    rm -f "$DATA_DIR/bin/dawn-satellite-launch" 2>/dev/null || true
-else
-    warn "OTA launcher (dawn-satellite-launch) not found next to the binary — \
-OTA rollback will not function. Rebuild the satellite to produce it."
-fi
+log "Installing OTA launcher to $LAUNCH_DIR/dawn-satellite-launch"
+install -m 755 -o root -g root "$LAUNCHER_PATH" "$LAUNCH_DIR/dawn-satellite-launch"
+# Drop any pre-migration launcher from the old dawn-writable location.
+rm -f "$DATA_DIR/bin/dawn-satellite-launch" 2>/dev/null || true
 
 # Remove any pre-migration binary so the old read-only path can't shadow the
 # new writable one (the service now ExecStarts the launcher).
@@ -711,6 +723,12 @@ chmod -R 755 "$DATA_DIR"
 # OTA staging dirs must be 0700 — set AFTER the recursive 755 above (which would
 # otherwise clobber them); they hold transient downloads + the rollback copy.
 chmod 700 "$DATA_DIR/ota/tmp" "$DATA_DIR/ota/rollback"
+# The satellite's identity file ($HOME of the service user) holds its UUID and
+# reconnect secret. The satellite creates it 0600 but never re-chmods an
+# existing file, so restore owner-only after the recursive 755 above.
+if [ -f "$DATA_DIR/.dawn_satellite_identity" ]; then
+    chmod 600 "$DATA_DIR/.dawn_satellite_identity"
+fi
 chown "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR"
 chmod 755 "$LOG_DIR"
 chown -R root:root "$CONFIG_DIR"
