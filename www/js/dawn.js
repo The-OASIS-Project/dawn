@@ -2157,6 +2157,11 @@
       const modeEl = document.getElementById('llm-mini-mode');
       const modelEl = document.getElementById('llm-mini-model');
       if (!modeEl || !modelEl) return;
+      const agent = typeof DawnCodingEvents !== 'undefined' ? DawnCodingEvents.agentMini() : null;
+      if (agent) {
+         [modeEl.textContent, modelEl.textContent] = agent; // a coding job's view
+         return;
+      }
 
       const typeSelect = document.getElementById('llm-type-select');
       const modelSelect = document.getElementById('llm-model-select');

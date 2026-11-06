@@ -1267,7 +1267,15 @@ void jobs_monitor_tick(time_t now) {
                          : (strcmp(rows[i].job_status, "interrupted") == 0) ? "was interrupted"
                          : timed_out                                        ? "timed out"
                                                                             : "failed";
-      const char *tail = (strcmp(rows[i].job_status, "done") == 0) ? " Ask me for the result." : "";
+      /* A coding job's end is reported into the conversation it came from
+       * (written after this notice), when its watcher ended it: a gateway is
+       * wired in (the cancel hook), and not at boot (interrupted). */
+      const bool reported = strcmp(rows[i].job_kind, JOB_KIND_CODING) == 0 &&
+                            rows[i].parent_id > 0 && kind_cancel_hook(JOB_KIND_CODING) != NULL &&
+                            strcmp(rows[i].job_status, "interrupted") != 0;
+      const char *tail = reported ? " Its report will be in the conversation it came from."
+                         : (strcmp(rows[i].job_status, "done") == 0) ? " Ask me for the result."
+                                                                     : "";
       char text[512];
       snprintf(text, sizeof(text), "Background job \"%s\" %s.%s", rows[i].title, verb, tail);
 

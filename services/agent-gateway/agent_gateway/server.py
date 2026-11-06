@@ -43,7 +43,7 @@ UPDATE_STATUS = "update-status.json"
 def public(t: dict) -> dict:
    keys = ("id", "dawn_user_id", "agent", "repo", "base", "branch", "task", "status",
            "session_id", "budget_usd", "cost_usd", "summary", "error", "client_ref",
-           "created", "updated")
+           "model", "created", "updated")
    out = {k: t[k] for k in keys}
    out["published"] = json.loads(t["published"]) if t["published"] else None
    return out

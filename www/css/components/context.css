@@ -340,6 +340,34 @@
    margin-left: 0.5rem;
 }
 
+/* A coding job's view: the job runs in its agent, so DAWN's controls give way
+ * to the agent's (greyed, read only). */
+#llm-controls-grid.agent-mode #llm-controls,
+#llm-controls-grid.agent-mode #llm-conversation-controls,
+#llm-controls-grid.agent-mode .llm-grid-separator {
+   display: none;
+}
+
+#llm-agent-view {
+   display: contents;
+}
+
+#llm-agent-view .llm-agent-note {
+   grid-column: 1 / -1;
+   padding-top: 0.25rem;
+   color: var(--text-secondary);
+   font-size: 0.75rem;
+   text-align: center;
+}
+
+#text-input.agent-locked {
+   cursor: not-allowed;
+}
+
+.agent-locked {
+   opacity: 0.5;
+}
+
 /* Collapsed state — hides the full grid */
 #llm-controls-grid.collapsed {
    max-height: 0;

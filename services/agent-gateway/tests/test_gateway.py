@@ -757,6 +757,23 @@ def service_umask():
    os.umask(old)
 
 
+def test_store_upgrades_a_v1_database(tmp_path):
+   """A schema-1 gateway database gains the model column and keeps its tasks."""
+   import sqlite3
+   p = str(tmp_path / "g.db")
+   db = sqlite3.connect(p)
+   db.executescript(st.SCHEMA.replace("   model TEXT,\n", "") + "PRAGMA user_version=1;")
+   db.execute("INSERT INTO tasks (id, dawn_user_id, agent, repo, base, branch, worktree, task, "
+              "status, budget_usd, created, updated) VALUES ('t1', 1, 'claude', 'r', 'main', "
+              "'b', '/w', 'x', 'completed', 5, 0, 0)")
+   db.commit()
+   db.close()
+   s = st.Store(p)
+   assert s.db.execute("PRAGMA user_version").fetchone()[0] == st.SCHEMA_VERSION
+   s.update_task("t1", model="claude-sonnet-5")
+   assert s.task("t1")["model"] == "claude-sonnet-5"
+
+
 def test_protected_patterns():
    from agent_gateway.repos import is_protected
    pats = [".github/**", "CLAUDE.md", "**/install.sh", "scripts/install*",

@@ -117,7 +117,8 @@ int mcp_bridge_call_tool(const char *alias,
       }
       char buf[2048];
       snprintf(buf, sizeof(buf),
-               "{\"task\":{\"status\":\"%s\",\"client_ref\":\"job:42.1000\","
+               "{\"task\":{\"status\":\"%s\",\"model\":\"claude-sonnet-5\","
+               "\"client_ref\":\"job:42.1000\","
                "\"repo\":\"dawn\"},\"pending\":%s}",
                g_task_status, g_pending);
       *result_out = strdup(buf);
@@ -238,6 +239,7 @@ int conv_db_job_get(int64_t conv_id, int user_id, job_record_t *out) {
    memset(out, 0, sizeof(*out));
    out->id = 42;
    out->user_id = 5;
+   out->parent_id = 7;
    snprintf(out->job_status, sizeof(out->job_status), "%s", g_status);
    snprintf(out->job_kind, sizeof(out->job_kind), "%s", g_kind);
    return AUTH_DB_SUCCESS;
@@ -384,6 +386,20 @@ void turn_origin_note_answered(struct session *session, uint32_t made_turn) {
 }
 int64_t session_turn_conversation(session_t *session) {
    return atomic_load(&session->history_conversation_id);
+}
+
+/* --- what is posted into the job's conversation --------------------------- */
+
+static char g_posted[1024];
+static int64_t g_posted_conv;
+int job_report_post(int64_t parent_conv, int user_id, const char *text) {
+   (void)user_id;
+   g_posted_conv = parent_conv;
+   snprintf(g_posted, sizeof(g_posted), "%s", text);
+   return SUCCESS;
+}
+char *llm_context_neutralize(const char *text) {
+   return text ? strdup(text) : NULL;
 }
 
 /* --- the watcher (its own test) ------------------------------------------- */
@@ -1068,8 +1084,11 @@ static void test_card_open_requests(void) {
    g_pending = "[" HOST_REQ ",{\"id\":10,\"kind\":\"domain\",\"payload\":{\"value\":"
                "\"bad host!\"}}," QUESTION_REQ "]";
    char *err = NULL;
-   struct json_object *open = coding_requests_open(5, 42, &err);
-   TEST_ASSERT_NOT_NULL_MESSAGE(open, err);
+   struct json_object *job = coding_requests_open(5, 42, &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(job, err);
+   TEST_ASSERT_EQUAL_STRING("Claude Code", coding_gateway_jstr(job, "agent"));
+   TEST_ASSERT_EQUAL_STRING("claude-sonnet-5", coding_gateway_jstr(job, "model"));
+   struct json_object *open = json_object_object_get(job, "requests");
    TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(open));
    struct json_object *host = json_object_array_get_idx(open, 0);
    TEST_ASSERT_EQUAL_STRING("reach the host `pypi.org`", coding_gateway_jstr(host, "line"));
@@ -1080,7 +1099,7 @@ static void test_card_open_requests(void) {
    struct json_object *q = json_object_array_get_idx(open, 2);
    TEST_ASSERT_EQUAL_STRING("question", coding_gateway_jstr(q, "kind"));
    TEST_ASSERT_EQUAL_STRING("Which branch?", coding_gateway_jstr(q, "question"));
-   json_object_put(open);
+   json_object_put(job);
    TEST_ASSERT_NULL(coding_requests_open(6, 42, &err)); /* another user's job */
    TEST_ASSERT_NOT_NULL(err);
    free(err);
@@ -1117,9 +1136,13 @@ static void test_card_reply_checks(void) {
          TEST_ASSERT_NOT_EQUAL(0, strcmp(g_calls[c], "task_reply"));
       }
    }
+   g_posted[0] = '\0';
    char *r = coding_requests_card_reply(5, 42, 7, CODING_CARD_ALLOW_REPO, NULL, line);
    TEST_ASSERT_FALSE_MESSAGE(tool_result_is_error(r), r);
    TEST_ASSERT_NOT_NULL(strstr(r, "for every task on dawn"));
+   /* The answer goes into the job's conversation, beside its waiting notice. */
+   TEST_ASSERT_EQUAL_INT64(7, g_posted_conv);
+   TEST_ASSERT_EQUAL_STRING(r, g_posted);
    free(r);
    int c = last_call("task_reply");
    TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"decision\": \"always_repo\""));

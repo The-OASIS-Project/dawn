@@ -433,10 +433,12 @@ static int reconcile_job(const job_record_t *rec) {
    if (!json_object_is_type(task, json_type_object)) {
       /* No task: its start never reached the gateway (the gateway records a
        * task before answering).  Stopped anyway in case the answer was lost. */
-      job_manager_set_terminal_if_active(rec->id, rec->user_id, "failed",
-                                         queued ? "it never reached the gateway"
-                                                : "the gateway has no record of it",
-                                         time(NULL), 0);
+      if (job_manager_set_terminal_if_active(rec->id, rec->user_id, "failed",
+                                             queued ? "it never reached the gateway"
+                                                    : "the gateway has no record of it",
+                                             time(NULL), 0) == AUTH_DB_SUCCESS) {
+         coding_report_job_end(rec->id, rec->user_id, "failed", NULL); /* as every end is */
+      }
       coding_gateway_cancel(rec->user_id, rec->id);
    } else if (is_end(coding_gateway_jstr(task, "status"))) {
       /* Its end event is gone; the task record holds the same facts. */

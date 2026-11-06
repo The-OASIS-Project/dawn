@@ -32,6 +32,7 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "core/job_report.h"
 #include "core/pending_slots.h"
 #include "core/session_history.h"
 #include "core/session_manager.h"
@@ -39,6 +40,7 @@
 #include "core/tool_call_challenge.h"
 #include "core/turn_origin.h"
 #include "dawn_error.h"
+#include "llm/llm_context_text.h"
 #include "tools/coding_agent_gateway.h"
 #include "tools/coding_agent_internal.h"
 #include "tools/tool_pending.h"
@@ -713,6 +715,7 @@ char *coding_requests_revoke(struct json_object *details, int user_id) {
 /* ========== the WebUI card: the user answers directly ========== */
 
 #define CR_QUESTION_MAX 1500 /* the agent's question as the card shows it */
+#define CR_MODEL_MAX 80      /* the agent's model id, as the job's view shows it */
 
 /* The agent's question from its question tool's input: each question and its
  * options when the input reads as the tool's JSON, else the input itself. */
@@ -750,9 +753,20 @@ struct json_object *coding_requests_open(int user_id, int64_t job, char **err_ou
    if (ans == NULL) {
       return NULL;
    }
-   const char *repo = coding_gateway_jstr(json_object_object_get(ans, "task"), "repo");
+   struct json_object *task = json_object_object_get(ans, "task");
+   const char *repo = coding_gateway_jstr(task, "repo");
    const bool repo_ok = coding_agent_repo_name_ok(repo);
+   struct json_object *job_info = json_object_new_object();
    struct json_object *out = json_object_new_array();
+   /* Who does the work, for the job's view: a model id only when it reads as one. */
+   const char *model = coding_gateway_jstr(task, "model");
+   const size_t ml = strlen(model);
+   json_object_object_add(job_info, "agent", json_object_new_string("Claude Code"));
+   if (ml > 0 && ml <= CR_MODEL_MAX &&
+       strspn(model, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/-[]") ==
+           ml) {
+      json_object_object_add(job_info, "model", json_object_new_string(model));
+   }
    struct json_object *pending = json_object_object_get(ans, "pending");
    for (size_t i = 0; json_object_is_type(pending, json_type_array) &&
                       i < json_object_array_length(pending) && i < CR_LISTED_MAX;
@@ -778,7 +792,8 @@ struct json_object *coding_requests_open(int user_id, int64_t job, char **err_ou
       json_object_array_add(out, o);
    }
    json_object_put(ans);
-   return out;
+   json_object_object_add(job_info, "requests", out);
+   return job_info;
 }
 
 /* Any approval staged for this request (DAWN's own question or a preview the
@@ -874,6 +889,13 @@ char *coding_requests_card_reply(int user_id,
       scope_text(scope, sizeof(scope), decision == CODING_CARD_ALLOW_REPO, repo);
       snprintf(buf, sizeof(buf), "Allowed: coding job #%lld (%s) may now %s, %s. %s",
                (long long)job, rec.title, line, scope, next);
+   }
+   /* The waiting notice was posted there; so is its answer, or the chat (and
+    * the model reading it) would take the request as still open. */
+   if (rec.parent_id > 0) {
+      char *said = llm_context_neutralize(buf);
+      job_report_post(rec.parent_id, user_id, said ? said : buf);
+      free(said);
    }
    return strdup(buf);
 }

@@ -1867,6 +1867,8 @@ in the data rather than in frame ordering.
       "jobs": [
          {
             "job": 1977,
+            "agent": "Claude Code",
+            "model": "claude-sonnet-5",
             "requests": [
                { "request_id": 12, "kind": "permission", "line": "reach the host `downloads.arduino.cc`", "repo": "dawn" },
                { "request_id": 13, "kind": "question", "line": "", "question": "Which branch?\nOptions: main / dev" }
@@ -1879,7 +1881,11 @@ in the data rather than in frame ordering.
 `line` is DAWN's checked wording (empty when DAWN can't show what is asked: offer Deny
 only); `repo` is present when allowing on the repo can be offered; `question` is the
 agent's question, its own words (show it as text, as theirs). A job with nothing
-open has `requests: []`.
+open has `requests: []`. `agent` names what runs the job; `model` is the model its last
+run reported, absent before the first run (show "default"). A coding job's work happens
+in its agent, not on the conversation's model, so a client shows these in place of its
+model controls and doesn't send text into the job's conversation (follow-up work goes
+through the assistant: "follow up on job 1977: ...").
 
 #### `coding_reply_response`
 ```json

@@ -109,10 +109,8 @@ static void pending_run(void *arg) {
          if (open == NULL) {
             continue;
          }
-         struct json_object *o = json_object_new_object();
-         json_object_object_add(o, "job", json_object_new_int64(jobs[i]));
-         json_object_object_add(o, "requests", open);
-         json_object_array_add(list, o);
+         json_object_object_add(open, "job", json_object_new_int64(jobs[i]));
+         json_object_array_add(list, open);
       }
       if (coding_gateway_stopping()) {
          json_object_put(list); /* the WebUI may be going away */

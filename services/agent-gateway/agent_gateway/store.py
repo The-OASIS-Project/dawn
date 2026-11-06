@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS tasks (
    error TEXT,
    client_ref TEXT,
    published TEXT,
+   model TEXT,
    created REAL NOT NULL,
    updated REAL NOT NULL,
    UNIQUE (dawn_user_id, client_ref)
@@ -85,7 +86,12 @@ CREATE INDEX IF NOT EXISTS idx_events_kind_ts ON events(kind, ts);
 """
 
 # Bumped with each schema change; Store refuses a database it doesn't know.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Older databases, brought up to this schema in order: version -> its statements.
+MIGRATIONS = {
+   2: "ALTER TABLE tasks ADD COLUMN model TEXT;",  # the model a task's agent runs on
+}
 
 # Statuses follow the MCP Tasks vocabulary, so moving to that extension later
 # is a rename.
@@ -107,9 +113,12 @@ class Store:
       version = self.db.execute("PRAGMA user_version").fetchone()[0]
       if version == 0:
          self.db.executescript(SCHEMA + f"PRAGMA user_version={SCHEMA_VERSION};")
-      elif version != SCHEMA_VERSION:
+      elif version > SCHEMA_VERSION:
          raise RuntimeError(f"gateway database is schema {version}; this gateway knows "
                             f"{SCHEMA_VERSION}")
+      else:
+         for v in range(version + 1, SCHEMA_VERSION + 1):
+            self.db.executescript("BEGIN;" + MIGRATIONS[v] + f"PRAGMA user_version={v};COMMIT;")
       self.new_event = asyncio.Event()
 
    # --- tasks -------------------------------------------------------------

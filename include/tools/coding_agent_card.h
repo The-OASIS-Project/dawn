@@ -39,11 +39,13 @@ typedef enum {
 } coding_card_decision_t;
 
 /**
- * @brief Job @p job's open requests, for the WebUI card: each {request_id, kind
- *        ("permission"|"question"), line (DAWN's checked words, "" when it can't
- *        show it), repo (when allowing on the repo can be offered), question (the
- *        agent's question)}.  Blocks on the gateway: call off the lws thread.
- * @return The array (caller puts), or NULL with the error result in *err_out.
+ * @brief Job @p job for the WebUI: {agent ("Claude Code"), model (the model its
+ *        agent last ran on, when known), requests: its open requests, each
+ *        {request_id, kind ("permission"|"question"), line (DAWN's checked words,
+ *        "" when it can't show it), repo (when allowing on the repo can be
+ *        offered), question (the agent's question)}}.  Blocks on the gateway:
+ *        call off the lws thread.
+ * @return The object (caller puts), or NULL with the error result in *err_out.
  */
 struct json_object *coding_requests_open(int user_id, int64_t job, char **err_out);
 

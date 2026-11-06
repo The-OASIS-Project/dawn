@@ -16,6 +16,7 @@
    'use strict';
 
    const pending = Object.create(null); // job id -> [{request_id, kind, line, repo, question}]
+   const jobInfo = Object.create(null); // job id -> {agent, model}: who does its work
    const sending = Object.create(null); // "job:request" -> {decision, nonce} while on its way
    const drafts = Object.create(null); // "job:request" -> an answer being written
    const listeners = [];
@@ -65,6 +66,108 @@
          }
       });
       renderTranscriptCard();
+      applyAgentView();
+   }
+
+   /* ---- a coding job's view: DAWN's model controls don't apply ----------- */
+
+   const AGENT_NOTE = 'To give this job more work, ask Friday to follow up on it.';
+   let agentViewOn = false;
+   let savedPlaceholder = null;
+
+   function agentSelect(label, value) {
+      const wrap = document.createDocumentFragment();
+      wrap.appendChild(elem('label', 'llm-label', label));
+      const sel = elem('select', 'llm-agent-select');
+      sel.disabled = true;
+      sel.setAttribute('aria-label', label + ' ' + value);
+      sel.appendChild(elem('option', null, value));
+      wrap.appendChild(sel);
+      return wrap;
+   }
+
+   /* While a coding job's view is open, the model bar shows its agent and model
+    * (greyed) and the message box is locked: typing there would reach DAWN's
+    * model, not the agent. */
+   function applyAgentView() {
+      const info = attachedJob ? jobInfo[String(attachedJob)] : null;
+      const grid = document.getElementById('llm-controls-grid');
+      const input = document.getElementById('text-input');
+      const on = !!info;
+      if (on === agentViewOn && !on) return;
+      /* Listening would put voice turns into the job's conversation, for DAWN's
+       * model to answer: stop it on entering the view. */
+      if (on && !agentViewOn && typeof DawnAlwaysOn !== 'undefined' && DawnAlwaysOn.isEnabled()) {
+         DawnAlwaysOn.disable();
+      }
+      agentViewOn = on;
+      if (grid) {
+         let view = document.getElementById('llm-agent-view');
+         if (view) view.remove();
+         grid.classList.toggle('agent-mode', on);
+         if (on) {
+            view = elem('div');
+            view.id = 'llm-agent-view';
+            view.appendChild(agentSelect('Mode:', 'Agent'));
+            view.appendChild(agentSelect('Provider:', info.agent + ' (agent)'));
+            view.appendChild(agentSelect('Model:', info.model || info.agent + ' default'));
+            const note = elem(
+               'div',
+               'llm-agent-note',
+               'This job runs in ' + info.agent + '; DAWN’s model settings don’t apply.'
+            );
+            view.appendChild(note);
+            grid.appendChild(view);
+         }
+      }
+      const mode = document.getElementById('llm-mini-mode');
+      const model = document.getElementById('llm-mini-model');
+      if (on && mode && model) {
+         [mode.textContent, model.textContent] = agentMini();
+      } else if (!on && window.DAWN && window.DAWN.updateLlmMiniSummary) {
+         window.DAWN.updateLlmMiniSummary(); // from DAWN's live controls
+      }
+      if (input) {
+         if (on && savedPlaceholder === null) savedPlaceholder = input.placeholder;
+         input.readOnly = on;
+         input.placeholder = on ? AGENT_NOTE : savedPlaceholder || input.placeholder;
+         input.classList.toggle('agent-locked', on);
+         if (!on) savedPlaceholder = null;
+      }
+      ['attach-btn', 'attach-dropdown-btn', 'action-btn', 'action-dropdown-btn'].forEach(
+         function (id) {
+            const b = document.getElementById(id);
+            if (!b) return;
+            b.classList.toggle('agent-locked', on);
+            if (on) b.setAttribute('aria-disabled', 'true');
+            else b.removeAttribute('aria-disabled');
+         }
+      );
+   }
+
+   /* The message box and its buttons do nothing while it is locked (Enter would
+    * still send a draft typed before the view opened; a paste or drop would queue
+    * an attachment for the next chat), except Stop on a running turn. */
+   function blockLocked(e) {
+      if (!agentViewOn || !e.target.closest) return;
+      const locked = e.target.closest('.agent-locked');
+      if (!locked) return;
+      if (e.type === 'keydown' && e.key !== 'Enter') return;
+      if (e.type === 'click' && locked.id === 'action-btn' && typeof DawnState !== 'undefined') {
+         const st = DawnState.getAppState ? DawnState.getAppState() : 'idle';
+         if (st === 'processing' || st === 'speaking' || st === 'thinking') return; // Stop
+      }
+      e.preventDefault();
+      e.stopPropagation();
+   }
+   ['click', 'keydown', 'mousedown', 'touchstart', 'paste', 'drop'].forEach(function (type) {
+      document.addEventListener(type, blockLocked, true); // mousedown/touchstart: push-to-talk
+   });
+
+   /* The collapsed bar's text while a coding job's view is open, else null. */
+   function agentMini() {
+      const info = agentViewOn && attachedJob ? jobInfo[String(attachedJob)] : null;
+      return info ? [info.agent, info.model || 'default'] : null;
    }
 
    /* ---- what the jobs wait on --------------------------------------------- */
@@ -123,6 +226,7 @@
       const list = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
       list.forEach(function (j) {
          pending[String(j.job)] = Array.isArray(j.requests) ? j.requests : [];
+         jobInfo[String(j.job)] = { agent: j.agent || 'Coding agent', model: j.model || '' };
       });
       notify();
    }
@@ -396,6 +500,7 @@
       if (attachedJob) request([attachedJob]); // the server answers only for coding jobs
       shownSig = '';
       renderTranscriptCard();
+      applyAgentView();
    }
 
    /* ---- the trail -------------------------------------------------------- */
@@ -570,6 +675,7 @@
       waiting: waiting,
       waitingCount: waitingCount,
       buildCard: buildCard,
+      agentMini: agentMini,
       onChange: function (fn) {
          listeners.push(fn);
       },

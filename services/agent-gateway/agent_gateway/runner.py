@@ -84,6 +84,12 @@ def clip(text: str, cap: int = TEXT_CAP) -> str:
 REPO_CACHE_SUBDIR = ".cache/repo"
 
 
+def _model_id(value) -> str | None:
+   """The model an init message names; None when absent or too long to be one."""
+   text = str(value or "")
+   return text if 0 < len(text) <= 80 else None
+
+
 def floor_settings(agent_home: str, work_dir: str, worktree: str, domains: list[str],
                    repo: str = "") -> str:
    """The agent's fixed rules plus this run's pieces, passed with every run.
@@ -383,8 +389,11 @@ class Runner:
             await client.query(prompt)
             async for m in client.receive_response():
                if isinstance(m, SystemMessage) and m.subtype == "init":
-                  # Saved at once, so a run cut off by a gateway restart resumes.
-                  self.store.update_task(task_id, session_id=m.data.get("session_id"))
+                  # Saved at once, so a run cut off by a gateway restart resumes; the
+                  # model is what Claude Code reports it runs on (config may leave it
+                  # to Claude Code's default).
+                  self.store.update_task(task_id, session_id=m.data.get("session_id"),
+                                         model=_model_id(m.data.get("model")))
                elif isinstance(m, AssistantMessage):
                   for b in m.content:
                      if getattr(b, "text", None):

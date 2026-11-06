@@ -385,6 +385,8 @@ static char *handle_status(struct json_object *details, int user_id) {
          strbuf_append(&sb, "A host or tool: approve (the user confirms) or deny; a question: "
                             "answer, with the user's words.\n");
       }
+   } else {
+      strbuf_append(&sb, "No open requests: nothing is waiting for the user.\n");
    }
    json_object_put(ans);
    if (strbuf_len(&sb) < CA_RESULT_MAX - CA_RESULT_ROOM) { /* room for it, else left out */
