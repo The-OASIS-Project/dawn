@@ -709,3 +709,171 @@ char *coding_requests_revoke(struct json_object *details, int user_id) {
             (long long)grant);
    return strdup(buf);
 }
+
+/* ========== the WebUI card: the user answers directly ========== */
+
+#define CR_QUESTION_MAX 1500 /* the agent's question as the card shows it */
+
+/* The agent's question from its question tool's input: each question and its
+ * options when the input reads as the tool's JSON, else the input itself. */
+static void question_text(struct json_object *req, char *out, size_t len) {
+   const char *input = coding_gateway_jstr(json_object_object_get(req, "payload"), "input");
+   struct json_object *in = json_tokener_parse(input);
+   struct json_object *qs = in ? json_object_object_get(in, "questions") : NULL;
+   strbuf_t sb;
+   strbuf_init(&sb, 256);
+   for (size_t i = 0; json_object_is_type(qs, json_type_array) && i < json_object_array_length(qs);
+        i++) {
+      struct json_object *q = json_object_array_get_idx(qs, i);
+      strbuf_appendf(&sb, "%s%s", i ? "\n" : "", coding_gateway_jstr(q, "question"));
+      struct json_object *opts = json_object_object_get(q, "options");
+      for (size_t j = 0;
+           json_object_is_type(opts, json_type_array) && j < json_object_array_length(opts); j++) {
+         strbuf_appendf(&sb, "%s%s", j ? " / " : "\nOptions: ",
+                        coding_gateway_jstr(json_object_array_get_idx(opts, j), "label"));
+      }
+   }
+   str_excerpt_line(strbuf_len(&sb) ? strbuf_str(&sb) : input, CR_QUESTION_MAX, out, len);
+   strbuf_free(&sb);
+   json_object_put(in);
+}
+
+struct json_object *coding_requests_open(int user_id, int64_t job, char **err_out) {
+   *err_out = NULL;
+   job_record_t rec;
+   char *bad = coding_agent_check_job(job, user_id, &rec);
+   if (bad != NULL) {
+      *err_out = bad;
+      return NULL;
+   }
+   struct json_object *ans = fetch_open(user_id, job, err_out);
+   if (ans == NULL) {
+      return NULL;
+   }
+   const char *repo = coding_gateway_jstr(json_object_object_get(ans, "task"), "repo");
+   const bool repo_ok = coding_agent_repo_name_ok(repo);
+   struct json_object *out = json_object_new_array();
+   struct json_object *pending = json_object_object_get(ans, "pending");
+   for (size_t i = 0; json_object_is_type(pending, json_type_array) &&
+                      i < json_object_array_length(pending) && i < CR_LISTED_MAX;
+        i++) {
+      struct json_object *r = json_object_array_get_idx(pending, i);
+      const bool question = strcmp(coding_gateway_jstr(r, "kind"), "question") == 0;
+      struct json_object *o = json_object_new_object();
+      json_object_object_add(o, "request_id", json_object_new_int64(request_id(r)));
+      json_object_object_add(o, "kind",
+                             json_object_new_string(question ? "question" : "permission"));
+      char line[CODING_GATEWAY_REQUEST_LINE_MAX] = "";
+      if (!question && !coding_gateway_request_line(r, line, sizeof(line))) {
+         line[0] = '\0';
+      }
+      json_object_object_add(o, "line", json_object_new_string(line));
+      if (question) {
+         char text[CR_QUESTION_MAX + 8];
+         question_text(r, text, sizeof(text));
+         json_object_object_add(o, "question", json_object_new_string(text));
+      } else if (repo_ok && line[0] != '\0') {
+         json_object_object_add(o, "repo", json_object_new_string(repo));
+      }
+      json_object_array_add(out, o);
+   }
+   json_object_put(ans);
+   return out;
+}
+
+/* Any approval staged for this request (DAWN's own question or a preview the
+ * user asked for): it is answered now, and a live one would hold back DAWN's
+ * question about the job's next request. */
+static void drop_staged_for(int64_t job, int64_t rid) {
+   pthread_mutex_lock(&s_pending_mutex);
+   for (int i = 0; i < CR_PENDING_MAX; i++) {
+      if (s_pending[i].hdr.active && s_pending[i].job == job && s_pending[i].request_id == rid) {
+         memset(&s_pending[i], 0, sizeof(s_pending[i]));
+      }
+   }
+   pthread_mutex_unlock(&s_pending_mutex);
+}
+
+char *coding_requests_card_reply(int user_id,
+                                 int64_t job,
+                                 int64_t rid,
+                                 coding_card_decision_t decision,
+                                 const char *answer,
+                                 const char *shown) {
+   job_record_t rec;
+   char *bad = coding_agent_check_job(job, user_id, &rec);
+   if (bad != NULL) {
+      return bad;
+   }
+   char *err = NULL;
+   struct json_object *ans = fetch_open(user_id, job, &err);
+   if (ans == NULL) {
+      return err;
+   }
+   /* Everything from the live request, nothing from the card but its choice. */
+   struct json_object *req = NULL;
+   struct json_object *pending = json_object_object_get(ans, "pending");
+   for (size_t i = 0; json_object_is_type(pending, json_type_array) &&
+                      i < json_object_array_length(pending) && req == NULL;
+        i++) {
+      struct json_object *r = json_object_array_get_idx(pending, i);
+      req = request_id(r) == rid ? r : NULL;
+   }
+   const char *refusal = NULL;
+   const char *gw_decision = NULL;
+   const char *gw_answer = NULL;
+   char line[CODING_GATEWAY_REQUEST_LINE_MAX] = "";
+   char repo[CODING_AGENT_REPO_MAX] = "";
+   copy_repo(repo, sizeof(repo), coding_gateway_jstr(json_object_object_get(ans, "task"), "repo"));
+   const bool question = req && strcmp(coding_gateway_jstr(req, "kind"), "question") == 0;
+   const bool showable = req && !question && coding_gateway_request_line(req, line, sizeof(line));
+   if (req == NULL) {
+      refusal = "That request isn't open any more; nothing was changed.";
+   } else if (question) {
+      if (decision == CODING_CARD_DENY) {
+         gw_answer = "The operator chose not to answer; continue without it.";
+      } else if (decision != CODING_CARD_ANSWER || answer == NULL || answer[0] == '\0' ||
+                 strlen(answer) > CR_ANSWER_MAX || !utf8_is_valid(answer, strlen(answer))) {
+         refusal = "A question takes an answer (at most 2000 bytes) or Deny.";
+      } else {
+         gw_answer = answer;
+      }
+   } else if (decision == CODING_CARD_DENY) {
+      gw_decision = "deny";
+   } else if (decision == CODING_CARD_ANSWER) {
+      refusal = "That request takes Allow or Deny, not an answer.";
+   } else if (!showable) {
+      refusal = "DAWN can't check what that request asks for, so it can only be denied.";
+   } else if (shown == NULL || strcmp(shown, line) != 0) {
+      refusal = "That request changed since it was shown; nothing was allowed.";
+   } else if (decision == CODING_CARD_ALLOW_REPO && repo[0] == '\0') {
+      refusal = "That job's repo can't be named, so it can be allowed for this task only.";
+   } else {
+      gw_decision = decision == CODING_CARD_ALLOW_REPO ? "always_repo" : "allow";
+   }
+   json_object_put(ans);
+   if (refusal != NULL) {
+      return coding_agent_error(refusal);
+   }
+   char next[CR_NEXT_MAX];
+   if (reply(user_id, job, rid, gw_decision, gw_answer, next, sizeof(next), &err) != CODING_GW_OK) {
+      return coding_agent_error_free(err);
+   }
+   drop_staged_for(job, rid);
+   char buf[CONV_TITLE_MAX + CODING_GATEWAY_REQUEST_LINE_MAX + CODING_AGENT_REPO_MAX + CR_NEXT_MAX +
+            160];
+   if (gw_answer != NULL) {
+      snprintf(buf, sizeof(buf), "%s coding job #%lld (%s). %s",
+               decision == CODING_CARD_DENY ? "Declined the question of" : "Answered",
+               (long long)job, rec.title, next);
+   } else if (strcmp(gw_decision, "deny") == 0) {
+      snprintf(buf, sizeof(buf), "Denied: coding job #%lld (%s). %s", (long long)job, rec.title,
+               next);
+   } else {
+      char scope[CODING_AGENT_REPO_MAX + 32];
+      scope_text(scope, sizeof(scope), decision == CODING_CARD_ALLOW_REPO, repo);
+      snprintf(buf, sizeof(buf), "Allowed: coding job #%lld (%s) may now %s, %s. %s",
+               (long long)job, rec.title, line, scope, next);
+   }
+   return strdup(buf);
+}

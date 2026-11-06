@@ -1245,6 +1245,18 @@
                   DawnJobs.handleHistoryPage(msg.payload);
                }
                break;
+            case 'coding_pending_response':
+               // What the user's coding jobs wait on (the card's requests).
+               if (typeof DawnCodingEvents !== 'undefined') {
+                  DawnCodingEvents.handlePending(msg.payload);
+               }
+               break;
+            case 'coding_reply_response':
+               // The result of a click on a coding job's card.
+               if (typeof DawnCodingEvents !== 'undefined') {
+                  DawnCodingEvents.handleReplyResponse(msg.payload);
+               }
+               break;
             case 'job_action_response':
                // Result of a cancel/resume. Always sent, including on refusal,
                // so a panel can tell "refused" from "still working".

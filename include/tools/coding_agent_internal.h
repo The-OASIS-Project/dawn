@@ -33,6 +33,7 @@
 
 #include "auth/auth_db.h"
 #include "core/turn_origin.h"
+#include "tools/coding_agent_card.h"
 
 struct session;
 

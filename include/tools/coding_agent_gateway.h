@@ -113,6 +113,17 @@ void coding_gateway_cancel_ref(int user_id, const char *client_ref);
  */
 void coding_gateway_cancel_async(int user_id, int64_t conv_id);
 
+/**
+ * @brief Run @p fn(@p arg) on a short-lived thread that coding_gateway_stop()
+ *        waits for (for gateway calls off a caller's thread).
+ * @return SUCCESS, or FAILURE (stopping, or no thread): @p fn never runs and
+ *         @p arg stays the caller's.
+ */
+int coding_gateway_run_async(void (*fn)(void *), void *arg);
+
+/** Whether coding_gateway_stop() has begun (async work should end early). */
+bool coding_gateway_stopping(void);
+
 /** Refuse new async calls and wait for those in flight (shutdown). */
 void coding_gateway_stop(void);
 

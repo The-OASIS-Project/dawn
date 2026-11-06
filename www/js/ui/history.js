@@ -2021,6 +2021,8 @@
          transcript.innerHTML = '';
          if (typeof DawnToolPills !== 'undefined') DawnToolPills.reset();
       }
+      // Leaving any attached job: its markers and card don't follow into the new chat.
+      if (typeof DawnAgentEvents !== 'undefined') DawnAgentEvents.reset(0);
 
       // Reset per-conversation LLM settings
       if (typeof DawnSettings !== 'undefined') {

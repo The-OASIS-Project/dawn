@@ -82,10 +82,9 @@ static int s_recancel_next;
 /* ========== Events onto jobs ========== */
 
 static const char *const k_step_fields[] = { "tool", "brief", "text", NULL };
-static const char *const k_request_fields[] = { "request_id", "request_kind", "value",
-                                                "tool",       "input",        "note",
-                                                "error",      "decision",     "request_ids",
-                                                NULL };
+static const char *const k_request_fields[] = { "request_id",  "request_kind", "value", "tool",
+                                                "input",       "note",         "error", "decision",
+                                                "request_ids", "line",         NULL };
 static const char *const k_end_fields[] = { "summary",         "branch", "commits",  "diffstat",
                                             "uncommitted",     "error",  "cost_usd", "protected",
                                             "protected_count", NULL };
@@ -308,6 +307,27 @@ void coding_watch_apply(struct json_object *event) {
       return;
    }
 
+   struct json_object *data = json_object_object_get(event, "data");
+   if (strcmp(kind, "request") != 0 && json_object_is_type(data, json_type_object)) {
+      json_object_object_del(data, "line"); /* only DAWN's own, on a request */
+   }
+   if (strcmp(kind, "request") == 0 && json_object_is_type(data, json_type_object)) {
+      /* What it asks, in DAWN's checked words, from the raw event (its value is
+       * scrubbed when stored): the trail shows this, never the agent's value. */
+      struct json_object *req = json_object_new_object();
+      struct json_object *payload = json_object_new_object();
+      json_object_object_add(payload, "value",
+                             json_object_new_string(coding_gateway_jstr(data, "value")));
+      json_object_object_add(req, "kind",
+                             json_object_new_string(coding_gateway_jstr(data, "request_kind")));
+      json_object_object_add(req, "payload", payload);
+      char line[CODING_GATEWAY_REQUEST_LINE_MAX];
+      if (!coding_gateway_request_line(req, line, sizeof(line))) {
+         line[0] = '\0';
+      }
+      json_object_put(req);
+      json_object_object_add(data, "line", json_object_new_string(line));
+   }
    for (size_t i = 0; i < sizeof(k_kinds) / sizeof(k_kinds[0]); i++) {
       if (strcmp(kind, k_kinds[i].gw) == 0) {
          struct json_object *jseq = json_object_object_get(event, "seq");

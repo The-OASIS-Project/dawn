@@ -34,6 +34,7 @@
    let renderedSeqs = new Set(); // seqs already drawn (dedup across replay + live)
    let flushed = false; // has the message render completed (buffer drained)?
    let buffer = []; // {ev, live} received before the render completed
+   const BOTTOM_SLACK_PX = 48; // within this of the bottom counts as following along
 
    // Kinds this renderer draws.  Everything else (tool_call/tool_result/status) is
    // intentionally dropped — see file header.  A set so an unknown or future kind is
@@ -49,6 +50,10 @@
       research_unanswerable: true,
       research_critic: true,
       research_stop: true,
+      // A coding job's trail and report (DawnCodingEvents draws them).
+      agent_step: true,
+      agent_request: true,
+      agent_end: true,
    };
 
    /* Bare hostname from a URL, for a compact claim citation. Never throws. */
@@ -142,6 +147,7 @@
       renderedSeqs = new Set();
       flushed = false;
       buffer = [];
+      if (typeof DawnCodingEvents !== 'undefined') DawnCodingEvents.attached(0);
    }
 
    /* Called by the load path once the async message render has fully appended —
@@ -153,6 +159,8 @@
       const pending = buffer;
       buffer = [];
       for (const b of pending) renderMarker(b.ev, b.live);
+      // A coding job's card goes after its trail (it asks what the job waits on).
+      if (typeof DawnCodingEvents !== 'undefined') DawnCodingEvents.attached(convId);
    }
 
    /* Human-facing disposition line for a `complete` event. */
@@ -186,6 +194,9 @@
       } else if (kind === 'resume') {
          el.classList.add('agent-event-muted');
          el.textContent = 'Resumed — continuing the task';
+      } else if (kind.indexOf('agent_') === 0) {
+         if (typeof DawnCodingEvents === 'undefined') return null;
+         return DawnCodingEvents.buildTrail(kind, payload, live);
       } else if (kind.indexOf('research_') === 0) {
          const info = researchLine(kind, payload);
          if (!info) return null;
@@ -225,7 +236,9 @@
             }
          }
       }
-      t.appendChild(el);
+      // A coding job's waiting card stays last.
+      const cards = t.querySelector('.coding-cards');
+      t.insertBefore(el, cards);
    }
 
    /* Draw one event (already ownership/active-conv checked). Dedups by seq. */
@@ -244,8 +257,18 @@
       }
       const el = buildMarker(ev.kind, payload, live);
       if (!el) return;
+      // Following along at the bottom: stay there as the trail grows (not when
+      // the user has scrolled up to read).
+      const t = transcriptEl();
+      const atBottom = t && t.scrollHeight - t.scrollTop - t.clientHeight < BOTTOM_SLACK_PX;
+      // A coding job's tool steps gather in one collapsed group.
+      if (typeof DawnCodingEvents !== 'undefined' && t && DawnCodingEvents.placeStep(el, t)) {
+         if (atBottom) t.scrollTop = t.scrollHeight;
+         return;
+      }
       // Replay carries created_at (interleave by boundary); a live event is "now".
       insertByTs(el, typeof ev.created_at === 'number' ? ev.created_at : Infinity);
+      if (atBottom) t.scrollTop = t.scrollHeight;
    }
 
    /* Replay batch: {conversation_id, events:[{seq,kind,created_at,payload}], has_more, last_seq}. */
@@ -267,6 +290,8 @@
 
    /* Live single event: {conversation_id, seq, kind, payload}. */
    function handleConversationEvent(payload) {
+      // Any tab: a coding job's request or end changes what it waits on.
+      if (typeof DawnCodingEvents !== 'undefined') DawnCodingEvents.noteEvent(payload);
       if (!payload || payload.conversation_id !== activeConvId) return; // not the viewed job
       if (!MARKER_KINDS[payload.kind]) return; // tool_call/tool_result/status — not drawn here
       // Before flush (message render still in flight) buffer so ordering holds.

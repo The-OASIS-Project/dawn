@@ -1062,6 +1062,108 @@ static void test_revise_edges(void) {
    TEST_ASSERT_EQUAL_STRING("done", g_status); /* its real end is kept */
 }
 
+/* The WebUI card: what a job waits on, in DAWN's checked words. */
+static void test_card_open_requests(void) {
+   coding_job();
+   g_pending = "[" HOST_REQ ",{\"id\":10,\"kind\":\"domain\",\"payload\":{\"value\":"
+               "\"bad host!\"}}," QUESTION_REQ "]";
+   char *err = NULL;
+   struct json_object *open = coding_requests_open(5, 42, &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(open, err);
+   TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(open));
+   struct json_object *host = json_object_array_get_idx(open, 0);
+   TEST_ASSERT_EQUAL_STRING("reach the host `pypi.org`", coding_gateway_jstr(host, "line"));
+   TEST_ASSERT_EQUAL_STRING("dawn", coding_gateway_jstr(host, "repo"));
+   struct json_object *bad = json_object_array_get_idx(open, 1);
+   TEST_ASSERT_EQUAL_STRING("", coding_gateway_jstr(bad, "line")); /* deny only */
+   TEST_ASSERT_EQUAL_STRING("", coding_gateway_jstr(bad, "repo"));
+   struct json_object *q = json_object_array_get_idx(open, 2);
+   TEST_ASSERT_EQUAL_STRING("question", coding_gateway_jstr(q, "kind"));
+   TEST_ASSERT_EQUAL_STRING("Which branch?", coding_gateway_jstr(q, "question"));
+   json_object_put(open);
+   TEST_ASSERT_NULL(coding_requests_open(6, 42, &err)); /* another user's job */
+   TEST_ASSERT_NOT_NULL(err);
+   free(err);
+}
+
+/* A click is checked against the live request; forged ones are refused and
+ * nothing reaches the gateway. */
+static void test_card_reply_checks(void) {
+   coding_job();
+   g_pending = "[" HOST_REQ ",{\"id\":10,\"kind\":\"domain\",\"payload\":{\"value\":"
+               "\"bad host!\"}}," QUESTION_REQ "]";
+   const char *line = "reach the host `pypi.org`";
+   struct {
+      int user;
+      int64_t rid;
+      coding_card_decision_t d;
+      const char *answer, *shown;
+   } refused[] = {
+      { 6, 7, CODING_CARD_ALLOW, NULL, line },   /* another user's job */
+      { 5, 99, CODING_CARD_ALLOW, NULL, line },  /* not open */
+      { 5, 7, CODING_CARD_ANSWER, "yes", line }, /* an answer to a host request */
+      { 5, 7, CODING_CARD_ALLOW, NULL, "reach the host `evil.example`" }, /* stale line */
+      { 5, 10, CODING_CARD_ALLOW, NULL, "" },                             /* DAWN can't show it */
+      { 5, 9, CODING_CARD_ALLOW, NULL, "" },  /* a decision on a question */
+      { 5, 9, CODING_CARD_ANSWER, "", NULL }, /* an empty answer */
+   };
+   for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+      const int before = atomic_load(&g_ncalls);
+      char *r = coding_requests_card_reply(refused[i].user, 42, refused[i].rid, refused[i].d,
+                                           refused[i].answer, refused[i].shown);
+      TEST_ASSERT_TRUE_MESSAGE(tool_result_is_error(r), r);
+      free(r);
+      for (int c = before; c < atomic_load(&g_ncalls); c++) {
+         TEST_ASSERT_NOT_EQUAL(0, strcmp(g_calls[c], "task_reply"));
+      }
+   }
+   char *r = coding_requests_card_reply(5, 42, 7, CODING_CARD_ALLOW_REPO, NULL, line);
+   TEST_ASSERT_FALSE_MESSAGE(tool_result_is_error(r), r);
+   TEST_ASSERT_NOT_NULL(strstr(r, "for every task on dawn"));
+   free(r);
+   int c = last_call("task_reply");
+   TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"decision\": \"always_repo\""));
+   r = coding_requests_card_reply(5, 42, 10, CODING_CARD_DENY, NULL, NULL);
+   TEST_ASSERT_FALSE_MESSAGE(tool_result_is_error(r), r);
+   free(r);
+   TEST_ASSERT_NOT_NULL(strstr(g_args[last_call("task_reply")], "\"decision\": \"deny\""));
+   r = coding_requests_card_reply(5, 42, 9, CODING_CARD_ANSWER, "main", NULL);
+   TEST_ASSERT_FALSE_MESSAGE(tool_result_is_error(r), r);
+   free(r);
+   TEST_ASSERT_NOT_NULL(strstr(g_args[last_call("task_reply")], "\"answer\": \"main\""));
+   r = coding_requests_card_reply(5, 42, 9, CODING_CARD_DENY, NULL, NULL); /* a question declined */
+   TEST_ASSERT_FALSE_MESSAGE(tool_result_is_error(r), r);
+   free(r);
+   TEST_ASSERT_NOT_NULL(strstr(g_args[last_call("task_reply")], "chose not to answer"));
+}
+
+/* A card answer drops the approval DAWN staged for that request, so its next
+ * question in the chat isn't held back. */
+static void test_card_reply_drops_staged_approval(void) {
+   const uint32_t own = g_session->session_id;
+   g_session->session_id = 9;
+   atomic_store(&g_session->history_conversation_id, 7);
+   coding_job();
+   g_pending = "[" HOST_REQ "]";
+   char line[CODING_GATEWAY_REQUEST_LINE_MAX];
+   struct json_object *host = json_tokener_parse(HOST_REQ);
+   bool already = false;
+   uint32_t turn = 0;
+   TEST_ASSERT_NOT_EQUAL(0, coding_requests_stage_unasked(g_session, 5, 42, 7, "x", "dawn", host,
+                                                          line, sizeof(line), &already, &turn));
+   char *r = coding_requests_card_reply(5, 42, 7, CODING_CARD_ALLOW, NULL,
+                                        "reach the host `pypi.org`");
+   TEST_ASSERT_FALSE_MESSAGE(tool_result_is_error(r), r);
+   free(r);
+   struct json_object *next = json_tokener_parse(TOOL_REQ);
+   TEST_ASSERT_NOT_EQUAL(0, coding_requests_stage_unasked(g_session, 5, 42, 7, "x", "dawn", next,
+                                                          line, sizeof(line), &already, &turn));
+   json_object_put(next);
+   json_object_put(host);
+   atomic_store(&g_session->history_conversation_id, 0);
+   g_session->session_id = own;
+}
+
 /* A request that closed since the preview (or changed) allows nothing. */
 static void test_confirm_approve_needs_the_request_still_open(void) {
    coding_job();
@@ -1406,6 +1508,9 @@ int main(void) {
    RUN_TEST(test_revise_not_sent);
    RUN_TEST(test_revise_edges);
    RUN_TEST(test_delegate_naming_a_finished_job);
+   RUN_TEST(test_card_open_requests);
+   RUN_TEST(test_card_reply_checks);
+   RUN_TEST(test_card_reply_drops_staged_approval);
    RUN_TEST(test_approve_for_the_repo);
    RUN_TEST(test_grants_list_and_revoke);
    RUN_TEST(test_confirm_approve_needs_the_request_still_open);

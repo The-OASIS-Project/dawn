@@ -1647,6 +1647,18 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
             limit = json_object_get_int(o);
       }
       webui_jobs_send_history(conn, before_created_at, before_id, limit);
+#ifdef DAWN_ENABLE_CODING_AGENT_TOOL
+   } else if (strcmp(type, "coding_pending") == 0) {
+      /* What the user's coding jobs wait on.  Ownership is checked per job inside. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_pending(conn, payload);
+   } else if (strcmp(type, "coding_reply") == 0) {
+      /* The card's answer; checked against the live request inside. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_reply(conn, payload);
+#endif
    } else if (strcmp(type, "job_action") == 0) {
       /* cancel | resume.  Ownership is checked inside, against conn->auth_user_id. */
       if (!conn_require_auth(conn))

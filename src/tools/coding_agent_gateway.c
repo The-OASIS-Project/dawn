@@ -253,50 +253,69 @@ typedef struct {
    int user_id;
 } gw_cancel_t;
 
-static void *cancel_thread(void *arg) {
-   gw_cancel_t c = *(gw_cancel_t *)arg;
-   free(arg);
-   coding_gateway_cancel_ref(c.user_id, c.ref);
+typedef struct {
+   void (*fn)(void *);
+   void *arg;
+} gw_async_t;
+
+static void *async_thread(void *p) {
+   gw_async_t a = *(gw_async_t *)p;
+   free(p);
+   a.fn(a.arg);
    atomic_fetch_sub(&s_in_flight, 1);
    return NULL;
 }
 
-void coding_gateway_cancel_async(int user_id, int64_t conv_id) {
+bool coding_gateway_stopping(void) {
+   return atomic_load(&s_stopping);
+}
+
+int coding_gateway_run_async(void (*fn)(void *), void *arg) {
    /* Counted before the check, so stop() either waits for this one or this
     * one sees it stopping. */
    atomic_fetch_add(&s_in_flight, 1);
-   if (atomic_load(&s_stopping)) {
-      atomic_fetch_sub(&s_in_flight, 1);
-      OLOG_WARNING("coding_agent: shutting down; job %lld's task wasn't asked to stop",
-                   (long long)conv_id);
-      return;
-   }
-   gw_cancel_t *c = malloc(sizeof(*c));
+   gw_async_t *a = atomic_load(&s_stopping) ? NULL : malloc(sizeof(*a));
    pthread_attr_t attr;
-   if (c == NULL || pthread_attr_init(&attr) != 0) {
-      free(c);
+   if (a == NULL || pthread_attr_init(&attr) != 0) {
+      free(a);
       atomic_fetch_sub(&s_in_flight, 1);
-      OLOG_WARNING("coding_agent: couldn't ask the gateway to stop job %lld", (long long)conv_id);
-      return;
+      return FAILURE;
    }
-   /* Named now: the job's row may be deleted right after this returns. */
-   if (!coding_gateway_ref(conv_id, c->ref, sizeof(c->ref))) {
-      free(c);
-      pthread_attr_destroy(&attr);
+   a->fn = fn;
+   a->arg = arg;
+   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+   pthread_t th;
+   const int rc = pthread_create(&th, &attr, async_thread, a);
+   pthread_attr_destroy(&attr);
+   if (rc != 0) {
+      free(a);
       atomic_fetch_sub(&s_in_flight, 1);
+      return FAILURE;
+   }
+   return SUCCESS;
+}
+
+static void cancel_run(void *arg) {
+   gw_cancel_t *c = arg;
+   coding_gateway_cancel_ref(c->user_id, c->ref);
+   free(c);
+}
+
+void coding_gateway_cancel_async(int user_id, int64_t conv_id) {
+   gw_cancel_t *c = malloc(sizeof(*c));
+   /* Named now: the job's row may be deleted right after this returns. */
+   if (c == NULL || !coding_gateway_ref(conv_id, c->ref, sizeof(c->ref))) {
+      free(c);
       OLOG_WARNING("coding_agent: can't name job %lld's task; it wasn't asked to stop",
                    (long long)conv_id);
       return;
    }
    c->user_id = user_id;
-   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-   pthread_t th;
-   if (pthread_create(&th, &attr, cancel_thread, c) != 0) {
-      atomic_fetch_sub(&s_in_flight, 1);
+   if (coding_gateway_run_async(cancel_run, c) != SUCCESS) {
       free(c);
-      OLOG_WARNING("coding_agent: couldn't ask the gateway to stop job %lld", (long long)conv_id);
+      OLOG_WARNING("coding_agent: couldn't ask the gateway to stop job %lld (shutting down?)",
+                   (long long)conv_id);
    }
-   pthread_attr_destroy(&attr);
 }
 
 static void wait_in_flight(void) {
