@@ -436,6 +436,38 @@ static void test_pagination(void) {
    TEST_ASSERT_EQUAL_INT(0, count);
 }
 
+/* Exact value only, per user and type, first by entity name. */
+static void test_find_by_value(void) {
+   int64_t zoe = insert_entity(1, "Zoe Hart", "zoe hart");
+   int64_t amy = insert_entity(1, "Amy Hart", "amy hart");
+   int64_t other = insert_entity(2, "Other User", "other user");
+   contacts_add(1, zoe, "phone", "+15550001111", "mobile");
+   contacts_add(1, amy, "phone", "+15550001111", "home");
+   contacts_add(1, zoe, "email", "+15550002222", "");
+   contacts_add(2, other, "phone", "+15550002222", "");
+   contacts_add(1, zoe, "email", "Zoe@Example.com", "");
+
+   contact_result_t r[2];
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(0, contacts_find_by_value(1, "phone", "+15550001111", r, 2, &count));
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_STRING("Amy Hart", r[0].entity_name);
+   TEST_ASSERT_EQUAL_INT64(amy, r[0].entity_id);
+   TEST_ASSERT_EQUAL_STRING("Zoe Hart", r[1].entity_name);
+
+   /* Not a substring, not another type, not another user's, not case-folded. */
+   TEST_ASSERT_EQUAL_INT(0, contacts_find_by_value(1, "phone", "+1555000111", r, 2, &count));
+   TEST_ASSERT_EQUAL_INT(0, count);
+   TEST_ASSERT_EQUAL_INT(0, contacts_find_by_value(1, "phone", "+15550002222", r, 2, &count));
+   TEST_ASSERT_EQUAL_INT(0, count);
+   TEST_ASSERT_EQUAL_INT(0, contacts_find_by_value(1, "email", "zoe@example.com", r, 2, &count));
+   TEST_ASSERT_EQUAL_INT(0, count);
+   TEST_ASSERT_EQUAL_INT(0, contacts_find_by_value(1, "email", "Zoe@Example.com", r, 2, &count));
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT(0, contacts_find_by_value(1, "phone", "", r, 2, &count));
+   TEST_ASSERT_EQUAL_INT(0, count);
+}
+
 /* ============================================================================
  * Main
  * ============================================================================ */
@@ -497,6 +529,7 @@ int main(void) {
    RUN_TEST(test_find_no_results);
    RUN_TEST(test_delete_wrong_user);
    RUN_TEST(test_pagination);
+   RUN_TEST(test_find_by_value);
 
    return UNITY_END();
 }
