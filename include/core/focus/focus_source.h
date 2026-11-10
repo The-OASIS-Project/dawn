@@ -140,7 +140,10 @@ typedef struct {
    const char *kind;               /* How the item is known ("told", "inferred",
                                      ...), static; NULL shows nothing.  The
                                      framework sets "outside" on every item
-                                     not of the INTERNAL tier */
+                                     not of the INTERNAL tier, unless its
+                                     adapter set the item's source_type to
+                                     INTERNAL (a document marked as the
+                                     user's own; notes by default) */
 } focus_candidate_t;
 
 /* =============================================================================

@@ -86,6 +86,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 - **doc-library.js / doc-library.css** (`www/`): WebUI frontend
    - Drag-and-drop upload with progress indicator
    - Document list with type badges, chunk counts, delete confirmation
+   - Per-document "My own text" switch on the user's own documents (see below)
    - Admin controls: "All Users" toggle, global upload checkbox, per-document globe toggle
    - Owner badge (username) on documents in admin "All Users" view
    - SVG globe icon with filled/stroke states for global visibility
@@ -98,12 +99,42 @@ Two tables in `auth.db`:
 
 ```sql
 documents (id, user_id, filename, filepath, filetype, file_hash,
-           num_chunks, is_global, created_at)
+           num_chunks, is_global, created_at, original_blob_id, outside, own)
 
 document_chunks (id, document_id, chunk_index, text, embedding, embedding_norm)
 ```
 
 Indexes: `idx_doc_chunks_doc`, `idx_documents_user`, `idx_documents_hash`.
+
+### Whose words a document holds
+
+Two columns, kept apart (v114).  `documents.outside` (`outside_kind_t`) says where a document's
+text came from: a note starts NONE; every other document (an upload, an attachment, saved text)
+starts DOCUMENT; a research report is RESEARCH; a note written in a turn that read outside text
+carries that text's kind.  `documents.own` says the user vouched for its text as their own words.
+A chunk focus recalls into a turn counts as the user's words only when the reader owns the
+document and either `own` is 1 or its kind is NONE (or UNKNOWN) (`OUTSIDE_OWN_SQL`,
+`document_is_own`); any other chunk is marked outside text, so the memory batch that turn feeds
+is tainted ("document") and can't overwrite what the user told DAWN.
+
+The user sets the vouch with the panel's **My own text** switch (`set_document_own`,
+`document_db_set_own`).  On sets `own` and keeps the kind, so a research report or an emailed
+attachment still says what it is.  Off clears `own`, and a document with no recorded kind (NONE
+or UNKNOWN) becomes DOCUMENT, since the user says it isn't their words; any other kind stays.
+Only the user sets it; `document_manage` has no action for it, since a model steered by outside
+text must not be able to vouch for that text.  A save, edit, append, recover or undo by the model
+keeps the stored kind combined with what the turn read, and in a turn that read outside text also
+clears `own` (the user vouched for the old text, not the new); a write in a clean turn, and an
+edit or restore in the panel, leave `own` alone.  A version keeps its document's kind and gives
+it back on restore, but not the vouch: a deleted document recovered comes back with `own` 0.
+
+The document tools decide the same way.  `document_search`, `document_read` and `document_grep`
+return their text unframed when every document in the result is the reader's own words
+(`document_is_own`; a grep hit carries `own`, a ranked chunk `is_own`), and otherwise put the
+whole result in a `DOCUMENT CONTENT` frame (`llm_tools_result_third_party`), which memory
+extraction reads as a document and sees only as a stub.  The tools declare `TOOL_RESULTS_OWN`, so
+an unframed result leaves the batch clean; `document_manage` returns only names and confirmations
+and is own too.  `document_index` stays outside (it reports on a fetched page).
 
 ## Configuration
 

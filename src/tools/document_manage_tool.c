@@ -37,6 +37,7 @@
 
 #include "auth/auth_db_withdraw.h"
 #include "core/embedding_engine.h"
+#include "core/outside_kind.h"
 #include "core/pending_slots.h"
 #include "core/session_prefix.h"
 #include "core/strbuf.h"
@@ -44,6 +45,7 @@
 #include "dawn_error.h"
 #include "llm/llm_tools.h" /* LLM_TOOLS_ARGS_LEN — the upstream tool-arg cap DOCMGMT_SAVE_TEXT_MAX mirrors */
 #include "logging.h"
+#include "memory/memory_extraction_input.h"
 #include "memory/memory_note_bridge.h"
 #include "toml.h"
 #include "tools/document_db.h"
@@ -430,7 +432,7 @@ static const tool_action_kind_entry_t s_doc_manage_action_kinds[] = {
 
 static const tool_metadata_t doc_manage_metadata = {
    .name = "document_manage",
-   .results = TOOL_RESULTS_OUTSIDE,
+   .results = TOOL_RESULTS_OWN, /* confirmations and names, never a document's text */
    .describe_call = doc_manage_describe_call,
    .action_kinds = s_doc_manage_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_doc_manage_action_kinds),
@@ -495,10 +497,14 @@ static char *do_save_note(int user_id, const char *label, const char *text) {
                res.error_msg);
       return strdup(msg);
    }
-   /* Memory→note bridge (v61): refresh the gloss pointer so a fuzzy recall of
+   /* The note's text is what this turn wrote: it carries what the turn read.
+    * Memory→note bridge (v61): refresh the gloss pointer so a fuzzy recall of
     * this note routes to document_read.  Best-effort — never fail the save. */
-   if (res.doc_id > 0)
-      (void)memory_note_bridge_upsert_gloss(user_id, res.doc_id, label);
+   if (res.doc_id > 0) {
+      const int outside = memory_turn_outside(user_id);
+      (void)document_db_set_outside(user_id, res.doc_id, outside, false, outside);
+      (void)memory_note_bridge_upsert_gloss_from(user_id, res.doc_id, label, outside);
+   }
    char msg[DOCMGMT_CONFIRM_MSG_MAX];
    snprintf(msg, sizeof(msg), "%s note '%s'.", overwrite ? "Updated (overwrote existing)" : "Saved",
             label);
@@ -531,6 +537,9 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
                      res.error_msg);
             return strdup(msg);
          }
+         /* Its kind and what this turn read, as an edit (commit_edit). */
+         const int turn = memory_turn_outside(user_id);
+         (void)document_db_set_outside(user_id, existing.id, turn, true, turn);
          char msg[256];
          snprintf(msg, sizeof(msg), "Updated (overwrote existing) document '%s' (%d chunk%s).",
                   title, res.num_chunks, res.num_chunks == 1 ? "" : "s");
@@ -645,12 +654,14 @@ static int load_editable_text(int user_id,
 
 /* Commit edited text: a single-chunk note goes through the stable-id note update;
  * a multi-chunk document is re-chunked + re-embedded in place.  Both keep doc_id
- * stable and archive the prior content.  Returns the user-facing message. */
+ * stable and archive the prior content.  Returns the user-facing message; into
+ * @p done_out (optional) whether the text was written. */
 static char *commit_edit(int user_id,
                          const document_t *doc,
                          bool is_note,
                          const char *new_text,
-                         const char *ok_msg) {
+                         const char *ok_msg,
+                         bool *done_out) {
    doc_index_result_t res;
    int rc = is_note ? document_note_update(user_id, doc->id, doc->filename, new_text,
                                            strlen(new_text), &res)
@@ -660,6 +671,13 @@ static char *commit_edit(int user_id,
       snprintf(msg, sizeof(msg), TOOL_RESULT_ERROR_MARK "Couldn't apply the edit: %s",
                res.error_msg);
       return strdup(msg);
+   }
+   /* It keeps what its old text carried, plus what this turn read (the user's
+    * vouch for it goes, once this turn's outside text is in it). */
+   const int turn = memory_turn_outside(user_id);
+   (void)document_db_set_outside(user_id, doc->id, turn, true, turn);
+   if (done_out) {
+      *done_out = true;
    }
    return strdup(ok_msg);
 }
@@ -715,7 +733,7 @@ static char *do_edit(int user_id, const char *label, int64_t id, const char *cha
          char ok[DOCMGMT_CONFIRM_MSG_MAX];
          snprintf(ok, sizeof(ok), "Edited %s '%s' (replaced 1 occurrence).",
                   is_note ? "note" : "document", doc.filename);
-         result = commit_edit(user_id, &doc, is_note, new_text, ok);
+         result = commit_edit(user_id, &doc, is_note, new_text, ok, NULL);
          OLOG_INFO("document_manage edit: %s id=%lld find_len=%zu", is_note ? "note" : "doc",
                    (long long)doc.id, strlen(find));
          free(new_text);
@@ -749,7 +767,7 @@ static char *do_append(int user_id, const char *label, int64_t id, const char *t
          char ok[DOCMGMT_CONFIRM_MSG_MAX];
          snprintf(ok, sizeof(ok), "Appended to %s '%s'.", is_note ? "note" : "document",
                   doc.filename);
-         result = commit_edit(user_id, &doc, is_note, new_text, ok);
+         result = commit_edit(user_id, &doc, is_note, new_text, ok, NULL);
          OLOG_INFO("document_manage append: %s id=%lld add_len=%zu", is_note ? "note" : "doc",
                    (long long)doc.id, strlen(text));
          free(new_text);
@@ -771,10 +789,15 @@ static char *do_list(int user_id) {
    strbuf_t sb;
    strbuf_init(&sb, 1024);
    strbuf_appendf(&sb, "Stored documents and notes (%d):\n", count);
+   bool others = false;
    for (int i = 0; i < count; i++) {
       bool is_note = (strcmp(docs[i].filetype, "note") == 0);
       strbuf_appendf(&sb, "- [id %lld] %s (%s)\n", (long long)docs[i].id, docs[i].filename,
                      is_note ? "note" : docs[i].filetype);
+      others = others || docs[i].user_id != user_id;
+   }
+   if (others) {
+      llm_tools_result_third_party(TOOL_FRAME_DOCUMENT); /* another's shared names: theirs */
    }
    if (strbuf_oom(&sb)) {
       strbuf_free(&sb);
@@ -827,7 +850,9 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
          return strdup(
              "There's no earlier version to undo — it hasn't changed since it was saved.");
       char *vtext = NULL;
-      if (document_db_version_get_text(ev[0].id, user_id, &vtext, NULL, 0, NULL) != SUCCESS ||
+      int outside = OUTSIDE_OTHER; /* read with the text: the undo may prune the version */
+      if (document_db_version_get_text(ev[0].id, user_id, &vtext, NULL, 0, NULL, &outside) !=
+              SUCCESS ||
           !vtext)
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Couldn't read the saved version to undo the change.");
@@ -836,7 +861,16 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
       snprintf(ok, sizeof(ok), "Undid the last change to %s '%s' (restored the previous version).",
                is_note ? "note" : "document", doc.filename);
       pthread_mutex_lock(&s_edit_mutex);
-      char *result = commit_edit(user_id, &doc, is_note, vtext, ok);
+      bool done = false;
+      char *result = commit_edit(user_id, &doc, is_note, vtext, ok, &done);
+      /* The restored text replaces the discarded one: it takes the kind its
+       * version carried, with what this turn read.  A failed restore left the
+       * text, so it keeps its kind. */
+      if (done) {
+         const int turn = memory_turn_outside(user_id);
+         (void)document_db_set_outside(user_id, doc.id, outside_combine(outside, turn), false,
+                                       turn);
+      }
       pthread_mutex_unlock(&s_edit_mutex);
       free(vtext);
       return result;
@@ -868,8 +902,9 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
                     "recoverable).");
 
    char *text = NULL;
-   if (document_db_version_get_text(version_id, user_id, &text, fname, sizeof(fname), NULL) !=
-           SUCCESS ||
+   int outside = OUTSIDE_OTHER;
+   if (document_db_version_get_text(version_id, user_id, &text, fname, sizeof(fname), NULL,
+                                    &outside) != SUCCESS ||
        !text)
       return strdup(TOOL_RESULT_ERROR_MARK "Couldn't read the saved version to recover it.");
 
@@ -886,8 +921,15 @@ static char *do_recover(int user_id, const char *label, int64_t id) {
                res.error_msg);
       return strdup(msg);
    }
-   if (as_note && res.doc_id > 0)
-      (void)memory_note_bridge_upsert_gloss(user_id, res.doc_id, fname);
+   /* The item takes back the kind its version carried, with what this turn
+    * read; a note also gets its gloss back. */
+   if (res.doc_id > 0) {
+      const int turn = memory_turn_outside(user_id);
+      outside = outside_combine(outside, turn);
+      (void)document_db_set_outside(user_id, res.doc_id, outside, false, turn);
+      if (as_note)
+         (void)memory_note_bridge_upsert_gloss_from(user_id, res.doc_id, fname, outside);
+   }
 
    /* Move the deleted item's surviving snapshots onto the re-created doc so it
     * leaves "Recently deleted" and a repeat restore can't duplicate it (#5). */

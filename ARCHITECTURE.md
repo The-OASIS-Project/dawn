@@ -259,6 +259,7 @@ them as one Layer-2 unit, not as separate modules with a direction between them.
 | lower-layer broadcasts (scheduler, jobs, calendar, phone, ...) | `webui_broadcasts.c` | weak no-op default, strong WebUI override |
 | `src/tools/email_service_move.c` (a move or undo changed a mailbox) | `webui_email_changed.c` (email_changed to every tab of the user) | weak `email_changed_notify` |
 | `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |
+| `src/memory/memory_consolidate.c`, `memory_consolidation_undo.c` (a batch recorded, undone or kept) | `webui_broadcasts.c` (`memory_batch` to every tab of the user) | weak `memory_consolidation_batch_notify` |
 
 \* **Orchestration-unit note.** `job_worker.c` and `research_worker.c` physically live in
 `src/core/` but are **application-orchestration units**: each is a detached top-of-stack sequencer
@@ -376,6 +377,9 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    learned from a conversation made    │
 │                    private; forgets one fact, all of   │
 │                    them (waits out an extraction)      │
+│  Memory undo     — detached, one per user: undoes or   │
+│                    keeps what a consolidation batch    │
+│                    did (waits out an extraction)       │
 │  Music player    — one per playing music player (each  │
 │                    WebUI music session's, and the      │
 │                    local speaker's): opens tracks      │
@@ -625,6 +629,8 @@ Per-module locks (scoped to a single subsystem):
                                                                      registry, then its metrics_mutex for the owner check) BEFORE the deliver_mutex is
                                                                      taken.  A deliberate module-before-session exception to rule 1: the send only
                                                                      queues, so nothing waits on a session while it's held
+  memory_consolidation_undo::s_inflight_mutex (src/memory/memory_consolidation_undo.c) — users with an undo or
+                                                                     Keep running (LEAF: held only to claim or free a slot)
   email_undo::s_mutex (src/tools/email_undo.c) — the trash/archive undo tokens (LEAF: held only to add, claim, finish or release
                                                                      a token; never across a call into anything else)
   email_service_move::s_pace_mutex (src/tools/email_service_move.c) — Gmail's per-account call pacing, shared by the tool and

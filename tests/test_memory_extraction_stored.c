@@ -100,7 +100,7 @@ static void test_loaded_history_reads_request_context(void) {
                                    .context_of = q,
                                    .content = "[M1 calendar_event outside 2026-10-01] Invite" });
    add(ctx, &(conv_message_row_t){ .role = "assistant", .content = "One invite." });
-   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, stored_outside(ctx));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_CALENDAR, stored_outside(ctx));
 
    add(job, &(conv_message_row_t){ .role = "user", .content = "start it" });
    add(job, &(conv_message_row_t){ .role = "user",
@@ -112,6 +112,38 @@ static void test_loaded_history_reads_request_context(void) {
    add(clean, &(conv_message_row_t){ .role = "user", .content = "my dog is Ash" });
    add(clean, &(conv_message_row_t){ .role = "assistant", .content = "Noted." });
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, stored_outside(clean));
+}
+
+/* A stored turn context naming only recalled memories (learned from outside
+ * text or not) and a note's chunk read no outside text; a document's chunk
+ * beside them does. */
+static void test_recalled_memories_are_not_outside(void) {
+   static const char k_recalled[] = "[M1 memory_fact told, outside 2026-10-01] A memo\n"
+                                    "[M2 memory_relation outside 2026-10-01] Jon works_at Acme\n"
+                                    "[memory_summary outside] A talk\n"
+                                    "[M3 memory_entity outside] Acme\n"
+                                    "[M4 document_chunk 2026-10-01] [Groceries] Eggs";
+   int64_t mem = 0, doc = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Memories", &mem));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Document", &doc));
+   int64_t q = add(mem, &(conv_message_row_t){ .role = "user", .content = "Acme?" });
+   add(mem, &(conv_message_row_t){ .role = "user",
+                                   .kind = "turn_context",
+                                   .context_of = q,
+                                   .content = k_recalled });
+   add(mem, &(conv_message_row_t){ .role = "assistant", .content = "Jon works there." });
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, stored_outside(mem));
+
+   char both[512];
+   snprintf(both, sizeof(both), "%s\n[M5 document_chunk outside 2026-10-01] [a.pdf] A page",
+            k_recalled);
+   q = add(doc, &(conv_message_row_t){ .role = "user", .content = "Acme?" });
+   add(doc, &(conv_message_row_t){ .role = "user",
+                                   .kind = "turn_context",
+                                   .context_of = q,
+                                   .content = both });
+   add(doc, &(conv_message_row_t){ .role = "assistant", .content = "It's in a.pdf." });
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, stored_outside(doc));
 }
 
 /* A compaction's summary in the live history: the rows it replaced are read
@@ -140,12 +172,13 @@ static void test_compacted_rows_are_read_from_the_database(void) {
    snprintf(live, sizeof(live), k_live, (long long)q2);
    TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, outside_of(mail, json_tokener_parse(live)));
    snprintf(live, sizeof(live), k_live, (long long)q4);
-   TEST_ASSERT_EQUAL_INT(OUTSIDE_OTHER, outside_of(ctx, json_tokener_parse(live)));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_CALENDAR, outside_of(ctx, json_tokener_parse(live)));
 }
 
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_loaded_history_reads_request_context);
    RUN_TEST(test_compacted_rows_are_read_from_the_database);
+   RUN_TEST(test_recalled_memories_are_not_outside);
    return UNITY_END();
 }

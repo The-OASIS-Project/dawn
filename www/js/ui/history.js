@@ -929,6 +929,9 @@
             if (typeof DawnAgentEvents !== 'undefined') {
                DawnAgentEvents.flush(payload.conversation_id);
             }
+            // What memory learned from it, as markers after the messages it read.
+            if (window.DawnMemoryMarker)
+               DawnMemoryMarker.conversationLoaded(payload.conversation_id);
 
             // Scroll to bottom after all messages loaded
             transcript.scrollTop = transcript.scrollHeight;

@@ -35,6 +35,7 @@
 #include "auth/auth_db_withdraw.h"
 #include "blob_store.h" /* BLOB_ID_LEN */
 #include "config/dawn_config.h"
+#include "core/outside_kind.h"
 #include "core/session_prefix.h"
 #include "dawn_error.h"
 #include "logging.h"
@@ -201,6 +202,13 @@ void handle_doc_library_list(ws_connection_t *conn, json_object *payload) {
          json_object_object_add(doc, "num_chunks", json_object_new_int(docs[i].num_chunks));
          json_object_object_add(doc, "is_global", json_object_new_boolean(docs[i].is_global));
          json_object_object_add(doc, "created_at", json_object_new_int64(docs[i].created_at));
+         /* Whose words it holds, on the requester's own documents only (the
+          * panel shows the "My own text" switch where these are present). */
+         if (docs[i].user_id == conn->auth_user_id) {
+            json_object_object_add(doc, "outside", json_object_new_int(docs[i].outside));
+            json_object_object_add(
+                doc, "own", json_object_new_boolean(document_is_own(&docs[i], conn->auth_user_id)));
+         }
          /* Documents (not notes) may have a stored original file: surface its blob id +
           * a has_original flag so a client can fetch/download the original. Notes carry
           * their body inline (above) and have no separate original file. Emit for docs
@@ -481,6 +489,48 @@ void handle_doc_library_toggle_global(ws_connection_t *conn, json_object *payloa
 }
 
 /* =============================================================================
+ * The user's own text: set_document_own
+ * ============================================================================= */
+
+void handle_set_document_own(ws_connection_t *conn, json_object *payload) {
+   if (!conn_require_auth(conn))
+      return;
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("set_document_own_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   json_object *id_obj = NULL, *own_obj = NULL;
+   int64_t doc_id = 0;
+   int outside = OUTSIDE_DOCUMENT;
+   if (payload && json_object_object_get_ex(payload, "document_id", &id_obj)) {
+      doc_id = json_object_get_int64(id_obj);
+   }
+   json_object_object_add(resp_payload, "document_id", json_object_new_int64(doc_id));
+   if (doc_id <= 0 || !json_object_object_get_ex(payload, "own", &own_obj) ||
+       !json_object_is_type(own_obj, json_type_boolean)) {
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("document_id and own are required"));
+   } else if (document_db_set_own(conn->auth_user_id, doc_id, json_object_get_boolean(own_obj),
+                                  &outside) != SUCCESS) {
+      /* Owner-only, a global document of another user included. */
+      json_object_object_add(resp_payload, "error",
+                             json_object_new_string("Document not found (or not yours)"));
+   } else {
+      /* Off leaves no untainted kind, so it reads as own exactly when asked. */
+      const bool own = json_object_get_boolean(own_obj);
+      json_object_object_add(resp_payload, "own", json_object_new_boolean(own));
+      json_object_object_add(resp_payload, "outside", json_object_new_int(outside));
+      OLOG_INFO("doc_library: user %d marked document %lld %s", conn->auth_user_id,
+                (long long)doc_id, own ? "own" : "not own");
+   }
+
+   json_object_object_add(response, "payload", resp_payload);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
+/* =============================================================================
  * Notes — save (create) and update (edit) (v61)
  *
  * A note is a single-chunk document whose filename IS the label.  Deletion goes
@@ -583,8 +633,10 @@ void handle_doc_library_note_update(ws_connection_t *conn, json_object *payload)
                                                               ? result.error_msg
                                                               : document_index_error_string(rc)));
          } else {
-            /* Memory→note bridge (v61): refresh the gloss (label may have changed →
-             * delete+recreate inside the bridge).  Best-effort. */
+            /* The note keeps its outside kind and the user's vouch: an edit
+             * leaves most of the text (a research report stays one).
+             * Memory→note bridge (v61): refresh the gloss (label may have
+             * changed → delete+recreate inside the bridge).  Best-effort. */
             (void)memory_note_bridge_upsert_gloss(conn->auth_user_id, doc_id, label);
             json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
             json_object_object_add(resp_payload, "id", json_object_new_int64(doc_id));
@@ -778,8 +830,9 @@ void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payl
    char *text = NULL;
    char fname[DOC_FILENAME_MAX] = "";
    int64_t doc_id = 0;
+   int outside = OUTSIDE_OTHER; /* read with the text: a restore may prune the version */
    if (document_db_version_get_text(version_id, conn->auth_user_id, &text, fname, sizeof(fname),
-                                    &doc_id) != SUCCESS) {
+                                    &doc_id, &outside) != SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Version not found (or not yours)"));
@@ -829,8 +882,12 @@ void handle_doc_library_version_restore(ws_connection_t *conn, json_object *payl
        * has no gloss. */
       bool restored_note = exists ? (strcmp(doc.filetype, "note") == 0 && doc.num_chunks == 1)
                                   : recreated_as_note;
-      if (restored_note)
-         (void)memory_note_bridge_upsert_gloss(conn->auth_user_id, doc_id, label);
+      /* It takes back the kind the version carried, replacing the discarded
+       * text's (no turn wrote it); a document re-created from it too. */
+      (void)document_db_set_outside(conn->auth_user_id, doc_id, outside, false, OUTSIDE_NONE);
+      if (restored_note) {
+         (void)memory_note_bridge_upsert_gloss_from(conn->auth_user_id, doc_id, label, outside);
+      }
       /* Re-point the deleted item's surviving snapshots onto the re-created doc
        * so it leaves "Recently deleted" and a repeat restore can't dup it (#5). */
       if (deleted_doc_id > 0)

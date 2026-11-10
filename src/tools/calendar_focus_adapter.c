@@ -104,6 +104,7 @@
 #include "config/dawn_config.h"
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_source.h"
+#include "core/outside_markers.h"
 #include "core/tz.h"
 #include "core/user_tz.h"
 #include "dawn_error.h"
@@ -595,8 +596,8 @@ static int calendar_adapter_query(int user_id,
       if (importance > 1.0f)
          importance = 1.0f;
 
-      if (focus_candidate_init(&out[produced], "calendar_event", FOCUS_SOURCE_EXTERNAL, rendered,
-                               item_id, starts, semantic, recency, importance,
+      if (focus_candidate_init(&out[produced], OUTSIDE_MARKER_CAL_SOURCE, FOCUS_SOURCE_EXTERNAL,
+                               rendered, item_id, starts, semantic, recency, importance,
                                &truncated_warned) != SUCCESS) {
          OLOG_ERROR("calendar_adapter: focus_candidate_init failed (occ_id=%lld)",
                     (long long)occ->id);
@@ -629,7 +630,7 @@ cleanup:
 }
 
 static const focus_source_adapter_t k_calendar_focus_adapter = {
-   .source_id = "calendar_event",
+   .source_id = OUTSIDE_MARKER_CAL_SOURCE,
    .source_type = FOCUS_SOURCE_EXTERNAL,
    .requires_embedding = false,
    .query = calendar_adapter_query,

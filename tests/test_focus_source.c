@@ -47,9 +47,10 @@ typedef struct {
    focus_source_type_t source_type;
    bool requires_embedding;
    /* Programmable knobs */
-   int candidate_count;   /* How many to emit on a call */
-   const char **texts;    /* Borrowed; copied into heap on emit */
-   const char **item_ids; /* Borrowed; copied into heap on emit */
+   int candidate_count;              /* How many to emit on a call */
+   const char **texts;               /* Borrowed; copied into heap on emit */
+   const char **item_ids;            /* Borrowed; copied into heap on emit */
+   const focus_source_type_t *types; /* Per candidate; NULL: the adapter's */
    float *semantic_scores;
    float *recency_scores;
    float *importance_scores;
@@ -119,7 +120,7 @@ static char *xstrdup(const char *s) {
       int populated = 0;                                                                        \
       for (int i = 0; i < n; i++) {                                                             \
          out[i].source_id = st->source_id;                                                      \
-         out[i].source_type = st->source_type;                                                  \
+         out[i].source_type = st->types ? st->types[i] : st->source_type;                       \
          out[i].semantic_score = st->semantic_scores ? st->semantic_scores[i] : FOCUS_SCORE_NA; \
          out[i].recency_score = st->recency_scores ? st->recency_scores[i] : FOCUS_SCORE_NA;    \
          out[i].importance_score = st->importance_scores ? st->importance_scores[i] : 0.5f;     \
@@ -302,6 +303,31 @@ static void test_external_items_marked_outside(void) {
          TEST_ASSERT_EQUAL_STRING("outside", c->kind);
       else
          TEST_ASSERT_NULL(c->kind);
+   }
+   focus_result_free(&result);
+}
+
+/* A candidate an outside source marks internal (a note: the user's own text)
+ * carries no outside kind, and still reads as its adapter's. */
+static void test_internal_candidate_of_external_source_not_outside(void) {
+   const char *texts[] = { "a page", "a note" };
+   const focus_source_type_t types[] = { FOCUS_SOURCE_EXTERNAL, FOCUS_SOURCE_INTERNAL };
+   register_fake("document_chunk", FOCUS_SOURCE_EXTERNAL, false);
+   s_fake[0].candidate_count = 2;
+   s_fake[0].texts = texts;
+   s_fake[0].types = types;
+
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, NULL, NULL, 0, 0, 5, &result));
+   TEST_ASSERT_EQUAL_INT(2, result.candidate_count);
+   for (int i = 0; i < result.candidate_count; i++) {
+      const focus_candidate_t *c = &result.candidates[i];
+      TEST_ASSERT_EQUAL_STRING("document_chunk", c->source_id);
+      TEST_ASSERT_EQUAL_INT(FOCUS_SOURCE_EXTERNAL, c->source_type);
+      if (strcmp(c->text, "a note") == 0)
+         TEST_ASSERT_NULL(c->kind);
+      else
+         TEST_ASSERT_EQUAL_STRING("outside", c->kind);
    }
    focus_result_free(&result);
 }
@@ -889,6 +915,7 @@ int main(void) {
    RUN_TEST(test_register_and_iterate_all_adapters);
    RUN_TEST(test_memory_off_skips_internal_sources);
    RUN_TEST(test_external_items_marked_outside);
+   RUN_TEST(test_internal_candidate_of_external_source_not_outside);
    RUN_TEST(test_cross_user_isolation);
    RUN_TEST(test_ranker_math);
    RUN_TEST(test_ranker_tiebreak_by_timestamp);

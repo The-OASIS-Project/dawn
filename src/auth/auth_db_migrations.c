@@ -3539,12 +3539,31 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
       }
       sqlite3_free(err);
       err = NULL;
+      if (!auth_db_column_exists(s_db.db, "memory_consolidation_ops", "reason_by") &&
+          sqlite3_exec(s_db.db,
+                       "ALTER TABLE memory_consolidation_ops ADD "
+                       "COLUMN " MEMORY_CONSOLIDATION_OPS_REASON_BY_COL,
+                       NULL, NULL, &err) != SQLITE_OK) {
+         OLOG_WARNING("auth_db: consolidation record column: %s", err ? err : "?");
+      }
+      sqlite3_free(err);
+      err = NULL;
       if (sqlite3_exec(s_db.db,
                        MEMORY_CONSOLIDATION_LATER_INDEXES_SQL MEMORY_CONSOLIDATION_SOURCE_INDEX_SQL,
                        NULL, NULL, &err) != SQLITE_OK) {
          OLOG_WARNING("auth_db: consolidation record indexes: %s", err ? err : "?");
       }
       sqlite3_free(err);
+   }
+
+   /* v114: documents.outside, a note's outside kind, and documents.own.  Run
+    * on its columns, not only the version: steps developed side by side can
+    * reach a database out of order, so one stamped past 114 by a later step
+    * may still lack them.  Such a database keeps its version (the bump below
+    * never lowers it); a failure here retries on the next start. */
+   bool v114_ok = true;
+   if (current_version < 114 || auth_db_migrations_v114_pending(s_db.db)) {
+      v114_ok = auth_db_migrations_v114(s_db.db) == AUTH_DB_SUCCESS;
    }
 
    /* Log migration if upgrading from an older version */
@@ -3574,7 +3593,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
                               v90_ok && v91_ok && v92_ok && v93_ok && v94_ok && v95_ok && v96_ok &&
                               v97_ok && v98_ok && v99_ok && v100_ok && v101_ok && v102_ok &&
                               v103_ok && v104_ok && v106_ok && v107_ok && v108_ok && v109_ok &&
-                              v110_ok && v111_ok && v112_ok && v113_ok;
+                              v110_ok && v111_ok && v112_ok && v113_ok && v114_ok;
    if (current_version < AUTH_DB_SCHEMA_VERSION && ready_to_bump) {
       rc = sqlite3_exec(s_db.db, "DELETE FROM schema_version", NULL, NULL, &errmsg);
       if (rc != SQLITE_OK) {

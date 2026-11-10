@@ -38,8 +38,12 @@ extern "C" {
 
 #define WEBUI_PROTOCOL_VERSION 1
 
-/* Room for webui_protocol_json_members()' output: raise it with the flags. */
-#define WEBUI_PROTOCOL_JSON_MAX 256
+/* Room for webui_protocol_json_members()' output with every flag on
+ * (webui_protocol_json_max_len, checked by test_webui_protocol). */
+#define WEBUI_PROTOCOL_JSON_MAX 512
+
+/** The longest webui_protocol_json_members() can write: every flag on. */
+size_t webui_protocol_json_max_len(void);
 
 /**
  * @brief The advertised fields as JSON object members (no braces):

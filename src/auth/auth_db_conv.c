@@ -769,7 +769,47 @@ static int unlink_usage_rows_locked(const char *where, int64_t arg) {
    return rc;
 }
 
-int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
+/* Lock held, before the rows go: @p user_id's consolidation batches of the
+ * conversations @p convs selects (an SQL condition on the conversation id; ?1
+ * is the user, ?2 @p conv_id), and the batches with rows quoting one, the
+ * newest CONV_DB_BATCHES_MAX into @p out (may be NULL). */
+static int batches_going_locked(int user_id,
+                                int64_t conv_id,
+                                const char *convs,
+                                conv_db_batches_t *out) {
+   if (!out) {
+      return SQLITE_DONE;
+   }
+   out->user_id = user_id;
+   out->n = 0;
+   char sql[512];
+   snprintf(sql, sizeof(sql),
+            "SELECT id FROM memory_consolidation_batches WHERE user_id = ?1 AND conversation_id "
+            "%s UNION SELECT batch_id FROM memory_consolidation_ops WHERE user_id = ?1 AND "
+            "source_conversation_id %s ORDER BY 1 DESC LIMIT %d",
+            convs, convs, CONV_DB_BATCHES_MAX);
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      if (sqlite3_bind_parameter_count(st) >= 2) {
+         sqlite3_bind_int64(st, 2, conv_id);
+      }
+      while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+         out->ids[out->n++] = sqlite3_column_int64(st, 0);
+      }
+   }
+   sqlite3_finalize(st);
+   return rc;
+}
+
+int conv_db_set_private(int64_t conv_id,
+                        int user_id,
+                        bool is_private,
+                        conv_db_batches_t *batches_out) {
+   if (batches_out) {
+      batches_out->n = 0;
+   }
    if (conv_id <= 0 || user_id <= 0) {
       return AUTH_DB_INVALID;
    }
@@ -826,6 +866,12 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
                                     (int64_t)user_id);
    }
    if (rc == SQLITE_DONE && changes > 0 && is_private) {
+      rc = batches_going_locked(user_id, 0,
+                                "IN (SELECT id FROM conversations WHERE user_id = ?1 AND "
+                                "is_private = 1)",
+                                batches_out);
+   }
+   if (rc == SQLITE_DONE && changes > 0 && is_private) {
       /* What memory recorded of them goes too (it quotes what was learned):
        * their batches, and the rows other batches made quoting a candidate
        * they set aside. */
@@ -856,6 +902,9 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
    AUTH_DB_UNLOCK();
 
    if (rc != SQLITE_DONE) {
+      if (batches_out) {
+         batches_out->n = 0;
+      }
       return AUTH_DB_FAILURE;
    }
 
@@ -1369,6 +1418,7 @@ static int delete_conversation_locked(sqlite3_stmt *del,
                                       int owner,
                                       conv_images_mode_t mode,
                                       conv_image_files_t *files,
+                                      conv_db_batches_t *batches,
                                       int *changes_out) {
    *changes_out = 0;
    if (sqlite3_exec(s_db.db, "SAVEPOINT conv_delete", NULL, NULL, NULL) != SQLITE_OK) {
@@ -1378,6 +1428,10 @@ static int delete_conversation_locked(sqlite3_stmt *del,
    int rc = SQLITE_DONE;
    if (owner > 0 && clear_memory_provenance(conv_id, owner) != AUTH_DB_SUCCESS) {
       rc = SQLITE_ERROR;
+   }
+   /* The batches the cascade takes (its own, and rows quoting it). */
+   if (rc == SQLITE_DONE && owner > 0) {
+      rc = batches_going_locked(owner, conv_id, "= ?2", batches);
    }
    if (rc == SQLITE_DONE && owner > 0) {
       rc = continuations_take_floor_locked(conv_id);
@@ -1407,6 +1461,9 @@ static int delete_conversation_locked(sqlite3_stmt *del,
    sqlite3_exec(s_db.db, "ROLLBACK TO conv_delete", NULL, NULL, NULL);
    sqlite3_exec(s_db.db, "RELEASE conv_delete", NULL, NULL, NULL);
    conv_image_files_free(files);
+   if (batches) {
+      batches->n = 0;
+   }
    return rc == SQLITE_DONE ? SQLITE_ERROR : rc;
 }
 
@@ -1430,9 +1487,13 @@ int conv_db_delete_ex(int64_t conv_id,
                       int user_id,
                       bool admin,
                       conv_images_mode_t mode,
-                      conv_image_files_t *files_out) {
+                      conv_image_files_t *files_out,
+                      conv_db_batches_t *batches_out) {
    if (files_out) {
       memset(files_out, 0, sizeof(*files_out));
+   }
+   if (batches_out) {
+      batches_out->n = 0;
    }
    if (conv_id <= 0 || (mode == CONV_IMAGES_DELETE && !files_out)) {
       return AUTH_DB_INVALID;
@@ -1450,7 +1511,8 @@ int conv_db_delete_ex(int64_t conv_id,
 
    int changes = 0;
    const int owner = conversation_owner_locked(conv_id, admin ? 0 : user_id);
-   const int rc = delete_conversation_locked(del, conv_id, owner, mode, files_out, &changes);
+   const int rc = delete_conversation_locked(del, conv_id, owner, mode, files_out, batches_out,
+                                             &changes);
 
    AUTH_DB_UNLOCK();
 
@@ -1469,11 +1531,14 @@ int conv_db_delete_ex(int64_t conv_id,
       return AUTH_DB_SUCCESS;
    }
 
+   if (batches_out) {
+      batches_out->n = 0;
+   }
    return AUTH_DB_NOT_FOUND;
 }
 
 int conv_db_delete(int64_t conv_id, int user_id) {
-   return conv_db_delete_ex(conv_id, user_id, false, CONV_IMAGES_KEEP, NULL);
+   return conv_db_delete_ex(conv_id, user_id, false, CONV_IMAGES_KEEP, NULL, NULL);
 }
 
 /* =============================================================================
