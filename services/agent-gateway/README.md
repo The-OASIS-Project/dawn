@@ -80,8 +80,13 @@ Agent SDK with your Claude plan" on support.claude.com before relying on it.
 
 List the repos the agent may work in under `[[repos]]` in
 `/usr/local/etc/agent-gateway/agent-gateway.toml`, then `sudo systemctl restart agent-gateway`.
-To publish, put a fine-grained GitHub token (those repos: Contents and Pull requests,
-read/write) in `AGENT_GATEWAY_GITHUB_TOKEN` in `/usr/local/etc/agent-gateway/env`.
+To publish, put a fine-grained GitHub token in `AGENT_GATEWAY_GITHUB_TOKEN` in
+`/usr/local/etc/agent-gateway/env` and restart the gateway. On GitHub: Settings, Developer
+settings, Personal access tokens, Fine-grained tokens; only the repos the gateway works on;
+Contents and Pull requests, read and write. Leave **Workflows** at no access: pushing a change to
+`.github/workflows/` runs it with the repo's secrets before anyone reviews it, and a token
+without that permission makes GitHub refuse such a push (DAWN then says to publish that work
+yourself). Without a token, publishing is off.
 
 To connect DAWN, add the gateway to `dawn.toml` and its token (`AGENT_GATEWAY_TOKEN` in
 `/usr/local/etc/agent-gateway/env`) to `secrets.toml`, then restart DAWN:
@@ -142,14 +147,15 @@ is collected there whenever a run stops, so work in progress can be looked at to
 
 | Tool | Does |
 |---|---|
-| `agents_list` | agents, Claude Code and SDK versions, repos (`name`, `url`, `base`), tasks running and the limit |
+| `agents_list` | agents, Claude Code and SDK versions, `update` (the updater's last result when it failed, rolled back or needs review), repos (`name`, `url`, `base`), tasks running and the limit |
 | `task_start {dawn_user_id, repo, task, budget_usd?, client_ref?}` | new branch `agent/<id>-<slug>`; returns at once, then clones in the background (`started` once the agent runs; `failed` if the clone fails); a repeated `client_ref` returns the task it already started |
 | `task_events {after_seq, wait_s}` | every task's events after `after_seq`, waiting up to 25 s |
-| `task_list {dawn_user_id, task?}` | a task with its pending requests (`task` null for a `client_ref` with none), or the user's recent tasks |
+| `task_list {dawn_user_id, task?}` | a task with its pending requests and `unpublished_commits` (commits on its branch not in what was published; null when the mirror can't be read) (`task` null for a `client_ref` with none), or the user's recent tasks |
 | `task_reply {dawn_user_id, task, request_id, decision \| answer}` | `allow`, `always_repo`, `always` or `deny`; a question takes `answer` |
 | `task_revise {dawn_user_id, instructions, client_ref, budget_usd?, revise_ref?}` | more work for a completed or failed task: its session resumes on the same branch and clone (`revised`, then `resumed`); `budget_usd` adds to its budget; a repeated `revise_ref` adds nothing |
 | `task_cancel {dawn_user_id, task}` | stop; the branch is kept |
 | `task_publish {dawn_user_id, task, head, open_pr?, title?}` | push exactly `head` (the full commit id the user was shown, from `task_changes`) to the branch, open a PR; refused if the work has moved on; a second call returns the first result while nothing moved, and after a revise pushes the new commits (keeping an open PR, opening a new one if it was merged or closed) |
+| `task_close {dawn_user_id, task, head?}` | the user is done with a finished task: its clone and `refs/agent/<id>` are removed and it is marked `closed` (it then refuses revise, publish and the viewer tools). Without `head`, only when nothing would be lost (no commits, or all of them in what was published), else `{closed: false, unpublished_commits, head}`; with `head`, only while the branch is still at that commit |
 | `task_changes {dawn_user_id, task}` | the work so far: changed files with +/- counts (each marked `protected` when it matches the repo's patterns), commits, head |
 | `task_file {dawn_user_id, task, path, view}` | one file: `diff`, `new` (after) or `old` (before); too large, binary or missing are reported, not sent |
 | `task_tree {dawn_user_id, task, path?}` | one folder of the repo at the task's latest collected commit |
@@ -187,7 +193,9 @@ agent's words, never as instructions.
 | `completed` | `summary` (the agent's final report, up to 8000 chars), `branch`, `session_id`, `cost_usd` (the task's total), `commits` (`"<hash> <subject>"`, up to 20), `diffstat`, `uncommitted` (files changed but not committed), `protected` (changed paths matching the repo's `protected` patterns, up to 20), `checks` (each build or test command's last run: `command`, `ok`; up to 10) |
 | `failed` | `error`, `cost_usd` |
 | `cancelled` | (none) |
-| `published` | `pushed` (`owner/repo:branch`), `pr_url` when a PR was opened |
+| `published` | `pushed` (`owner/repo:branch`), `pr_url` when a PR was opened, `head` |
+| `merged` | `pr_url`, `unpublished`: its pull request was merged but newer commits weren't published, so the task stays open |
+| `closed` | `reason`: `user`, or `merged` (the gateway closes a task whose pull request was merged when everything on its branch was published; checked hourly) |
 | `update` | a system event (`task_id` empty, no user): `result` (`updated`, `failed`, `rolled_back`, `needs_review`, `error`), `from`, `to`, `detail`, `time` |
 
 ## Looking at the work yourself
@@ -202,7 +210,8 @@ git config --global --add safe.directory /var/lib/dawn-gateway/mirrors/<repo>.gi
 git fetch /var/lib/dawn-gateway/mirrors/<repo>.git refs/agent/<id>:agent/<id>
 ```
 
-A task's clone stays in `/var/lib/dawn-agent/work/<id>` for `keep_worktrees_days`. To take a task
+A task's clone stays in `/var/lib/dawn-agent/work/<id>` for `keep_worktrees_days` (checked
+hourly); its branch stays in the mirror until the task is closed, so it can still be published. To take a task
 over by hand: `cd /var/lib/dawn-agent/work/<id> && sudo -u dawn-agent -H
 /usr/local/lib/agent-gateway/claude --resume <session_id>`.
 

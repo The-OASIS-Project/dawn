@@ -38,7 +38,7 @@ from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKCli
                               SystemMessage, UserMessage)
 
 from . import policy, store as st
-from .repos import GitError, Repos, pr_is_open, slug
+from .repos import GitError, Repos, pr_state, slug
 
 log = logging.getLogger("agent-gateway")
 
@@ -46,6 +46,8 @@ log = logging.getLogger("agent-gateway")
 TEXT_CAP = 2000
 SUMMARY_CAP = 8000  # the agent's final report: what it did and how it checked it
 PAYLOAD_CAP = 4000
+# How often old clones are removed and published pull requests are checked.
+HOUSEKEEPING_S = 3600
 
 GUIDANCE = """You are running unattended for the operator, who reaches you through their \
 assistant.  Commits in this task's worktree are pre-approved: commit your work when it is \
@@ -170,7 +172,9 @@ class Runner:
       self.clients: dict[str, ClaudeSDKClient] = {}
       self.starting = 0
       self.cloning: dict[str, asyncio.Task] = {}  # tasks whose clone is being made
-      self.pruning: set[str] = set()               # tasks whose clone is being removed
+      # Tasks a publish, close, revise or cleanup is changing: each refuses
+      # (or skips) a task another holds, as each awaits partway.
+      self.busy: set[str] = set()
       self.background: set[asyncio.Task] = set()
 
    def soon(self, coro) -> None:
@@ -303,16 +307,96 @@ class Runner:
       before = time.time() - self.cfg.keep_worktrees_days * 86400
       for task_id in self.store.stale_finished(before):
          t = self.store.task(task_id)
-         if t["status"] in st.OPEN or t["updated"] >= before:
-            continue  # revised since the list was read
-         self.pruning.add(task_id)
+         if t["status"] in st.OPEN or t["updated"] >= before or task_id in self.busy:
+            continue  # revised since the list was read, or being changed
+         self.busy.add(task_id)
          try:
             await self.repos.remove(task_id)
             self.store.update_task(task_id, worktree="")
          except Exception as e:
             log.warning("could not remove worktree of %s: %s", task_id, e)
          finally:
-            self.pruning.discard(task_id)
+            self.busy.discard(task_id)
+
+   async def housekeeping(self) -> None:
+      """Hourly: old clones go, and a task whose pull request was merged is closed."""
+      while True:
+         try:
+            await self.prune()
+            await self.watch_merges()
+         except Exception as e:
+            log.warning("housekeeping: %s", e)
+         await asyncio.sleep(HOUSEKEEPING_S)
+
+   async def watch_merges(self) -> None:
+      if not self.cfg.github_token:
+         return
+      for t in self.store.tasks(status=st.COMPLETED, limit=None):
+         try:
+            await self.watch_merge(t)
+         except Exception as e:  # one task's trouble doesn't stop the others' checks
+            log.warning("merge watch, task %s: %s", t["id"], e)
+
+   async def watch_merge(self, t: dict) -> None:
+      record = t["published"]
+      prev = json.loads(record) if record else None
+      if t["closed"] or not prev or not prev.get("pr_url") or prev.get("merged_seen"):
+         return
+      state = await asyncio.to_thread(pr_state, prev["pr_url"], self.cfg.github_token)
+      t = self.store.task(t["id"])  # what changed while GitHub answered
+      if (state != "merged" or t["closed"] or t["status"] != st.COMPLETED
+            or t["published"] != record or t["id"] in self.busy):
+         return  # a newer publish (another PR) or a revise: this answer is about the past
+      self.busy.add(t["id"])  # no revise between the count and the close
+      try:
+         left = await self.unpublished_commits(t)
+         if left == 0:
+            await self.close_held(t, "merged")
+         else:
+            # Newer work isn't in what merged: said once, nothing dropped.
+            self.store.set_published(t["id"], json.dumps({**prev, "merged_seen": True}))
+            self.store.add_event(t["id"], "merged", pr_url=prev["pr_url"], unpublished=left)
+      finally:
+         self.busy.discard(t["id"])
+
+   async def unpublished_commits(self, t: dict) -> int:
+      prev = json.loads(t["published"]) if t["published"] else None
+      return await self.repos.unpublished(t["repo"], t["id"], t["base"],
+                                          prev.get("head") if prev else None)
+
+   async def close(self, task_id: str, dawn_user_id: int, head: str | None) -> dict:
+      """Drop a finished task's work: its clone and its collected branch.  Without
+      `head`, only when nothing would be lost (no commits, or all of them
+      published); with it, only while the branch is still at that commit (the one
+      the user agreed to lose)."""
+      t = self.owned(task_id, dawn_user_id)
+      if t["closed"]:
+         return {"closed": True, "task": t}
+      if t["status"] in st.OPEN or task_id in self.cloning:
+         raise ValueError("the task is still running; cancel it first")
+      if task_id in self.busy:
+         raise ValueError("the task is busy (being published, revised or cleaned up); try again")
+      self.busy.add(task_id)  # held across every await below: no revise or publish slips in
+      try:
+         left = await self.unpublished_commits(t)
+         if left:
+            now, _ = await self.repos.agent_ref(t["repo"], task_id, t["base"])
+            if not head:
+               return {"closed": False, "unpublished_commits": left, "head": now}
+            if head.lower() != now:
+               raise ValueError(f"the branch moved since it was shown (it is now at {now[:12]})")
+         await self.close_held(t, "user")
+      finally:
+         self.busy.discard(task_id)
+      return {"closed": True, "task": self.store.task(task_id)}
+
+   async def close_held(self, t: dict, reason: str) -> None:
+      """Drop the work; the caller holds the task in `busy`."""
+      await self.repos.remove(t["id"])
+      await self.repos.drop(t["repo"], t["id"])
+      self.store.update_task(t["id"], worktree="")
+      self.store.set_closed(t["id"])
+      self.store.add_event(t["id"], "closed", reason=reason)
 
    # --- one run ----------------------------------------------------------
 
@@ -622,7 +706,11 @@ class Runner:
          raise ValueError(f"the task is {t['status']}; only a finished one takes more work")
       if not t["session_id"]:
          raise ValueError("the task has no session to resume; start a new task")
-      if not t["worktree"] or task_id in self.pruning or not os.path.isdir(t["worktree"]):
+      if t["closed"]:
+         raise ValueError("the task was closed; start a new task")
+      if task_id in self.busy:
+         raise ValueError("the task is busy (being published or cleaned up); try again")
+      if not t["worktree"] or not os.path.isdir(t["worktree"]):
          raise ValueError("the task's clone is gone; start a new task")
       if budget_usd is not None and budget_usd <= 0:
          raise ValueError("budget_usd must be positive")
@@ -641,8 +729,20 @@ class Runner:
                      head: str) -> dict:
       """`head` is the commit the user was shown; a branch that moved since is refused."""
       t = self.owned(task_id, dawn_user_id)
+      if t["closed"]:
+         raise ValueError("the task was closed; its work is gone from the gateway")
+      if task_id in self.busy:
+         raise ValueError("the task is busy (being closed or cleaned up); try again")
+      self.busy.add(task_id)
+      try:
+         return await self.publish_held(t, open_pr, title, head)
+      finally:
+         self.busy.discard(task_id)
+
+   async def publish_held(self, t: dict, open_pr: bool, title: str | None, head: str) -> dict:
+      task_id = t["id"]
       prev = json.loads(t["published"]) if t["published"] else None
-      if prev and t["status"] == st.COMPLETED:
+      if prev and t["status"] == st.COMPLETED and (prev.get("pr_url") or not open_pr):
          now, _ = await self.repos.agent_ref(t["repo"], task_id, t["base"])
          if prev.get("head") == now:
             return prev  # already done: the same answer again (an older record has no
@@ -654,15 +754,17 @@ class Runner:
          raise ValueError(f"the branch moved since it was shown (it is now at {now[:12]})")
       if not self.cfg.github_token:
          raise ValueError("no GitHub token configured (AGENT_GATEWAY_GITHUB_TOKEN)")
-      body = (t["summary"] or "") + f"\n\nTask: {t['task']}"
+      # The agent's summary only: the task text was written to the agent, not for
+      # the public.
+      body = (t["summary"] or "") + "\n\nMade by a coding agent for DAWN."
       # Revised since it was published: push the new commits; its PR stays while
       # it is open (a merged or closed one gets a new PR).
       pr = prev.get("pr_url") if prev else None
       earlier = None  # what a refused new PR falls back to: one whose state couldn't be read
       if pr:
-         is_open = await asyncio.to_thread(pr_is_open, pr, self.cfg.github_token)
-         if not is_open:
-            earlier = pr if is_open is None else None
+         state = await asyncio.to_thread(pr_state, pr, self.cfg.github_token)
+         if state != "open":
+            earlier = pr if state is None else None
             pr = None
       res = await self.repos.publish(t["repo"], now, t["branch"], t["base"],
                                      self.cfg.github_token, open_pr and not pr,

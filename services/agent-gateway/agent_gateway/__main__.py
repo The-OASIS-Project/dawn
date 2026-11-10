@@ -45,6 +45,7 @@ async def main() -> None:
                  cfg.agent_gitconfig, (cfg.git_name, cfg.git_email))
    runner = Runner(cfg, store, repos)
    await runner.recover()
+   housekeeping = asyncio.create_task(runner.housekeeping())  # noqa: F841 (lives with the loop)
    srv = uvicorn.Server(uvicorn.Config(server.app(runner, cfg), host=cfg.host, port=cfg.port,
                                        log_level="warning"))
    await srv.serve()

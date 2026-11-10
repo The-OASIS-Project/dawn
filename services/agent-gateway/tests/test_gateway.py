@@ -141,6 +141,14 @@ class FakeRepos:
    async def remove(self, task_id):
       pass
 
+   left = 0  # commits only the mirror has
+
+   async def unpublished(self, name, task_id, base, published_head):
+      return self.left
+
+   async def drop(self, name, task_id):
+      self.dropped = task_id
+
 
 class FakeRunner(Runner):
    """Records launches instead of starting the agent."""
@@ -594,7 +602,8 @@ def test_publish_after_a_revise_pushes_again(store, monkeypatch):
    a merged one gets a new PR."""
    from agent_gateway import runner as rmod
    pr_open = [True]
-   monkeypatch.setattr(rmod, "pr_is_open", lambda url, token: pr_open[0])
+   monkeypatch.setattr(rmod, "pr_state",
+                       lambda url, token: "open" if pr_open[0] else "merged")
    class Moving(FakeRepos):
       head = "abcdef1234567890"
       pushes = []
@@ -722,6 +731,160 @@ def test_publish_refuses_a_moved_branch(store):
       asyncio.run(r.publish("t1", 1, False, None, "abcdef1"))  # a prefix isn't enough
 
 
+def closed_events(store, tid="t1"):
+   return [e["data"] for e in store.events_after(0) if e["task_id"] == tid
+           and e["kind"] == "closed"]
+
+
+def test_close_drops_only_what_is_safe_to_drop(store, tmp_path):
+   """Nothing unpublished: closed at once.  Unpublished work: the head to confirm
+   comes back and nothing is dropped; closed with that head, refused with another."""
+   r = runner(store)
+   finished_with_clone(store, tmp_path)
+   r.repos.left = 2
+   out = asyncio.run(r.close("t1", 1, None))
+   assert out == {"closed": False, "unpublished_commits": 2, "head": "abcdef1234567890"}
+   assert not store.task("t1")["closed"] and not closed_events(store)
+   with pytest.raises(ValueError, match="moved"):
+      asyncio.run(r.close("t1", 1, "1111111111111111"))
+   out = asyncio.run(r.close("t1", 1, "abcdef1234567890"))
+   t = store.task("t1")
+   assert out["closed"] and t["closed"] and t["worktree"] == "" and r.repos.dropped == "t1"
+   assert closed_events(store) == [{"reason": "user"}]
+   assert asyncio.run(r.close("t1", 1, None))["closed"]           # again: nothing more
+   assert len(closed_events(store)) == 1
+   for refused in (lambda: r.revise("t1", 1, "more", None, "x"),
+                   lambda: r.publish("t1", 1, False, None, "abcdef1234567890")):
+      with pytest.raises(ValueError, match="closed"):
+         asyncio.run(refused())
+
+
+def test_close_refuses_running_busy_and_other_users(store, tmp_path):
+   r = runner(store)
+   finished_with_clone(store, tmp_path, status=st.INPUT_REQUIRED)
+   with pytest.raises(ValueError, match="running"):
+      asyncio.run(r.close("t1", 1, None))
+   store.update_task("t1", status=st.COMPLETED)
+   r.busy.add("t1")
+   with pytest.raises(ValueError, match="busy"):
+      asyncio.run(r.close("t1", 1, None))
+   with pytest.raises(ValueError, match="busy"):
+      asyncio.run(r.publish("t1", 1, False, None, "abcdef1234567890"))
+   r.busy.clear()
+   with pytest.raises(ValueError):
+      asyncio.run(r.close("t1", 2, None))
+   assert not store.task("t1")["closed"]
+
+
+def test_merged_pull_request_closes_only_published_work(store, tmp_path, monkeypatch):
+   """Merged with nothing newer: closed.  Merged with newer commits: said once, kept."""
+   from agent_gateway import runner as rmod
+   state = ["open"]
+   monkeypatch.setattr(rmod, "pr_state", lambda url, token: state[0])
+   r = runner(store, github_token="tok")
+   finished_with_clone(store, tmp_path)
+   store.update_task("t1", published=json.dumps({"pr_url": "https://github.com/o/r/pull/1",
+                                                 "head": "abcdef1234567890"}))
+   asyncio.run(r.watch_merges())
+   assert not store.task("t1")["closed"]                       # still open
+   state[0] = "merged"
+   r.repos.left = 1                                            # revised after publishing
+   asyncio.run(r.watch_merges())
+   asyncio.run(r.watch_merges())
+   merged = [e for e in store.events_after(0) if e["kind"] == "merged"]
+   assert len(merged) == 1 and merged[0]["data"]["unpublished"] == 1
+   assert not store.task("t1")["closed"]
+   # The new work published: the next merge closes it.
+   store.update_task("t1", published=json.dumps({"pr_url": "https://github.com/o/r/pull/1",
+                                                 "head": "1111111111111111"}))
+   r.repos.left = 0
+   asyncio.run(r.watch_merges())
+   assert store.task("t1")["closed"] and closed_events(store) == [{"reason": "merged"}]
+
+
+def test_merge_watch_leaves_a_task_revised_meanwhile(store, tmp_path, monkeypatch):
+   from agent_gateway import runner as rmod
+   r = runner(store, github_token="tok")
+   finished_with_clone(store, tmp_path)
+   store.update_task("t1", published=json.dumps({"pr_url": "https://github.com/o/r/pull/1",
+                                                 "head": "abcdef1234567890"}))
+
+   monkeypatch.setattr(rmod, "pr_state", lambda url, token: "merged")
+   orig = store.task
+
+   def revised_while_asking(task_id):  # the re-read after GitHub answered sees the revise
+      store.task = orig
+      store.update_task(task_id, status=st.INPUT_REQUIRED)
+      return orig(task_id)
+   store.task = revised_while_asking
+   asyncio.run(r.watch_merges())
+   assert not store.task("t1")["closed"]
+
+
+def test_publish_maps_a_workflow_refusal(tmp_path, monkeypatch):
+   from agent_gateway import repos as repos_mod
+
+   async def refused(argv, **kw):
+      raise repos_mod.GitError("push: refusing to allow a Personal Access Token to create or "
+                               "update workflow `.github/workflows/x.yml` without `workflow` scope")
+   monkeypatch.setattr(repos_mod, "run", refused)
+   repos = Repos({"r": {"url": "https://github.com/o/r", "base": "main"}},
+                 str(tmp_path), str(tmp_path), [], str(tmp_path), str(tmp_path / "g"))
+   with pytest.raises(repos_mod.GitError, match="publish it yourself"):
+      asyncio.run(repos.publish("r", "abc", "b", "main", "tok", False, "t", "x"))
+
+
+def test_merge_watch_skips_a_record_published_again(store, tmp_path, monkeypatch):
+   """Published again (a new PR) while GitHub answered about the old one: left alone."""
+   from agent_gateway import runner as rmod
+   r = runner(store, github_token="tok")
+   finished_with_clone(store, tmp_path)
+   store.update_task("t1", published=json.dumps({"pr_url": "https://github.com/o/r/pull/1",
+                                                 "head": "abcdef1234567890"}))
+   orig = store.task
+
+   def republished(task_id):
+      store.task = orig
+      store.update_task(task_id, published=json.dumps(
+         {"pr_url": "https://github.com/o/r/pull/2", "head": "2222222222222222"}))
+      return orig(task_id)
+   monkeypatch.setattr(rmod, "pr_state", lambda url, token: "merged")
+   store.task = republished
+   asyncio.run(r.watch_merges())
+   assert not store.task("t1")["closed"]
+   assert "pull/2" in store.task("t1")["published"]
+
+
+def test_push_only_then_a_pull_request(store):
+   """Pushed with no PR, then asked for one: pushed again with a PR, not the old answer."""
+   class Pushing(FakeRepos):
+      pushes = []
+
+      async def publish(self, name, head, branch, base, token, open_pr, *a):
+         self.pushes.append(open_pr)
+         return {"pushed": "o/r:b", **({"pr_url": "https://pr/1"} if open_pr else {})}
+   r = runner(store, github_token="tok")
+   r.repos = Pushing()
+   add_task(store)
+   store.update_task("t1", status=st.COMPLETED)
+   asyncio.run(r.publish("t1", 1, False, None, "abcdef1234567890"))
+   out = asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890"))
+   assert r.repos.pushes == [False, True] and out["pr_url"] == "https://pr/1"
+
+
+def test_workflow_named_branch_keeps_its_real_error(tmp_path, monkeypatch):
+   from agent_gateway import repos as repos_mod
+
+   async def refused(argv, **kw):
+      raise repos_mod.GitError("-q https://github.com/o/r abc:refs/heads/agent/1-fix-ci-workflow: "
+                               "! [rejected] (non-fast-forward)")
+   monkeypatch.setattr(repos_mod, "run", refused)
+   repos = Repos({"r": {"url": "https://github.com/o/r", "base": "main"}},
+                 str(tmp_path), str(tmp_path), [], str(tmp_path), str(tmp_path / "g"))
+   with pytest.raises(repos_mod.GitError, match="non-fast-forward"):
+      asyncio.run(repos.publish("r", "abc", "b", "main", "tok", False, "t", "x"))
+
+
 def test_events_carry_client_ref_and_batches_are_capped(store):
    store.add_task(id="t1", dawn_user_id=1, agent="claude", repo="r", base="main",
                   branch="agent/t1", worktree="/w", task="x", budget_usd=5.0,
@@ -758,11 +921,13 @@ def service_umask():
 
 
 def test_store_upgrades_a_v1_database(tmp_path):
-   """A schema-1 gateway database gains the model column and keeps its tasks."""
+   """A schema-1 gateway database gains the later columns and keeps its tasks."""
    import sqlite3
    p = str(tmp_path / "g.db")
    db = sqlite3.connect(p)
-   db.executescript(st.SCHEMA.replace("   model TEXT,\n", "") + "PRAGMA user_version=1;")
+   v1 = st.SCHEMA.replace("   model TEXT,\n", "").replace("   closed REAL,\n", "")
+   assert v1 != st.SCHEMA
+   db.executescript(v1 + "PRAGMA user_version=1;")
    db.execute("INSERT INTO tasks (id, dawn_user_id, agent, repo, base, branch, worktree, task, "
               "status, budget_usd, created, updated) VALUES ('t1', 1, 'claude', 'r', 'main', "
               "'b', '/w', 'x', 'completed', 5, 0, 0)")
@@ -771,7 +936,7 @@ def test_store_upgrades_a_v1_database(tmp_path):
    s = st.Store(p)
    assert s.db.execute("PRAGMA user_version").fetchone()[0] == st.SCHEMA_VERSION
    s.update_task("t1", model="claude-sonnet-5")
-   assert s.task("t1")["model"] == "claude-sonnet-5"
+   assert s.task("t1")["model"] == "claude-sonnet-5" and s.task("t1")["closed"] is None
 
 
 def test_protected_patterns():
@@ -889,12 +1054,21 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    git("commit", "-qm", "big", cwd=wt)
    asyncio.run(repos.collect("r", "aaaa0001", "agent/aaaa0001-x", "main"))
    assert asyncio.run(repos.file("r", "aaaa0001", "main", "big.txt", "diff"))["too_large"]
+   # Work only the mirror has: none of it published, then part, then all.
+   mirror_git = lambda *a: git("-C", str(tmp_path / "mirrors/r.git"), *a)  # noqa: E731
+   first = mirror_git("rev-list", "--reverse", "refs/agent/aaaa0001", "^refs/heads/main")
+   first = first.splitlines()[0]
+   unpub = lambda h: asyncio.run(repos.unpublished("r", "aaaa0001", "main", h))  # noqa: E731
+   assert unpub(None) == 3 and unpub(first) == 2
+   assert unpub(mirror_git("rev-parse", "refs/agent/aaaa0001")) == 0
    # The agent drops its commits: the earlier collected work must not linger.
    git("reset", "-q", "--hard", "origin/main", cwd=wt)
    gone = asyncio.run(repos.collect("r", "aaaa0001", "agent/aaaa0001-x", "main"))
    assert gone["commits"] == []
    with pytest.raises(GitError, match="nothing collected"):
       asyncio.run(repos.changes("r", "aaaa0001", "main"))
+   assert unpub(None) == 0
+   asyncio.run(repos.drop("r", "aaaa0001"))  # nothing there: no error either
    asyncio.run(repos.remove("aaaa0001"))
    assert not os.path.exists(wt)
 

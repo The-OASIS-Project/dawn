@@ -240,7 +240,7 @@ class Repos:
       stat = await self.gw("-C", m, "diff", "--shortstat", f"refs/heads/{base}...{ref}")
       names = await run(["git", "-C", m, "diff", "--no-renames", "--name-only", "-z",
                          f"refs/heads/{base}...{ref}"])
-      patterns = self.repos[name].get("protected", [])
+      patterns = self.protected(name)
       touched = [p for p in names.decode(errors="replace").split("\0")
                  if p and is_protected(p, patterns)]
       return {"commits": [c[:SUBJECT_CAP] for c in commits.splitlines()[:20]],
@@ -248,6 +248,30 @@ class Repos:
               "protected": touched[:PROTECTED_CAP], "protected_count": len(touched)}
 
    # --- reading the agent's work (in the mirror only) -----------------------
+
+   def protected(self, name: str) -> list[str]:
+      """The repo's protected patterns, and always CI workflows: a pushed one runs
+      with the repo's secrets."""
+      return [".github/workflows/**", *self.repos[name].get("protected", [])]
+
+   async def unpublished(self, name: str, task_id: str, base: str,
+                         published_head: str | None) -> int:
+      """Commits on the task's collected branch that are neither on its base nor in
+      what was published: the work only the mirror has.  0 with none collected."""
+      m, ref = self.mirror(name), f"refs/agent/{task_id}"
+      try:
+         await self.gw("-C", m, "rev-parse", "--verify", "-q", ref)
+      except GitError:
+         return 0
+      shut = [f"^{published_head}"] if published_head else []
+      # --ignore-missing: a published commit gone from the mirror excludes nothing,
+      # so its work counts as unpublished (errs toward keeping it).
+      return int(await self.gw("-C", m, "rev-list", "--count", "--ignore-missing", ref,
+                               f"^refs/heads/{base}", *shut))
+
+   async def drop(self, name: str, task_id: str) -> None:
+      """The task's collected branch, out of the mirror."""
+      await run(["git", "-C", self.mirror(name), "update-ref", "-d", f"refs/agent/{task_id}"])
 
    async def agent_ref(self, name: str, task_id: str, base: str) -> tuple[str, str]:
       """(head, merge base) of the task's collected branch."""
@@ -272,7 +296,7 @@ class Repos:
             path = f"{fields[i + 1].decode(errors='replace')} -> " \
                    f"{fields[i + 2].decode(errors='replace')}"
             i += 2
-         patterns = self.repos[name].get("protected", [])
+         patterns = self.protected(name)
          files.append({"path": path, "added": None if added == "-" else int(added),
                        "removed": None if removed == "-" else int(removed),
                        "protected": any(is_protected(p, patterns)
@@ -358,8 +382,16 @@ class Repos:
              "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": "1",
              "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
              "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}"}
-      await run(["git", "-C", self.mirror(name), "push", "-q", url,
-                 f"{head}:refs/heads/{branch}"], env=env)
+      try:
+         await run(["git", "-C", self.mirror(name), "push", "-q", url,
+                    f"{head}:refs/heads/{branch}"], env=env)
+      except GitError as e:
+         if "refusing to allow" in str(e) and "workflow" in str(e):  # GitHub's own words
+            # The token can't touch .github/workflows (as it should not): pushing
+            # those would run them with the repo's secrets before any review.
+            raise GitError("this work changes CI workflows (.github/workflows), which the "
+                           "gateway's token can't push; publish it yourself") from e
+         raise
       result = {"pushed": f"{owner}/{repo}:{branch}"}
       if open_pr:
          try:
@@ -384,9 +416,9 @@ def open_pull_request(owner, repo, token, head, base, title, body) -> str:
       return json.load(resp)["html_url"]
 
 
-def pr_is_open(pr_url: str, token: str) -> bool | None:
-   """Whether the pull request at `pr_url` (https://github.com/o/r/pull/N) is still
-   open: True, False (merged or closed), or None when it can't be read."""
+def pr_state(pr_url: str, token: str) -> str | None:
+   """The pull request at `pr_url` (https://github.com/o/r/pull/N): "open",
+   "merged" or "closed", or None when it can't be read."""
    m = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)$", pr_url)
    if not m:
       return None
@@ -396,6 +428,7 @@ def pr_is_open(pr_url: str, token: str) -> bool | None:
                "X-GitHub-Api-Version": "2022-11-28"})
    try:
       with urllib.request.urlopen(req, timeout=30) as resp:
-         return json.load(resp).get("state") == "open"
+         pr = json.load(resp)
    except (OSError, ValueError):
       return None
+   return "merged" if pr.get("merged_at") else pr.get("state")

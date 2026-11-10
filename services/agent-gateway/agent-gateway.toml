@@ -1,6 +1,8 @@
 # agent-gateway configuration.  Secrets are NOT here: AGENT_GATEWAY_TOKEN (the
 # bearer DAWN sends, 32+ characters) and AGENT_GATEWAY_GITHUB_TOKEN (push + PR)
-# go in /usr/local/etc/agent-gateway/env, mode 600, owner dawn.
+# go in /usr/local/etc/agent-gateway/env, mode 600, owner dawn.  The GitHub
+# token: fine-grained, Contents + Pull requests read/write, Workflows NO access
+# (see README).
 
 [server]
 host = "127.0.0.1"

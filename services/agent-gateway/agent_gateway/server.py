@@ -25,6 +25,7 @@ import hmac
 import json
 
 import os
+import time
 
 from importlib.metadata import version as package_version
 
@@ -43,7 +44,7 @@ UPDATE_STATUS = "update-status.json"
 def public(t: dict) -> dict:
    keys = ("id", "dawn_user_id", "agent", "repo", "base", "branch", "task", "status",
            "session_id", "budget_usd", "cost_usd", "summary", "error", "client_ref",
-           "model", "created", "updated")
+           "model", "closed", "created", "updated")
    out = {k: t[k] for k in keys}
    out["published"] = json.loads(t["published"]) if t["published"] else None
    return out
@@ -79,12 +80,29 @@ def build(runner, cfg) -> MCPServer:
       if store.meta("update_reported") != raw:
          store.set_meta("update_reported", raw)
          store.add_event("", "update", **{k: str(v)[:500] for k, v in status.items()})
+   def update_problem() -> dict | None:
+      """The updater's last result when it left the operator something to know."""
+      path = os.path.join(cfg.state_dir, UPDATE_STATUS)
+      try:
+         with open(path) as f:
+            status = json.load(f)
+         age = time.time() - os.path.getmtime(path)
+      except (OSError, ValueError):
+         return None
+      if status.get("result") not in ("failed", "rolled_back", "needs_review", "error"):
+         return None
+      # Versions are the SDK's (the updater installs SDK releases by number).
+      if status.get("to") and status["to"] == package_version("claude-agent-sdk"):
+         return None  # installed since (by hand)
+      if status.get("result") == "error" and age > 86400:
+         return None  # a check that failed once; the next ones passed quietly
+      return {k: str(status.get(k, ""))[:200] for k in ("result", "to", "detail")}
    tool = lambda fn: mcp.tool()(explained(fn))  # noqa: E731
 
    @tool
    async def agents_list() -> dict:
       """Agents this gateway runs and the repos it may work in (name, url, base)."""
-      return {"agents": ["claude"], "claude_code": __cli_version__,
+      return {"agents": ["claude"], "claude_code": __cli_version__, "update": update_problem(),
               "sdk": package_version("claude-agent-sdk"),
               "repos": [{"name": n, **r} for n, r in sorted(cfg.repos.items())],
               "running": len(runner.running), "max_concurrent": cfg.max_concurrent_tasks}
@@ -121,6 +139,10 @@ def build(runner, cfg) -> MCPServer:
          raise ValueError("name the task by task_id or client_ref")
       return runner.owned(task_id, dawn_user_id)
 
+   def closed_check(t: dict) -> None:
+      if t["closed"]:
+         raise ValueError("the task was closed; its work is gone from the gateway")
+
    @tool
    async def task_list(dawn_user_id: int, task_id: str | None = None,
                        client_ref: str | None = None) -> dict:
@@ -130,7 +152,12 @@ def build(runner, cfg) -> MCPServer:
          return {"task": None, "pending": []}
       if task_id or client_ref:
          t = task_of(dawn_user_id, task_id, client_ref)
-         return {"task": public(t), "pending": store.pending_requests(t["id"])}
+         try:
+            left = 0 if t["closed"] else await runner.unpublished_commits(t)
+         except GitError:
+            left = None  # unknown (the mirror can't be read): the task still answers
+         return {"task": public(t), "pending": store.pending_requests(t["id"]),
+                 "unpublished_commits": left}
       return {"tasks": [public(t) for t in store.tasks(dawn_user_id)]}
 
    @tool
@@ -165,6 +192,21 @@ def build(runner, cfg) -> MCPServer:
       return public(await runner.cancel(t["id"], dawn_user_id))
 
    @tool
+   async def task_close(dawn_user_id: int, task_id: str | None = None,
+                        client_ref: str | None = None, head: str | None = None) -> dict:
+      """Drop a finished task's work (its clone and branch) once the user is done
+      with it.  Without `head`: closes only when nothing would be lost, else answers
+      closed false with unpublished_commits and the head to confirm.  With `head`:
+      closes only while the branch is still at that commit."""
+      t = task_of(dawn_user_id, task_id, client_ref)
+      res = await runner.close(t["id"], dawn_user_id, head)
+      if not res.get("closed"):
+         res["branch"] = t["branch"]
+      if "task" in res:
+         res["task"] = public(res["task"])
+      return res
+
+   @tool
    async def task_publish(dawn_user_id: int, head: str, task_id: str | None = None,
                           client_ref: str | None = None, open_pr: bool = True,
                           title: str | None = None) -> dict:
@@ -182,6 +224,7 @@ def build(runner, cfg) -> MCPServer:
                           client_ref: str | None = None) -> dict:
       """The task's work so far: changed files with +/- counts, and its commits."""
       t = task_of(dawn_user_id, task_id, client_ref)
+      closed_check(t)
       return await runner.repos.changes(t["repo"], t["id"], t["base"])
 
    @tool
@@ -191,6 +234,7 @@ def build(runner, cfg) -> MCPServer:
       """One file of the task's work: view diff, new (after) or old (before).  A renamed
       file's diff takes its old name as old_path."""
       t = task_of(dawn_user_id, task_id, client_ref)
+      closed_check(t)
       return await runner.repos.file(t["repo"], t["id"], t["base"], path, view, old_path)
 
    @tool
@@ -198,6 +242,7 @@ def build(runner, cfg) -> MCPServer:
                        client_ref: str | None = None) -> dict:
       """One folder of the repo at the task's latest collected commit."""
       t = task_of(dawn_user_id, task_id, client_ref)
+      closed_check(t)
       return await runner.repos.tree(t["repo"], t["id"], t["base"], path)
 
    @tool

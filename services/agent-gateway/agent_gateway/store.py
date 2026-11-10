@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS tasks (
    client_ref TEXT,
    published TEXT,
    model TEXT,
+   closed REAL,
    created REAL NOT NULL,
    updated REAL NOT NULL,
    UNIQUE (dawn_user_id, client_ref)
@@ -86,11 +87,12 @@ CREATE INDEX IF NOT EXISTS idx_events_kind_ts ON events(kind, ts);
 """
 
 # Bumped with each schema change; Store refuses a database it doesn't know.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Older databases, brought up to this schema in order: version -> its statements.
 MIGRATIONS = {
    2: "ALTER TABLE tasks ADD COLUMN model TEXT;",  # the model a task's agent runs on
+   3: "ALTER TABLE tasks ADD COLUMN closed REAL;",  # when its work was dropped (done with)
 }
 
 # Statuses follow the MCP Tasks vocabulary, so moving to that extension later
@@ -141,7 +143,7 @@ class Store:
       return dict(row) if row else None
 
    def tasks(self, dawn_user_id: int | None = None, open_only: bool = False,
-             status: str | None = None) -> list[dict]:
+             status: str | None = None, limit: int | None = 50) -> list[dict]:
       sql, args = "SELECT * FROM tasks WHERE 1", []
       if status:
          sql += " AND status = ?"
@@ -152,7 +154,10 @@ class Store:
       if open_only:
          sql += " AND status IN (?, ?)"
          args += list(OPEN)
-      return [dict(r) for r in self.db.execute(sql + " ORDER BY created DESC LIMIT 50", args)]
+      sql += " ORDER BY created DESC"
+      if limit is not None:
+         sql += f" LIMIT {int(limit)}"
+      return [dict(r) for r in self.db.execute(sql, args)]
 
    def stale_finished(self, before: float) -> list[str]:
       rows = self.db.execute(
@@ -164,6 +169,16 @@ class Store:
       fields["updated"] = time.time()
       sets = ", ".join(f"{k} = ?" for k in fields)
       self.db.execute(f"UPDATE tasks SET {sets} WHERE id = ?", (*fields.values(), task_id))
+      self.db.commit()
+
+   def set_published(self, task_id: str, record: str) -> None:
+      """Bookkeeping on the publish record; `updated` left alone."""
+      self.db.execute("UPDATE tasks SET published = ? WHERE id = ?", (record, task_id))
+      self.db.commit()
+
+   def set_closed(self, task_id: str) -> None:
+      """When the task was closed; `updated` left alone."""
+      self.db.execute("UPDATE tasks SET closed = ? WHERE id = ?", (time.time(), task_id))
       self.db.commit()
 
    def add_cost(self, task_id: str, usd: float) -> None:
