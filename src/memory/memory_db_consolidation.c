@@ -1039,6 +1039,20 @@ int memory_db_consolidation_keep_record(int user_id,
       added->claim_op_id = 0;
       result = rc == SQLITE_ROW ? op_add_locked(added, added_id_out) : MEMORY_DB_FAILURE;
    }
+   if (result == MEMORY_DB_SUCCESS && added) {
+      /* The batch holds something applied again: no longer all undone. */
+      rc = sqlite3_prepare_v2(s_db.db,
+                              "UPDATE memory_consolidation_batches SET undone_at = NULL WHERE "
+                              "id = ?1 AND user_id = ?2",
+                              -1, &st, NULL);
+      if (rc == SQLITE_OK) {
+         sqlite3_bind_int64(st, 1, batch_id);
+         sqlite3_bind_int(st, 2, user_id);
+         rc = sqlite3_step(st);
+      }
+      sqlite3_finalize(st);
+      result = rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+   }
    if (auth_db_txn_end_locked(result == MEMORY_DB_SUCCESS ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
                               "memory_db: keep") != AUTH_DB_SUCCESS &&
        result == MEMORY_DB_SUCCESS) {

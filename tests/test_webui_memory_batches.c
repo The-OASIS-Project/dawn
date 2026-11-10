@@ -463,6 +463,66 @@ void test_an_undo_of_another_users_batch_is_not_found(void) {
    json_object_put(b);
 }
 
+static memory_consolidation_status_t act(memory_consolidation_action_t action,
+                                         int64_t batch,
+                                         int64_t op) {
+   memory_consolidation_outcome_t io;
+   memset(&io, 0, sizeof(io));
+   io.action = action;
+   io.user_id = s_user;
+   io.batch_id = batch;
+   io.op_id = op;
+   memory_consolidation_run(&io);
+   return io.status;
+}
+
+/* A candidate kept after the whole batch was undone: its row can be undone,
+ * the batch no longer reads as undone, and undoing the row takes it back. */
+void test_a_keep_after_undo_all_can_be_undone(void) {
+   const int64_t batch = run("{\"facts\": [{\"text\": \"Jonathan Smith plays the cello\", "
+                             "\"subject\": \"Jonathan Smith\"}, {\"text\": \"Jonathan Smith "
+                             "visits Lisbon\", \"subject\": \"Jonathan Smith\"}]}",
+                             "{\"ops\": [{\"op\": \"add\", \"c\": \"C1\"}, {\"op\": \"drop\", "
+                             "\"c\": \"C2\"}], \"finish\": true}");
+   TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATION_OK, act(MEMORY_CONSOLIDATION_UNDO_BATCH, batch, 0));
+   json_object *b = webui_memory_batch_json(s_user, batch);
+   TEST_ASSERT_EQUAL_STRING("undone", str(b, "status"));
+   const int64_t dropped = json_object_get_int64(get(op_named(b, "dropped"), "op_id"));
+   json_object_put(b);
+
+   json_object_put(s_notified);
+   s_notified = NULL;
+   TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATION_OK,
+                         act(MEMORY_CONSOLIDATION_KEEP_OP, batch, dropped));
+   TEST_ASSERT_NOT_NULL(s_notified);
+   json_object *ops = get(s_notified, "ops");
+   json_object *kept = NULL;
+   for (size_t i = 0; i < json_object_array_length(ops); i++) {
+      json_object *o = json_object_array_get_idx(ops, i);
+      if (strcmp(str(o, "op"), "added") == 0 && strcmp(str(o, "status"), "applied") == 0) {
+         kept = o;
+      }
+   }
+   TEST_ASSERT_NOT_NULL(kept);
+   TEST_ASSERT_EQUAL_STRING("undo", str(kept, "action"));
+   TEST_ASSERT_EQUAL_STRING("partial", str(s_notified, "status"));
+   const int64_t kept_op = json_object_get_int64(get(kept, "op_id"));
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATION_OK,
+                         act(MEMORY_CONSOLIDATION_UNDO_OP, batch, kept_op));
+   b = webui_memory_batch_json(s_user, batch);
+   TEST_ASSERT_EQUAL_STRING("undone", str(b, "status"));
+   ops = get(b, "ops");
+   for (size_t i = 0; i < json_object_array_length(ops); i++) {
+      json_object *o = json_object_array_get_idx(ops, i);
+      TEST_ASSERT_NULL(get(o, "action")); /* the kept row stays kept */
+      if (json_object_get_int64(get(o, "op_id")) == kept_op) {
+         TEST_ASSERT_EQUAL_STRING("undone", str(o, "status"));
+      }
+   }
+   json_object_put(b);
+}
+
 /* A forget sends the tabs the batch it changed, without the forgotten fact. */
 void test_a_forget_sends_the_batch_it_changed(void) {
    const int64_t batch = run("{\"facts\": [{\"text\": \"Jonathan Smith plays the cello\", "
@@ -514,6 +574,7 @@ int main(void) {
    RUN_TEST(test_each_reason_says_who_wrote_it);
    RUN_TEST(test_a_stale_undo_is_reported_with_its_op);
    RUN_TEST(test_an_undo_of_another_users_batch_is_not_found);
+   RUN_TEST(test_a_keep_after_undo_all_can_be_undone);
    RUN_TEST(test_a_forget_sends_the_batch_it_changed);
    RUN_TEST(test_a_conversation_forget_sends_the_batch_it_removed);
    return UNITY_END();

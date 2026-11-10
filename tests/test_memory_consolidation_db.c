@@ -1996,6 +1996,40 @@ void test_a_whole_batch_undo_takes_back_two_restatements_of_one_fact(void) {
                               current(CELLO), NULL));
 }
 
+/* A Keep after the whole batch was undone: the batch reads as undone no more,
+ * the kept fact's undo takes it out, and then the batch is undone again. */
+void test_a_keep_after_undo_all_is_undone_alone(void) {
+   const int64_t batch = dropped_batch(0);
+   const int64_t dropped = op_of(batch, "dropped");
+   memory_consolidation_outcome_t io;
+   outcome(&io, MEMORY_CONSOLIDATION_UNDO_BATCH, s_user, batch, 0);
+   TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATION_OK, io.status);
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT undone_at IS NOT NULL FROM memory_consolidation_batches "
+                              "WHERE id = ?1",
+                              batch, NULL));
+   outcome(&io, MEMORY_CONSOLIDATION_KEEP_OP, s_user, batch, dropped);
+   TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATION_OK, io.status);
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT undone_at IS NULL FROM memory_consolidation_batches "
+                              "WHERE id = ?1",
+                              batch, NULL));
+   const int64_t added = q("SELECT id FROM memory_consolidation_ops WHERE fact_id = ?1 AND op = "
+                           "'added'",
+                           io.fact_id, NULL);
+   TEST_ASSERT_TRUE(added > 0);
+   outcome(&io, MEMORY_CONSOLIDATION_UNDO_BATCH, s_user, batch, 0);
+   TEST_ASSERT_EQUAL_INT(MEMORY_CONSOLIDATION_OK, io.status);
+   TEST_ASSERT_EQUAL_INT(1, io.n_undone);
+   TEST_ASSERT_EQUAL_INT64(added, io.undone[0]);
+   TEST_ASSERT_EQUAL_INT(0, current("Jonathan Smith is visiting Lisbon"));
+   TEST_ASSERT_EQUAL_INT(1, q("SELECT undone_at IS NOT NULL FROM memory_consolidation_batches "
+                              "WHERE id = ?1",
+                              batch, NULL));
+   /* The decision stays as made: kept once, not again. */
+   TEST_ASSERT_EQUAL_STRING("kept", status_of(dropped));
+   outcome(&io, MEMORY_CONSOLIDATION_KEEP_OP, s_user, batch, dropped);
+   TEST_ASSERT_EQUAL_STRING("This one can't be kept.", io.error);
+}
+
 /* A Keep that adds an unrelated fact doesn't make the batch's earlier add
  * stale. */
 void test_a_keep_of_an_unrelated_fact_leaves_the_earlier_add_undoable(void) {
@@ -2196,6 +2230,7 @@ int main(void) {
    RUN_TEST(test_an_op_undone_alone_sees_its_batchs_later_restatement);
    RUN_TEST(test_a_whole_batch_undo_takes_back_two_restatements_of_one_fact);
    RUN_TEST(test_a_keep_of_an_unrelated_fact_leaves_the_earlier_add_undoable);
+   RUN_TEST(test_a_keep_after_undo_all_is_undone_alone);
    RUN_TEST(test_an_add_undone_alone_then_the_close_it_made);
    RUN_TEST(test_cross_batch_undo_keeps_a_relation_taught_later);
    RUN_TEST(test_cross_batch_undo_keeps_a_relation_restated_later);
