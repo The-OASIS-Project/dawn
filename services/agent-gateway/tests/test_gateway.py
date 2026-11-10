@@ -885,6 +885,78 @@ def test_workflow_named_branch_keeps_its_real_error(tmp_path, monkeypatch):
       asyncio.run(repos.publish("r", "abc", "b", "main", "tok", False, "t", "x"))
 
 
+def test_close_collects_before_counting(store, tmp_path):
+   """A cancelled run's commits reach the mirror before close counts them; an
+   empty clone keeps what was collected before; unreadable work refuses."""
+   class Recording(FakeRepos):
+      calls = []
+      fail = False
+
+      async def collect(self, name, task_id, branch, base, keep_on_empty=False):
+         if self.fail:
+            raise GitError("bundle failed")
+         self.calls.append(keep_on_empty)
+         return await super().collect(name, task_id, branch, base)
+   from agent_gateway.repos import GitError
+   r = runner(store)
+   r.repos = Recording()
+   finished_with_clone(store, tmp_path)            # completed: collected as it finished
+   store.add_event("t1", "started", repo="r", branch="b", task="x")
+   asyncio.run(r.close("t1", 1, None))
+   assert r.repos.calls == []
+   add_task(store, tid="t2")
+   store.update_task("t2", status=st.CANCELLED, worktree=str(tmp_path))
+   asyncio.run(r.close("t2", 1, None))
+   assert r.repos.calls == []                     # never started: nothing to collect
+   store.update_task("t1", status=st.CANCELLED)
+   store.update_task("t1", closed=None, worktree=str(tmp_path))
+   store.add_event("t1", "started", repo="r", branch="b", task="x")
+   r.repos.fail = True
+   with pytest.raises(ValueError, match="couldn't be read"):
+      asyncio.run(r.close("t1", 1, None))
+   assert not store.task("t1")["closed"]
+   r.repos.fail = False
+   asyncio.run(r.close("t1", 1, None))
+   assert r.repos.calls == [True] and store.task("t1")["closed"]
+
+
+def test_prune_collects_before_removing_and_keeps_what_it_cant(store, tmp_path):
+   """A cancelled run's clone is collected before it goes; unreadable, it stays."""
+   from agent_gateway.repos import GitError
+
+   class Recording(FakeRepos):
+      fail = False
+      removed = []
+
+      async def collect(self, *a, **kw):
+         if self.fail:
+            raise GitError("bundle failed")
+         return {"commits": []}
+
+      async def remove(self, task_id):
+         self.removed.append(task_id)
+   r = runner(store, keep_worktrees_days=1)
+   r.repos = Recording()
+   finished_with_clone(store, tmp_path, status=st.CANCELLED)
+   store.add_event("t1", "started", repo="r", branch="b", task="x")
+   store.db.execute("UPDATE tasks SET updated = ? WHERE id = 't1'", (time.time() - 3 * 86400,))
+   store.db.commit()
+   r.repos.fail = True
+   asyncio.run(r.prune())
+   assert r.repos.removed == [] and store.task("t1")["worktree"]
+   r.repos.fail = False
+   asyncio.run(r.prune())
+   assert r.repos.removed == ["t1"] and store.task("t1")["worktree"] == ""
+
+
+def test_close_waits_for_a_run_still_stopping(store, tmp_path):
+   r = runner(store)
+   finished_with_clone(store, tmp_path, status=st.CANCELLED)
+   r.running["t1"] = object()  # its run hasn't ended yet
+   with pytest.raises(ValueError, match="still stopping"):
+      asyncio.run(r.close("t1", 1, None))
+
+
 def test_events_carry_client_ref_and_batches_are_capped(store):
    store.add_task(id="t1", dawn_user_id=1, agent="claude", repo="r", base="main",
                   branch="agent/t1", worktree="/w", task="x", budget_usd=5.0,

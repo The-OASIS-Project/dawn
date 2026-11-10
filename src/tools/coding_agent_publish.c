@@ -54,6 +54,8 @@
 #define CP_URL_MAX 200
 #define CP_AGENT_TEXT_MAX 3000 /* the agent's commit subjects and paths in a preview */
 #define CP_LINES_SHOWN 20      /* of each */
+#define CP_TASK_ID_LEN 8       /* the gateway's task ids: 8 hex digits */
+#define CP_LABEL_MAX (CONV_TITLE_MAX + 32)
 
 typedef struct {
    pending_slot_t hdr;
@@ -63,7 +65,9 @@ typedef struct {
    char repo[CODING_AGENT_REPO_MAX];
    char branch[CP_BRANCH_MAX];
    char base[CP_BRANCH_MAX];
-   int commits; /* publish: commits on the branch; close: unpublished ones */
+   char task[CP_TASK_ID_LEN + 1]; /* close of a task with no DAWN job: its id ("" for a job) */
+   char label[CP_LABEL_MAX];      /* close: 'coding job #N ("name")' or 'task <id>' */
+   int commits;                   /* publish: commits on the branch; close: unpublished ones */
    int files;
    int protected_paths;
    bool pr;
@@ -434,35 +438,130 @@ char *coding_publish_confirm(struct json_object *details,
 
 /* ========== close ========== */
 
-char *coding_close(struct json_object *details, int user_id, const turn_origin_t *origin) {
-   const int64_t job = coding_agent_details_job(details);
+/* The gateway's arguments naming what a close drops: a job's task, or a task by id. */
+static struct json_object *close_args(int64_t job, const char *task) {
+   if (task[0] == '\0') {
+      return coding_agent_job_args(job);
+   }
+   struct json_object *args = json_object_new_object();
+   json_object_object_add(args, "task_id", json_object_new_string(task));
+   return args;
+}
+
+static bool is_task_id(const char *s) {
+   size_t n = 0;
+   for (; s[n] != '\0'; n++) {
+      if (!isxdigit((unsigned char)s[n]) || isupper((unsigned char)s[n])) {
+         return false;
+      }
+   }
+   return n == CP_TASK_ID_LEN;
+}
+
+/* What a close names in @p want: a coding job ({"job": N}), or a task of the
+ * user's that no DAWN job tracks ({"task": "<id>"}: from before tasks carried
+ * one).  *@p open: that task still runs, so it is stopped first (it has no job
+ * to cancel).  NULL, or the refusal. */
+static char *close_target(struct json_object *details,
+                          int user_id,
+                          cp_pending_t *want,
+                          bool *open) {
+   *open = false;
+   struct json_object *jtask = NULL;
+   if (!json_object_object_get_ex(details, "task", &jtask)) {
+      job_record_t rec;
+      want->job = coding_agent_details_job(details);
+      char *bad = coding_agent_check_job(want->job, user_id, &rec);
+      if (bad != NULL) {
+         return bad;
+      }
+      if (strcmp(rec.job_status, "queued") == 0 || strcmp(rec.job_status, "running") == 0) {
+         return coding_agent_error("That job is still running; cancel it first (the job tool's "
+                                   "cancel), then close it.");
+      }
+      safe_strscpy(want->name, rec.title);
+      snprintf(want->label, sizeof(want->label), "coding job #%lld (\"%s\")", (long long)want->job,
+               rec.title);
+      return NULL;
+   }
+   const char *task = json_object_get_string(jtask);
+   if (task == NULL || !is_task_id(task)) {
+      return coding_agent_error("Name the task by the id the list shows, as a string: "
+                                "{\"task\": \"281935db\"}.");
+   }
+   struct json_object *args = json_object_new_object();
+   json_object_object_add(args, "task_id", json_object_new_string(task));
+   struct json_object *ans = NULL;
+   char *err = NULL;
+   if (coding_gateway_call(user_id, "task_list", args, &ans, &err) != CODING_GW_OK) {
+      return coding_agent_error_free(err); /* the gateway checks it is the user's */
+   }
+   free(err);
+   struct json_object *t = json_object_object_get(ans, "task");
+   int64_t job = 0;
    job_record_t rec;
-   char *bad = coding_agent_check_job(job, user_id, &rec);
+   /* Only a clean "no such job" makes it an orphan: a read that failed might
+    * hide the job it belongs to, which its job's cancel must stop. */
+   const int ref_rc = coding_gateway_ref_job(coding_gateway_jstr(t, "client_ref"), &job);
+   const int job_rc = (ref_rc == SUCCESS && job > 0) ? conv_db_job_get(job, user_id, &rec)
+                                                     : AUTH_DB_NOT_FOUND;
+   const char *status = coding_gateway_jstr(t, "status");
+   *open = strcmp(status, "working") == 0 || strcmp(status, "input_required") == 0;
+   json_object_put(ans);
+   if (ref_rc != SUCCESS || (job_rc != AUTH_DB_SUCCESS && job_rc != AUTH_DB_NOT_FOUND)) {
+      return coding_agent_error("Couldn't check whether that task belongs to a job; nothing was "
+                                "changed. Try again.");
+   }
+   if (job_rc == AUTH_DB_SUCCESS) {
+      char msg[96];
+      snprintf(msg, sizeof(msg), "That task is coding job #%lld; close it by its number.",
+               (long long)job);
+      return coding_agent_error(msg);
+   }
+   safe_strscpy(want->task, task);
+   snprintf(want->label, sizeof(want->label), "task %s", task);
+   return NULL;
+}
+
+char *coding_close(struct json_object *details, int user_id, const turn_origin_t *origin) {
+   cp_pending_t want = { .job = 0 };
+   bool open = false;
+   char *bad = close_target(details, user_id, &want, &open);
    if (bad != NULL) {
       return bad;
    }
-   if (strcmp(rec.job_status, "queued") == 0 || strcmp(rec.job_status, "running") == 0) {
-      return coding_agent_error("That job is still running; cancel it first (the job tool's "
-                                "cancel), then close it.");
+   /* Before anything is stopped: a refused close leaves nothing behind. */
+   if (coding_agent_turn_read(origin) && live(origin->session_id, CP_PENDING_CLOSE)) {
+      return coding_agent_error("A close is already waiting for the user's answer; it can't be "
+                                "replaced in a turn that read the coding agent's words.");
    }
    struct json_object *ans = NULL;
    char *err = NULL;
-   if (coding_gateway_call(user_id, "task_close", coding_agent_job_args(job), &ans, &err) !=
+   if (open) { /* no job to cancel: the user asking to close it is asking to stop it */
+      if (coding_gateway_call(user_id, "task_cancel", close_args(0, want.task), &ans, &err) !=
+          CODING_GW_OK) {
+         return coding_agent_error_free(err);
+      }
+      open = strcmp(coding_gateway_jstr(ans, "status"), "cancelled") == 0; /* it was running */
+      json_object_put(ans);
+      ans = NULL;
+      free(err);
+      err = NULL;
+   }
+   if (coding_gateway_call(user_id, "task_close", close_args(want.job, want.task), &ans, &err) !=
        CODING_GW_OK) {
       return coding_agent_error_free(err);
    }
    free(err);
-   char buf[CONV_TITLE_MAX + CP_BRANCH_MAX + 256];
+   char buf[CP_LABEL_MAX + CP_BRANCH_MAX + 256];
    if (json_object_get_boolean(json_object_object_get(ans, "closed"))) {
       json_object_put(ans);
       snprintf(buf, sizeof(buf),
-               "Closed coding job #%lld (\"%s\"): its copy of the repo and its branch are gone "
-               "from the gateway.",
-               (long long)job, rec.title);
+               "Closed %s%s: its copy of the repo and its branch are gone from the gateway.",
+               want.label, open ? " (stopped first)" : "");
       return strdup(buf);
    }
    /* Unpublished work would go: only on the user's yes to exactly that. */
-   cp_pending_t want = { .job = job };
    const char *head = coding_gateway_jstr(ans, "head");
    want.commits = json_object_get_int(json_object_object_get(ans, "unpublished_commits"));
    copy_whole(want.branch, sizeof(want.branch), coding_gateway_jstr(ans, "branch"));
@@ -473,11 +572,6 @@ char *coding_close(struct json_object *details, int user_id, const turn_origin_t
    json_object_put(ans);
    if (!head_ok || want.commits <= 0) {
       return coding_agent_error("The gateway's answer can't be shown; nothing was closed.");
-   }
-   safe_strscpy(want.name, rec.title);
-   if (coding_agent_turn_read(origin) && live(origin->session_id, CP_PENDING_CLOSE)) {
-      return coding_agent_error("A close is already waiting for the user's answer; it can't be "
-                                "replaced in a turn that read the coding agent's words.");
    }
    pending_stage_rc_t rc = PENDING_STAGED;
    pthread_mutex_lock(&s_pending_mutex);
@@ -497,11 +591,11 @@ char *coding_close(struct json_object *details, int user_id, const turn_origin_t
    /* A question to the user, as a prepare is: DAWN asks nothing else meanwhile. */
    turn_origin_note_prepare(session_get_command_context());
    snprintf(buf, sizeof(buf),
-            "Closing coding job #%lld (\"%s\") deletes its %d unpublished commit%s on branch %s "
-            "(at %.12s); nothing else has them. Read this to the user and ask them to confirm; "
-            "if they say yes in their reply, call coding_agent with action 'confirm_close' and "
-            "arguments {\"id\": %u}.",
-            (long long)job, rec.title, want.commits, want.commits == 1 ? "" : "s",
+            "Closing %s%s deletes its %d unpublished commit%s on branch %s (at %.12s); nothing "
+            "else has them. Read this to the user and ask them to confirm; if they say yes in "
+            "their reply, call coding_agent with action 'confirm_close' and arguments "
+            "{\"id\": %u}.",
+            want.label, open ? " (now stopped)" : "", want.commits, want.commits == 1 ? "" : "s",
             want.branch[0] ? want.branch : "(its branch)", want.head, (unsigned)id);
    return strdup(buf);
 }
@@ -512,7 +606,7 @@ char *coding_close_confirm(struct json_object *details, int user_id, const turn_
    if (bad != NULL) {
       return bad;
    }
-   struct json_object *args = coding_agent_job_args(p.job);
+   struct json_object *args = close_args(p.job, p.task);
    if (args != NULL) {
       json_object_object_add(args, "head", json_object_new_string(p.head));
    }
@@ -525,13 +619,13 @@ char *coding_close_confirm(struct json_object *details, int user_id, const turn_
    const bool closed = json_object_get_boolean(json_object_object_get(ans, "closed"));
    json_object_put(ans);
    if (!closed) {
-      return coding_agent_error("The job changed since the user was asked; nothing was closed.");
+      return coding_agent_error("It changed since the user was asked; nothing was closed.");
    }
-   char buf[CONV_TITLE_MAX + 160];
+   char buf[CP_LABEL_MAX + 160];
    snprintf(buf, sizeof(buf),
-            "Closed coding job #%lld (\"%s\"): its %d unpublished commit%s, its copy of the repo "
-            "and its branch are gone.",
-            (long long)p.job, p.name, p.commits, p.commits == 1 ? "" : "s");
+            "Closed %s: its %d unpublished commit%s, its copy of the repo and its branch are "
+            "gone.",
+            p.label, p.commits, p.commits == 1 ? "" : "s");
    return strdup(buf);
 }
 
@@ -559,9 +653,8 @@ int coding_publish_describe(const char *value,
                           &slot) == PENDING_FOUND) {
       const cp_pending_t *p = (const cp_pending_t *)slot;
       if (close) {
-         n = snprintf(out, out_len,
-                      "close coding job #%lld (\"%s\"), deleting its %d unpublished commit%s",
-                      (long long)p->job, p->name, p->commits, p->commits == 1 ? "" : "s");
+         n = snprintf(out, out_len, "close %s, deleting its %d unpublished commit%s", p->label,
+                      p->commits, p->commits == 1 ? "" : "s");
       } else {
          n = snprintf(out, out_len,
                       "publish coding job #%lld (\"%s\"): push %s of %s at %.12s (%d commit%s, "

@@ -345,10 +345,10 @@ static void update_event(struct json_object *data) {
    str_excerpt_line(coding_gateway_jstr(data, "to"), 40, to, sizeof(to));
    str_excerpt_line(coding_gateway_jstr(data, "detail"), 140, detail, sizeof(detail));
    if (strcmp(result, "updated") == 0) {
-      OLOG_INFO("coding_agent: the gateway updated Claude Code to %s", to);
+      OLOG_INFO("coding_agent: the gateway updated the Claude Agent SDK to %s", to);
       return;
    }
-   OLOG_WARNING("coding_agent: the gateway's Claude Code update to %s: %s (%s)", to, result,
+   OLOG_WARNING("coding_agent: the gateway's Claude Agent SDK update to %s: %s (%s)", to, result,
                 detail);
    if (strcmp(result, "needs_review") != 0) {
       return;
@@ -357,8 +357,8 @@ static void update_event(struct json_object *data) {
    auth_db_list_users(collect_admin, &admins); /* ids copied: notified with no lock held */
    char text[256];
    snprintf(text, sizeof(text),
-            "Claude Code %s is out for the coding agent, a new major version: the gateway won't "
-            "install it by itself. Check it and update it by hand.",
+            "A new major version of the Claude Agent SDK (%s) is out for the coding agent: the "
+            "gateway won't install it by itself. Check it and update it by hand.",
             to);
    for (int i = 0; i < admins.n; i++) {
       job_notify_user(admins.ids[i], text, 0, 0);

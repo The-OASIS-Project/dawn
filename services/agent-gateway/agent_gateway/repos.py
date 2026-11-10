@@ -217,7 +217,8 @@ class Repos:
 
    # --- after the agent runs --------------------------------------------
 
-   async def collect(self, name: str, task_id: str, branch: str, base: str) -> dict:
+   async def collect(self, name: str, task_id: str, branch: str, base: str,
+                     keep_on_empty: bool = False) -> dict:
       """Bring the task's branch into the mirror (as refs/agent/<id>) and
       describe it.  Only data crosses: a bundle, checked before it is read."""
       dirty = text(await self.jailed_git(task_id, "status", "--porcelain"))
@@ -227,8 +228,11 @@ class Repos:
       except GitError as e:
          if "empty bundle" not in str(e):
             raise
-         # No commits now: an earlier collect's commits must not stay behind.
-         await run(["git", "-C", self.mirror(name), "update-ref", "-d", f"refs/agent/{task_id}"])
+         # No commits now: an earlier collect's commits must not stay behind
+         # (unless the caller keeps them, erring toward keeping work).
+         if not keep_on_empty:
+            await run(["git", "-C", self.mirror(name), "update-ref", "-d",
+                       f"refs/agent/{task_id}"])
          return {"commits": [], "diffstat": "", "uncommitted": len(dirty.splitlines())}
       m, ref = self.mirror(name), f"refs/agent/{task_id}"
       with tempfile.NamedTemporaryFile(suffix=".bundle") as f:

@@ -470,7 +470,7 @@ static void test_update_events(void) {
       json_object_put(e);
    }
    TEST_ASSERT_EQUAL_INT(1, g_notices); /* the admin, once */
-   TEST_ASSERT_NOT_NULL(strstr(g_notice, "Claude Code 1.0.0"));
+   TEST_ASSERT_NOT_NULL(strstr(g_notice, "Claude Agent SDK (1.0.0)"));
    TEST_ASSERT_EQUAL_INT(0, g_events);
 }
 

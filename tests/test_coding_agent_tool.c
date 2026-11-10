@@ -65,6 +65,7 @@ static const char *g_after_reply = "working"; /* the task's status task_reply re
 static const char *g_task_extra = ""; /* more of the task's fields, after a comma */
 static int g_unpublished;             /* task_list / task_close: commits only the mirror has */
 static const char *g_pr_url = "https://github.com/o/dawn/pull/7";
+static const char *g_task_ref = "null"; /* a task named by id: its client_ref (JSON) */
 
 int mcp_bridge_ensure_connected(const char *alias) {
    (void)alias;
@@ -115,6 +116,13 @@ int mcp_bridge_call_tool(const char *alias,
          return FAILURE; /* no text: no answer */
       }
       *result_out = strdup("{\"id\":\"t1\",\"status\":\"working\"}");
+   } else if (strcmp(tool, "task_list") == 0 && args_json && strstr(args_json, "task_id")) {
+      char buf[256];
+      snprintf(buf, sizeof(buf),
+               "{\"task\":{\"id\":\"281935db\",\"status\":\"%s\","
+               "\"client_ref\":%s},\"pending\":[]}",
+               g_task_status, g_task_ref);
+      *result_out = strdup(buf);
    } else if (strcmp(tool, "task_list") == 0 && args_json && strstr(args_json, "client_ref")) {
       if (g_list_fails) {
          return FAILURE;
@@ -160,6 +168,8 @@ int mcp_bridge_call_tool(const char *alias,
       char buf[96];
       snprintf(buf, sizeof(buf), "{\"status\":\"%s\"}", g_after_reply);
       *result_out = strdup(buf);
+   } else if (strcmp(tool, "task_cancel") == 0) {
+      *result_out = strdup("{\"id\":\"281935db\",\"status\":\"cancelled\"}");
    } else if (strcmp(tool, "task_close") == 0) {
       char buf[160];
       if (g_unpublished > 0 && !(args_json && strstr(args_json, "\"head\""))) {
@@ -534,6 +544,7 @@ void setUp(void) {
    g_task_extra = "";
    g_unpublished = 0;
    g_pr_url = "https://github.com/o/dawn/pull/7";
+   g_task_ref = "null";
    g_turn++;
 }
 
@@ -1683,6 +1694,31 @@ static void test_publish_again_and_closed_revise(void) {
    free(rev);
 }
 
+/* A task no DAWN job tracks is closed by its id: stopped first while it still
+ * runs; a bad id or a task that is a job's is refused. */
+static void test_close_a_task_with_no_job(void) {
+   g_task_status = "input_required";
+   char *r = call("close", "{\"task\":\"281935db\"}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
+   TEST_ASSERT_NOT_NULL(strstr(r, "Closed task 281935db (stopped first)"));
+   free(r);
+   const int cancel = last_call("task_cancel"), close = last_call("task_close");
+   TEST_ASSERT_TRUE(cancel >= 0 && close > cancel);
+   TEST_ASSERT_NOT_NULL(strstr(g_args[close], "\"task_id\": \"281935db\""));
+   for (int i = 0; i < 2; i++) {
+      r = call("close", i ? "{\"task\":281935}" : "{\"task\":\"28193\"}");
+      TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+      TEST_ASSERT_NOT_NULL(strstr(r, "as a string"));
+      free(r);
+   }
+   coding_job();
+   g_task_ref = "\"job:42.1000\"";
+   r = call("close", "{\"task\":\"281935db\"}");
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+   TEST_ASSERT_NOT_NULL(strstr(r, "coding job #42; close it by its number"));
+   free(r);
+}
+
 /* A pull request's address is shown only in GitHub's own form. */
 static void test_pr_url_check(void) {
    TEST_ASSERT_TRUE(coding_publish_pr_url_ok("https://github.com/o-1/my.repo_x/pull/12"));
@@ -1745,6 +1781,7 @@ int main(void) {
    RUN_TEST(test_no_publish_confirm_in_a_turn_that_read_the_agent);
    RUN_TEST(test_pr_url_check);
    RUN_TEST(test_publish_again_and_closed_revise);
+   RUN_TEST(test_close_a_task_with_no_job);
    free(g_session);
    return UNITY_END();
 }

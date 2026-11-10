@@ -109,12 +109,15 @@ static void append_excerpt(strbuf_t *sb, const char *label, const char *text, si
 static void append_task(strbuf_t *sb, struct json_object *t, bool full) {
    int64_t job = 0;
    coding_gateway_ref_job(coding_gateway_jstr(t, "client_ref"), &job); /* 0: by its task id */
+   const bool closed = coding_gateway_jstr(t, "closed")[0] != '\0';    /* when; null if open */
    if (job > 0) {
       strbuf_appendf(sb, "- job #%lld", (long long)job);
-   } else {
+   } else if (closed) {
       strbuf_appendf(sb, "- task %s", coding_gateway_jstr(t, "id"));
+   } else {
+      strbuf_appendf(sb, "- task %s (no DAWN job: close {\"task\": \"%s\"})",
+                     coding_gateway_jstr(t, "id"), coding_gateway_jstr(t, "id"));
    }
-   const bool closed = coding_gateway_jstr(t, "closed")[0] != '\0'; /* when; null if open */
    strbuf_appendf(sb, " [%s] %s, branch %s", closed ? "closed" : coding_gateway_jstr(t, "status"),
                   coding_gateway_jstr(t, "repo"), coding_gateway_jstr(t, "branch"));
    const char *cost = coding_gateway_jstr(t, "cost_usd");
@@ -764,7 +767,8 @@ static const treg_param_t coding_agent_params[] = {
            "budget_usd (optional)}. revise: {job, instructions (the more work, in "
            "the user's words; the same agent resumes with what it knows), budget_usd "
            "(optional, added to the job's budget)}. publish: {job, pr (optional, true by "
-           "default; false pushes the branch only)}. close: {job}. confirm_delegate, "
+           "default; false pushes the branch only)}. close: {job}, or {task (the id, as a string)} "
+           "for a task the list shows with no DAWN job. confirm_delegate, "
            "confirm_revise, confirm_publish, confirm_close, confirm_approve: {id (the "
            "number its preview returned)}; "
            "only in the user's reply agreeing to it. approve: {job, request (when the "
@@ -813,7 +817,9 @@ static const tool_metadata_t coding_agent_metadata = {
        "copy of the repo's base, which can't see the job's branch or work. delegate "
        "(no list needed first: it checks the repo) proposes the task and starts nothing: read the "
        "task to the user, and start it with "
-       "confirm_delegate only after they agree. changes and file show the agent's work itself, so "
+       "confirm_delegate only after they agree. Call delegate (or revise, publish) as soon as "
+       "the user asks: its preview is the question to them, so don't draft the task and ask "
+       "first in your own words. changes and file show the agent's work itself, so "
        "the user can check it. When a job waits on the user, DAWN's notice (or status) says "
        "what for. When the user asks to allow it, call approve at once (it finds the open "
        "request itself, no status needed): its preview is the "

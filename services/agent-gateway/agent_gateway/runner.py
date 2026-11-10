@@ -311,9 +311,10 @@ class Runner:
             continue  # revised since the list was read, or being changed
          self.busy.add(task_id)
          try:
+            await self.collect_for_close(t)  # a stopped run's commits outlive its clone
             await self.repos.remove(task_id)
             self.store.update_task(task_id, worktree="")
-         except Exception as e:
+         except Exception as e:  # the clone stays: its work couldn't be kept, or removed
             log.warning("could not remove worktree of %s: %s", task_id, e)
          finally:
             self.busy.discard(task_id)
@@ -372,12 +373,15 @@ class Runner:
       t = self.owned(task_id, dawn_user_id)
       if t["closed"]:
          return {"closed": True, "task": t}
-      if t["status"] in st.OPEN or task_id in self.cloning:
+      if t["status"] in st.OPEN:
          raise ValueError("the task is still running; cancel it first")
+      if task_id in self.cloning or task_id in self.running:
+         raise ValueError("the task is still stopping; try the close again in a moment")
       if task_id in self.busy:
          raise ValueError("the task is busy (being published, revised or cleaned up); try again")
       self.busy.add(task_id)  # held across every await below: no revise or publish slips in
       try:
+         await self.collect_for_close(t)
          left = await self.unpublished_commits(t)
          if left:
             now, _ = await self.repos.agent_ref(t["repo"], task_id, t["base"])
@@ -389,6 +393,20 @@ class Runner:
       finally:
          self.busy.discard(task_id)
       return {"closed": True, "task": self.store.task(task_id)}
+
+   async def collect_for_close(self, t: dict) -> None:
+      """The clone's commits into the mirror before they're counted: a run that
+      was cancelled (or stopped late) never collected its own.  An empty clone
+      keeps what was collected before (a cancel is when its state is least
+      trusted).  Work that can't be read refuses the close."""
+      if (t["status"] == st.COMPLETED or not t["worktree"] or not os.path.isdir(t["worktree"])
+            or not self.store.task_events(t["id"], "started", 1)):
+         return  # collected as it completed; or no clone, or one cancelled before it was made
+      try:
+         await self.repos.collect(t["repo"], t["id"], t["branch"], t["base"], keep_on_empty=True)
+      except (GitError, KeyError) as e:  # KeyError: its repo left the config
+         log.warning("task %s: could not collect its branch before closing: %s", t["id"], e)
+         raise ValueError("the task's work couldn't be read, so nothing was closed") from e
 
    async def close_held(self, t: dict, reason: str) -> None:
       """Drop the work; the caller holds the task in `busy`."""
