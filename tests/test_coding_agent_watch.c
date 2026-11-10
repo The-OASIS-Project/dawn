@@ -102,6 +102,14 @@ int job_report_post(int64_t parent_conv, int user_id, const char *text) {
 char *llm_context_neutralize(const char *text) {
    return strdup(text);
 }
+/* Users: 1 an admin, 2 not. */
+int auth_db_list_users(auth_user_summary_callback_t callback, void *ctx) {
+   auth_user_summary_t u = { .id = 1, .is_admin = true };
+   callback(&u, ctx);
+   u = (auth_user_summary_t){ .id = 2, .is_admin = false };
+   callback(&u, ctx);
+   return AUTH_DB_SUCCESS;
+}
 /* A tab viewing the job's conversation, and DAWN staging its approval there. */
 static session_t g_viewer_session;
 static bool g_viewer;
@@ -408,6 +416,64 @@ static void test_ended_job_takes_nothing_and_its_task_is_stopped(void) {
    TEST_ASSERT_EQUAL_INT(1, atomic_load(&g_cancels));
 }
 
+/* A finished job's work published, merged or closed: on its trail, its status
+ * untouched; a word in its conversation only for what GitHub's merge did. */
+static void test_after_the_end(void) {
+   row("done", JOB_KIND_CODING);
+   g_posted[0] = '\0';
+   struct json_object *e = event("published", "job:42.1000", 5);
+   json_object_object_add(json_object_object_get(e, "data"), "pr_url",
+                          json_object_new_string("https://github.com/o/dawn/pull/7"));
+   coding_watch_apply(e);
+   json_object_put(e);
+   TEST_ASSERT_EQUAL_INT(1, g_events);
+   TEST_ASSERT_EQUAL_STRING(CONV_EVENT_AGENT_REQUEST, g_last_kind);
+   TEST_ASSERT_NOT_NULL(
+       strstr(g_last_payload, "\"pr_url\":\"https:\\/\\/github.com")); /* json-c escapes / */
+   TEST_ASSERT_NULL(strstr(g_last_payload, "working on it"));          /* only its own fields */
+   TEST_ASSERT_EQUAL_STRING("", g_posted);
+   TEST_ASSERT_EQUAL_STRING("", g_end);
+   TEST_ASSERT_EQUAL_INT(0, atomic_load(&g_cancels));
+   e = event("closed", "job:42.1000", 5);
+   json_object_object_add(json_object_object_get(e, "data"), "reason",
+                          json_object_new_string("user"));
+   coding_watch_apply(e);
+   json_object_put(e);
+   TEST_ASSERT_EQUAL_STRING("", g_posted); /* the user closed it: they know */
+   e = event("closed", "job:42.1000", 5);
+   json_object_object_add(json_object_object_get(e, "data"), "reason",
+                          json_object_new_string("merged"));
+   coding_watch_apply(e);
+   json_object_put(e);
+   TEST_ASSERT_EQUAL_INT64(7, g_posted_to);
+   TEST_ASSERT_NOT_NULL(strstr(g_posted, "pull request was merged, so I closed the job"));
+   e = event("merged", "job:42.1000", 5);
+   json_object_object_add(json_object_object_get(e, "data"), "unpublished", json_object_new_int(2));
+   coding_watch_apply(e);
+   json_object_put(e);
+   TEST_ASSERT_NOT_NULL(strstr(g_posted, "2 newer commits on its branch are not published"));
+   TEST_ASSERT_EQUAL_STRING("", g_end);
+}
+
+/* The gateway's updater: only an update that needs the operator reaches the admins. */
+static void test_update_events(void) {
+   const char *results[] = { "updated", "failed", "rolled_back", "needs_review" };
+   for (size_t i = 0; i < sizeof(results) / sizeof(results[0]); i++) {
+      struct json_object *e = json_object_new_object();
+      json_object_object_add(e, "task_id", json_object_new_string(""));
+      json_object_object_add(e, "kind", json_object_new_string("update"));
+      struct json_object *data = json_object_new_object();
+      json_object_object_add(data, "result", json_object_new_string(results[i]));
+      json_object_object_add(data, "to", json_object_new_string("1.0.0"));
+      json_object_object_add(e, "data", data);
+      coding_watch_apply(e);
+      json_object_put(e);
+   }
+   TEST_ASSERT_EQUAL_INT(1, g_notices); /* the admin, once */
+   TEST_ASSERT_NOT_NULL(strstr(g_notice, "Claude Code 1.0.0"));
+   TEST_ASSERT_EQUAL_INT(0, g_events);
+}
+
 /* A deleted job's task is stopped; its end needs nothing. */
 static void test_deleted_job(void) {
    g_row_exists = false;
@@ -591,6 +657,8 @@ int main(void) {
    RUN_TEST(test_ends);
    RUN_TEST(test_dawn_asks_with_a_viewer);
    RUN_TEST(test_ended_job_takes_nothing_and_its_task_is_stopped);
+   RUN_TEST(test_after_the_end);
+   RUN_TEST(test_update_events);
    RUN_TEST(test_deleted_job);
    RUN_TEST(test_task_of_an_earlier_job_with_the_id);
    RUN_TEST(test_unreadable_job_is_left_alone);

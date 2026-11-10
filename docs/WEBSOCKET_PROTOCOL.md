@@ -316,6 +316,20 @@ One lookup per user runs at a time; asks that arrive meanwhile are merged into t
 { "type": "coding_pending", "payload": { "jobs": [1977, 1983] } }
 ```
 
+#### `coding_grants`
+The user's standing approvals for the coding agent (hosts and tools allowed for every
+task on a repo, or every repo). Answered with `coding_grants_response`.
+```json
+{ "type": "coding_grants", "payload": {} }
+```
+
+#### `coding_grant_revoke`
+Remove one standing approval; the gateway removes only the user's own. Answered with
+`coding_grants_response` carrying the result and the list as it now stands.
+```json
+{ "type": "coding_grant_revoke", "payload": { "id": 3 } }
+```
+
 #### `coding_reply`
 The user's answer to one open request of a coding job, from a card. `decision` is
 `allow` (this task), `allow_repo` (every task on the job's repo), `deny`, or `answer`
@@ -1887,6 +1901,22 @@ in its agent, not on the conversation's model, so a client shows these in place 
 model controls and doesn't send text into the job's conversation (follow-up work goes
 through the assistant: "follow up on job 1977: ...").
 
+#### `coding_grants_response`
+To every tab of the user. `grants` is absent (with `error`) when the gateway didn't
+answer; after a revoke, `revoked`, `ok` and `message` say how it went. Each grant:
+`kind` (`domain` or `tool`), `value` (as stored, control characters dropped, clipped:
+show as text), `checked` (false: DAWN can't read it as a host or tool name; still
+listed so it can be revoked), `repo` (absent: every repo).
+```json
+{
+   "type": "coding_grants_response",
+   "payload": {
+      "revoked": 4, "ok": true, "message": "Removed standing approval 4 (...).",
+      "grants": [ { "id": 3, "kind": "domain", "value": "pypi.org", "checked": true, "repo": "dawn" } ]
+   }
+}
+```
+
 #### `coding_reply_response`
 ```json
 {
@@ -1900,10 +1930,13 @@ A coding job's conversation carries `agent_step` (`gw`: `tool` with `tool`, `bri
 `progress` with `text`), `agent_request` (`gw`: `request` with `request_id`,
 `request_kind`, `line` (DAWN's checked wording, empty when it can't show it),
 `value`, `tool`, `input`; `reply` with `request_id`, `decision`; `blocked`;
-`input_required` with `request_ids`) and `agent_end` (`gw`: `completed`, `failed`,
-`cancelled`, with `summary`, `branch`, `commits`, `diffstat`, `uncommitted`,
-`protected`, `protected_count`, `error`, `cost_usd`; lists arrive joined by
-newlines). All of it is the agent's text except `line`: render it as text only.
+`input_required` with `request_ids`; after the job finished, `published` with
+`pushed`, `pr_url`; `merged` with `pr_url`, `unpublished` (newer commits not
+published); `closed` with `reason`: `user` or `merged`) and `agent_end` (`gw`:
+`completed`, `failed`, `cancelled`, with `summary`, `branch`, `commits`, `diffstat`,
+`uncommitted`, `protected`, `protected_count`, `error`, `cost_usd`; lists arrive
+joined by newlines). All of it is the agent's text except `line`: render it as text
+only (show `pr_url` only in GitHub's form, `https://github.com/<o>/<r>/pull/<n>`).
 
 #### `job_action_response`
 Result of a `job_action`. Sent on every outcome including refusal, so a client can

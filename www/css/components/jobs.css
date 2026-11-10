@@ -787,3 +787,102 @@
    background: var(--error);
    box-shadow: 0 0 0 2px var(--bg-primary);
 }
+
+/* The coding agent's standing approvals, at the panel's foot (coding-grants.js). */
+.coding-grants.hidden {
+   display: none;
+}
+
+.coding-grants {
+   margin: 0.5rem 0 0.25rem;
+   border-top: 1px solid var(--border-color);
+}
+
+.coding-grants > summary {
+   list-style: none;
+   padding: 0.5rem 1rem 0.35rem;
+   font-family: var(--font-mono);
+   font-size: 0.7rem;
+   letter-spacing: 0.08em;
+   text-transform: uppercase;
+   color: var(--text-secondary);
+   cursor: pointer;
+}
+
+.coding-grants > summary::-webkit-details-marker {
+   display: none;
+}
+
+.coding-grants > summary::after {
+   content: ' ▾';
+   color: var(--text-tertiary);
+}
+
+.coding-grants[open] > summary::after {
+   content: ' ▴';
+}
+
+.coding-grants > summary:hover {
+   color: var(--text-primary);
+}
+
+.coding-grants > summary:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: -2px;
+}
+
+@media (pointer: coarse) {
+   .coding-grants > summary {
+      padding-top: 0.9rem;
+      padding-bottom: 0.9rem;
+   }
+}
+
+.coding-grants-list {
+   list-style: none;
+   margin: 0;
+   padding: 0 1rem 0.5rem;
+}
+
+.coding-grant {
+   display: flex;
+   align-items: center;
+   justify-content: space-between;
+   gap: 0.5rem;
+   padding: 0.35rem 0;
+   font-size: 0.8rem;
+}
+
+.coding-grant + .coding-grant {
+   border-top: 1px solid var(--border-color);
+}
+
+.coding-grant-what {
+   display: flex;
+   flex-wrap: wrap;
+   align-items: baseline;
+   gap: 0.4rem;
+   min-width: 0;
+}
+
+.coding-grant-kind,
+.coding-grant-scope,
+.coding-grants-note {
+   color: var(--text-secondary);
+   font-size: 0.72rem;
+}
+
+.coding-grants-note {
+   padding: 0 1rem 0.5rem;
+}
+
+.coding-grant-value {
+   font-family: var(--font-mono);
+   overflow-wrap: anywhere;
+   unicode-bidi: isolate;
+}
+
+.coding-grant-odd {
+   color: var(--warning);
+   font-size: 0.72rem;
+}

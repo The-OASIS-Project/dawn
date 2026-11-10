@@ -911,6 +911,9 @@
       if (typeof DawnCodingEvents !== 'undefined') {
          DawnCodingEvents.refresh();
       }
+      if (typeof DawnCodingGrants !== 'undefined') {
+         DawnCodingGrants.refresh();
+      }
       renderActive();
       requestHistory(true);
       startTicker();

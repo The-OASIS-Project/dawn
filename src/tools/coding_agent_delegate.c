@@ -134,6 +134,21 @@ static bool has_text(const char *s) {
    return s[strspn(s, " ")] != '\0';
 }
 
+/* Whether job @p job's work was closed at the gateway (its branch and clone are
+ * gone): no revise can reach it.  False when the gateway can't tell. */
+static bool task_dropped(int user_id, int64_t job) {
+   struct json_object *ans = NULL;
+   char *err = NULL;
+   bool dropped = false;
+   if (coding_gateway_call(user_id, "task_list", coding_agent_job_args(job), &ans, &err) ==
+       CODING_GW_OK) {
+      dropped = coding_gateway_jstr(json_object_object_get(ans, "task"), "closed")[0] != '\0';
+   }
+   json_object_put(ans);
+   free(err);
+   return dropped;
+}
+
 /* A finished coding job of @p user_id the task names ("job 1977", "job #1977"),
  * or 0: continuing one is revise, since a new task can't see its branch. */
 static int64_t names_finished_job(const char *task, int user_id) {
@@ -147,7 +162,8 @@ static int64_t names_finished_job(const char *task, int user_id) {
       job_record_t rec;
       if (conv_db_job_get(job, user_id, &rec) == AUTH_DB_SUCCESS &&
           strcmp(rec.job_kind, JOB_KIND_CODING) == 0 &&
-          (strcmp(rec.job_status, "done") == 0 || strcmp(rec.job_status, "failed") == 0)) {
+          (strcmp(rec.job_status, "done") == 0 || strcmp(rec.job_status, "failed") == 0) &&
+          !task_dropped(user_id, job)) { /* a closed one takes no more work */
          return job;
       }
    }
@@ -445,6 +461,10 @@ char *coding_revise_propose(struct json_object *details, int user_id, const turn
                "Coding job #%lld is %s; only a finished (done or failed) job takes more work.",
                (long long)job, rec.job_status);
       return coding_agent_error(msg);
+   }
+   if (task_dropped(user_id, job)) {
+      return coding_agent_error("That job was closed: its branch is gone, so it takes no more "
+                                "work. Start a new task (delegate) instead.");
    }
    /* As delegate: not replacing a draft the user has seen in a turn that read the agent. */
    if (coding_agent_turn_read(origin) && coding_delegate_live(origin->session_id)) {

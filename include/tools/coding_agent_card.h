@@ -64,6 +64,22 @@ char *coding_requests_card_reply(int user_id,
                                  const char *answer,
                                  const char *shown);
 
+/**
+ * @brief The user's standing approvals for the WebUI: an array of {id, kind,
+ *        value (as stored: control characters dropped, clipped), checked (DAWN
+ *        can show it as a host or tool name), repo (the repo it covers; absent:
+ *        every repo)}.  Every row is listed, checked or not, so each can be
+ *        revoked.  Blocks on the gateway: call off the lws thread.
+ * @return The array (caller puts), or NULL with the error result in *err_out.
+ */
+struct json_object *coding_requests_grant_list(int user_id, char **err_out);
+
+/**
+ * @brief Remove standing approval @p grant of @p user_id.  Blocks on the gateway.
+ * @return The result (TOOL_RESULT_ERROR_MARK-prefixed on refusal); caller frees.
+ */
+char *coding_requests_grant_revoke(int user_id, int64_t grant);
+
 #ifdef __cplusplus
 }
 #endif

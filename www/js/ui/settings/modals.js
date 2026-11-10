@@ -42,7 +42,7 @@
    function trapFocus(modal, options) {
       const opts = options || {};
       const focusableSelectors =
-         'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+         'button, [href], input, select, textarea, summary, [tabindex]:not([tabindex="-1"])';
 
       function getFocusables() {
          /* Live query per keypress.  Filter out hidden and disabled

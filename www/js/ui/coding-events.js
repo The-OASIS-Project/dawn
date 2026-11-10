@@ -27,6 +27,7 @@
    const ANSWER_MAX_BYTES = 2000;
    const PATHS_SHOWN = 20;
    const PATH_OK = /^[A-Za-z0-9._/-]{1,120}$/;
+   const PR_URL = /^https:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+\/pull\/[0-9]+$/;
 
    function elem(tag, cls, text) {
       const e = document.createElement(tag);
@@ -528,6 +529,27 @@
             return 'Waiting for room to run';
          case 'input_required':
             return 'Stopped: waiting for you';
+         case 'published':
+            return (
+               'Published' +
+               (PR_URL.test(p.pr_url || '') ? ': ' + p.pr_url : p.pushed ? ': ' + p.pushed : '')
+            );
+         case 'merged': {
+            const n = Number(p.unpublished) || 0;
+            return (
+               'Pull request merged; ' +
+               n +
+               ' newer ' +
+               (n === 1 ? 'commit' : 'commits') +
+               ' not published'
+            );
+         }
+         case 'closed':
+            return p.reason === 'merged'
+               ? 'Closed: its pull request was merged'
+               : p.reason === 'user'
+                 ? 'Closed at your request'
+                 : 'Closed: its work is gone from the gateway';
          default:
             return null;
       }

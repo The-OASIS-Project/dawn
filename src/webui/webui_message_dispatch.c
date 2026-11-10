@@ -1658,6 +1658,15 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
       if (!conn_require_auth(conn))
          return;
       webui_coding_handle_reply(conn, payload);
+   } else if (strcmp(type, "coding_grants") == 0) {
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_grants(conn, payload);
+   } else if (strcmp(type, "coding_grant_revoke") == 0) {
+      /* The gateway removes only the user's own. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_grant_revoke(conn, payload);
 #endif
    } else if (strcmp(type, "job_action") == 0) {
       /* cancel | resume.  Ownership is checked inside, against conn->auth_user_id. */

@@ -61,6 +61,10 @@ static char g_status[JOB_STATUS_MAX]; /* the job row (defined with the job store
 static bool g_list_fails;             /* task_list gets no answer */
 static const char *g_task_status = "working"; /* the task's status, as task_list returns it */
 static const char *g_after_reply = "working"; /* the task's status task_reply returns */
+#define FULL_HEAD "0123456789abcdef0123456789abcdef01234567"
+static const char *g_task_extra = ""; /* more of the task's fields, after a comma */
+static int g_unpublished;             /* task_list / task_close: commits only the mirror has */
+static const char *g_pr_url = "https://github.com/o/dawn/pull/7";
 
 int mcp_bridge_ensure_connected(const char *alias) {
    (void)alias;
@@ -118,9 +122,10 @@ int mcp_bridge_call_tool(const char *alias,
       char buf[2048];
       snprintf(buf, sizeof(buf),
                "{\"task\":{\"status\":\"%s\",\"model\":\"claude-sonnet-5\","
-               "\"client_ref\":\"job:42.1000\","
-               "\"repo\":\"dawn\"},\"pending\":%s}",
-               g_task_status, g_pending);
+               "\"client_ref\":\"job:42.1000\",\"branch\":\"agent/t1-fix\","
+               "\"base\":\"main\",\"repo\":\"dawn\"%s},\"pending\":%s,"
+               "\"unpublished_commits\":%d}",
+               g_task_status, g_task_extra, g_pending, g_unpublished);
       *result_out = strdup(buf);
    } else if (strcmp(tool, "task_list") == 0 && g_ntasks > 0) {
       /* Each summary ends in a multi-byte character past any excerpt's cut. */
@@ -155,6 +160,28 @@ int mcp_bridge_call_tool(const char *alias,
       char buf[96];
       snprintf(buf, sizeof(buf), "{\"status\":\"%s\"}", g_after_reply);
       *result_out = strdup(buf);
+   } else if (strcmp(tool, "task_close") == 0) {
+      char buf[160];
+      if (g_unpublished > 0 && !(args_json && strstr(args_json, "\"head\""))) {
+         snprintf(buf, sizeof(buf),
+                  "{\"closed\":false,\"unpublished_commits\":%d,\"head\":\"" FULL_HEAD
+                  "\",\"branch\":\"agent/t1-fix\"}",
+                  g_unpublished);
+      } else {
+         snprintf(buf, sizeof(buf), "{\"closed\":true}");
+      }
+      *result_out = strdup(buf);
+   } else if (strcmp(tool, "task_publish") == 0) {
+      char buf[256];
+      snprintf(buf, sizeof(buf), "{\"pushed\":\"o/dawn:agent/t1-fix\",\"pr_url\":\"%s\"}",
+               g_pr_url);
+      *result_out = strdup(buf);
+   } else if (strcmp(tool, "task_changes") == 0 && g_status[0] == 'd') {
+      /* A finished job's work: a full head, as publishing needs. */
+      *result_out = strdup("{\"head\":\"" FULL_HEAD "\",\"base\":\"fedcba9876543210\",\"files\":["
+                           "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3,\"protected\":true}],"
+                           "\"commits\":[{\"hash\":\"" FULL_HEAD
+                           "\",\"subject\":\"fix the oracle\"}]}");
    } else if (strcmp(tool, "task_changes") == 0) {
       *result_out = strdup(
           "{\"head\":\"0123456789abcdef\",\"base\":\"fedcba9876543210\",\"files\":["
@@ -381,6 +408,9 @@ bool turn_origin_unasked(struct session *session, turn_origin_t *out) {
    return true;
 }
 
+void turn_origin_note_prepare(struct session *session) {
+   (void)session;
+}
 void turn_origin_note_answered(struct session *session, uint32_t made_turn) {
    (void)session, (void)made_turn;
 }
@@ -400,6 +430,18 @@ int job_report_post(int64_t parent_conv, int user_id, const char *text) {
 }
 char *llm_context_neutralize(const char *text) {
    return text ? strdup(text) : NULL;
+}
+char *llm_context_neutralize_owned(char *text) {
+   return text;
+}
+char *llm_third_party_frame(const char *name, const char *tag, const char *body) {
+   (void)tag;
+   const size_t n = strlen(name) * 2 + strlen(body) + 8;
+   char *out = malloc(n);
+   if (out != NULL) {
+      snprintf(out, n, "[%s]\n%s[/%s]", name, body, name);
+   }
+   return out;
 }
 
 /* --- the watcher (its own test) ------------------------------------------- */
@@ -489,6 +531,9 @@ void setUp(void) {
    g_goal[0] = '\0';
    g_resumed_emits = 0;
    g_after_reply = "working";
+   g_task_extra = "";
+   g_unpublished = 0;
+   g_pr_url = "https://github.com/o/dawn/pull/7";
    g_turn++;
 }
 
@@ -1504,6 +1549,151 @@ static void test_client_ref_names_one_job(void) {
    TEST_ASSERT_EQUAL_INT64(0, job);
 }
 
+/* publish: refused until the job is done; DAWN's facts first, the agent's
+ * words framed after; the yes pushes the commit shown and returns the PR. */
+static void test_publish_then_confirm(void) {
+   coding_job();
+   char *r = call("publish", "{\"job\":42}");
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r); /* still running */
+   free(r);
+   snprintf(g_status, sizeof(g_status), "done");
+   g_task_status = "completed";
+   g_unpublished = 1;
+   char *preview = call("publish", "{\"job\":42}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
+   TEST_ASSERT_NOT_NULL(strstr(preview, "push branch agent/t1-fix of dawn at commit 0123456789ab"));
+   TEST_ASSERT_NOT_NULL(strstr(preview, "1 protected path"));
+   TEST_ASSERT_NOT_NULL(strstr(preview, "open a pull request against main"));
+   TEST_ASSERT_NOT_NULL(strstr(preview, "[" TOOL_FRAME_AGENT "]\nCommits:\n- fix the oracle"));
+   TEST_ASSERT_EQUAL_INT(-1, last_call("task_publish"));
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   free(preview);
+   char *same = call("confirm_publish", args);
+   TEST_ASSERT_TRUE_MESSAGE(is_error(same), same); /* not in the turn that proposed it */
+   free(same);
+   g_turn++;
+   char out[256];
+   int valid = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         g_meta.describe_call("confirm_publish", args, out, sizeof(out), &valid));
+   TEST_ASSERT_NOT_NULL(strstr(out, "push agent/t1-fix of dawn at 0123456789ab (1 commit, 1 file, "
+                                    "1 protected) and open"));
+   TEST_ASSERT_NULL(strstr(out, "fix the oracle\n")); /* no agent words in a reply code */
+   g_pr_url = "https://github.com/o/dawn/pull/7)[x](https://evil";
+   char *done = call("confirm_publish", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
+   TEST_ASSERT_NULL(strstr(done, "evil")); /* an address that isn't a PR's isn't shown */
+   free(done);
+   const int c = last_call("task_publish");
+   TEST_ASSERT_NOT_EQUAL(-1, c);
+   TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"head\": \"" FULL_HEAD "\""));
+   TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"open_pr\": true"));
+}
+
+/* Nothing new since the last publish: its address, no preview; a closed job: refused. */
+static void test_publish_when_nothing_is_new_or_closed(void) {
+   coding_job();
+   snprintf(g_status, sizeof(g_status), "done");
+   g_task_extra = ",\"published\":{\"pr_url\":\"https://github.com/o/dawn/pull/7\"}";
+   char *r = call("publish", "{\"job\":42}");
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r); /* nothing staged: not a prepare's question */
+   TEST_ASSERT_NOT_NULL(strstr(r, "already published: https://github.com/o/dawn/pull/7"));
+   TEST_ASSERT_NULL(strstr(r, "confirm_publish"));
+   free(r);
+   g_task_extra = ",\"closed\":1793949000.5";
+   g_unpublished = 0;
+   r = call("publish", "{\"job\":42}");
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+   TEST_ASSERT_NOT_NULL(strstr(r, "closed"));
+   free(r);
+}
+
+/* close: at once when nothing would be lost; a preview, and a yes bound to the
+ * head shown, when unpublished commits would go; never while running. */
+static void test_close(void) {
+   coding_job();
+   char *r = call("close", "{\"job\":42}");
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+   TEST_ASSERT_NOT_NULL(strstr(r, "still running"));
+   free(r);
+   TEST_ASSERT_EQUAL_INT(-1, last_call("task_close"));
+   snprintf(g_status, sizeof(g_status), "done");
+   r = call("close", "{\"job\":42}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
+   TEST_ASSERT_NOT_NULL(strstr(r, "Closed coding job #42"));
+   free(r);
+   g_unpublished = 2;
+   char *preview = call("close", "{\"job\":42}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
+   TEST_ASSERT_NOT_NULL(
+       strstr(preview, "deletes its 2 unpublished commits on branch agent/t1-fix"));
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   free(preview);
+   g_turn++;
+   char *done = call("confirm_close", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
+   free(done);
+   TEST_ASSERT_NOT_NULL(strstr(g_args[last_call("task_close")], "\"head\": \"" FULL_HEAD "\""));
+}
+
+/* A turn that read the agent's words can't confirm a publish. */
+static void test_no_publish_confirm_in_a_turn_that_read_the_agent(void) {
+   coding_job();
+   snprintf(g_status, sizeof(g_status), "done");
+   g_unpublished = 1;
+   char *preview = call("publish", "{\"job\":42}");
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   free(preview);
+   g_turn++;
+   free(call("status", "{\"job\":42}"));
+   char *r = call("confirm_publish", args);
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+   free(r);
+   TEST_ASSERT_EQUAL_INT(-1, last_call("task_publish"));
+}
+
+/* A waiting publish preview is replaced by a new ask in a later turn; a
+ * push-only publish can still get its pull request; a closed job takes no revise. */
+static void test_publish_again_and_closed_revise(void) {
+   coding_job();
+   snprintf(g_status, sizeof(g_status), "done");
+   g_unpublished = 1;
+   char *first = call("publish", "{\"job\":42}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(first), first);
+   free(first);
+   g_turn++;
+   char *again = call("publish", "{\"job\":42,\"pr\":false}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(again), again);
+   TEST_ASSERT_NOT_NULL(strstr(again, "the branch only"));
+   free(again);
+   g_turn++;
+   g_unpublished = 0;
+   g_task_extra = ",\"published\":{\"pushed\":\"o/dawn:agent/t1-fix\"}"; /* pushed, no PR */
+   char *pr = call("publish", "{\"job\":42}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(pr), pr);
+   TEST_ASSERT_NOT_NULL(strstr(pr, "open a pull request against main"));
+   free(pr);
+   g_task_extra = ",\"closed\":1793949000.5";
+   char *rev = call("revise", "{\"job\":42,\"instructions\":\"add tests\"}");
+   TEST_ASSERT_TRUE_MESSAGE(is_error(rev), rev);
+   TEST_ASSERT_NOT_NULL(strstr(rev, "closed"));
+   free(rev);
+}
+
+/* A pull request's address is shown only in GitHub's own form. */
+static void test_pr_url_check(void) {
+   TEST_ASSERT_TRUE(coding_publish_pr_url_ok("https://github.com/o-1/my.repo_x/pull/12"));
+   const char *bad[] = { "http://github.com/o/r/pull/1",    "https://github.com/o/r/pull/",
+                         "https://github.com/o/r/pull/1x",  "https://github.com//r/pull/1",
+                         "https://github.com/o/r/issues/1", "https://github.com/o/r/pull/1/" };
+   for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+      TEST_ASSERT_FALSE_MESSAGE(coding_publish_pr_url_ok(bad[i]), bad[i]);
+   }
+}
+
 int main(void) {
    g_session = calloc(1, sizeof(session_t));
    g_session->type = SESSION_TYPE_WEBUI;
@@ -1549,6 +1739,12 @@ int main(void) {
    RUN_TEST(test_status_shows_recent_steps);
    RUN_TEST(test_needs_the_gateway_grant);
    RUN_TEST(test_cancel_hook_ends_the_row_and_asks_the_gateway);
+   RUN_TEST(test_publish_then_confirm);
+   RUN_TEST(test_publish_when_nothing_is_new_or_closed);
+   RUN_TEST(test_close);
+   RUN_TEST(test_no_publish_confirm_in_a_turn_that_read_the_agent);
+   RUN_TEST(test_pr_url_check);
+   RUN_TEST(test_publish_again_and_closed_revise);
    free(g_session);
    return UNITY_END();
 }

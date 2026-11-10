@@ -108,6 +108,31 @@ char *coding_revise_confirm(struct json_object *details, int user_id, const turn
 /** describe_call for confirm_revise. */
 int coding_revise_describe(const char *value, char *out, size_t out_len, int *valid_for_sec);
 
+/* ========== publish and close (coding_agent_publish.c) ========== */
+
+/** publish: a preview of pushing a finished job's branch (and its pull request). */
+char *coding_publish_propose(struct json_object *details, int user_id, const turn_origin_t *origin);
+
+/** confirm_publish: pushes the commit the preview showed. */
+char *coding_publish_confirm(struct json_object *details, int user_id, const turn_origin_t *origin);
+
+/** close: drops a finished job's work at once when nothing would be lost, else
+ *  stages a preview of what would be. */
+char *coding_close(struct json_object *details, int user_id, const turn_origin_t *origin);
+
+/** confirm_close: drops it, only while the branch is at the commit shown. */
+char *coding_close_confirm(struct json_object *details, int user_id, const turn_origin_t *origin);
+
+/** What confirm_publish (or confirm_close, @p close) sends, for a reply code. */
+int coding_publish_describe(const char *value,
+                            bool close,
+                            char *out,
+                            size_t out_len,
+                            int *valid_for_sec);
+
+/** Whether @p url is a pull request's address as GitHub gives it. */
+bool coding_publish_pr_url_ok(const char *url);
+
 /* ---- coding_agent_requests.c ---- */
 
 /** approve: stage allowing the host or tool a job waits on; return the preview. */

@@ -41,6 +41,7 @@
 #include "core/turn_origin.h"
 #include "dawn_error.h"
 #include "llm/llm_context_text.h"
+#include "tools/coding_agent_card.h"
 #include "tools/coding_agent_gateway.h"
 #include "tools/coding_agent_internal.h"
 #include "tools/tool_pending.h"
@@ -688,11 +689,63 @@ char *coding_requests_grants(int user_id) {
    return strbuf_steal(&sb);
 }
 
+#define CR_GRANT_VALUE_SHOWN 120
+
+struct json_object *coding_requests_grant_list(int user_id, char **err_out) {
+   struct json_object *ans = NULL;
+   char *err = NULL;
+   *err_out = NULL;
+   if (coding_gateway_call(user_id, "grants_list", json_object_new_object(), &ans, &err) !=
+       CODING_GW_OK) {
+      *err_out = err;
+      return NULL;
+   }
+   free(err);
+   struct json_object *grants = json_object_object_get(ans, "grants");
+   struct json_object *out = json_object_new_array();
+   for (size_t i = 0;
+        json_object_is_type(grants, json_type_array) && i < json_object_array_length(grants); i++) {
+      struct json_object *g = json_object_array_get_idx(grants, i);
+      struct json_object *req = json_object_new_object();
+      struct json_object *payload = json_object_new_object();
+      json_object_object_add(payload, "value",
+                             json_object_new_string(coding_gateway_jstr(g, "value")));
+      json_object_object_add(req, "kind", json_object_new_string(coding_gateway_jstr(g, "kind")));
+      json_object_object_add(req, "payload", payload);
+      char line[CODING_GATEWAY_REQUEST_LINE_MAX];
+      const bool checked = coding_gateway_request_line(req, line, sizeof(line));
+      json_object_put(req);
+      char value[CR_GRANT_VALUE_SHOWN + 8];
+      str_excerpt_line(coding_gateway_jstr(g, "value"), CR_GRANT_VALUE_SHOWN, value, sizeof(value));
+      struct json_object *row = json_object_new_object();
+      json_object_object_add(row, "id", json_object_new_int64(request_id(g)));
+      json_object_object_add(row, "kind",
+                             json_object_new_string(
+                                 strcmp(coding_gateway_jstr(g, "kind"), "tool") == 0 ? "tool"
+                                                                                     : "domain"));
+      json_object_object_add(row, "value", json_object_new_string(value));
+      json_object_object_add(row, "checked", json_object_new_boolean(checked));
+      const char *repo = coding_gateway_jstr(g, "repo");
+      if (repo[0] != '\0') {
+         json_object_object_add(row, "repo",
+                                json_object_new_string(coding_agent_repo_name_ok(repo)
+                                                           ? repo
+                                                           : "(a repo DAWN can't show)"));
+      }
+      json_object_array_add(out, row);
+   }
+   json_object_put(ans);
+   return out;
+}
+
 char *coding_requests_revoke(struct json_object *details, int user_id) {
    struct json_object *jg = NULL;
-   const int64_t grant = json_object_object_get_ex(details, "grant", &jg)
-                             ? json_object_get_int64(jg)
-                             : 0;
+   return coding_requests_grant_revoke(user_id, json_object_object_get_ex(details, "grant", &jg)
+                                                    ? json_object_get_int64(jg)
+                                                    : 0);
+}
+
+char *coding_requests_grant_revoke(int user_id, int64_t grant) {
    if (grant <= 0) {
       return coding_agent_error("revoke_grant needs {\"grant\": N} (grants lists them).");
    }

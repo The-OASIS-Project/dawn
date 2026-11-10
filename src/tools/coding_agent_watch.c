@@ -88,6 +88,7 @@ static const char *const k_request_fields[] = { "request_id",  "request_kind", "
 static const char *const k_end_fields[] = { "summary",         "branch", "commits",  "diffstat",
                                             "uncommitted",     "error",  "cost_usd", "protected",
                                             "protected_count", NULL };
+static const char *const k_after_fields[] = { "pushed", "pr_url", "reason", "unpublished", NULL };
 static const char *const k_scrubbed[] = { "brief", "text", "value", "input", NULL };
 
 /* The gateway's kinds DAWN keeps, and where; the rest (started, resumed,
@@ -106,11 +107,21 @@ static const struct {
    { "completed", CONV_EVENT_AGENT_END, k_end_fields },
    { "failed", CONV_EVENT_AGENT_END, k_end_fields },
    { "cancelled", CONV_EVENT_AGENT_END, k_end_fields },
+   /* After a job finished: its work published, merged, or closed. */
+   { "published", CONV_EVENT_AGENT_REQUEST, k_after_fields },
+   { "merged", CONV_EVENT_AGENT_REQUEST, k_after_fields },
+   { "closed", CONV_EVENT_AGENT_REQUEST, k_after_fields },
 };
 
 static bool is_end(const char *kind) {
    return strcmp(kind, "completed") == 0 || strcmp(kind, "failed") == 0 ||
           strcmp(kind, "cancelled") == 0;
+}
+
+/* What happens to a finished job's work: on its trail, never its status. */
+static bool is_after_end(const char *kind) {
+   return strcmp(kind, "published") == 0 || strcmp(kind, "merged") == 0 ||
+          strcmp(kind, "closed") == 0;
 }
 
 /* Kinds that mean the agent is still at work. */
@@ -267,12 +278,98 @@ static void notify_waiting(int user_id,
    }
 }
 
+/* A finished job's work published, merged or closed: a line on its trail, and
+ * a word in the conversation it came from when GitHub's merge (no one asked
+ * just then) closed it or left newer work unpublished. */
+static void after_end(struct json_object *event,
+                      const char *kind,
+                      int64_t job,
+                      int user_id,
+                      const job_record_t *rec) {
+   struct json_object *data = json_object_object_get(event, "data");
+   for (size_t i = 0; i < sizeof(k_kinds) / sizeof(k_kinds[0]); i++) {
+      if (strcmp(kind, k_kinds[i].gw) == 0) {
+         conv_event_emit(job, user_id, k_kinds[i].kind,
+                         event_payload_agent(
+                             kind, json_object_get_int64(json_object_object_get(event, "seq")),
+                             (int64_t)json_object_get_double(json_object_object_get(event, "ts")),
+                             data, k_kinds[i].fields, NULL));
+         break;
+      }
+   }
+   const bool merged_close = strcmp(kind, "closed") == 0 &&
+                             strcmp(coding_gateway_jstr(data, "reason"), "merged") == 0;
+   if (rec->parent_id <= 0 || (!merged_close && strcmp(kind, "merged") != 0)) {
+      return;
+   }
+   char *title = llm_context_neutralize(rec->title);
+   char text[CW_NOTICE_MAX];
+   if (merged_close) {
+      snprintf(text, sizeof(text),
+               "Coding job #%lld (%s): its pull request was merged, so I closed the job; its "
+               "copy of the repo and its branch are gone from the gateway.",
+               (long long)job, title ? title : rec->title);
+   } else {
+      const int left = json_object_get_int(json_object_object_get(data, "unpublished"));
+      snprintf(text, sizeof(text),
+               "Coding job #%lld (%s): its pull request was merged, but %d newer commit%s on its "
+               "branch %s not published. Publish them, or close the job to drop them.",
+               (long long)job, title ? title : rec->title, left, left == 1 ? "" : "s",
+               left == 1 ? "is" : "are");
+   }
+   free(title);
+   job_report_post(rec->parent_id, user_id, text);
+}
+
+#define CW_ADMINS_MAX 16
+
+typedef struct {
+   int ids[CW_ADMINS_MAX];
+   int n;
+} cw_admins_t;
+
+static int collect_admin(const auth_user_summary_t *user, void *ctx) {
+   cw_admins_t *a = ctx;
+   if (user->is_admin && a->n < CW_ADMINS_MAX) {
+      a->ids[a->n++] = user->id;
+   }
+   return 0;
+}
+
+/* The gateway's Claude Code updater: logged; one that needs the operator (a
+ * new major version, installed by hand) is told to the admins too.  The
+ * gateway keeps working on the old version in every case. */
+static void update_event(struct json_object *data) {
+   const char *result = coding_gateway_jstr(data, "result");
+   char to[48], detail[160];
+   str_excerpt_line(coding_gateway_jstr(data, "to"), 40, to, sizeof(to));
+   str_excerpt_line(coding_gateway_jstr(data, "detail"), 140, detail, sizeof(detail));
+   if (strcmp(result, "updated") == 0) {
+      OLOG_INFO("coding_agent: the gateway updated Claude Code to %s", to);
+      return;
+   }
+   OLOG_WARNING("coding_agent: the gateway's Claude Code update to %s: %s (%s)", to, result,
+                detail);
+   if (strcmp(result, "needs_review") != 0) {
+      return;
+   }
+   cw_admins_t admins = { .n = 0 };
+   auth_db_list_users(collect_admin, &admins); /* ids copied: notified with no lock held */
+   char text[256];
+   snprintf(text, sizeof(text),
+            "Claude Code %s is out for the coding agent, a new major version: the gateway won't "
+            "install it by itself. Check it and update it by hand.",
+            to);
+   for (int i = 0; i < admins.n; i++) {
+      job_notify_user(admins.ids[i], text, 0, 0);
+   }
+}
+
 void coding_watch_apply(struct json_object *event) {
    const char *kind = coding_gateway_jstr(event, "kind");
    if (coding_gateway_jstr(event, "task_id")[0] == '\0') {
       if (strcmp(kind, "update") == 0) {
-         OLOG_INFO("coding_agent: the gateway's Claude Code update: %s",
-                   coding_gateway_jstr(json_object_object_get(event, "data"), "result"));
+         update_event(json_object_object_get(event, "data"));
       }
       return; /* a system event: nobody's job */
    }
@@ -299,6 +396,10 @@ void coding_watch_apply(struct json_object *event) {
    }
    if (rc != AUTH_DB_SUCCESS || strcmp(rec.job_kind, JOB_KIND_CODING) != 0) {
       return; /* not this user's coding job */
+   }
+   if (is_after_end(kind)) {
+      after_end(event, kind, job, user_id, &rec); /* the job stays as it is */
+      return;
    }
    if (strcmp(rec.job_status, "queued") != 0 && strcmp(rec.job_status, "running") != 0) {
       if (is_working(kind)) {

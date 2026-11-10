@@ -1251,6 +1251,12 @@
                   DawnCodingEvents.handlePending(msg.payload);
                }
                break;
+            case 'coding_grants_response':
+               // The coding agent's standing approvals (the jobs panel's list).
+               if (typeof DawnCodingGrants !== 'undefined') {
+                  DawnCodingGrants.handleResponse(msg.payload);
+               }
+               break;
             case 'coding_reply_response':
                // The result of a click on a coding job's card.
                if (typeof DawnCodingEvents !== 'undefined') {

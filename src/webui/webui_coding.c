@@ -359,3 +359,80 @@ void webui_coding_handle_reply(ws_connection_t *conn, json_object *payload) {
       send_reply_result(user_id, job, rid, nonce, false, "The reply couldn't be sent now.");
    }
 }
+
+/* =============================================================================
+ * coding_grants {} and coding_grant_revoke {id}: the standing approvals list
+ *
+ * Answered to every tab of the user (an open list there stays current).  The
+ * handshake's origin check covers a forged revoke; the gateway checks owner.
+ * ============================================================================= */
+
+typedef struct {
+   int user_id;
+   int64_t revoke; /* 0: just the list */
+} wc_grants_t;
+
+static void grants_run(void *arg) {
+   wc_grants_t *w = arg;
+   struct json_object *payload = json_object_new_object();
+   if (w->revoke > 0) {
+      char *result = coding_requests_grant_revoke(w->user_id, w->revoke);
+      const bool failed = result == NULL || tool_result_is_error(result);
+      const char *text = result ? result : "The approval couldn't be removed.";
+      if (failed && result != NULL) {
+         text += strlen(TOOL_RESULT_ERROR_MARK);
+      }
+      OLOG_INFO("coding_agent: grant %" PRId64 " revoke by user %d: %s", w->revoke, w->user_id,
+                failed ? "refused" : "done");
+      json_object_object_add(payload, "revoked", json_object_new_int64(w->revoke));
+      json_object_object_add(payload, "ok", json_object_new_boolean(!failed));
+      json_object_object_add(payload, "message", json_object_new_string(text));
+      free(result);
+   }
+   char *err = NULL;
+   struct json_object *list = coding_requests_grant_list(w->user_id, &err);
+   if (list != NULL) {
+      json_object_object_add(payload, "grants", list);
+   } else {
+      json_object_object_add(payload, "error",
+                             json_object_new_string("The coding-agent gateway didn't answer."));
+   }
+   free(err);
+   if (!coding_gateway_stopping()) {
+      send_to_user(w->user_id, "coding_grants_response", payload);
+   } else {
+      json_object_put(payload);
+   }
+   free(w);
+}
+
+static void grants_start(ws_connection_t *conn, int64_t revoke) {
+   if (!conn || !conn->authenticated || conn->is_satellite || conn->auth_user_id <= 0) {
+      return;
+   }
+   wc_grants_t *w = calloc(1, sizeof(*w));
+   if (w != NULL) {
+      w->user_id = conn->auth_user_id;
+      w->revoke = revoke;
+   }
+   if (w == NULL || coding_gateway_run_async(grants_run, w) != SUCCESS) {
+      free(w);
+      struct json_object *payload = json_object_new_object();
+      json_object_object_add(payload, "error", json_object_new_string("Try again in a moment."));
+      send_to_user(conn->auth_user_id, "coding_grants_response", payload);
+   }
+}
+
+void webui_coding_handle_grants(ws_connection_t *conn, json_object *payload) {
+   (void)payload;
+   grants_start(conn, 0);
+}
+
+void webui_coding_handle_grant_revoke(ws_connection_t *conn, json_object *payload) {
+   struct json_object *o = NULL;
+   const int64_t id = json_object_object_get_ex(payload, "id", &o) ? json_object_get_int64(o) : 0;
+   if (id <= 0) {
+      return;
+   }
+   grants_start(conn, id);
+}
