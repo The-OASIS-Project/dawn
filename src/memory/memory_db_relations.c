@@ -963,7 +963,7 @@ int memory_db_relation_list_by_object_at(int user_id,
                                  object_entity_id, as_of_ts, out, max, count_out);
 }
 
-/* A JSON array of @p ids ("[1,2,3]") for json_each(); NULL when out of memory.
+/* A JSON array of @p ids ("[1,2,3]") for json_each(); NULL on failure.
  * Caller frees. */
 static char *ids_json(const int64_t *ids, int n) {
    const size_t cap = (size_t)n * 21 + 3;
@@ -974,7 +974,14 @@ static char *ids_json(const int64_t *ids, int n) {
    size_t len = 0;
    buf[len++] = '[';
    for (int i = 0; i < n; i++) {
-      len += (size_t)snprintf(buf + len, cap - len, i ? ",%lld" : "%lld", (long long)ids[i]);
+      char num[24];
+      int w = snprintf(num, sizeof(num), i ? ",%lld" : "%lld", (long long)ids[i]);
+      if (w < 0 || (size_t)w >= sizeof(num) || (size_t)w + 2 > cap - len) {
+         free(buf);
+         return NULL;
+      }
+      memcpy(buf + len, num, (size_t)w);
+      len += (size_t)w;
    }
    buf[len++] = ']';
    buf[len] = '\0';

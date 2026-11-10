@@ -398,7 +398,8 @@ int memory_db_entity_list(int user_id, memory_entity_t *out, int max, int offset
    sqlite3_bind_int(s_db.stmt_memory_entity_search, 4, offset);
 
    int count = 0;
-   while (count < max && sqlite3_step(s_db.stmt_memory_entity_search) == SQLITE_ROW) {
+   int rc = SQLITE_DONE;
+   while (count < max && (rc = sqlite3_step(s_db.stmt_memory_entity_search)) == SQLITE_ROW) {
       populate_entity_from_row(s_db.stmt_memory_entity_search, &out[count]);
       count++;
    }
@@ -407,7 +408,8 @@ int memory_db_entity_list(int user_id, memory_entity_t *out, int max, int offset
    AUTH_DB_UNLOCK();
    if (count_out)
       *count_out = count;
-   return MEMORY_DB_SUCCESS;
+   /* A step error ends the read early: report it, not a short list. */
+   return (rc == SQLITE_ROW || rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
 int memory_db_entity_search(int user_id,

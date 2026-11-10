@@ -1253,12 +1253,19 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
 
    if (is_text) {
       /* --- Human-readable text export --- */
-      /* Build text output: one line per memory.  Use strbuf (growable) so a
-       * dense profile can't silently truncate facts/prefs the way the prior
-       * fixed-size buffer did.  Initial cap sized to a reasonable per-row
-       * estimate; will grow if rows are larger. */
+      /* Build text output: one line per memory, sized exactly from the
+       * loaded rows (headers and line framing included), so the whole store
+       * fits in one allocation and no fixed cap cuts a large one off.  Each
+       * term is bounded by its field's array size, so the sum can't wrap. */
+      size_t need = 64;
+      for (int i = 0; i < fact_count; i++) {
+         need += strlen(facts[i].fact_text) + 3;
+      }
+      for (int i = 0; i < pref_count; i++) {
+         need += strlen(prefs[i].category) + strlen(prefs[i].value) + 5;
+      }
       strbuf_t sb;
-      strbuf_init(&sb, (size_t)(fact_count + pref_count + 10) * 200);
+      strbuf_init_with_max(&sb, need, need);
 
       strbuf_append(&sb, "# My Memories\n\n");
 
@@ -1283,7 +1290,7 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
       char *text_buf = NULL;
       if (strbuf_oom(&sb)) {
          strbuf_free(&sb);
-         text_err = "Export buffer exceeded safety cap";
+         text_err = "Memory allocation failed";
       } else if (!(text_buf = strbuf_steal(&sb))) {
          text_err = "Memory allocation failed";
       }
