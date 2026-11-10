@@ -262,9 +262,11 @@ int memory_db_get_stats(int user_id, memory_stats_t *out_stats) {
        "(SELECT COUNT(*) FROM memory_entities WHERE user_id = ?1)",
        -1, &stmt, NULL);
 
+   bool ok = false;
    if (rc == SQLITE_OK) {
       sqlite3_bind_int(stmt, 1, user_id);
       if (sqlite3_step(stmt) == SQLITE_ROW) {
+         ok = true;
          out_stats->fact_count = sqlite3_column_int(stmt, 0);
          out_stats->oldest_fact = (time_t)sqlite3_column_int64(stmt, 1);
          out_stats->newest_fact = (time_t)sqlite3_column_int64(stmt, 2);
@@ -276,7 +278,7 @@ int memory_db_get_stats(int user_id, memory_stats_t *out_stats) {
    }
 
    AUTH_DB_UNLOCK();
-   return MEMORY_DB_SUCCESS;
+   return ok ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
 /* =============================================================================
