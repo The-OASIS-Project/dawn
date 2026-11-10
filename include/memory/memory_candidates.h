@@ -28,6 +28,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "memory/memory_db_consolidation.h"
 #include "memory/memory_types.h"
 
 #ifdef __cplusplus
@@ -153,10 +154,23 @@ typedef struct {
    int dims;
 } memory_store_opts_t;
 
+/** Relations one memory_store_candidate() call lists as created. */
+#define MEMORY_STORE_NEW_RELATIONS_MAX 16
+
 /** What memory_store_candidate() did. */
 typedef struct {
    int64_t fact_id; /* the fact stored or said again (0: none) */
    bool reused;     /* a stored fact said again: reinforced, not created */
+   /* A stored fact said again with keep_exact: as it was before this call set
+    * its subject, expiry or relations (what an undo puts back). */
+   bool has_prior;
+   memory_consolidation_fact_state_t prior;
+   /* The relations the agent's store created for it (not an open one said
+    * again); more than the array holds sets relations_overflow. */
+   int64_t new_relation_ids[MEMORY_STORE_NEW_RELATIONS_MAX];
+   int64_t new_relation_valid_to[MEMORY_STORE_NEW_RELATIONS_MAX]; /* each as created (0: open) */
+   int n_new_relations;
+   bool relations_overflow;
 } memory_store_result_t;
 
 /**

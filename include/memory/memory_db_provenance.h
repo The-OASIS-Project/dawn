@@ -116,6 +116,14 @@ int memory_db_fact_provenance_extend(int64_t fact_id,
                                      int64_t new_msg_end);
 
 /**
+ * @brief Remove conversation @p conv_id from fact @p fact_id's sources (its
+ *        memory_fact_sources row), as when what taught it there is undone
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (no such source of the
+ *         user's fact) or MEMORY_DB_FAILURE
+ */
+int memory_db_fact_source_remove(int64_t fact_id, int user_id, int64_t conv_id);
+
+/**
  * @brief Record a conversation that didn't exist yet when a fact was saved
  *
  * A "remember" during a turn whose conversation was created afterwards (a new

@@ -85,6 +85,7 @@ typedef enum {
    MEMORY_CONSOLIDATE_REPAIR_FAILED, /* the repair left something rejected or undisposed */
    MEMORY_CONSOLIDATE_CANCELLED,     /* the daemon is stopping */
    MEMORY_CONSOLIDATE_TOKENS,        /* over the input or output budget */
+   MEMORY_CONSOLIDATE_FULL,          /* the record filled up: what didn't fit wasn't applied */
 } memory_consolidate_stop_t;
 
 /** The stop's name as recorded ("finished", "triage", ...). */
@@ -159,6 +160,29 @@ typedef struct {
  */
 int memory_consolidate_batch(const memory_consolidate_input_t *in,
                              memory_consolidate_result_t *out);
+
+
+/** memory_consolidate_keep(): a forgotten record says it; nothing stored. */
+#define MEMORY_CONSOLIDATE_KEEP_FORGOTTEN 9
+
+/**
+ * @brief The user keeps candidate @p op_id of batch @p batch_id (dropped, or
+ *        deferred and open or expired): stored through the same path and
+ *        guards a batch stores with, carrying the outside text it was
+ *        recorded with, and recorded in that batch as added; the op becomes
+ *        kept
+ *
+ * Refused when a forgotten record says it (MEMORY_CONSOLIDATE_KEEP_FORGOTTEN),
+ * its subject is the assistant (MEMORY_CONSOLIDATION_NOTHING), or the batch's
+ * record is full (MEMORY_CONSOLIDATION_FULL).  A text a current fact already
+ * says only marks the op kept, pointing at that fact (nothing reinforced).
+ * The caller holds the user's extraction (memory_consolidation_undo.c).
+ *
+ * @param fact_id_out The fact stored or said again (0: none)
+ * @return SUCCESS, MEMORY_CONSOLIDATE_KEEP_FORGOTTEN, MEMORY_DB_NOT_FOUND,
+ *         MEMORY_CONSOLIDATION_NOTHING, MEMORY_CONSOLIDATION_FULL or FAILURE
+ */
+int memory_consolidate_keep(int user_id, int64_t batch_id, int64_t op_id, int64_t *fact_id_out);
 
 #ifdef __cplusplus
 }

@@ -918,6 +918,10 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
    static const char *const k_email[] = { "email", "content", NULL };
    static const char *const k_end_web[] = { "end", "web", "content", NULL };
    static const char *const k_web[] = { "web", "content", NULL };
+   static const char *const k_end_document[] = { "end", "document", "content", NULL };
+   static const char *const k_document[] = { "document", "content", NULL };
+   static const char *const k_end_calendar[] = { "end", "calendar", "content", NULL };
+   static const char *const k_calendar[] = { "calendar", "content", NULL };
    static const char *const k_end_agent[] = { "end", "agent", "content", NULL };
    static const char *const k_agent[] = { "agent", "content", NULL };
    static const char *const k_note[] = { "operator", "note", NULL };
@@ -934,8 +938,8 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
       const char first = letter_at(sh, w, &next);
       /* shaped: only in a frame line's shape (frame_shape_after), for the
        * names ordinary text starts lines with ("Email content", "Web
-       * content").  A close's three words aren't prose, so they are defused
-       * in any shape: a tagless frame (a briefing's) can't be ended by
+       * content", "Document content", "Calendar content").  A close's three words aren't prose, so
+       * they are defused in any shape: a tagless frame (a briefing's) can't be ended by
        * "--- END EMAIL CONTENT." either. */
       static const struct {
          const char *const *words;
@@ -952,6 +956,10 @@ static size_t imitation_at(const shadow_t *sh, size_t i, const char **out) {
          { k_email, "- - EMAIL CONTENT (quoted)", true },
          { k_end_web, "- - END WEB CONTENT (quoted)", false },
          { k_web, "- - WEB CONTENT (quoted)", true },
+         { k_end_document, "- - END DOCUMENT CONTENT (quoted)", false },
+         { k_document, "- - DOCUMENT CONTENT (quoted)", true },
+         { k_end_calendar, "- - END CALENDAR CONTENT (quoted)", false },
+         { k_calendar, "- - CALENDAR CONTENT (quoted)", true },
          { k_end_agent, "- - END AGENT CONTENT (quoted)", false },
          { k_agent, "- - AGENT CONTENT (quoted)", true },
       };

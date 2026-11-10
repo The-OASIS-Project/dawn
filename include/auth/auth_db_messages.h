@@ -262,15 +262,18 @@ void conv_image_files_free(conv_image_files_t *files);
  * transaction as the conversation, so no row naming one can be stored between
  * the choice and the delete.  The removed images' files come back in
  * @p files_out (CONV_IMAGES_DELETE; may be NULL only for the other modes).
+ * The memory consolidation batches that went with it, or whose rows did, come
+ * back in @p batches_out (may be NULL), for memory_consolidation_batch_notify.
  *
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, AUTH_DB_INVALID or
- *         AUTH_DB_FAILURE (nothing deleted, *@p files_out empty).
+ *         AUTH_DB_FAILURE (nothing deleted, *@p files_out and *@p batches_out empty).
  */
 int conv_db_delete_ex(int64_t conv_id,
                       int user_id,
                       bool admin,
                       conv_images_mode_t mode,
-                      conv_image_files_t *files_out);
+                      conv_image_files_t *files_out,
+                      conv_db_batches_t *batches_out);
 
 /**
  * @brief Drop stored blocks no reload reads any more

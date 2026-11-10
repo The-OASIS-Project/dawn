@@ -33,6 +33,8 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_consolidation.h"
+#include "memory/memory_db_entities.h"
+#include "memory/memory_extraction.h"
 
 /* Maximum users to process in one run */
 #define MAX_USERS 64
@@ -42,7 +44,8 @@
 
 /* The consolidation record keeps a batch (its ops, and a candidate set aside
  * in it) MEMORY_CONSOLIDATE_RECORD_DAYS, whatever decay is set to: it holds
- * conversation text. */
+ * conversation text.  A candidate set aside expires after
+ * MEMORY_CONSOLIDATE_DEFERRED_DAYS. */
 static void prune_consolidation_record(time_t now) {
    int batches = 0;
    if (memory_db_consolidation_prune((int64_t)now - (int64_t)MEMORY_CONSOLIDATE_RECORD_DAYS * 86400,
@@ -50,6 +53,52 @@ static void prune_consolidation_record(time_t now) {
       OLOG_WARNING("memory_decay: pruning the consolidation record failed; it runs again tomorrow");
    } else if (batches > 0) {
       OLOG_INFO("memory_decay: %d consolidation batches past their record time removed", batches);
+   }
+   /* A candidate set aside that long: no later batch takes it up (the user
+    * may still keep it until its batch is pruned). */
+   int expired = 0;
+   if (memory_db_consolidation_expire_deferred(
+           (int64_t)now - (int64_t)MEMORY_CONSOLIDATE_DEFERRED_DAYS * 86400, &expired) !=
+       MEMORY_DB_SUCCESS) {
+      OLOG_WARNING("memory_decay: expiring set-aside candidates failed; it runs again tomorrow");
+   } else if (expired > 0) {
+      OLOG_INFO("memory_decay: %d set-aside candidates expired", expired);
+   }
+}
+
+/* How old an entity nothing names must be before the sweep removes it: past
+ * any batch that could still name it, and long enough that one the user just
+ * saw in the Graph tab doesn't vanish under them. */
+#define ORPHAN_ENTITY_MIN_AGE_DAYS 7
+
+/* How long the sweep waits for a user's running extraction before leaving
+ * that user to the next night: short, so a slow batch never stalls the
+ * maintenance thread for every user after it. */
+#define ORPHAN_SWEEP_HOLD_WAIT_SEC 5
+
+/* Entities nothing names (no fact, relation, alias, proposal, contact or
+ * record row), left before batches removed their own: noise in focus and the
+ * graph that undo and forget never reach.  Each user's extraction is held so
+ * a running batch's new entity isn't taken before it is named. */
+static void sweep_orphan_entities(time_t now) {
+   int user_ids[MAX_USERS];
+   int user_count = 0;
+   memory_db_get_all_user_ids(user_ids, MAX_USERS, &user_count);
+   for (int i = 0; i < user_count; i++) {
+      if (!memory_extraction_hold_user(user_ids[i], ORPHAN_SWEEP_HOLD_WAIT_SEC)) {
+         OLOG_INFO("memory_decay: user %d: extraction running; entity sweep skipped until "
+                   "tomorrow",
+                   user_ids[i]);
+         continue;
+      }
+      int deleted = 0;
+      const int rc = memory_db_entity_sweep_orphans(
+          user_ids[i], (int64_t)now - (int64_t)ORPHAN_ENTITY_MIN_AGE_DAYS * 86400, &deleted);
+      memory_extraction_release_user(user_ids[i]);
+      if (rc == MEMORY_DB_SUCCESS && deleted > 0) {
+         OLOG_INFO("memory_decay: user %d: %d entities nothing names removed", user_ids[i],
+                   deleted);
+      }
    }
 }
 
@@ -70,6 +119,9 @@ void memory_run_nightly_decay(void) {
       return;
    }
    prune_consolidation_record(now);
+   if (g_config.memory.enabled) {
+      sweep_orphan_entities(now);
+   }
 
    /* Check if memory and decay are enabled */
    if (!g_config.memory.enabled || !g_config.memory.decay_enabled) {

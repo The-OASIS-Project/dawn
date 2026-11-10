@@ -487,6 +487,42 @@ int memory_db_fact_provenance_extend(int64_t fact_id,
    return provenance_extend_impl(fact_id, user_id, new_conv_id, new_msg_start, new_msg_end, false);
 }
 
+int memory_db_internal_fact_source_remove_locked(int64_t fact_id,
+                                                 int user_id,
+                                                 int64_t conv_id,
+                                                 bool *removed) {
+   *removed = false;
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "DELETE FROM memory_fact_sources WHERE fact_id = ?1 AND "
+                               "conversation_id = ?2 AND fact_id IN (SELECT id FROM memory_facts "
+                               "WHERE id = ?1 AND user_id = ?3)",
+                               -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, fact_id);
+      sqlite3_bind_int64(st, 2, conv_id);
+      sqlite3_bind_int(st, 3, user_id);
+      rc = sqlite3_step(st);
+   }
+   *removed = rc == SQLITE_DONE && sqlite3_changes(s_db.db) > 0;
+   sqlite3_finalize(st);
+   return rc;
+}
+
+int memory_db_fact_source_remove(int64_t fact_id, int user_id, int64_t conv_id) {
+   if (fact_id <= 0 || user_id <= 0 || conv_id <= 0) {
+      return MEMORY_DB_NOT_FOUND;
+   }
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   bool removed = false;
+   const int rc = memory_db_internal_fact_source_remove_locked(fact_id, user_id, conv_id, &removed);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      return MEMORY_DB_FAILURE;
+   }
+   return removed ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}
+
 /* =============================================================================
  * Per-conversation lookups
  *

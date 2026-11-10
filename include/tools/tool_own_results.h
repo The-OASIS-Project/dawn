@@ -28,13 +28,19 @@
 #ifndef TOOL_OWN_RESULTS_H
 #define TOOL_OWN_RESULTS_H
 
-/** The names, as an initializer: `{ TOOL_OWN_RESULTS_NAMES }`. */
-#define TOOL_OWN_RESULTS_NAMES                                                                     \
+/** The tools whose every result is DAWN's own, stored before v113 too. */
+#define TOOL_OWN_RESULTS_ALWAYS_NAMES                                                              \
    "audio_device", "calculator", "date", "faceplate", "home_assistant", "hud_control", "hud_mode", \
        "llm_status", "memory", "music", "recording", "render_visual",                              \
        "render_visual_load_guidelines", "reset_conversation", "scheduler", "sfx", "shutdown",      \
        "stocks", "suit_status", "switch_llm", "system_status", "time", "tts", "visual_offset",     \
        "volume", "weather"
+
+/** The tools whose own text goes unframed and someone else's in its frame
+ *  (TOOL_FRAME_*): own only in a result stored since they frame it, so the
+ *  v113 backfill (rows from before) doesn't count them. */
+#define TOOL_OWN_RESULTS_FRAMED_NAMES \
+   "calendar", "document_grep", "document_manage", "document_read", "document_search"
 
 /** The tool and action whose results aren't, though the tool's are. */
 #define TOOL_OWN_RESULTS_EXCEPT_TOOL "stocks"

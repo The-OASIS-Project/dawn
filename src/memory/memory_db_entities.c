@@ -506,6 +506,7 @@ int memory_db_entity_get_photo(int user_id,
 }
 
 int memory_db_entity_delete(int64_t entity_id, int user_id) {
+   memory_consolidation_touched_t touched = { .n = 0 };
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
    /* One transaction: the entity, its relations, and the consolidation record's
     * rows that name it go together. */
@@ -540,7 +541,7 @@ int memory_db_entity_delete(int64_t entity_id, int user_id) {
    }
    /* The consolidation record mustn't keep its name, or its relations' text. */
    if (rc == SQLITE_DONE && changes > 0 &&
-       memory_db_consolidation_scrub_entities_locked(user_id) != MEMORY_DB_SUCCESS) {
+       memory_db_consolidation_scrub_entities_locked(user_id, &touched) != MEMORY_DB_SUCCESS) {
       rc = SQLITE_ERROR;
    }
    if (auth_db_txn_end_locked(rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
@@ -557,7 +558,94 @@ int memory_db_entity_delete(int64_t entity_id, int user_id) {
       /* A deleted entity mustn't stay findable from the embedding cache. */
       memory_embeddings_invalidate_entity_cache_for_user(user_id);
    }
+   memory_consolidation_touched_notify(user_id, &touched);
    return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}
+
+/* An entity (user ?1) the nightly sweep may remove: nothing names it
+ * (MEMORY_ENTITY_UNREFERENCED), and, what only the sweep keeps (a forget
+ * removes these records with the entity), no photo, alias from it, merge
+ * proposal or consolidation record row names it. */
+/* clang-format off */
+#define ENTITY_ORPHAN_SQL \
+   MEMORY_ENTITY_UNREFERENCED " AND photo_id IS NULL " \
+   "AND id NOT IN (SELECT source_entity_id FROM memory_entity_aliases WHERE user_id = ?1 AND " \
+   "source_entity_id IS NOT NULL) " \
+   "AND id NOT IN (SELECT source_entity_id FROM memory_entity_merge_proposals WHERE " \
+   "user_id = ?1) " \
+   "AND id NOT IN (SELECT target_entity_id FROM memory_entity_merge_proposals WHERE " \
+   "user_id = ?1) " \
+   "AND id NOT IN (SELECT entity_id FROM memory_consolidation_ops WHERE user_id = ?1 AND " \
+   "entity_id IS NOT NULL) " \
+   "AND id NOT IN (SELECT other_entity_id FROM memory_consolidation_ops WHERE user_id = ?1 AND " \
+   "other_entity_id IS NOT NULL)"
+/* clang-format on */
+
+/* Delete user @p user_id's entities that @p sql (binding ?2) picks and
+ * nothing names; @p bind_text or @p bind_int is ?2. */
+static int delete_orphans(int user_id,
+                          const char *sql,
+                          const char *bind_text,
+                          int64_t bind_int,
+                          int *deleted_out) {
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      if (bind_text) {
+         sqlite3_bind_text(st, 2, bind_text, -1, SQLITE_STATIC);
+      } else {
+         sqlite3_bind_int64(st, 2, bind_int);
+      }
+      rc = sqlite3_step(st);
+   }
+   const int changes = rc == SQLITE_DONE ? sqlite3_changes(s_db.db) : 0;
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("memory_db: removing unnamed entities failed: %s", sqlite3_errmsg(s_db.db));
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (changes > 0) {
+      memory_embeddings_invalidate_entity_cache_for_user(user_id);
+   }
+   if (deleted_out) {
+      *deleted_out = changes;
+   }
+   return rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
+int memory_db_entity_delete_orphans(int user_id, const int64_t *ids, int n, int *deleted_out) {
+   if (deleted_out) {
+      *deleted_out = 0;
+   }
+   if (n <= 0 || !ids) {
+      return MEMORY_DB_SUCCESS;
+   }
+   char *list = auth_db_internal_ids_json(ids, n);
+   if (!list) {
+      return MEMORY_DB_FAILURE;
+   }
+   int deleted = 0;
+   const int rc = delete_orphans(user_id,
+                                 "DELETE FROM memory_entities WHERE user_id = ?1 AND id IN "
+                                 "(SELECT value FROM json_each(?2)) AND " ENTITY_ORPHAN_SQL,
+                                 list, 0, &deleted);
+   free(list);
+   if (deleted > 0) {
+      OLOG_INFO("memory_db: removed %d unnamed entities of user %d", deleted, user_id);
+   }
+   if (deleted_out) {
+      *deleted_out = deleted;
+   }
+   return rc;
+}
+
+int memory_db_entity_sweep_orphans(int user_id, int64_t older_than, int *deleted_out) {
+   return delete_orphans(user_id,
+                         "DELETE FROM memory_entities WHERE user_id = ?1 AND first_seen < ?2 "
+                         "AND " ENTITY_ORPHAN_SQL,
+                         NULL, older_than, deleted_out);
 }
 
 int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id) {

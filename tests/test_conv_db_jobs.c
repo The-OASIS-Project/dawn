@@ -667,7 +667,7 @@ static void test_restart_safety_leaves_the_disposition_alone(void) {
 static void test_job_inherits_parent_privacy(void) {
    int64_t priv = 0, pub = 0, child_of_priv = 0, child_of_pub = 0, rootless = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "private chat", &priv));
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(priv, alice_id, true));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(priv, alice_id, true, NULL));
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "public chat", &pub));
 
    conv_db_create_job(alice_id, "j1", priv, "detached", "notify", NULL, 1, "g", &child_of_priv);

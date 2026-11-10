@@ -201,7 +201,15 @@ A/B that measured it, is in ATLAS (`dawn/archive/TOOL_RESULT_VIEWS_DESIGN.md`).
 - **Third-party frames.** An action whose result is someone else's text names its frame in the tool's
   action-kinds table (`tool_action_kind_entry_t.third_party`, or the tool's `third_party` default):
   `EMAIL CONTENT` for the email tool's read, recent, search and digest; `WEB CONTENT` for `url_fetch`
-  and `search`. A successful result goes in that frame after the neutralizer (`llm_third_party_frame`:
+  and `search`; `CALENDAR CONTENT` for the calendar's reads and its list of calendars (event text and
+  calendar names are written by whoever shares a calendar or sends an invitation). A tool whose text is
+  someone else's only on some calls names the frame from its callback instead
+  (`llm_tools_result_third_party`): the document tools frame `DOCUMENT CONTENT` when a result holds a
+  document that isn't the user's own words (`document_is_own`: another user's, or one the user hasn't
+  vouched for whose `documents.outside` kind is tainted, such as an upload or a note saved from an email), and leave the
+  user's own unframed; `document_manage`'s list is framed when it names another user's shared
+  document. A successful result goes in that frame after the
+  neutralizer (`llm_third_party_frame`:
   the conversation's tag on its lines, a first line saying the text is data), with a view's header
   ahead of it. The neutralizer defuses imitations of both frames, so a page or an email can't end its
   own. `result_read` frames a slice of a stored result the same way when the tool that stored it

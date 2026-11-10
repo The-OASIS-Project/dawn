@@ -567,7 +567,8 @@ int memory_db_get_all_user_ids(int *out_ids, int max_ids, int *count_out) {
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db,
                                "SELECT user_id FROM memory_facts "
-                               "UNION SELECT user_id FROM memory_preferences",
+                               "UNION SELECT user_id FROM memory_preferences "
+                               "UNION SELECT user_id FROM memory_entities",
                                -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("memory_db: get_all_user_ids prepare failed: %s", sqlite3_errmsg(s_db.db));

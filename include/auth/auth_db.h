@@ -2016,6 +2016,16 @@ int conv_db_list_all(bool include_archived,
  */
 int conv_db_rename(int64_t conv_id, int user_id, const char *new_title);
 
+/** Memory consolidation batches a privacy change or a delete removed, or whose
+ *  rows it removed: the newest this many, each once. */
+#define CONV_DB_BATCHES_MAX 256
+
+typedef struct {
+   int user_id; /**< their owner */
+   int64_t ids[CONV_DB_BATCHES_MAX];
+   int n;
+} conv_db_batches_t;
+
 /**
  * @brief Set private mode for a conversation
  *
@@ -2025,12 +2035,20 @@ int conv_db_rename(int64_t conv_id, int user_id, const char *new_title);
  * a public continuation would leak the parent's content into memory.  Making one
  * public changes only that conversation.
  *
+ * Going private also removes what memory recorded of them (their consolidation
+ * batches, and other batches' rows quoting them); those batches come back in
+ * @p batches_out, for memory_consolidation_batch_notify once the call returns.
+ *
  * @param conv_id Conversation ID
  * @param user_id User ID (for authorization check)
  * @param is_private True to enable private mode, false to disable
+ * @param batches_out The batches removed or changed (n = 0 on failure; may be NULL)
  * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
  */
-int conv_db_set_private(int64_t conv_id, int user_id, bool is_private);
+int conv_db_set_private(int64_t conv_id,
+                        int user_id,
+                        bool is_private,
+                        conv_db_batches_t *batches_out);
 
 /** Upper bound on conv_db_continuation_chain() results. */
 #define CONV_CHAIN_MAX 256

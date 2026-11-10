@@ -150,6 +150,9 @@ static const char *DDL =
    "  num_chunks INTEGER NOT NULL,"
    "  is_global INTEGER DEFAULT 0,"
    "  created_at INTEGER NOT NULL,"
+   "  original_blob_id TEXT DEFAULT NULL,"
+   "  outside INTEGER NOT NULL DEFAULT 0,"
+   "  own INTEGER NOT NULL DEFAULT 0,"
    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
    ");"
    "CREATE TABLE IF NOT EXISTS document_chunks ("
@@ -222,15 +225,17 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO documents (user_id, filename, filepath, filetype, file_hash, "
-       "num_chunks, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+       "num_chunks, is_global, created_at, original_blob_id, outside) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ?4 = 'note' THEN 0 ELSE 5 END)",
        -1, &s_db.stmt_doc_create, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-                           "num_chunks, is_global, created_at FROM documents WHERE id = ?",
-                           -1, &s_db.stmt_doc_get, NULL);
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, filename, filepath, filetype, file_hash, "
+       "num_chunks, is_global, created_at, outside, own FROM documents WHERE id = ?",
+       -1, &s_db.stmt_doc_get, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
@@ -243,20 +248,21 @@ static int prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-                           "num_chunks, is_global, created_at FROM documents "
+                           "num_chunks, is_global, created_at, outside, own FROM documents "
                            "WHERE user_id = ? OR is_global = 1 ORDER BY created_at DESC "
                            "LIMIT ? OFFSET ?",
                            -1, &s_db.stmt_doc_list, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT d.id, d.user_id, d.filename, d.filepath, d.filetype, "
-                           "d.file_hash, d.num_chunks, d.is_global, d.created_at, "
-                           "COALESCE(u.username, '') FROM documents d "
-                           "LEFT JOIN users u ON d.user_id = u.id "
-                           "ORDER BY d.created_at DESC LIMIT ? OFFSET ?",
-                           -1, &s_db.stmt_doc_list_all, NULL);
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT d.id, d.user_id, d.filename, d.filepath, d.filetype, "
+       "d.file_hash, d.num_chunks, d.is_global, d.created_at, d.outside, d.own, "
+       "COALESCE(u.username, '') FROM documents d "
+       "LEFT JOIN users u ON d.user_id = u.id "
+       "ORDER BY d.created_at DESC LIMIT ? OFFSET ?",
+       -1, &s_db.stmt_doc_list_all, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
@@ -296,7 +302,7 @@ static int prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-                           "num_chunks, is_global, created_at "
+                           "num_chunks, is_global, created_at, outside, own "
                            "FROM documents "
                            "WHERE (user_id = ? OR is_global = 1) "
                            "AND filename LIKE ? ESCAPE '\\' COLLATE NOCASE "

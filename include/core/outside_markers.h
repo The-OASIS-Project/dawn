@@ -45,7 +45,25 @@
 #define OUTSIDE_MARKER_KIND_SUFFIX ", " OUTSIDE_MARKER_ITEM_KIND
 #define OUTSIDE_MARKER_MEMORY_MARK " (" OUTSIDE_MARKER_ITEM_KIND ")"
 
+/* What a memory search's source excerpt header starts with ("[source:
+ * conv=N msgs=X-Y]", memory_callback.c); it ends with OUTSIDE_MARKER_MEMORY_MARK
+ * when that conversation read outside text, and the stored messages quoted
+ * under it are then outside text (memory_extraction_input.c). */
+#define OUTSIDE_MARKER_SOURCE_HEAD "[source: conv="
+
 /* The source of a document's chunk in a turn context's item header. */
 #define OUTSIDE_MARKER_DOC_SOURCE "document_chunk"
+
+/* The source of a calendar event in a turn context's item header. */
+#define OUTSIDE_MARKER_CAL_SOURCE "calendar_event"
+
+/* What a recalled memory's source in an item header starts with.  Its kind
+ * word may say "outside" (where it was learned), but the line is DAWN's own
+ * rendering of what it stored under the guard, so it never counts as outside
+ * text again.  The live scan skips any source with this prefix; the stored-row
+ * scan (CONV_TURN_CONTEXT_FOREIGN_SQL) strips the four named ones, memory_fact,
+ * memory_entity, memory_relation and memory_summary, so a new memory source
+ * joins that list (test_memory_focus_adapters checks it). */
+#define OUTSIDE_MARKER_MEMORY_SOURCE "memory_"
 
 #endif /* OUTSIDE_MARKERS_H */

@@ -344,6 +344,25 @@ void handle_list_memory_superseded(ws_connection_t *conn, struct json_object *pa
 void handle_restore_memory_fact(ws_connection_t *conn, struct json_object *payload);
 
 /**
+ * @brief What memory learned per consolidation batch, newest first, a page at
+ *        a time (webui_memory_batches.c; payload: optional conversation_id,
+ *        before_batch_id, limit)
+ */
+void handle_list_memory_batches(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Undo a batch, or one op of it ("batch_id", optional "op_id"), on a
+ *        worker; undo_memory_batch_response when it ends (webui_memory_batches.c)
+ */
+void handle_undo_memory_batch(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Keep a candidate a batch dropped or set aside ("batch_id", "op_id"),
+ *        on a worker; keep_memory_op_response when it ends (webui_memory_batches.c)
+ */
+void handle_keep_memory_op(ws_connection_t *conn, struct json_object *payload);
+
+/**
  * @brief List memory preferences for the current user (paginated)
  */
 void handle_list_memory_preferences(ws_connection_t *conn, struct json_object *payload);

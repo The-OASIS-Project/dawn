@@ -33,6 +33,7 @@
 #include "config/dawn_config.h"
 #include "core/embedding_engine.h"
 #include "dawn_error.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/document_rank.h"
 #include "tools/tool_registry.h"
@@ -74,7 +75,9 @@ static const treg_param_t doc_search_params[] = {
 
 static const tool_metadata_t doc_search_metadata = {
    .name = "document_search",
-   .results = TOOL_RESULTS_OUTSIDE,
+   /* Its text is the user's own unless a passage shown isn't (the result is
+    * then framed as a document's, TOOL_FRAME_DOCUMENT). */
+   .results = TOOL_RESULTS_OWN,
    .default_kind = TOOL_KIND_READ,
    .device_string = "document search",
    .description = "Search ONLY the user's saved documents and notes (hybrid keyword + semantic). "
@@ -230,6 +233,7 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
 
    int pos = 0;
    int shown = 0;
+   bool outside = false;
    pos += snprintf(result + pos, (size_t)(result_buf_size - pos),
                    "DOCUMENT SEARCH RESULTS (showing up to %d of %d matches):\n",
                    DOC_SEARCH_MAX_RESULTS, total_matches);
@@ -242,6 +246,7 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
 
       shown++;
       token_budget -= chunk_tokens;
+      outside = outside || !it->is_own;
 
       pos += snprintf(result + pos, (size_t)(result_buf_size - pos),
                       "\n[%d] (score: %.2f) %s, chunk %d:\n%s\n", shown, it->hybrid, it->filename,
@@ -260,5 +265,8 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
    }
 
    document_ranking_free(&ranking);
+   if (outside) {
+      llm_tools_result_third_party(TOOL_FRAME_DOCUMENT);
+   }
    return result;
 }

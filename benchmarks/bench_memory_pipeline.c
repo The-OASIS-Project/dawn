@@ -271,16 +271,18 @@ int bench_mp_dump_candidates(const char *path) {
 }
 
 /* The daemon's tools aren't registered here, but extraction asks the registry
- * whose text a stored tool result is: stand-ins for DAWN's own tools
- * (tools/tool_own_results.h), so a replayed conversation reads as the daemon
- * reads it.  Any other tool is unknown, so outside, as there. */
+ * whose text a stored tool result is: stand-ins for the tools whose every
+ * result is DAWN's own (tools/tool_own_results.h's ALWAYS list), so a replayed
+ * conversation reads as the daemon reads it.  Any other tool is unknown, so
+ * outside, as there; so are the FRAMED tools, whose stored results predate
+ * their framing. */
 static char *bench_no_call(const char *action, char *value, int *should_respond) {
    (void)action;
    (void)value;
    (void)should_respond;
    return NULL;
 }
-static const char *const s_own_tools[] = { TOOL_OWN_RESULTS_NAMES };
+static const char *const s_own_tools[] = { TOOL_OWN_RESULTS_ALWAYS_NAMES };
 static tool_metadata_t s_own_meta[sizeof(s_own_tools) / sizeof(s_own_tools[0])];
 static const treg_param_t s_except_params[] = {
    {

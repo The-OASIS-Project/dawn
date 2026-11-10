@@ -64,11 +64,13 @@
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
+#include "memory/memory_consolidate.h"
 #include "memory/memory_db_aliases.h"
 #include "tools/calendar_service.h"
 #include "utils/string_utils.h"
 #include "webui/webui_email_ref.h"
 #include "webui/webui_internal.h"
+#include "webui/webui_memory_batches.h"
 #include "webui/webui_send.h" /* webui_sentence_audio_callback, webui_send_audio_end/_state */
 #include "webui/webui_server.h"
 
@@ -1755,6 +1757,27 @@ void webui_broadcast_memory_proposals_changed(int user_id) {
       OLOG_INFO("WebUI: Broadcast memory_proposals_changed (count=%d) to %d client(s)", pending,
                 sent);
    }
+}
+
+/* Strong override of the weak no-op in memory_db_consolidation.c: a batch recorded,
+ * undone, changed by a Keep or a forget, or removed by one goes to every tab of
+ * its user (memory_batch: the batch object, or its id marked removed).  From
+ * the extraction thread, the undo worker or a forget. */
+void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id) {
+   (void)conversation_id; /* the batch object carries it */
+   if (user_id <= 0) {
+      return; /* never every user's tabs */
+   }
+   json_object *batch = webui_memory_batch_notice(user_id, batch_id);
+   if (!batch) {
+      return;
+   }
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("memory_batch"));
+   json_object_object_add(root, "payload", batch);
+   int sent = broadcast_json_to_user_ex(user_id, root, true);
+   OLOG_INFO("WebUI: Broadcast memory_batch (user=%d batch=%lld) to %d client(s)", user_id,
+             (long long)batch_id, sent);
 }
 
 /*

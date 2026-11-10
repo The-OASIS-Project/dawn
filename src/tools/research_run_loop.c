@@ -53,6 +53,7 @@
 #include "logging.h"
 #include "memory/memory_note_bridge.h"
 #include "prompts.h"
+#include "tools/document_db.h"
 #include "tools/document_index_pipeline.h"
 #include "tools/research_run.h"
 #include "utils/string_utils.h" /* sanitize_utf8_for_json */
@@ -201,6 +202,8 @@ static void research_persist_report_note(int user_id,
       rc = document_index_text(user_id, label, "text", report, strlen(report), false, NULL, &res);
       if (rc == DOC_INDEX_SUCCESS && res.doc_id > 0) {
          research_db_run_set_report_doc(run_id, res.doc_id);
+         (void)document_db_set_outside(user_id, res.doc_id, OUTSIDE_RESEARCH, false,
+                                       OUTSIDE_RESEARCH);
          OLOG_INFO("research: run %lld report saved as document %lld (%s)", (long long)run_id,
                    (long long)res.doc_id, label);
       } else if (rc == DOC_INDEX_ERROR_DUPLICATE && res.doc_id > 0) {
@@ -222,6 +225,7 @@ static void research_persist_report_note(int user_id,
       return;
    }
    research_db_run_set_report_doc(run_id, res.doc_id);
+   (void)document_db_set_outside(user_id, res.doc_id, OUTSIDE_RESEARCH, false, OUTSIDE_RESEARCH);
    /* Best-effort memory->note bridge, exactly like do_save_note; never from a
     * private conversation's run (the job inherits its privacy): the gloss is a
     * memory, and nothing private is learned.  Unreadable counts as private. */

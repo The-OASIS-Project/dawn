@@ -391,6 +391,11 @@
                if (typeof DawnJobs !== 'undefined') {
                   DawnJobs.handleReconnect();
                }
+               // The Learned tab misses memory_batch frames sent while the socket
+               // was down: its first page again.
+               if (window.DawnMemoryBatches) {
+                  DawnMemoryBatches.handleReconnect();
+               }
                // Recover conversation-list changes missed while the socket was
                // down (the list-changed frame is never replayed). Diffs into the
                // consent pill rather than reordering under the user; on first
@@ -464,10 +469,22 @@
                      type: 'set_active_conversation',
                      payload: { conversation_id: savedConvId },
                   });
+                  // Its memory markers, as a load would ask for them (batches
+                  // recorded or changed while disconnected).
+                  if (window.DawnMemoryMarker) {
+                     DawnMemoryMarker.conversationLoaded(savedConvId);
+                  }
                }
                break;
             case 'config':
                // Config payload may contain sensitive data - don't log full contents
+               // What memory learned per batch: offered when the daemon has it.
+               if (window.DawnMemoryBatches) {
+                  DawnMemoryBatches.setEnabled(
+                     Array.isArray(msg.payload.features) &&
+                        msg.payload.features.includes('memory_batches')
+                  );
+               }
                if (msg.payload.audio_chunk_ms) {
                   DawnAudioCapture.setAudioChunkMs(msg.payload.audio_chunk_ms);
                   console.log('Audio chunk size set to:', msg.payload.audio_chunk_ms, 'ms');
@@ -887,6 +904,7 @@
                break;
             case 'delete_memory_fact_response':
                DawnMemory.handleDeleteFactResponse(msg.payload);
+               if (window.DawnMemoryBatches) DawnMemoryBatches.handleFactDeleted(msg.payload);
                break;
             case 'delete_memory_preference_response':
                DawnMemory.handleDeletePreferenceResponse(msg.payload);
@@ -943,6 +961,19 @@
             case 'restore_memory_fact_response':
                if (window.DawnMemoryMerged) DawnMemoryMerged.handleRestoreResponse(msg.payload);
                break;
+            // What memory learned per batch (memory_batches.js, memory-marker.js)
+            case 'list_memory_batches_response':
+               if (window.DawnMemoryBatches) DawnMemoryBatches.handleListResponse(msg.payload);
+               break;
+            case 'undo_memory_batch_response':
+               if (window.DawnMemoryBatches) DawnMemoryBatches.handleUndoResponse(msg.payload);
+               break;
+            case 'keep_memory_op_response':
+               if (window.DawnMemoryBatches) DawnMemoryBatches.handleKeepResponse(msg.payload);
+               break;
+            case 'memory_batch':
+               if (window.DawnMemoryBatches) DawnMemoryBatches.handleBatch(msg.payload);
+               break;
             // Contacts management responses
             case 'contacts_list_response':
                if (typeof DawnContacts !== 'undefined')
@@ -991,6 +1022,10 @@
             case 'doc_library_toggle_global_response':
                if (typeof DawnDocLibrary !== 'undefined')
                   DawnDocLibrary.handleToggleGlobalResponse(msg.payload);
+               break;
+            case 'set_document_own_response':
+               if (typeof DawnDocLibrary !== 'undefined')
+                  DawnDocLibrary.handleSetOwnResponse(msg.payload);
                break;
             case 'doc_library_note_save_response':
                if (typeof DawnDocLibrary !== 'undefined')
@@ -1682,6 +1717,10 @@
          // no-opping the refresh pill, infinite scroll, and reconnect re-sync.
          if (typeof DawnHistory !== 'undefined' && DawnHistory.handleDisconnect) {
             DawnHistory.handleDisconnect();
+         }
+         // Same for the Learned tab's and the markers' page requests.
+         if (window.DawnMemoryBatches) {
+            DawnMemoryBatches.handleDisconnect();
          }
          // Clear the composer working-indicator for the same reason: a socket drop
          // mid-tool-loop would otherwise leave a lit "Using Tools" reactor pinned to

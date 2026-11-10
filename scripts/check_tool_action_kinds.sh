@@ -96,7 +96,8 @@ for f in $FILES; do
 done
 
 # Rule 8: the tools that declare TOOL_RESULTS_OWN are exactly the names in
-# include/tools/tool_own_results.h (the list code without the registry reads),
+# include/tools/tool_own_results.h (its ALWAYS and FRAMED lists, which code
+# without the registry reads),
 # and its exception pair is exactly the one action whose results differ from
 # its tool's.
 if [ -z "${CHECK_TOOL_KINDS_FILES:-}" ]; then
@@ -109,7 +110,7 @@ if [ -z "${CHECK_TOOL_KINDS_FILES:-}" ]; then
          print "$1\n" if $body =~ /\.name\s*=\s*"([^"]+)"/;
       }' src/tools/*.c | sort -u)"
    listed="$(perl -0777 -ne '
-      if (/#define TOOL_OWN_RESULTS_NAMES((?:[^\n]*\\\n)*[^\n]*)\n/) {
+      while (/#define TOOL_OWN_RESULTS_(?:ALWAYS|FRAMED)_NAMES((?:[^\n]*\\\n)*[^\n]*)\n/g) {
          my $l = $1;
          print "$1\n" while $l =~ /"([a-z_]+)"/g;
       }' include/tools/tool_own_results.h | sort -u)"

@@ -789,6 +789,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_restore.c
         src/webui/webui_memory.c
         src/webui/webui_memory_merged.c
+        src/webui/webui_memory_batches.c
         src/webui/webui_config.c
         src/webui/webui_reasoning.c
         src/webui/webui_session.c
@@ -1018,6 +1019,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v111.c
     src/auth/auth_db_migrations_v112.c
     src/auth/auth_db_migrations_v113.c
+    src/auth/auth_db_migrations_v114.c
     src/auth/auth_db_migrations_v115.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
@@ -1065,6 +1067,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_db_provenance.c
     src/memory/memory_db_forget.c
     src/memory/memory_db_consolidation.c
+    src/memory/memory_db_consolidation_undo.c
     src/core/focus/focus_source.c
     src/core/focus/focus_recency.c
     src/core/focus/focus_candidate_helpers.c
@@ -1089,6 +1092,8 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_candidates.c
     src/memory/memory_consolidate.c
     src/memory/memory_consolidate_ops.c
+    src/memory/memory_consolidation_undo.c
+    src/memory/memory_consolidation_view.c
     src/memory/memory_extraction_queue.c
     src/memory/memory_extraction_slots.c
     src/memory/memory_extraction_input.c
