@@ -2674,11 +2674,6 @@ int webui_filter_command_tags(session_t *session,
    return text_filter_command_tags_to_buffer(&session->cmd_tag_filter, text, out_buf, out_size);
 }
 
-/* Per-delta stream working-buffer size.  The frame field `ws_response_t.stream.text`
- * is 1024 bytes and snprintf-truncates there, so the intermediate strip buffer
- * never needs to exceed it (with a margin, a round number). */
-#define WEBUI_STREAM_DELTA_BUF 1088
-
 /**
  * @brief Emit one already-tag-stripped delta chunk to the stream.
  *
@@ -2715,21 +2710,19 @@ static void webui_emit_clean_delta(session_t *session, const char *text) {
    queue_response(&resp);
 }
 
-/**
- * @brief Send streaming text to WebUI with command tag filtering
- *
- * Filters <command>...</command> tags when in legacy mode (native tools disabled).
- * Automatically starts the stream on first content. Thread-safe per session.
- */
-void webui_send_stream_delta(session_t *session, const char *text) {
-   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2 &&
-                    session->type != SESSION_TYPE_JOB)) {
-      return;
-   }
+/* A thinking delta has no tag filter: a piece is a frame's text less its NUL.  A
+ * delta piece, plus the <cited> filter's held bytes (under CITED_TAG_BUF_SIZE)
+ * and a NUL, fits a frame's text. */
+#define WEBUI_THINKING_DELTA_PIECE (WEBUI_STREAM_TEXT_SIZE - 1)
+_Static_assert(WEBUI_STREAM_DELTA_PIECE <= TEXT_PIECE_MAX, "delta piece exceeds TEXT_PIECE_MAX");
+_Static_assert(WEBUI_STREAM_DELTA_PIECE + (CITED_TAG_BUF_SIZE - 1) + 1 <= WEBUI_STREAM_TEXT_SIZE,
+               "a filtered delta piece must fit a frame's text");
+_Static_assert(WEBUI_THINKING_DELTA_PIECE <= TEXT_PIECE_MAX,
+               "thinking piece exceeds TEXT_PIECE_MAX");
 
-   if (!text || text[0] == '\0') {
-      return;
-   }
+/* One piece of a delta (webui_send_stream_delta). */
+static void webui_stream_delta_piece(const char *text, void *ctx) {
+   session_t *session = (session_t *)ctx;
 
    /* Strip the live <cited> memory-citation tag on EVERY stream path.  The
     * finalizer only cleans the completed/persisted copy; the browser renders
@@ -2739,7 +2732,7 @@ void webui_send_stream_delta(session_t *session, const char *text) {
     * rather than inside the native one.  Stateful: a tag may split across deltas;
     * held-back partial-opener bytes surface on a later delta or the stream-end
     * flush. */
-   char cited_clean[WEBUI_STREAM_DELTA_BUF];
+   char cited_clean[sizeof(((ws_response_t *)0)->stream.text)];
    text_filter_cited_tags_to_buffer(&session->cited_tag_filter, text, cited_clean,
                                     sizeof(cited_clean));
    if (cited_clean[0] == '\0') {
@@ -2754,6 +2747,22 @@ void webui_send_stream_delta(session_t *session, const char *text) {
 
    /* Legacy command tag mode: filter the cited-stripped text for <command> tags. */
    text_filter_command_tags(&session->cmd_tag_filter, cited_clean, webui_filter_output, session);
+}
+
+/**
+ * @brief Send streaming text to WebUI with command tag filtering
+ *
+ * Filters <command>...</command> tags when in legacy mode (native tools disabled).
+ * Automatically starts the stream on first content. Thread-safe per session.
+ * A delta longer than a frame's text goes out in pieces, none lost.
+ */
+void webui_send_stream_delta(session_t *session, const char *text) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2 &&
+                    session->type != SESSION_TYPE_JOB)) {
+      return;
+   }
+
+   text_split_pieces(text, WEBUI_STREAM_DELTA_PIECE, webui_stream_delta_piece, session);
 }
 
 void webui_send_stream_end(session_t *session, const char *reason) {
@@ -2845,14 +2854,9 @@ void webui_send_thinking_start(session_t *session, const char *provider) {
              p, session->session_id);
 }
 
-void webui_send_thinking_delta(session_t *session, const char *text) {
-   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_JOB)) {
-      return;
-   }
-
-   if (!text || text[0] == '\0') {
-      return;
-   }
+/* One frame of a thinking delta (webui_send_thinking_delta). */
+static void webui_thinking_delta_piece(const char *text, void *ctx) {
+   session_t *session = (session_t *)ctx;
 
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_THINKING_DELTA,
@@ -2864,6 +2868,15 @@ void webui_send_thinking_delta(session_t *session, const char *text) {
    safe_strscpy(resp.stream.text, text);
 
    queue_response(&resp);
+}
+
+/* A thinking delta longer than a frame's text goes out in pieces, none lost. */
+void webui_send_thinking_delta(session_t *session, const char *text) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_JOB)) {
+      return;
+   }
+
+   text_split_pieces(text, WEBUI_THINKING_DELTA_PIECE, webui_thinking_delta_piece, session);
 }
 
 void webui_send_thinking_end(session_t *session, bool has_content) {

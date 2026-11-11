@@ -26,6 +26,7 @@
 
 #include "core/text_filter.h"
 #include "unity.h"
+#include "webui/webui_server.h" /* WEBUI_STREAM_DELTA_PIECE */
 
 static cmd_tag_filter_state_t s_state;
 static cited_tag_filter_state_t s_cited;
@@ -496,6 +497,151 @@ static void test_emote_strip_null_and_no_name_out(void) {
 
 /* ── main ───────────────────────────────────────────────────────────────── */
 
+/* ── text_split_pieces ──────────────────────────────────────────────────── */
+
+/* Append @p add to the NUL-terminated @p dst of @p size bytes, cut to fit. */
+static void append(char *dst, size_t size, const char *add) {
+   size_t have = strlen(dst);
+   size_t n = strlen(add);
+   if (n > size - have - 1) {
+      n = size - have - 1;
+   }
+   memcpy(dst + have, add, n);
+   dst[have + n] = '\0';
+}
+
+typedef struct {
+   char out[2048];
+   size_t max_seen;
+   int calls;
+   int broken; /* pieces that start or end inside a character */
+   const char *first_ptr;
+} pieces_t;
+
+/* True when @p s starts on a character and ends with a complete one. */
+static bool whole_characters(const char *s) {
+   const unsigned char *p = (const unsigned char *)s;
+   while (*p) {
+      int len;
+      if (*p < 0x80) {
+         len = 1;
+      } else if ((*p & 0xE0) == 0xC0) {
+         len = 2;
+      } else if ((*p & 0xF0) == 0xE0) {
+         len = 3;
+      } else if ((*p & 0xF8) == 0xF0) {
+         len = 4;
+      } else {
+         return false; /* a continuation byte (0x80..0xBF) where a character starts */
+      }
+      for (int i = 1; i < len; i++) {
+         if ((p[i] & 0xC0) != 0x80) {
+            return false; /* the character is cut short */
+         }
+      }
+      p += len;
+   }
+   return true;
+}
+
+static void collect_piece(const char *piece, void *ctx) {
+   pieces_t *p = (pieces_t *)ctx;
+   size_t n = strlen(piece);
+   if (!whole_characters(piece)) {
+      p->broken++;
+   }
+   if (n > p->max_seen) {
+      p->max_seen = n;
+   }
+   if (p->calls++ == 0) {
+      p->first_ptr = piece;
+   }
+   append(p->out, sizeof(p->out), piece);
+}
+
+static void test_split_pieces_short_passes_through(void) {
+   pieces_t p = { 0 };
+   const char *text = "Hello world";
+   text_split_pieces(text, 64, collect_piece, &p);
+   TEST_ASSERT_EQUAL_INT(1, p.calls);
+   TEST_ASSERT_EQUAL_PTR(text, p.first_ptr);
+   TEST_ASSERT_EQUAL_STRING(text, p.out);
+
+   pieces_t none = { 0 };
+   text_split_pieces("", 64, collect_piece, &none);
+   text_split_pieces(NULL, 64, collect_piece, &none);
+   TEST_ASSERT_EQUAL_INT(0, none.calls);
+}
+
+/* Each piece ends on a character: "é" (2 bytes) and "€" (3 bytes) cross every
+ * cut point of a 7-byte limit somewhere in the run. */
+static void test_split_pieces_never_splits_a_character(void) {
+   char text[512] = "";
+   for (int i = 0; i < 40; i++) {
+      strcat(text, "a\xc3\xa9\xe2\x82\xac"); /* aé€ */
+   }
+   pieces_t p = { 0 };
+   text_split_pieces(text, 7, collect_piece, &p);
+   TEST_ASSERT_EQUAL_STRING(text, p.out);
+   TEST_ASSERT_TRUE(p.max_seen <= 7);
+   TEST_ASSERT_TRUE(p.calls > 1);
+   TEST_ASSERT_EQUAL_INT(0, p.broken);
+}
+
+/* The TTS stream's filter buffer and piece (session_manager_llm.c): one filtered
+ * piece is one stream delta. */
+#define FILTER_BUF (WEBUI_STREAM_DELTA_PIECE + 1)
+#define PIECE_MAX (FILTER_BUF - CMD_TAG_BUF_SIZE)
+
+typedef struct {
+   char out[2048];
+   int calls;
+} filtered_t;
+
+static void filter_piece(const char *piece, void *ctx) {
+   filtered_t *f = (filtered_t *)ctx;
+   char filtered[FILTER_BUF];
+   text_filter_command_tags_to_buffer(&s_state, piece, filtered, sizeof(filtered));
+   append(f->out, sizeof(f->out), filtered);
+   f->calls++;
+}
+
+/* A chunk longer than the filter buffer, a tag across the piece boundary:
+ * filtered piece by piece (as the TTS stream does) nothing is lost and the tag
+ * is still removed, where filtering it whole into the buffer cuts it short. */
+static void test_split_pieces_chunk_longer_than_filter_buffer(void) {
+   static const char tag[] = "<command>hidden</command>";
+   const size_t before = PIECE_MAX - 4; /* "<com" ends the first piece */
+   char text[2048] = "";
+   char expected[2048] = "";
+   size_t n = 0;
+   while (n < before) {
+      /* "é" (2 bytes) along the way, ASCII where only one byte is left */
+      const char *add = (n % 10 == 8 && before - n >= 2) ? "\xc3\xa9" : "x";
+      strcat(text, add);
+      n += strlen(add);
+   }
+   strcat(expected, text);
+   strcat(text, tag);
+   for (int i = 0; i < 300; i++) {
+      strcat(text, "y");
+      strcat(expected, "y");
+   }
+   TEST_ASSERT_EQUAL_INT(0, strncmp(text + before, tag, sizeof(tag) - 1));
+   TEST_ASSERT_TRUE(before < PIECE_MAX && PIECE_MAX < before + sizeof(tag) - 1);
+
+   char whole[FILTER_BUF];
+   filter_to_buf(text, whole, sizeof(whole));
+   TEST_ASSERT_TRUE(strlen(whole) < strlen(expected));
+
+   text_filter_reset(&s_state);
+   filtered_t f = { 0 };
+   text_split_pieces(text, PIECE_MAX, filter_piece, &f);
+   TEST_ASSERT_EQUAL_INT(2, f.calls);
+   TEST_ASSERT_EQUAL_STRING(expected, f.out);
+   TEST_ASSERT_NULL(strstr(f.out, "hidden"));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_no_tags);
@@ -554,5 +700,8 @@ int main(void) {
    RUN_TEST(test_emote_strip_utf8_neighbours_untouched);
    RUN_TEST(test_emote_strip_mid_text_keeps_words_apart);
    RUN_TEST(test_emote_strip_null_and_no_name_out);
+   RUN_TEST(test_split_pieces_short_passes_through);
+   RUN_TEST(test_split_pieces_never_splits_a_character);
+   RUN_TEST(test_split_pieces_chunk_longer_than_filter_buffer);
    return UNITY_END();
 }
