@@ -209,7 +209,8 @@ static int pref_list_run(sqlite3_stmt *const *stmtp,
    sqlite3_bind_int(stmt, 3, offset);
 
    int count = 0;
-   while (count < max_prefs && sqlite3_step(stmt) == SQLITE_ROW) {
+   int rc = SQLITE_DONE;
+   while (count < max_prefs && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {
       populate_pref_from_row(stmt, &out_prefs[count]);
       count++;
    }
@@ -218,7 +219,8 @@ static int pref_list_run(sqlite3_stmt *const *stmtp,
    AUTH_DB_UNLOCK();
    if (count_out)
       *count_out = count;
-   return MEMORY_DB_SUCCESS;
+   /* A step error ends the read early: report it, not a short list. */
+   return (rc == SQLITE_ROW || rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
 int memory_db_pref_list(int user_id,
