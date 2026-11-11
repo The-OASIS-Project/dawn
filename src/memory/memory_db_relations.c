@@ -42,6 +42,7 @@
 
 #define AUTH_DB_INTERNAL_ALLOWED
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -962,77 +963,162 @@ int memory_db_relation_list_by_object_at(int user_id,
                                  object_entity_id, as_of_ts, out, max, count_out);
 }
 
-int memory_db_relation_list_with_canonical_roots_by_user(int user_id,
-                                                         memory_relation_t *out,
-                                                         int64_t *subj_roots,
-                                                         int64_t *obj_roots,
-                                                         int max,
-                                                         int *count_out) {
+/* A JSON array of @p ids ("[1,2,3]") for json_each(); NULL on failure.
+ * Caller frees. */
+static char *ids_json(const int64_t *ids, int n) {
+   const size_t cap = (size_t)n * 21 + 3;
+   char *buf = malloc(cap);
+   if (!buf) {
+      return NULL;
+   }
+   size_t len = 0;
+   buf[len++] = '[';
+   for (int i = 0; i < n; i++) {
+      char num[24];
+      int w = snprintf(num, sizeof(num), i ? ",%lld" : "%lld", (long long)ids[i]);
+      if (w < 0 || (size_t)w >= sizeof(num) || (size_t)w + 2 > cap - len) {
+         free(buf);
+         return NULL;
+      }
+      memcpy(buf + len, num, (size_t)w);
+      len += (size_t)w;
+   }
+   buf[len++] = ']';
+   buf[len] = '\0';
+   return buf;
+}
+
+int memory_db_relation_list_for_entities(int user_id,
+                                         const int64_t *entity_ids,
+                                         int n_ids,
+                                         int per_dir_max,
+                                         bool with_incoming,
+                                         memory_card_relation_t **out,
+                                         int *count_out) {
    if (count_out)
       *count_out = 0;
-   if (!out || !subj_roots || !obj_roots || max <= 0)
+   if (!out || !count_out || n_ids < 0 || (n_ids > 0 && !entity_ids))
       return MEMORY_DB_FAILURE;
+   *out = NULL;
+   if (n_ids == 0)
+      return MEMORY_DB_SUCCESS;
 
-   AUTH_DB_LOCK_OR_FAIL();
+   /* cls: every entity whose relations belong on a listed card, with that
+    * card: the listed entity itself (an alias id lists nothing of its own)
+    * and the aliases linked to it.  cand: each member's strongest rows per
+    * direction (outgoing, then incoming from outside its class), at most the
+    * limit each, so no member's whole edge list is ranked; ranked then keeps
+    * a card's strongest across its members.  tot: a card's full count per
+    * direction, from index counts, so the limit can be told.  A negative
+    * ?3 is no limit (SQLite reads LIMIT -1 as unlimited).
+    *
+    * The CROSS JOINs fix the join order: driven from the listed ids through
+    * the subject/object indexes, never a scan of the user's whole relation
+    * set (+x.user_id keeps the planner off the user_id indexes). */
+   static const char sql[] =
+       "WITH cls(id, card) AS ( "
+       "  SELECT e.id, e.id FROM json_each(?2) j CROSS JOIN memory_entities e ON e.id = j.value "
+       "   WHERE e.user_id = ?1 AND e.canonical_id IS NULL "
+       "  UNION ALL "
+       "  SELECT e.id, e.canonical_id FROM json_each(?2) j "
+       "   CROSS JOIN memory_entities e ON e.canonical_id = j.value WHERE e.user_id = ?1), "
+       "cand(card, incoming, rid, mc) AS ( "
+       "  SELECT c.card, 0, r.id, r.mention_count FROM cls c "
+       "   CROSS JOIN memory_relations r ON r.id IN ( "
+       "     SELECT x.id FROM memory_relations x WHERE x.subject_entity_id = c.id AND +x.user_id = "
+       "?1 "
+       "      ORDER BY x.mention_count DESC, x.id DESC LIMIT ?3) "
+       "  UNION ALL "
+       "  SELECT c.card, 1, r.id, r.mention_count FROM cls c "
+       "   CROSS JOIN memory_relations r ON r.id IN ( "
+       "     SELECT x.id FROM memory_relations x LEFT JOIN memory_entities s ON s.id = "
+       "x.subject_entity_id "
+       "      WHERE x.object_entity_id = c.id AND +x.user_id = ?1 "
+       "        AND COALESCE(s.canonical_id, s.id, 0) <> c.card "
+       "      ORDER BY x.mention_count DESC, x.id DESC LIMIT ?3) "
+       "   WHERE ?4), "
+       "tot(card, incoming, total) AS ( "
+       "  SELECT c.card, 0, SUM((SELECT COUNT(*) FROM memory_relations x "
+       "                          WHERE x.subject_entity_id = c.id AND +x.user_id = ?1)) "
+       "   FROM cls c GROUP BY c.card "
+       "  UNION ALL "
+       "  SELECT c.card, 1, SUM((SELECT COUNT(*) FROM memory_relations x "
+       "                          LEFT JOIN memory_entities s ON s.id = x.subject_entity_id "
+       "                          WHERE x.object_entity_id = c.id AND +x.user_id = ?1 "
+       "                            AND COALESCE(s.canonical_id, s.id, 0) <> c.card)) "
+       "   FROM cls c WHERE ?4 GROUP BY c.card), "
+       "ranked AS (SELECT card, incoming, rid, "
+       "  ROW_NUMBER() OVER (PARTITION BY card, incoming ORDER BY mc DESC, rid DESC) AS rn FROM "
+       "cand) "
+       "SELECT r.id, r.subject_entity_id, r.relation, "
+       "       CASE WHEN k.incoming THEN COALESCE(s.canonical_id, s.id, 0) "
+       "            ELSE r.object_entity_id END, "
+       "       CASE WHEN k.incoming THEN sc.name ELSE COALESCE(e.name, r.object_value) END, "
+       "       r.confidence, COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
+       "       r.mention_count, r.outside, k.card, k.incoming, t.total "
+       "FROM ranked k JOIN tot t ON t.card = k.card AND t.incoming = k.incoming "
+       "CROSS JOIN memory_relations r ON r.id = k.rid "
+       "LEFT JOIN memory_entities e ON e.id = r.object_entity_id "
+       "LEFT JOIN memory_entities s ON s.id = r.subject_entity_id "
+       "LEFT JOIN memory_entities sc ON sc.id = COALESCE(s.canonical_id, s.id) "
+       "WHERE ?3 < 0 OR k.rn <= ?3 "
+       "ORDER BY k.card, k.incoming, k.rn";
 
-   /* Single query: all relations for this user with canonical-root id
-    * resolved per side via COALESCE(canonical_id, id).  Object side reuses
-    * the existing `e` JOIN that resolves object_name; subject side gets
-    * its own JOIN aliased `s` (subject_entity_id is NOT NULL per schema,
-    * so the s row always exists for valid relations).
-    *
-    * subj_root / obj_root: 0 means orphaned (LEFT JOIN missed) — callers
-    * MUST filter via "root == specific_entity_id" rather than "root != 0"
-    * to avoid attributing orphaned-subject relations to any entity card.
-    *
-    * No ORDER BY — sorting on the computed subj_root materializes a temp
-    * B-tree (verified 2026-05-20 via EXPLAIN QUERY PLAN), and no caller
-    * depends on iteration order.  valid_from/valid_to appended in v33,
-    * mention_count appended in v49 — column order matches
-    * populate_relation_from_row.  Roots follow at indices 9/10.
-    *
-    * EXPLAIN QUERY PLAN (Jetson, 2026-05-20):
-    *   SEARCH r USING INDEX idx_memory_relations_user_validity (user_id=?)
-    *   SEARCH e USING INTEGER PRIMARY KEY (rowid=?)
-    *   SEARCH s USING INTEGER PRIMARY KEY (rowid=?)
-    * Three indexed seeks; no scans, no temp tables. */
-   sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
-       "       COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
-       "       COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
-       "       r.mention_count, r.outside, "
-       "       COALESCE(s.canonical_id, s.id, 0) AS subj_root, "
-       "       COALESCE(e.canonical_id, e.id, 0) AS obj_root "
-       "FROM memory_relations r "
-       "LEFT JOIN memory_entities e ON r.object_entity_id = e.id "
-       "LEFT JOIN memory_entities s ON r.subject_entity_id = s.id "
-       "WHERE r.user_id = ? "
-       "LIMIT ?",
-       -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
+   char *ids = ids_json(entity_ids, n_ids);
+   if (!ids) {
       return MEMORY_DB_FAILURE;
    }
 
+   /* Locked by hand: the ids buffer must be freed on the not-ready path. */
+   pthread_mutex_lock(&s_db.mutex);
+   sqlite3_stmt *stmt = NULL;
+   if (!s_db.initialized || sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      free(ids);
+      return MEMORY_DB_FAILURE;
+   }
    sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_int(stmt, 2, max);
+   sqlite3_bind_text(stmt, 2, ids, -1, SQLITE_STATIC);
+   sqlite3_bind_int(stmt, 3, per_dir_max > 0 ? per_dir_max : -1);
+   sqlite3_bind_int(stmt, 4, with_incoming ? 1 : 0);
 
+   memory_card_relation_t *rows = NULL;
    int count = 0;
-   while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
-      populate_relation_from_row(stmt, &out[count]);
-      /* Roots are appended after the columns populate_relation_from_row
-       * reads (it stops at outside, index 9).  Indices 10/11 are ours. */
-      subj_roots[count] = sqlite3_column_int64(stmt, 10);
-      obj_roots[count] = sqlite3_column_int64(stmt, 11);
-      count++;
+   int cap = 0;
+   int rc = MEMORY_DB_SUCCESS;
+   int step;
+   while ((step = sqlite3_step(stmt)) == SQLITE_ROW) {
+      if (count == cap) {
+         const int next = cap ? cap * 2 : 64;
+         memory_card_relation_t *grown = realloc(rows, (size_t)next * sizeof(*rows));
+         if (!grown) {
+            rc = MEMORY_DB_FAILURE;
+            break;
+         }
+         rows = grown;
+         cap = next;
+      }
+      memory_card_relation_t *row = &rows[count++];
+      memset(row, 0, sizeof(*row));
+      populate_relation_from_row(stmt, &row->rel);
+      row->card_id = sqlite3_column_int64(stmt, 10);
+      row->incoming = sqlite3_column_int(stmt, 11) != 0;
+      row->total = sqlite3_column_int(stmt, 12);
+   }
+   if (rc == MEMORY_DB_SUCCESS && step != SQLITE_DONE) {
+      rc = MEMORY_DB_FAILURE;
    }
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
-   if (count_out)
-      *count_out = count;
+   free(ids);
+
+   if (rc != MEMORY_DB_SUCCESS) {
+      free(rows);
+      return rc;
+   }
+   *out = rows;
+   *count_out = count;
    return MEMORY_DB_SUCCESS;
 }
 

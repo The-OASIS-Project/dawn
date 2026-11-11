@@ -973,6 +973,24 @@ Search through stored memories.
 ```
 Response: `search_memory_response`
 
+#### `list_memory_entities`
+List entities (the Graph tab), most mentioned first.
+```json
+{"type": "list_memory_entities", "payload": {"limit": 20, "offset": 0}}
+```
+Response: `list_memory_entities_response`, with `entities`, `count` and `has_more`. Each
+entity (the same shape as the `entities` of `search_memory_response`) is a card: the entity and
+its aliases. Aliases are not listed on their own, but `count` and `has_more` count the entity rows
+read, aliases included: advance `offset` by `count`, not by `entities.length`.
+
+| Field | Meaning |
+|---|---|
+| `id`, `name`, `canonical_name`, `entity_type` | The entity |
+| `mention_count`, `first_seen`, `last_seen` | Across its aliases |
+| `alias_count`, `is_user_self` | Linked aliases; whether it is the user |
+| `relations` | Its relations, outgoing first, then incoming from outside the card. Each has `relation`, `object_name`, `object_entity_id`, `direction` (`out`/`in`), `confidence`, `mention_count`, and `valid_from`/`valid_to` when set. For `in`, `object_name`/`object_entity_id` name the other end's card |
+| `relations_total` | All of the card's relations. At most 50 per direction are sent, most seen first; when `relations_total` is larger, the rest exist but weren't sent |
+
 #### `get_memory_fact_source`
 Return the verbatim source conversation messages a fact was extracted from (memory provenance).
 ```json
@@ -2985,6 +3003,7 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `get_memory_stats` | `get_memory_stats_response` |
 | `list_memory_facts` | `list_memory_facts_response` |
 | `search_memory` | `search_memory_response` |
+| `list_memory_entities` | `list_memory_entities_response` |
 | `get_memory_fact_source` | `get_memory_fact_source_response` |
 | `delete_memory_fact` | `delete_memory_fact_response` |
 | `delete_all_memories` | `delete_all_memories_response` |
