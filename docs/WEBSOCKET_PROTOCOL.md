@@ -2020,7 +2020,8 @@ attached) or the message batch on attach (already-finished job). `complete` carr
 
 `stream_id` (unsigned integer) is the stream the reply was delivered on; 0 = none (a user
 message, a research report). It counts per session, so two sessions of one user on the same
-conversation can both have a stream N. `session_id` (unsigned integer, the value the `session`
+conversation can both have a stream N. `reasoning` (string) carries the reply's reasoning, and is
+present only when there is some. `session_id` (unsigned integer, the value the `session`
 frame sends) names the session whose turn wrote the row. It is present if and only if a non-job
 session's turn wrote the row (a typed or spoken WebUI message and its reply, a job result
 re-engaging a conversation a browser is viewing), and absent for a background job's answer (its
