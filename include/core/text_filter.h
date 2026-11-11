@@ -336,6 +336,38 @@ void text_filter_command_strip(char *text, bool truncate_orphan);
  */
 bool text_filter_emote_strip(char *text, char *name_out, size_t name_size);
 
+/* =============================================================================
+ * Pieces of a stream chunk
+ * ============================================================================= */
+
+#define TEXT_PIECE_MAX 1023 /* Longest piece text_split_pieces hands out */
+#define TEXT_PIECE_MIN 4    /* Shortest limit: the longest UTF-8 character */
+
+/** Receives one NUL-terminated piece of text_split_pieces' input. */
+typedef void (*text_piece_fn)(const char *piece, void *ctx);
+
+/**
+ * @brief Hand @p text to @p fn in order, in pieces of at most @p max_bytes
+ *
+ * For a caller that filters a stream chunk into a fixed buffer: a provider's
+ * chunk has no size limit.  Text no longer than @p max_bytes is passed through
+ * as is (the same pointer), in one call; longer text is copied out piece by
+ * piece.  Each cut is moved back over the continuation bytes (10xxxxxx) after
+ * it to the start of a character, so with valid UTF-8 every piece is whole
+ * characters.  Invalid UTF-8 is passed on byte for byte, nothing dropped or
+ * changed: a cut is placed by the same rule, and a run of continuation bytes
+ * reaching back to the piece's start is cut at @p max_bytes.  The tag filters
+ * keep their state across calls, so a tag cut between two pieces is handled
+ * as one cut between chunks.
+ *
+ * @param text      NUL-terminated text; NULL or "" calls nothing
+ * @param max_bytes Longest piece: 0 or over TEXT_PIECE_MAX means TEXT_PIECE_MAX,
+ *                  under TEXT_PIECE_MIN means TEXT_PIECE_MIN
+ * @param fn        Called once per piece
+ * @param ctx       Passed to @p fn
+ */
+void text_split_pieces(const char *text, size_t max_bytes, text_piece_fn fn, void *ctx);
+
 #ifdef __cplusplus
 }
 #endif

@@ -521,3 +521,41 @@ bool text_filter_emote_strip(char *text, char *name_out, size_t name_size) {
    }
    return found;
 }
+
+void text_split_pieces(const char *text, size_t max_bytes, text_piece_fn fn, void *ctx) {
+   if (!text || !text[0] || !fn) {
+      return;
+   }
+   if (max_bytes == 0 || max_bytes > TEXT_PIECE_MAX) {
+      max_bytes = TEXT_PIECE_MAX;
+   } else if (max_bytes < TEXT_PIECE_MIN) {
+      max_bytes = TEXT_PIECE_MIN; /* a shorter limit could cut inside a character */
+   }
+
+   size_t len = strlen(text);
+   if (len <= max_bytes) {
+      fn(text, ctx);
+      return;
+   }
+
+   char piece[TEXT_PIECE_MAX + 1];
+   while (len > 0) {
+      size_t n = len;
+      if (n > max_bytes) {
+         /* Back up off continuation bytes (10xxxxxx) to the start of the
+          * character the cut would split. */
+         n = max_bytes;
+         while (n > 0 && ((unsigned char)text[n] & 0xC0) == 0x80) {
+            n--;
+         }
+         if (n == 0) {
+            n = max_bytes; /* malformed: no character start in reach */
+         }
+      }
+      memcpy(piece, text, n);
+      piece[n] = '\0';
+      fn(piece, ctx);
+      text += n;
+      len -= n;
+   }
+}

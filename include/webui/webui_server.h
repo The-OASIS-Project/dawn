@@ -35,6 +35,7 @@
 
 #include <stdbool.h>
 
+#include "core/text_filter.h"  /* CITED_TAG_BUF_SIZE */
 #include "image_store.h"       /* IMAGE_ID_LEN */
 #include "webui/webui_audio.h" /* For WEBUI_MAX_RECORDING_SECONDS */
 
@@ -392,6 +393,17 @@ void webui_send_compaction_complete(struct session *session,
  * @note Sets session->llm_streaming_active = true
  */
 void webui_send_stream_start(struct session *session);
+
+/** Bytes of text one stream frame carries, NUL included (ws_response_t.stream.text) */
+#define WEBUI_STREAM_TEXT_SIZE 1024
+
+/**
+ * Longest piece of a delta webui_send_stream_delta filters at once: a held
+ * partial <cited> opener (under CITED_TAG_BUF_SIZE bytes) can come out ahead of
+ * it, and the result must still fit a frame.  A delta no longer than this is
+ * filtered whole, never split again.
+ */
+#define WEBUI_STREAM_DELTA_PIECE (WEBUI_STREAM_TEXT_SIZE - CITED_TAG_BUF_SIZE)
 
 /**
  * @brief Send incremental text chunk during LLM streaming

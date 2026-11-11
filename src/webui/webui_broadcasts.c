@@ -68,9 +68,9 @@
 #include "memory/memory_db_aliases.h"
 #include "tools/calendar_service.h"
 #include "utils/string_utils.h"
-#include "webui/webui_email_ref.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_memory_batches.h"
+#include "webui/webui_message_frame.h"
 #include "webui/webui_send.h" /* webui_sentence_audio_callback, webui_send_audio_end/_state */
 #include "webui/webui_server.h"
 
@@ -774,38 +774,16 @@ void webui_broadcast_message_appended_origin(int user_id,
       return;
    }
 
-   json_object *root = json_object_new_object();
-   json_object_object_add(root, "type", json_object_new_string("message_appended"));
-
-   json_object *p = json_object_new_object();
-   json_object_object_add(p, "conversation_id", json_object_new_int64(conv_id));
-   json_object_object_add(p, "message_id", json_object_new_int64(msg_id));
-   json_object_object_add(p, "role", json_object_new_string(role ? role : "assistant"));
-   json_object_object_add(p, "text", json_object_new_string(text));
-   /* Phase-0 cross-viewer fan-out fields (SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN §6a):
-    * reasoning lets a non-origin viewer render the E3 panel; stream_id lets the
-    * origin correlate + adopt instead of re-rendering. */
-   if (reasoning && reasoning[0]) {
-      json_object_object_add(p, "reasoning", json_object_new_string(reasoning));
-   }
-   json_object_object_add(p, "stream_id", json_object_new_int64((int64_t)stream_id));
-   webui_row_add_email_ref(p, role, email_ref);
-   json_object_object_add(root, "payload", p);
+   json_object *root = webui_message_appended_frame(conv_id, msg_id, role, text, reasoning,
+                                                    stream_id, origin, email_ref);
 
    /* browsers_only (SERVER_AUTHORITATIVE §8): message_appended is a transcript frame
     * a satellite renders nothing for — keep it strictly WEBUI, matching the
-    * frame-delivery capability matrix.  broadcast_json_to_user TAKES OWNERSHIP. */
-   if (!origin || !client_ref || !client_ref[0]) {
-      broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
-      return;
-   }
-   /* The sender's own connection gets a copy naming its turn (client_ref): if
+    * frame-delivery capability matrix.  broadcast_json_to_user TAKES OWNERSHIP.
+    * The sender's own connection gets a copy naming its turn (client_ref): if
     * its transcript echo is dropped, this copy still tells it which turn was
     * saved.  Other connections, whose refs are their own, get the plain frame. */
-   json_object_object_add(p, "client_ref", json_object_new_string(client_ref));
-   const char *with_ref = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
-   char *origin_json = with_ref ? strdup(with_ref) : NULL;
-   json_object_object_del(p, "client_ref");
+   char *origin_json = webui_message_appended_origin_json(root, origin, client_ref);
    broadcast_json_to_user_origin(user_id, root, /*browsers_only=*/true, origin, origin_json);
    free(origin_json);
 }
@@ -905,9 +883,13 @@ int webui_persist_final_answer(session_t *session,
          }
       }
 
-      /* One fan-out, stamped with this turn's stream_id so the origin adopts (browsers_only). */
-      conv_event_notify_message_appended(conv_id, (int)user_id, msg_id, "assistant", persist_body,
-                                         reasoning, atomic_load(&session->current_stream_id));
+      /* One fan-out, stamped with this turn's stream_id and session so the browser that
+       * streamed it adopts (browsers_only).  A job session belongs to no browser: its stream
+       * is fanned to every viewer of the job, so its row names no session. */
+      webui_broadcast_message_appended_origin((int)user_id, conv_id, msg_id, "assistant",
+                                              persist_body, reasoning,
+                                              atomic_load(&session->current_stream_id),
+                                              webui_message_origin(session), NULL, NULL);
    }
 
    free(combined);

@@ -1567,10 +1567,12 @@ static void *audio_worker_thread(void *arg) {
    /* Fan the user message out to every OTHER viewer of this conversation (§12c).
     * INVARIANT (mirrors webui_text_processing.c): guard on user_msg_id > 0 so a save
     * failure (id 0) emits ONLY the echo, never a second frame the client can't dedup —
-    * a spoken turn has no optimistic bubble, so an id-0 fan-out would double it. */
+    * a spoken turn has no optimistic bubble, so an id-0 fan-out would double it.
+    * The row names this session, as a typed user message does (an id > 0 means
+    * turn_conv > 0; the transcript is non-blank). */
    if (user_msg_id > 0 && conn && conn->auth_user_id > 0) {
-      conv_event_notify_message_appended(turn_conv, conn->auth_user_id, user_msg_id, "user",
-                                         transcript, NULL, 0);
+      webui_broadcast_message_appended_origin(conn->auth_user_id, turn_conv, user_msg_id, "user",
+                                              transcript, NULL, 0, session, NULL, NULL);
    }
 
 
