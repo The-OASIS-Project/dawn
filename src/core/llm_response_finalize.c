@@ -77,8 +77,8 @@ int llm_response_finalize(session_t *session, const char *raw_response, response
    if (session != NULL && session->type == SESSION_TYPE_LOCAL) {
       text_filter_emote_strip(clean, NULL, 0);
    }
-   text_filter_command_strip(clean, false); /* complete response: leave an orphan <command> */
-   text_filter_cited_strip(clean);          /* <cited>…</cited> (always removed) */
+   text_filter_end_of_turn_strip(clean);
+   text_filter_cited_strip(clean); /* <cited>…</cited> (always removed) */
 
    /* What the model was led to write that imitates DAWN's framing, or carries
     * the conversation's tag, doesn't stay in the conversation to pass for

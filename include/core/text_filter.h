@@ -18,7 +18,7 @@
  * enhancements, or additions to the project. These contributions become
  * part of the project and are adopted by the project author(s).
  *
- * Text filtering utilities for command tag stripping.
+ * Filters for the tags a model writes into its reply text.
  */
 
 #ifndef TEXT_FILTER_H
@@ -31,82 +31,14 @@
 extern "C" {
 #endif
 
-/* =============================================================================
- * Command Tag Constants
- *
- * Shared between text_filter and webui_server to ensure consistency.
- * ============================================================================= */
-
-#define CMD_TAG_OPEN "<command>"
-#define CMD_TAG_CLOSE "</command>"
-#define CMD_TAG_OPEN_LEN 9
-#define CMD_TAG_CLOSE_LEN 10
-#define CMD_TAG_BUF_SIZE 16     /* Enough for "</command>" (10) + margin */
-#define CMD_TAG_MAX_NESTING 100 /* Max nesting depth to prevent overflow */
-
 /**
- * @brief Command tag filter state
- *
- * Tracks state for filtering <command>...</command> tags from streaming text.
- * Must be initialized to zero before first use. Supports nested tags.
- */
-typedef struct {
-   char buffer[CMD_TAG_BUF_SIZE]; /**< Buffer for partial tag detection */
-   unsigned char len;             /**< Current length of partial tag buffer */
-   int nesting_depth;             /**< Nesting depth (0 = outside tags, >0 = inside) */
-} cmd_tag_filter_state_t;
-
-/**
- * @brief Output callback type for command tag filter
+ * @brief Output callback for the streaming tag filter
  *
  * @param text Filtered text chunk
  * @param len Length of text chunk
  * @param ctx User context
  */
 typedef void (*text_filter_output_fn)(const char *text, size_t len, void *ctx);
-
-/**
- * @brief Filter <command>...</command> tags from streaming text
- *
- * Uses a character-by-character state machine that handles partial tags
- * spanning chunk boundaries. Filtered text is emitted via callback.
- *
- * @param state Filter state (must be zeroed before first chunk)
- * @param text Input text to filter
- * @param output_fn Callback to emit filtered text
- * @param ctx User context passed to output_fn
- *
- * @note If stream ends with a partial tag buffer, content is silently dropped.
- */
-void text_filter_command_tags(cmd_tag_filter_state_t *state,
-                              const char *text,
-                              text_filter_output_fn output_fn,
-                              void *ctx);
-
-/**
- * @brief Filter command tags into a buffer
- *
- * Convenience wrapper that filters text into a fixed-size buffer.
- *
- * @param state Filter state (must be zeroed before first chunk)
- * @param text Input text to filter
- * @param out_buf Output buffer
- * @param out_size Size of output buffer
- * @return Length of filtered text written (excluding null terminator)
- */
-int text_filter_command_tags_to_buffer(cmd_tag_filter_state_t *state,
-                                       const char *text,
-                                       char *out_buf,
-                                       size_t out_size);
-
-/**
- * @brief Reset filter state
- *
- * Call this when starting a new stream or to clear partial tag state.
- *
- * @param state Filter state to reset
- */
-void text_filter_reset(cmd_tag_filter_state_t *state);
 
 /* =============================================================================
  * Memory-Citation Tag Constants
@@ -117,8 +49,7 @@ void text_filter_reset(cmd_tag_filter_state_t *state);
  * would reach the browser live (DOMPurify drops the unknown element but keeps
  * its inner text, leaking `M1,M5,M11`) before finalization runs.  This filter is
  * the live-stream strip seam — the streaming twin of the finalizer's strip.
- * Unlike command tags there is no nesting: everything between the open and close
- * is suppressed.
+ * There is no nesting: everything between the open and close is suppressed.
  * ============================================================================= */
 
 #define CITED_TAG_OPEN "<cited>"
@@ -146,12 +77,7 @@ void text_filter_reset(cmd_tag_filter_state_t *state);
 /* Prompt example of citing a tool-surfaced fact by id (see SURFACED_ID_FMT). */
 #define CITED_TAG_ID_EXAMPLE CITED_TAG_OPEN "ID:6432" CITED_TAG_CLOSE
 
-/* Command / end-of-turn tag grammar — the legacy `<command>…</command>` transport
- * and the `<end_of_turn>` marker some local models emit.  Shared by
- * text_filter_command_strip so the finalizer + every TTS path key off one source. */
-#define COMMAND_TAG_OPEN "<command>"
-#define COMMAND_TAG_CLOSE "</command>"
-#define COMMAND_TAG_CLOSE_LEN 10
+/* The end-of-turn marker some local models emit; the reply ends there. */
 #define END_OF_TURN_TAG "<end_of_turn>"
 
 /**
@@ -254,21 +180,14 @@ void text_filter_cited_strip(char *text);
 void text_filter_cited_normalize(char *text);
 
 /**
- * @brief Strip <command>…</command> pairs and truncate at <end_of_turn>, in place.
+ * @brief Truncate at the first <end_of_turn>, in place.
  *
- * The whole-string residual-tag scrub for the legacy command transport plus the
- * end-of-turn marker some local models emit. The single shared strip for the
- * response finalizer, local-voice TTS, and WebUI-audio TTS.
+ * The single shared cut for the response finalizer, local-voice TTS and
+ * WebUI-audio TTS.
  *
  * @param text NUL-terminated, mutable C string. NULL is tolerated (no-op).
- * @param truncate_orphan How to handle an orphan `<command>` opener (no closer):
- *   - true  (per-sentence TTS): drop from the opener to end-of-string, so a
- *           sentence that split mid-tag can't speak a partial `<command>`.
- *   - false (a complete response): leave the remainder as literal text — in an
- *           assembled response an unclosed `<command>` is more likely real prose
- *           than a truncated tag, so it is not destroyed.
  */
-void text_filter_command_strip(char *text, bool truncate_orphan);
+void text_filter_end_of_turn_strip(char *text);
 
 /* =============================================================================
  * Expression Tags
@@ -325,8 +244,8 @@ void text_filter_command_strip(char *text, bool truncate_orphan);
  * well, with no name, so it is never spoken: anything the opener starts that a
  * `]` closes on the same line within EMOTE_TAG_SPAN.  Otherwise it is text.
  *
- * Strip these BEFORE <command> and <cited>: removing one can join the text
- * around it, and the later strips must see the result.
+ * Strip these BEFORE <cited>: removing one can join the text around it, and
+ * the later strip must see the result.
  *
  * @param text      NUL-terminated, mutable C string. NULL is tolerated (no-op).
  * @param name_out  Receives the first vocabulary name found, lower-case, or ""

@@ -40,7 +40,6 @@
 #include "core/llm_response_finalize.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
-#include "core/text_filter.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_turn_blocks.h"
@@ -48,13 +47,15 @@
 #include "tools/time_utils.h"
 #include "utils/sentence_buffer.h"
 #include "utils/string_utils.h"
-#include "webui/webui_server.h" /* WEBUI_STREAM_DELTA_PIECE; the rest under ENABLE_WEBUI */
+#ifdef ENABLE_WEBUI
+#include "webui/webui_server.h"
+#endif
 
 /* =============================================================================
  * Streaming chunk callback
  *
- * Sends text to WebUI for real-time display.  Command-tag filtering is
- * handled by webui_send_stream_delta() internally.  Tracks timing metrics
+ * Sends text to WebUI for real-time display (webui_send_stream_delta() strips
+ * the <cited> tag and starts the stream).  Tracks timing metrics
  * for TTFT and token-rate visualization.  Used by session_llm_call() and
  * session_llm_call_with_tts_no_add() — the paths that don't run
  * through the sentence-buffer (TTS) layer.
@@ -110,7 +111,7 @@ static void session_text_chunk_callback(const char *chunk, void *userdata) {
          }
       }
 
-      /* Send to WebUI/satellite — filtering and stream_start handled internally */
+      /* Send to WebUI/satellite — tag strip and stream_start handled internally */
       webui_send_stream_delta(session, chunk);
    }
 #endif
@@ -243,12 +244,10 @@ static int llm_call_prepare(session_t *session,
    // Set command context for tool callbacks
    session_set_command_context(session);
 
-   // Reset streaming filter state for WebSocket, satellite, and job sessions
+   // Reset streaming state for WebSocket, satellite, and job sessions
    // (jobs stream too — see the callback above).
    if (session->type == SESSION_TYPE_WEBUI || session->type == SESSION_TYPE_DAP2 ||
        session->type == SESSION_TYPE_JOB) {
-      session->cmd_tag_filter.nesting_depth = 0;
-      session->cmd_tag_filter.len = 0;
       session->stream_had_content = false;
    }
 
@@ -316,7 +315,7 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
          webui_send_stream_end(session, reason);
       }
       // Fallback for non-streaming LLMs
-      if (response && !session->stream_had_content && session->cmd_tag_filter.nesting_depth == 0) {
+      if (response && !session->stream_had_content) {
          if (*response) {
             OLOG_INFO("Session %u: LLM didn't stream, sending full transcript",
                       session->session_id);
@@ -501,68 +500,11 @@ static void combined_sentence_callback(const char *sentence, void *userdata) {
    }
 }
 
-/* The filtered text of one piece of a chunk, sized so it goes out as one stream
- * delta (WEBUI_STREAM_DELTA_PIECE, never split again).  A held partial tag (under
- * CMD_TAG_BUF_SIZE bytes) can come out ahead of a piece, so a piece is at most
- * this buffer less that, and its output always fits. */
-#define COMBINED_FILTER_BUF (WEBUI_STREAM_DELTA_PIECE + 1)
-#define COMBINED_PIECE_MAX (COMBINED_FILTER_BUF - CMD_TAG_BUF_SIZE)
-_Static_assert(COMBINED_PIECE_MAX <= TEXT_PIECE_MAX, "combined piece exceeds TEXT_PIECE_MAX");
-_Static_assert(COMBINED_PIECE_MAX + (CMD_TAG_BUF_SIZE - 1) + 1 <= COMBINED_FILTER_BUF,
-               "a filtered piece must fit the filter buffer");
-
 /**
- * @brief One piece of a chunk (combined_chunk_callback)
+ * @brief Combined chunk callback - streams the text AND feeds the sentence buffer
  *
- * Each piece is:
- * 1. Filtered to remove <command>...</command> tags
- * 2. Sent to WebUI for real-time text display
- * 3. Fed to sentence buffer for TTS audio generation
- *
- * By filtering once and passing to both consumers, we avoid duplicate
- * command tag tracking in the sentence buffer.
- */
-static void combined_piece(const char *piece, void *userdata) {
-   combined_stream_ctx_t *ctx = (combined_stream_ctx_t *)userdata;
-   session_t *session = ctx->session;
-
-   /* Filter command tags ONCE for both consumers (WebUI and TTS).
-    * This updates session state and returns filtered text.
-    * Both consumers use the same filtered output for consistency. */
-   char filtered[COMBINED_FILTER_BUF];
-   int len;
-
-   if (session->cmd_tag_filter_bypass) {
-      /* Native tools mode: no command tags to filter, pass through */
-      len = (int)strlen(piece);
-      memcpy(filtered, piece, (size_t)len + 1);
-   } else {
-      /* Legacy mode: filter <command>...</command> tags */
-      len = text_filter_command_tags_to_buffer(&session->cmd_tag_filter, piece, filtered,
-                                               sizeof(filtered));
-   }
-
-   if (len > 0) {
-#ifdef ENABLE_WEBUI
-      // 1. Send filtered text to WebUI for real-time display
-      if (session->type == SESSION_TYPE_WEBUI) {
-         /* Send pre-filtered text (no command tags to filter) */
-         webui_send_stream_delta(session, filtered);
-      }
-#endif
-
-      // 2. Feed filtered text to sentence buffer for TTS
-      if (ctx->sentence_buffer) {
-         sentence_buffer_feed(ctx->sentence_buffer, filtered);
-      }
-   }
-}
-
-/**
- * @brief Combined chunk callback - does text streaming AND feeds sentence buffer
- *
- * A provider's chunk has no size limit (some stream whole paragraphs), so it is
- * handled in pieces that fit the filter buffer (combined_piece).
+ * The chunk goes to the WebUI for real-time display and to the sentence buffer
+ * for TTS audio.
  */
 static void combined_chunk_callback(const char *chunk, void *userdata) {
    combined_stream_ctx_t *ctx = (combined_stream_ctx_t *)userdata;
@@ -585,7 +527,7 @@ static void combined_chunk_callback(const char *chunk, void *userdata) {
    session->last_token_ms = now_ms;
 
 #ifdef ENABLE_WEBUI
-   /* Browser metrics, once per chunk (WebSocket only) */
+   /* Browser metrics and the text (WebSocket only) */
    if (session->type == SESSION_TYPE_WEBUI) {
       int ttft_ms = 0;
       float token_rate = 0.0f;
@@ -605,10 +547,14 @@ static void combined_chunk_callback(const char *chunk, void *userdata) {
       if (session->stream_token_count % 5 == 0 || session->stream_token_count == 1) {
          webui_send_metrics_update(session, "thinking", ttft_ms, token_rate, -1);
       }
+
+      webui_send_stream_delta(session, chunk);
    }
 #endif
 
-   text_split_pieces(chunk, COMBINED_PIECE_MAX, combined_piece, ctx);
+   if (ctx->sentence_buffer) {
+      sentence_buffer_feed(ctx->sentence_buffer, chunk);
+   }
 }
 
 char *session_llm_call_with_tts(session_t *session,
