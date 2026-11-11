@@ -978,8 +978,9 @@ void send_error_impl_ex(struct lws *wsi,
 /**
  * @brief A persisted message fanned out to every browser of its user, the
  *        sender's own connection getting a copy that names its turn
- * @param origin     The session whose turn wrote it (its connection gets
- *                   payload.client_ref); NULL: every connection gets the same
+ * @param origin     The session whose turn wrote it (payload.session_id; its
+ *                   connection gets payload.client_ref); NULL: no session_id,
+ *                   and every connection gets the same
  * @param client_ref That turn's client_ref; NULL or "" sends none
  * @param email_ref  A user row's email_ref (messages.email_ref), or NULL
  * Otherwise as webui_broadcast_message_appended (conv_event.h).

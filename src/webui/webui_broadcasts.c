@@ -789,6 +789,11 @@ void webui_broadcast_message_appended_origin(int user_id,
       json_object_object_add(p, "reasoning", json_object_new_string(reasoning));
    }
    json_object_object_add(p, "stream_id", json_object_new_int64((int64_t)stream_id));
+   /* stream_id counts per session: the session lets a client tell its own stream N
+    * from another session's stream N on the same conversation. */
+   if (origin != NULL) {
+      json_object_object_add(p, "session_id", json_object_new_int64(origin->session_id));
+   }
    webui_row_add_email_ref(p, role, email_ref);
    json_object_object_add(root, "payload", p);
 
@@ -905,9 +910,14 @@ int webui_persist_final_answer(session_t *session,
          }
       }
 
-      /* One fan-out, stamped with this turn's stream_id so the origin adopts (browsers_only). */
-      conv_event_notify_message_appended(conv_id, (int)user_id, msg_id, "assistant", persist_body,
-                                         reasoning, atomic_load(&session->current_stream_id));
+      /* One fan-out, stamped with this turn's stream_id and session so the browser that
+       * streamed it adopts (browsers_only).  A job session belongs to no browser: its stream
+       * is fanned to every viewer of the job, so its row names no session. */
+      const session_t *origin = session->type == SESSION_TYPE_JOB ? NULL : session;
+      webui_broadcast_message_appended_origin((int)user_id, conv_id, msg_id, "assistant",
+                                              persist_body, reasoning,
+                                              atomic_load(&session->current_stream_id), origin,
+                                              NULL, NULL);
    }
 
    free(combined);
