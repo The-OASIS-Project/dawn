@@ -2695,6 +2695,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
            ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
            ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
            ${SRC_ROOT}/src/llm/llm_tool_view.c
@@ -2825,6 +2826,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
            ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
            ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
            ${SRC_ROOT}/src/llm/llm_tool_view.c
@@ -2950,6 +2952,7 @@ dawn_add_unit_test(test_memory_supersede_kinds
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
            ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
            ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
            ${SRC_ROOT}/src/llm/llm_tool_view.c
@@ -3078,6 +3081,7 @@ set(MEMORY_CONSOLIDATE_TEST_SOURCES
     ${SRC_ROOT}/src/llm/llm_pricing.c
     ${SRC_ROOT}/src/llm/llm_command_parser.c
     ${SRC_ROOT}/src/llm/llm_tool_loop.c
+    ${SRC_ROOT}/src/llm/llm_tool_history.c
     ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
     ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
     ${SRC_ROOT}/src/llm/llm_tool_view.c

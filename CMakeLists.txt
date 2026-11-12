@@ -646,6 +646,7 @@ set(DAWN_SOURCES
     src/llm/llm_tool_images_render.c
     src/llm/llm_tools_dup.c
     src/llm/llm_tool_loop.c
+    src/llm/llm_tool_history.c
     src/llm/llm_tool_views_plan.c
     src/llm/llm_tool_views_apply.c
     src/llm/llm_context.c

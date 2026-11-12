@@ -51,6 +51,7 @@
 #include "llm/llm_openai.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_rate_limit.h"
+#include "llm/llm_tool_history.h"
 #include "llm/llm_tool_images.h"
 #include "llm/llm_tool_views.h"
 #include "llm/llm_tool_views_apply.h"
@@ -394,30 +395,6 @@ static void persist_appended_tool_turn(llm_tool_loop_params_t *params,
    session_release(s);
 }
 
-_Static_assert(LLM_TURN_CALLS_MAX >= LLM_TOOLS_MAX_PARALLEL_CALLS,
-               "a turn's blocks must be able to hold every call that runs");
-
-/* The response's blocks with their tool calls replaced by the calls that ran
- * (llm_turn_blocks_with_calls): the calls the stream carried and the calls
- * admitted and answered can differ (a cap, an over-long id, a stream cut
- * short), and a replay must hold each call with its result.  NULL without
- * blocks. */
-static json_object *blocks_as_run(const llm_tool_response_t *response, bool calls_ran) {
-   if (!response || !response->blocks) {
-      return NULL;
-   }
-   llm_turn_call_t calls[LLM_TOOLS_MAX_PARALLEL_CALLS];
-   int n = 0;
-   for (int i = 0; calls_ran && i < response->tool_calls.count && i < LLM_TOOLS_MAX_PARALLEL_CALLS;
-        i++) {
-      calls[n].id = response->tool_calls.calls[i].id;
-      calls[n].name = response->tool_calls.calls[i].name;
-      calls[n].arguments = response->tool_calls.calls[i].arguments;
-      n++;
-   }
-   return llm_turn_blocks_with_calls(response->blocks, calls, n);
-}
-
 /* Stash BOTH final-turn signals on the session in ONE lookup:
  *   - the finish/stop reason, so a background-job worker can tell a cut-off answer
  *     ("max_tokens"/"length") from a clean finish; and
@@ -440,7 +417,7 @@ static void tool_loop_stash_final(const llm_tool_loop_params_t *params,
    bool have_reason = (reason != NULL && reason[0] != '\0');
    char *json = build_reasoning_json(result, provider_label);
    /* A final answer ran no calls: its blocks keep none. */
-   struct json_object *blocks = blocks_as_run(result, false);
+   struct json_object *blocks = llm_tool_history_blocks_as_run(result, false);
    if (!have_reason && json == NULL && blocks == NULL) {
       return; /* nothing to write — skip the lookup entirely */
    }
@@ -477,120 +454,6 @@ static void fire_tool_iteration_boundary(llm_tool_loop_params_t *params) {
       s->tool_iteration_cb(s, s->tool_iteration_userdata);
    }
    session_release(s);
-}
-
-/**
- * @brief Add assistant message with tool calls in OpenAI format
- *
- * Appends the assistant message containing tool_calls array, then adds
- * tool result messages.  The turn's blocks (reasoning, a call's signature)
- * go with it; each request renders what belongs to its endpoint.
- */
-static void append_openai_tool_history(struct json_object *history,
-                                       const llm_tool_response_t *response,
-                                       const tool_result_list_t *results) {
-   json_object *assistant_msg = json_object_new_object();
-   json_object_object_add(assistant_msg, "role", json_object_new_string("assistant"));
-   /* Preserve any text the LLM streamed before its tool calls, so the follow-up
-    * iteration can see what was already said and won't repeat itself.
-    * Use empty string as fallback for Gemini API compatibility (rejects NULL). */
-   const char *pre_tool_text = (response->text && response->text[0] != '\0') ? response->text : "";
-   json_object_object_add(assistant_msg, "content", json_object_new_string(pre_tool_text));
-
-   json_object *tc_array = json_object_new_array();
-   for (int i = 0; i < response->tool_calls.count; i++) {
-      json_object *tc = json_object_new_object();
-      json_object_object_add(tc, "id", json_object_new_string(response->tool_calls.calls[i].id));
-      json_object_object_add(tc, "type", json_object_new_string("function"));
-
-      json_object *func = json_object_new_object();
-      json_object_object_add(func, "name",
-                             json_object_new_string(response->tool_calls.calls[i].name));
-      json_object_object_add(func, "arguments",
-                             json_object_new_string(response->tool_calls.calls[i].arguments));
-      json_object_object_add(tc, "function", func);
-
-      json_object_array_add(tc_array, tc);
-   }
-   json_object_object_add(assistant_msg, "tool_calls", tc_array);
-
-   /* The turn's blocks, where the path captured them (OpenAI Responses): its
-    * reasoning items go back with the next request, its calls as they ran. */
-   json_object *blocks = blocks_as_run(response, true);
-   if (blocks) {
-      json_object_object_add(assistant_msg, LLM_TURN_BLOCKS_KEY, blocks);
-   }
-
-   session_history_append(history, assistant_msg);
-
-   /* Add tool results */
-   llm_tools_add_results_openai(history, results);
-}
-
-/**
- * @brief Add assistant message with tool calls in Claude format
- *
- * Appends the assistant message containing thinking blocks (if any) and
- * tool_use content blocks, then adds tool result messages.
- */
-static void append_claude_tool_history(struct json_object *history,
-                                       const llm_tool_response_t *response,
-                                       const tool_result_list_t *results,
-                                       const char *carrier) {
-   json_object *assistant_msg = json_object_new_object();
-   json_object_object_add(assistant_msg, "role", json_object_new_string("assistant"));
-
-   /* The turn exactly as the model produced it: every block in order, each
-    * thinking block with its own signature (empty text or not).  The blocks
-    * travel with the message; each formatter renders them for its provider. */
-   json_object *blocks = blocks_as_run(response, true);
-   json_object *rendered = llm_turn_blocks_render_claude(blocks, carrier);
-   if (rendered) {
-      json_object_object_add(assistant_msg, "content", rendered);
-      json_object_object_add(assistant_msg, LLM_TURN_BLOCKS_KEY, blocks);
-      session_history_append(history, assistant_msg);
-      llm_tools_add_results_claude(history, results);
-      return;
-   }
-   json_object_put(blocks);
-
-   /* A path without blocks: the text and tool calls (its reasoning, if any,
-    * can't be replayed without the blocks it came in). */
-   json_object *content_array = json_object_new_array();
-
-   /* Preserve any text the LLM streamed before its tool_use blocks, so the follow-up
-    * iteration can see what was already said and won't repeat itself. */
-   if (response->text && response->text[0] != '\0') {
-      json_object *text_block = json_object_new_object();
-      json_object_object_add(text_block, "type", json_object_new_string("text"));
-      json_object_object_add(text_block, "text", json_object_new_string(response->text));
-      json_object_array_add(content_array, text_block);
-   }
-
-   /* Add tool_use blocks */
-   for (int i = 0; i < response->tool_calls.count; i++) {
-      json_object *tool_use = json_object_new_object();
-      json_object_object_add(tool_use, "type", json_object_new_string("tool_use"));
-      json_object_object_add(tool_use, "id",
-                             json_object_new_string(response->tool_calls.calls[i].id));
-      json_object_object_add(tool_use, "name",
-                             json_object_new_string(response->tool_calls.calls[i].name));
-
-      json_object *args = json_tokener_parse(response->tool_calls.calls[i].arguments);
-      if (args) {
-         json_object_object_add(tool_use, "input", args);
-      } else {
-         json_object_object_add(tool_use, "input", json_object_new_object());
-      }
-
-      json_object_array_add(content_array, tool_use);
-   }
-
-   json_object_object_add(assistant_msg, "content", content_array);
-   session_history_append(history, assistant_msg);
-
-   /* Add tool results in Claude format */
-   llm_tools_add_results_claude(history, results);
 }
 
 /* Append a note to the model (a user message of the loop's own), marked as
@@ -1107,9 +970,9 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
       if (params->history_format == LLM_HISTORY_CLAUDE) {
          char carrier[LLM_CARRIER_MAX];
          llm_request_carrier(params->base_url, params->api_key, carrier, sizeof(carrier));
-         append_claude_tool_history(params->conversation_history, &result, results, carrier);
+         llm_tool_history_append_claude(params->conversation_history, &result, results, carrier);
       } else {
-         append_openai_tool_history(params->conversation_history, &result, results);
+         llm_tool_history_append_openai(params->conversation_history, &result, results);
       }
       /* Step 8a: Persist the just-appended structured tool messages (E2) + this iteration's
        * display-only reasoning (E3) attached to its assistant row. */

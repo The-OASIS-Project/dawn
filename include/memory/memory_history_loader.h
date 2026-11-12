@@ -159,6 +159,16 @@ char *memory_history_strip_image_markers(const char *src);
  */
 char *memory_history_strip_visuals(const char *content);
 
+/**
+ * @brief The text a reply with visuals is saved as: @p body, then "\n",
+ *        @p visual (its `<dawn-visual ...>` blocks) and "\n", the form
+ *        memory_history_strip_visuals() takes back off on reload.
+ *
+ * @return A new heap string, or NULL on allocation failure (the caller saves
+ *         the bare body)
+ */
+char *memory_history_join_visual(const char *body, const char *visual);
+
 #ifdef __cplusplus
 }
 #endif

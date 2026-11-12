@@ -139,6 +139,20 @@ char *memory_history_strip_visuals(const char *content) {
    return NULL;
 }
 
+char *memory_history_join_visual(const char *body, const char *visual) {
+   size_t blen = strlen(body);
+   size_t vlen = strlen(visual);
+   char *combined = malloc(blen + 1 + vlen + 2); /* body '\n' visual '\n' '\0' */
+   if (combined != NULL) {
+      memcpy(combined, body, blen);
+      combined[blen] = '\n';
+      memcpy(combined + blen + 1, visual, vlen);
+      combined[blen + 1 + vlen] = '\n';
+      combined[blen + 1 + vlen + 1] = '\0';
+   }
+   return combined;
+}
+
 static int append_message_to_history(const conversation_llm_row_t *msg, void *ctx_ptr) {
    history_build_ctx_t *ctx = (history_build_ctx_t *)ctx_ptr;
    if (!ctx || !ctx->array || !msg) {

@@ -66,6 +66,7 @@
 #include "logging.h"
 #include "memory/memory_consolidate.h"
 #include "memory/memory_db_aliases.h"
+#include "memory/memory_history_loader.h"
 #include "tools/calendar_service.h"
 #include "utils/string_utils.h"
 #include "webui/webui_internal.h"
@@ -831,15 +832,8 @@ int webui_persist_final_answer(session_t *session,
    const char *persist_body = body;
    char *combined = NULL;
    if (visual != NULL && visual[0] != '\0') {
-      size_t blen = strlen(body);
-      size_t vlen = strlen(visual);
-      combined = malloc(blen + 1 + vlen + 2); /* body '\n' visual '\n' '\0' */
+      combined = memory_history_join_visual(body, visual);
       if (combined != NULL) {
-         memcpy(combined, body, blen);
-         combined[blen] = '\n';
-         memcpy(combined + blen + 1, visual, vlen);
-         combined[blen + 1 + vlen] = '\n';
-         combined[blen + 1 + vlen + 1] = '\0';
          persist_body = combined;
       }
       /* malloc failure: persist the bare body rather than lose the row. */
