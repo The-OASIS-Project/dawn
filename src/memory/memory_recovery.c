@@ -79,6 +79,10 @@ static pthread_mutex_t s_state_mutex = PTHREAD_MUTEX_INITIALIZER;
  * Acquired at run_pass entry, released at exit. */
 static pthread_mutex_t s_pass_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Tests only (memory_recovery_set_test_wait): called in place of the pass's
+ * sleeps.  NULL in the daemon. */
+static void (*s_test_wait)(void);
+
 /* =============================================================================
  * Internal helpers
  * ============================================================================= */
@@ -202,9 +206,13 @@ static bool wait_for_user_extraction(int user_id) {
       if (waited >= RECOVERY_PER_CONV_WAIT_SEC) {
          return false;
       }
-      /* s_pass_mutex only serializes recovery passes, never a hot path */
-      // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
-      sleep(RECOVERY_POLL_INTERVAL_SEC);
+      if (s_test_wait) {
+         s_test_wait();
+      } else {
+         /* s_pass_mutex only serializes recovery passes, never a hot path */
+         // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+         sleep(RECOVERY_POLL_INTERVAL_SEC);
+      }
       waited += RECOVERY_POLL_INTERVAL_SEC;
    }
    return true;
@@ -278,7 +286,11 @@ static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
    }
 
    /* Wait briefly to confirm extraction actually started (vs. a no-op skip). */
-   usleep(RECOVERY_TRIGGER_SETTLE_MS * 1000);
+   if (s_test_wait) {
+      s_test_wait();
+   } else {
+      usleep(RECOVERY_TRIGGER_SETTLE_MS * 1000);
+   }
    if (!memory_extraction_in_progress(row->user_id)) {
       /* No-op skip — extraction was disabled, conv too short, or capacity hit.
        * Attempts already counted; future passes will hit the cap and stop. */
@@ -430,6 +442,11 @@ static void *recovery_thread_func(void *arg) {
 
    OLOG_INFO("memory_recovery: thread stopped");
    return NULL;
+}
+
+void memory_recovery_set_test_wait(void (*wait)(void)) {
+   s_test_wait = wait;
+   s_running = wait != NULL;
 }
 
 int memory_recovery_start(void) {

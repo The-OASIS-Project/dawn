@@ -3121,6 +3121,21 @@ dawn_add_unit_test(test_memory_consolidation_db
            unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# Memory extraction end to end with a fake model: the real trigger, thread,
+# history loader and recovery pass on a real schema.  The model call is
+# wrapped, so no request leaves the process; the wrap reaches only objects
+# linked here.
+dawn_add_unit_test(test_memory_extraction_run
+   SOURCES test_memory_extraction_run.c
+           ${MEMORY_CONSOLIDATE_TEST_SOURCES}
+           ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/memory/memory_recovery.c
+   LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
+           unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
+   LABEL   ci)
+target_link_options(test_memory_extraction_run PRIVATE
+                    -Wl,--wrap=llm_chat_completion_with_config)
+
 # The memory batches frames: the batch object, keyset pages, one "Not found"
 # for missing and foreign ids, the undo and keep replies.  Its handlers take a
 # WebSocket connection (webui_internal.h, which needs libwebsockets), so it
@@ -3240,6 +3255,7 @@ add_dependencies(test_memory_remember models_toml_builtin)
 add_dependencies(test_memory_supersede_kinds models_toml_builtin)
 add_dependencies(test_memory_consolidate models_toml_builtin)
 add_dependencies(test_memory_consolidation_db models_toml_builtin)
+add_dependencies(test_memory_extraction_run models_toml_builtin)
 if(ENABLE_WEBUI)
    add_dependencies(test_webui_memory_batches models_toml_builtin)
 endif()

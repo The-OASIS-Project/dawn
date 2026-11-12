@@ -60,6 +60,20 @@ void memory_recovery_stop(void);
  */
 void memory_recovery_run_pass(int *triggered_out, int *skipped_out);
 
+/**
+ * @brief Tests only: run memory_recovery_run_pass() without the worker thread.
+ *
+ * A pass processes conversations only while the worker runs, and it sleeps
+ * after starting an extraction (a settle before checking that it started)
+ * and while waiting for it (a poll).  With @p wait set, a pass runs as if
+ * the worker were up, and calls @p wait in place of each of those sleeps,
+ * in that order: the settle first, then each poll while the extraction
+ * still runs.  A test then decides when the extraction it started is seen
+ * running and when it ends, with no timing.  NULL restores both.  Never
+ * while the worker thread runs.
+ */
+void memory_recovery_set_test_wait(void (*wait)(void));
+
 #ifdef __cplusplus
 }
 #endif
