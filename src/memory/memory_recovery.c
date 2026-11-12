@@ -215,9 +215,10 @@ static bool wait_for_user_extraction(int user_id) {
  *        actually triggered (regardless of outcome).
  */
 static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
-   /* Read pre-trigger counter so we can detect successful advancement. */
-   int last_extracted_before = 0;
-   memory_db_get_last_extracted(row->conv_id, &last_extracted_before);
+   /* Read the pre-trigger id cursor to detect advancement: a stored count can
+    * be in older units, so a partial advance may lower it. */
+   int64_t last_id_before = 0;
+   memory_db_get_last_extracted_msg_id(row->conv_id, &last_id_before);
 
    /* If extraction is already running for this user (e.g. live session),
     * skip this row this pass — the live extraction will handle it. */
@@ -293,14 +294,14 @@ static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
       return true;
    }
 
-   /* Inspect counter advancement for log clarity. */
-   int last_extracted_after = 0;
-   memory_db_get_last_extracted(row->conv_id, &last_extracted_after);
-   if (last_extracted_after > last_extracted_before) {
-      OLOG_INFO("memory_recovery: extracted conv %lld (%d -> %d msgs)", (long long)row->conv_id,
-                last_extracted_before, last_extracted_after);
+   /* Advanced if the id cursor moved, even with rows still above it. */
+   int64_t last_id_after = 0;
+   memory_db_get_last_extracted_msg_id(row->conv_id, &last_id_after);
+   if (last_id_after > last_id_before) {
+      OLOG_INFO("memory_recovery: extracted conv %lld (msg_id %lld -> %lld)",
+                (long long)row->conv_id, (long long)last_id_before, (long long)last_id_after);
    } else {
-      /* Extraction ran but didn't produce a counter advance.  Two
+      /* Extraction ran but the id cursor did not move.  Two
        * sub-cases: (a) transient network failure — roll back the attempt
        * stamp so the next pass picks the conv up again; (b) genuine
        * non-advance — apply the standard give-up-at-cap heuristic. */

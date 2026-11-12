@@ -794,10 +794,16 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * re-querying MAX(id) at commit time — avoids TOCTOU when new messages arrive
     * during LLM inference.  CASE guard preserves the existing cursor when the
     * caller passes 0 (early-skip paths with no prov). */
-   /* A cursor advance carries what the rows it passes read: ?4 raises the
+   /* An advance counts the rows it passes, in message_count's units (request
+    * context never counted): a caller's history may hold fewer rows than the
+    * conversation, and memory recovery picks a conversation by the count.
+    * ?1 stands only when the cursor stays.
+    * A cursor advance carries what the rows it passes read: ?4 raises the
     * outside floor when tainted and the floor isn't yet (the first sticks). */
    { "conv_set_last_extracted",
-     "UPDATE conversations SET last_extracted_msg_count = ?1, "
+     "UPDATE conversations SET last_extracted_msg_count = CASE WHEN ?2 > 0 THEN "
+     "(SELECT COUNT(*) FROM messages WHERE conversation_id = ?3 AND kind IS NULL "
+     "AND id <= ?2) ELSE ?1 END, "
      "last_extracted_msg_id = CASE WHEN ?2 > 0 THEN ?2 ELSE last_extracted_msg_id END, "
      "extraction_attempts = 0, extraction_last_attempt_at = 0, "
      "outside = CASE WHEN ?4 NOT IN (" OUTSIDE_UNTAINTED_SQL

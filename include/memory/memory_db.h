@@ -1129,7 +1129,8 @@ int memory_db_get_last_extracted(int64_t conversation_id, int *count_out);
  * the cursor passes are never read again.
  *
  * @param conversation_id Conversation ID
- * @param message_count Message count to record (legacy count-based cursor)
+ * @param message_count Message count to record when @p last_msg_id is 0; an
+ *        advance records the conversation's rows through @p last_msg_id
  * @param last_msg_id Highest message ID processed; 0 = do not advance cursor
  * @param outside What the rows passed read (outside_kind_t; OUTSIDE_NONE: nothing)
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE

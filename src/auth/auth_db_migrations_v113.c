@@ -80,21 +80,9 @@ static int v113_add_column(sqlite3 *db, const char *table, const char *column, b
    return AUTH_DB_SUCCESS;
 }
 
-/* A result DAWN framed as someone else's text (llm_third_party_frame): the
- * frame's whole open line, untagged or tagged, at the start of a line.  The
- * neutralizer defuses an imitation in the text itself, so one found is
- * DAWN's own. */
-/* clang-format off */
-#define V113_OPEN(name) "'--- " name " ---'"
-#define V113_OPEN_TAGGED(name) "'--- " name " (dawn-ctx-'"
-#define V113_FRAMED(name) \
-   "(substr(content, 1, length(" V113_OPEN(name) ")) = " V113_OPEN(name) " " \
-   "OR substr(content, 1, length(" V113_OPEN_TAGGED(name) ")) = " V113_OPEN_TAGGED(name) " " \
-   "OR instr(content, char(10) || " V113_OPEN(name) ") > 0 " \
-   "OR instr(content, char(10) || " V113_OPEN_TAGGED(name) ") > 0)"
-/* clang-format on */
-#define V113_EMAIL_FRAMED V113_FRAMED(TOOL_FRAME_EMAIL)
-#define V113_WEB_FRAMED V113_FRAMED(TOOL_FRAME_WEB)
+/* A result DAWN framed as someone else's text (llm_third_party_frame). */
+#define V113_EMAIL_FRAMED CONV_FRAMED_SQL("messages", TOOL_FRAME_EMAIL)
+#define V113_WEB_FRAMED CONV_FRAMED_SQL("messages", TOOL_FRAME_WEB)
 
 /* Which stored conversations read outside text, and from which message.
  * Outside text is a framed result, the result of a tool whose results aren't

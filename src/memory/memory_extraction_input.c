@@ -621,6 +621,56 @@ int64_t memory_extraction_history_first_id(struct json_object *history) {
    return first;
 }
 
+struct json_object *memory_extraction_history_whole(int user_id,
+                                                    int64_t conversation_id,
+                                                    struct json_object *history,
+                                                    int64_t last_msg_id) {
+   if (!history) {
+      return NULL;
+   }
+   const int64_t upto = memory_extraction_history_max_id(history);
+   if (conversation_id <= 0 || upto <= last_msg_id) {
+      return json_object_get(history);
+   }
+   /* Every id the history holds, whatever its row: only rows the database
+    * has and the history lacks matter.  An id dropped here would hide its row,
+    * so a failed allocation refuses the batch. */
+   struct json_object *ids = json_object_new_array();
+   bool built = ids != NULL;
+   for (size_t i = 0; built && i < json_object_array_length(history); i++) {
+      struct json_object *id = NULL;
+      if (json_object_object_get_ex(json_object_array_get_idx(history, i), "id", &id) &&
+          json_object_get_int64(id) > last_msg_id) {
+         struct json_object *v = json_object_new_int64(json_object_get_int64(id));
+         if (!v || json_object_array_add(ids, v) != 0) {
+            json_object_put(v);
+            built = false;
+         }
+      }
+   }
+   const char *ids_json = built ? json_object_to_json_string_ext(ids, JSON_C_TO_STRING_PLAIN)
+                                : NULL;
+   int missing = 0;
+   int64_t first = 0;
+   const int rc = ids_json ? conv_db_exchange_rows_missing(conversation_id, user_id, last_msg_id,
+                                                           upto, ids_json, &missing, &first)
+                           : AUTH_DB_FAILURE;
+   json_object_put(ids);
+   if (rc != AUTH_DB_SUCCESS) {
+      OLOG_WARNING("memory_extraction: refusing conv %lld for user %d: history check failed",
+                   (long long)conversation_id, user_id);
+      return NULL;
+   }
+   if (missing == 0) {
+      return json_object_get(history);
+   }
+   OLOG_WARNING("memory_extraction: conv %lld: history lacks %d row(s) in (%lld, %lld], first "
+                "%lld; extracting the stored conversation",
+                (long long)conversation_id, missing, (long long)last_msg_id, (long long)upto,
+                (long long)first);
+   return memory_history_load_from_db(conversation_id, user_id, NULL);
+}
+
 bool memory_extraction_input_has_question(struct json_object *input) {
    for (size_t i = 0; input && i < json_object_array_length(input); i++) {
       if (llm_history_is_question(json_object_array_get_idx(input, i))) {

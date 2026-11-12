@@ -35,12 +35,15 @@
 #include "auth/auth_db_messages.h"
 #include "bench_prompt_pieces.h"
 #include "config/dawn_config.h"
+#include "core/outside_kind.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
+#include "llm/llm_third_party.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_entities.h"
 #include "memory/memory_extraction.h"
 #include "prompts.h"
+#include "tools/tool_registry.h"
 #include "unity.h"
 
 char *memoryCallback(const char *actionName, char *value, int *should_respond);
@@ -515,6 +518,79 @@ static void test_unprompted_skip_leaves_a_later_reply_unread(void) {
    TEST_ASSERT_TRUE(reply > cursor);
 }
 
+/* A web result another session's turn wrote between the cursor and the
+ * history's end: the batch is recorded as having read the web, and the
+ * conversation's floor with it, though the history never held the row. */
+static void test_another_sessions_web_result_raises_the_floor(void) {
+   int64_t conv = 0, q1 = 0, tool = 0, a1 = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Shared", &conv));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_message_ex(conv, s_user, "user", "hi", &q1));
+   char *page = llm_third_party_frame(TOOL_FRAME_WEB, NULL, "A page\n");
+   TEST_ASSERT_NOT_NULL(page);
+   const conv_message_row_t row = { .role = "tool", .tool_call_id = "w1", .content = page };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &tool));
+   free(page);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_add_message_ex(conv, s_user, "assistant", "Hello.", &a1));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_set_last_extracted(conv, 1, q1, OUTSIDE_NONE));
+
+   char json[128];
+   snprintf(json, sizeof(json), "[{\"role\":\"assistant\",\"content\":\"Hello.\",\"id\":%lld}]",
+            (long long)a1);
+   struct json_object *history = json_tokener_parse(json);
+   TEST_ASSERT_NOT_NULL(history);
+   TEST_ASSERT_EQUAL_INT(0, memory_trigger_extraction(s_user, conv, "s", history, 3, 0, NULL));
+   json_object_put(history);
+
+   int64_t cursor = 0;
+   int floor = -1;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_get_last_extracted_msg_id(conv, &cursor));
+   TEST_ASSERT_EQUAL_INT64(a1, cursor);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get_outside(conv, s_user, &floor));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, floor);
+}
+
+/* A session's history counting fewer rows than its conversation (another
+ * session's tool row missing): the stored conversation is read, and
+ * the count cursor reaches the conversation's message_count, so memory
+ * recovery doesn't pick the conversation again. */
+static void test_stored_conversation_read_counts_every_row(void) {
+   int64_t conv = 0, q1 = 0, tool = 0, a1 = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Counted", &conv));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_message_ex(conv, s_user, "user", "hi", &q1));
+   const conv_message_row_t row = { .role = "tool", .tool_call_id = "t1", .content = "42" };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &tool));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_add_message_ex(conv, s_user, "assistant", "It's 42.", &a1));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_set_last_extracted(conv, 1, q1, OUTSIDE_NONE));
+
+   char json[128];
+   snprintf(json, sizeof(json), "[{\"role\":\"assistant\",\"content\":\"It's 42.\",\"id\":%lld}]",
+            (long long)a1);
+   struct json_object *history = json_tokener_parse(json);
+   TEST_ASSERT_NOT_NULL(history);
+   TEST_ASSERT_EQUAL_INT(0, memory_trigger_extraction(s_user, conv, "s", history, 2, 0, NULL));
+   json_object_put(history);
+
+   int64_t cursor = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_get_last_extracted_msg_id(conv, &cursor));
+   TEST_ASSERT_EQUAL_INT64(a1, cursor);
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "SELECT message_count, last_extracted_msg_count < message_count "
+                      "FROM conversations WHERE id = ?",
+                      -1, &st, NULL);
+   sqlite3_bind_int64(st, 1, conv);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   const int total = sqlite3_column_int(st, 0);
+   const int backlog = sqlite3_column_int(st, 1); /* memory recovery's rule */
+   sqlite3_finalize(st);
+   TEST_ASSERT_EQUAL_INT(3, total);
+   TEST_ASSERT_EQUAL_INT(0, backlog);
+}
+
 /* A benchmark's prompt file is split into literal pieces the way printf reads
  * the compiled template, so the same text gives the same prompt either way. */
 static void test_prompt_file_pieces_give_the_compiled_prompt(void) {
@@ -572,6 +648,8 @@ int main(void) {
    RUN_TEST(test_source_excerpt_marks_an_outside_conversation);
    RUN_TEST(test_list_merged_marks_outside_facts);
    RUN_TEST(test_unprompted_skip_leaves_a_later_reply_unread);
+   RUN_TEST(test_another_sessions_web_result_raises_the_floor);
+   RUN_TEST(test_stored_conversation_read_counts_every_row);
    RUN_TEST(test_prompt_file_pieces_give_the_compiled_prompt);
    RUN_TEST(test_prompt_file_split);
    return UNITY_END();
