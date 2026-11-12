@@ -53,11 +53,11 @@ def test_policy(tmp_path):
 def test_read_tools_stay_out_of_other_tasks(tmp_path):
    work = tmp_path / "work"
    own, other = str(work / "aaaa0001"), str(work / "bbbb0002")
-   assert policy.decide("Read", {"file_path": f"{own}/a.c"}, own, [], str(work)).allow
-   assert policy.decide("Read", {"file_path": "/usr/include/stdio.h"}, own, [], str(work)).allow
-   d = policy.decide("Read", {"file_path": f"{other}/secret"}, own, [], str(work))
+   assert policy.decide("Read", {"file_path": f"{own}/a.c"}, own, [], [str(work)]).allow
+   assert policy.decide("Read", {"file_path": "/usr/include/stdio.h"}, own, [], [str(work)]).allow
+   d = policy.decide("Read", {"file_path": f"{other}/secret"}, own, [], [str(work)])
    assert not d.allow and d.ask_kind is None
-   assert not policy.decide("Grep", {"path": other, "pattern": "x"}, own, [], str(work)).allow
+   assert not policy.decide("Grep", {"path": other, "pattern": "x"}, own, [], [str(work)]).allow
 
 
 def test_edit_through_symlink_is_outside(tmp_path):
@@ -1355,7 +1355,7 @@ def test_every_run_carries_the_whole_floor():
    from agent_gateway.runner import floor_settings
    s = json.loads(floor_settings("/var/lib/dawn-agent", "/var/lib/dawn-agent/work",
                                  "/var/lib/dawn-agent/work/aaaa0001", ["api.anthropic.com"], "dawn",
-                                 ["/var/lib/dawn-gateway", "/var/lib/dawn"]))
+                                 ["/var/lib/dawn-gateway", "/var/lib/dawn", "/srv/dawn-data/"]))
    fs = s["sandbox"]["filesystem"]
    # The mirrors and DAWN's data are hidden from the shell too, not only the file tools.
    assert "/var/lib/dawn-gateway" in fs["denyRead"] and "/var/lib/dawn" in fs["denyRead"]
@@ -1376,6 +1376,7 @@ def test_every_run_carries_the_whole_floor():
    assert s["sandbox"]["allowUnsandboxedCommands"] is False
    assert "Read(//var/lib/dawn-agent/.claude/.credentials.json)" in s["permissions"]["deny"]
    assert "Read(//home/**)" in s["permissions"]["deny"]
+   assert "Read(//srv/dawn-data/**)" in s["permissions"]["deny"]          # a hidden dir
    assert "~" not in json.dumps(s)
 
 
@@ -1433,3 +1434,24 @@ def test_agent_runs_on_the_floor_alone(store):
    assert opts.setting_sources == []
    assert "Commits need the developer's OK." in opts.system_prompt["append"]
    assert json.loads(opts.settings)["disableAllHooks"] is True
+
+
+def test_read_tools_never_reach_hidden_directories():
+   from agent_gateway import policy
+   wt, hidden = "/w/work/aaaa0001", ["/w/work", "/w/state", "/srv/dawn"]
+   ok = lambda tool, inp: policy.decide(tool, inp, wt, [], hidden).allow
+   assert ok("Read", {"file_path": f"{wt}/src/a.c"})
+   assert ok("Grep", {"pattern": "x", "path": f"{wt}/src"})
+   assert ok("Grep", {"pattern": "x"})                               # its own cwd
+   assert ok("Glob", {"pattern": "**/*.c"})
+   assert ok("Read", {"file_path": "/usr/include/stdio.h"})
+   assert not ok("Read", {"file_path": "/w/work/bbbb0002/secret.c"})  # another task
+   assert not ok("Read", {"file_path": "/srv/dawn/secrets.toml"})     # deny_read
+   assert not ok("NotebookRead", {"notebook_path": "/w/state/x.ipynb"})
+   assert not ok("Grep", {"pattern": "x", "path": "/w"})             # rooted above
+   assert not ok("Grep", {"pattern": "x", "path": "/"})
+   assert not ok("Glob", {"pattern": "/w/work/*/src/**"})            # absolute pattern
+   assert not ok("Glob", {"pattern": "/srv/*/secrets.toml"})
+   assert ok("Glob", {"pattern": f"{wt}/src/*.c"})
+   assert not ok("Grep", {"pattern": "x", "path": "../bbbb0002"})   # relative: leaves the clone
+   assert not ok("Read", {"file_path": "~/work/bbbb0002/s"})

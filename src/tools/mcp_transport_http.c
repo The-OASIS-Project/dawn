@@ -222,7 +222,7 @@ static int http_send(mcp_transport_t *base, const char *json, size_t len) {
       return FAILURE; /* stopped and not restarted: send nothing */
    }
    int64_t id = 0;
-   char method[64];
+   char method[64] = "";
    bool has_id = request_info(json, &id, method, sizeof(method));
 
    CURL *easy = curl_easy_init();

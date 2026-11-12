@@ -411,7 +411,7 @@ static char *take(struct json_object *details,
 char *coding_publish_confirm(struct json_object *details,
                              int user_id,
                              const turn_origin_t *origin) {
-   cp_pending_t p;
+   cp_pending_t p = { 0 };
    char *bad = take(details, user_id, origin, CP_PENDING_PUBLISH, "publish", &p);
    if (bad != NULL) {
       return bad;
@@ -637,7 +637,7 @@ char *coding_close(struct json_object *details, int user_id, const turn_origin_t
 }
 
 char *coding_close_confirm(struct json_object *details, int user_id, const turn_origin_t *origin) {
-   cp_pending_t p;
+   cp_pending_t p = { 0 };
    char *bad = take(details, user_id, origin, CP_PENDING_CLOSE, "close", &p);
    if (bad != NULL) {
       return bad;

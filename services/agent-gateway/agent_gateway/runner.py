@@ -104,6 +104,10 @@ def floor_settings(agent_home: str, work_dir: str, worktree: str, domains: list[
       s = json.load(f)
    # A permission rule's absolute path starts with //; a sandbox path is plain.
    s["permissions"]["deny"] = [r.replace("(~/", "(/" + home) for r in s["permissions"]["deny"]]
+   # The hidden directories as file-tool rules too, resolved by Claude Code
+   # itself (relative paths, symlinks), not only by the permission callback.
+   s["permissions"]["deny"] += [f"Read(/{p.rstrip('/')}/**)" for p in hidden
+                                if f"Read(/{p.rstrip('/')}/**)" not in s["permissions"]["deny"]]
    s["sandbox"]["network"]["allowedDomains"] = domains
    fs = s["sandbox"]["filesystem"]
    # Other tasks' clones and other repos' caches are hidden; its own are not.
@@ -432,13 +436,19 @@ class Runner:
 
    # --- one run ----------------------------------------------------------
 
+   def hidden_paths(self) -> list[str]:
+      """What no task may read beyond the other tasks' clones: the gateway's
+      own files and the operator's [paths] deny_read."""
+      return [self.cfg.state_dir, self.cfg.mirrors_dir, *self.cfg.deny_read]
+
    def permission_handler(self, task: dict, granted_tools: list[str]):
       """Claude Code's permission callback for one run: allow, deny, or record a
       request for the operator and stop the run."""
 
+      hidden = [self.cfg.work_dir, *self.hidden_paths()]
+
       async def can_use_tool(tool, tool_input, ctx):
-         d = policy.decide(tool, tool_input, task["worktree"], granted_tools,
-                           self.cfg.work_dir)
+         d = policy.decide(tool, tool_input, task["worktree"], granted_tools, hidden)
          if d.allow:
             return PermissionResultAllow()
          if d.ask_kind and self.store.task(task["id"])["status"] not in st.OPEN:
@@ -488,7 +498,7 @@ class Runner:
          disallowed_tools=[f"mcp__cbm__{t}" for t in CBM_WRITE_TOOLS] + list(NO_BACKGROUND_TOOLS),
          settings=floor_settings(self.cfg.agent_home, self.cfg.work_dir, task["worktree"],
                                  domains, task["repo"],
-                                 [self.cfg.state_dir, self.cfg.mirrors_dir, *self.cfg.deny_read]),
+                                 self.hidden_paths()),
          # The CLI restores a session's running cost on resume, so its budget
          # check is against the whole task: give it the whole budget.
          max_budget_usd=task["budget_usd"],

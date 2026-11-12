@@ -338,7 +338,8 @@
       }
       if (isActiveStatus(job.status)) {
          actions.appendChild(buildActionButton(job, 'cancel', 'Cancel'));
-      } else if (isResumable(job.status)) {
+      } else if (isResumable(job.status) && job.kind !== 'coding') {
+         /* A coding task goes on through the agent (revise), not a generic resume. */
          actions.appendChild(buildActionButton(job, 'resume', 'Resume'));
       }
       row.appendChild(actions);
@@ -1082,16 +1083,31 @@
       el.historyCount = document.getElementById('jobs-history-count');
       el.moreBtn = document.getElementById('jobs-load-more');
 
-      /* A redraw held back while an answer was being written, done on leaving it. */
+      /* A redraw held back while an answer was being written, done on leaving it,
+       * but not while a button in the list is being pressed: pressing Send moves
+       * focus off the answer, and a redraw before the release would drop the
+       * click.  The release catches up once the click has run. */
       if (el.activeList) {
-         el.activeList.addEventListener('focusout', function () {
+         let pressing = false;
+         const catchUp = function () {
             global.setTimeout(function () {
-               if (redrawAfterTyping && isOpen && !typingAnswer()) {
+               if (redrawAfterTyping && isOpen && !pressing && !typingAnswer()) {
                   redrawAfterTyping = false;
                   renderActive();
                }
             }, 0);
+         };
+         el.activeList.addEventListener('pointerdown', function () {
+            pressing = true;
          });
+         ['pointerup', 'pointercancel'].forEach(function (type) {
+            document.addEventListener(type, function () {
+               if (!pressing) return;
+               pressing = false;
+               catchUp();
+            });
+         });
+         el.activeList.addEventListener('focusout', catchUp);
       }
 
       if (el.btn) {

@@ -374,6 +374,9 @@ window.DawnJobsActivity = (function () {
       if (typeof DawnCodingEvents !== 'undefined') {
          DawnCodingEvents.reconnected();
       }
+      if (typeof DawnCodingGrants !== 'undefined') {
+         DawnCodingGrants.reconnected();
+      }
       if (typeof DawnWS !== 'undefined') {
          // A snapshot request opens a fresh reconciliation window, so drop the
          // terminal memory here. It exists only to suppress rows that finished

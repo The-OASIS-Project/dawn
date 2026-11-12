@@ -136,6 +136,17 @@
       ask('coding_grants');
    }
 
+   /* The socket came back: a revoke sent before it dropped may never be
+    * answered, so let it be tried again, and show the list as it stands now. */
+   function reconnected() {
+      revoking = 0;
+      focusIdx = null;
+      if (box && box.open) {
+         if (last) render(false);
+         ask('coding_grants');
+      }
+   }
+
    function init() {
       box = document.getElementById('coding-grants');
       list = document.getElementById('coding-grants-list');
@@ -160,6 +171,7 @@
 
    global.DawnCodingGrants = {
       handleResponse: handleResponse,
+      reconnected: reconnected,
       refresh: refresh,
    };
 })(window);
