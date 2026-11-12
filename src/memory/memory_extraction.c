@@ -1003,6 +1003,12 @@ static int trigger_extraction(int user_id,
       extraction_slot_release(user_id);
       return 0;
    }
+   /* The batch is the rows being sent, not the caller's count less the stored
+    * one: those two are in different units when the history isn't the stored
+    * conversation (a shared or compacted one), and their difference can be
+    * negative. */
+   new_messages = (int)json_object_array_length(filtered);
+   ctx->new_message_count = new_messages;
    /* Nothing the user said is new (only DAWN's own posts, say): mark it done
     * rather than send the model an empty conversation.  Only as far as the
     * history checked: a reply arriving since then is still to be read. */
