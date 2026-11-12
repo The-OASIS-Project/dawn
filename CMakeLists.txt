@@ -692,6 +692,7 @@ set(DAWN_SOURCES
     src/audio/audio_backend.c
     src/audio/audio_alsa.c
     src/audio/audio_pulse.c
+    src/audio/pulse_stream.c
     src/audio/ringtone.c
     # phone_apm.cpp is compiled UNCONDITIONALLY (base sources, NOT AEC_SOURCES):
     # its WebRTC use is fenced behind #ifdef AEC_BACKEND_WEBRTC and it stubs to
@@ -778,6 +779,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_send.c
         src/webui/webui_turn_ref.c
         src/webui/webui_email_ref.c
+        src/webui/webui_message_frame.c
         src/webui/webui_attachments.c
         src/webui/webui_http.c
         src/webui/webui_admin.c
@@ -788,6 +790,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_restore.c
         src/webui/webui_memory.c
         src/webui/webui_memory_merged.c
+        src/webui/webui_memory_batches.c
         src/webui/webui_config.c
         src/webui/webui_reasoning.c
         src/webui/webui_session.c
@@ -1014,6 +1017,8 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v110.c
     src/auth/auth_db_migrations_v111.c
     src/auth/auth_db_migrations_v112.c
+    src/auth/auth_db_migrations_v113.c
+    src/auth/auth_db_migrations_v114.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c
@@ -1056,8 +1061,11 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_db_alias_scorer.c
     src/memory/memory_db_alias_cascade.c
     src/memory/memory_db_alias_writes.c
+    src/memory/memory_db_alias_nominate.c
     src/memory/memory_db_provenance.c
     src/memory/memory_db_forget.c
+    src/memory/memory_db_consolidation.c
+    src/memory/memory_db_consolidation_undo.c
     src/core/focus/focus_source.c
     src/core/focus/focus_recency.c
     src/core/focus/focus_candidate_helpers.c
@@ -1079,6 +1087,11 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_callback_restore.c
     src/memory/memory_callback_forget.c
     src/memory/memory_extraction.c
+    src/memory/memory_candidates.c
+    src/memory/memory_consolidate.c
+    src/memory/memory_consolidate_ops.c
+    src/memory/memory_consolidation_undo.c
+    src/memory/memory_consolidation_view.c
     src/memory/memory_extraction_queue.c
     src/memory/memory_extraction_slots.c
     src/memory/memory_extraction_input.c
@@ -1285,7 +1298,7 @@ target_link_libraries(dawn uuid)
 # Link audio libraries for runtime backend selection
 # Both backends are statically linked; runtime selection via vtable
 if(HAVE_LOCAL_AUDIO)
-    target_link_libraries(dawn asound pulse-simple pulse)
+    target_link_libraries(dawn asound pulse)
 elseif(NOT SERVER_ONLY)
     message(FATAL_ERROR
         "Audio libraries (ALSA, PulseAudio) not found.\n"

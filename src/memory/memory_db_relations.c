@@ -42,6 +42,7 @@
 
 #define AUTH_DB_INTERNAL_ALLOWED
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -130,6 +131,29 @@ int memory_db_relation_create(int user_id,
                               int64_t valid_from,
                               int64_t valid_to,
                               const memory_provenance_t *prov) {
+   return memory_db_relation_create_ex(user_id, subject_entity_id, relation, object_entity_id,
+                                       object_value, fact_id, confidence, valid_from, valid_to,
+                                       prov, NULL, NULL);
+}
+
+int memory_db_relation_create_ex(int user_id,
+                                 int64_t subject_entity_id,
+                                 const char *relation,
+                                 int64_t object_entity_id,
+                                 const char *object_value,
+                                 int64_t fact_id,
+                                 float confidence,
+                                 int64_t valid_from,
+                                 int64_t valid_to,
+                                 const memory_provenance_t *prov,
+                                 int64_t *id_out,
+                                 bool *created_out) {
+   if (id_out) {
+      *id_out = 0;
+   }
+   if (created_out) {
+      *created_out = false;
+   }
    if (!relation)
       return MEMORY_DB_FAILURE;
 
@@ -171,6 +195,7 @@ int memory_db_relation_create(int user_id,
       sqlite3_bind_null(s_db.stmt_memory_relation_create, 9);
    }
    memory_db_internal_bind_provenance(s_db.stmt_memory_relation_create, 10, prov);
+   sqlite3_bind_int(s_db.stmt_memory_relation_create, 13, prov ? prov->outside : OUTSIDE_NONE);
 
    /* The relation and its source commit together (a savepoint nests inside a
     * caller's transaction). */
@@ -183,10 +208,15 @@ int memory_db_relation_create(int user_id,
     * at the supersede call site where extraction can log dedup-hits. */
    int rc = sqlite3_step(s_db.stmt_memory_relation_create);
    bool ok = (rc == SQLITE_ROW || rc == SQLITE_DONE);
-   if (rc == SQLITE_ROW && prov) {
-      memory_db_internal_source_add_locked(
-          MEMORY_SOURCE_RELATION, sqlite3_column_int64(s_db.stmt_memory_relation_create, 0),
-          prov->conv_id);
+   int64_t rel_id = 0;
+   bool created = false;
+   if (rc == SQLITE_ROW) {
+      rel_id = sqlite3_column_int64(s_db.stmt_memory_relation_create, 0);
+      /* A new row starts at one mention; an open one said again counts up. */
+      created = sqlite3_column_int(s_db.stmt_memory_relation_create, 1) == 1;
+      if (prov) {
+         memory_db_internal_source_add_locked(MEMORY_SOURCE_RELATION, rel_id, prov->conv_id);
+      }
    }
    while (rc == SQLITE_ROW) {
       rc = sqlite3_step(s_db.stmt_memory_relation_create);
@@ -201,6 +231,12 @@ int memory_db_relation_create(int user_id,
    }
    AUTH_DB_UNLOCK();
 
+   if (ok && id_out) {
+      *id_out = rel_id;
+   }
+   if (ok && created_out) {
+      *created_out = created;
+   }
    return ok ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
@@ -228,16 +264,21 @@ int memory_db_relation_supersede(int user_id,
                                           NULL, prov, out_old_fact_id);
 }
 
-/* Whether @p fact_id still backs an open relation (caller holds the lock). */
-static bool fact_has_open_relation_locked(int user_id, int64_t fact_id) {
+/* Whether @p fact_id stays current when a relation it backed closes: it still
+ * backs an open one, or the closing batch read outside text (@p tainted) and
+ * the fact isn't from such a batch (caller holds the lock). */
+static bool fact_stays_locked(int user_id, int64_t fact_id, bool tainted) {
    sqlite3_stmt *st = NULL;
    bool open = true; /* on error, keep the fact (never hide one by mistake) */
    if (sqlite3_prepare_v2(s_db.db,
-                          "SELECT EXISTS (SELECT 1 FROM memory_relations WHERE user_id = ? AND "
-                          "fact_id = ? AND valid_to IS NULL)",
+                          "SELECT EXISTS (SELECT 1 FROM memory_relations WHERE user_id = ?1 AND "
+                          "fact_id = ?2 AND valid_to IS NULL) OR (?3 AND EXISTS (SELECT 1 FROM "
+                          "memory_facts WHERE id = ?2 AND user_id = ?1 AND outside IN "
+                          "(" OUTSIDE_UNTAINTED_SQL ")))",
                           -1, &st, NULL) == SQLITE_OK) {
       sqlite3_bind_int(st, 1, user_id);
       sqlite3_bind_int64(st, 2, fact_id);
+      sqlite3_bind_int(st, 3, tainted);
       if (sqlite3_step(st) == SQLITE_ROW) {
          open = sqlite3_column_int(st, 0) != 0;
       }
@@ -394,6 +435,11 @@ int memory_db_relation_supersede_ex(int user_id,
       sqlite3_reset(close_stmt);
       bind_close_locked(close_stmt, close_time, user_id, subject_entity_id, relation,
                         object_entity_id, object_value);
+      if (prov && outside_is_tainted(prov->outside)) {
+         sqlite3_bind_int(close_stmt, 9, 1);
+      } else {
+         sqlite3_bind_null(close_stmt, 9);
+      }
       if (named) {
          sqlite3_bind_text(close_stmt, 7, replaces, -1, SQLITE_TRANSIENT);
       } else {
@@ -436,6 +482,7 @@ int memory_db_relation_supersede_ex(int user_id,
           "  AND valid_to IS NULL "
           "  AND COALESCE(object_entity_id, 0) = COALESCE(?5, 0) "
           "  AND COALESCE(object_value, '') = COALESCE(?6, '') "
+          "  AND (?8 IS NULL OR outside NOT IN (" OUTSIDE_UNTAINTED_SQL ")) "
           "RETURNING fact_id",
           -1, &cstmt, NULL);
       if (rc2 != SQLITE_OK) {
@@ -450,6 +497,11 @@ int memory_db_relation_supersede_ex(int user_id,
          sqlite3_bind_int64(cstmt, 7, fact_id);
       } else {
          sqlite3_bind_null(cstmt, 7);
+      }
+      if (prov && outside_is_tainted(prov->outside)) {
+         sqlite3_bind_int(cstmt, 8, 1);
+      } else {
+         sqlite3_bind_null(cstmt, 8);
       }
       const int before = n_closed_facts;
       rc2 = collect_closed_facts(cstmt, closed_facts, &n_closed_facts);
@@ -502,6 +554,7 @@ int memory_db_relation_supersede_ex(int user_id,
       sqlite3_bind_null(create_stmt, 9);
    }
    memory_db_internal_bind_provenance(create_stmt, 10, prov);
+   sqlite3_bind_int(create_stmt, 13, prov ? prov->outside : OUTSIDE_NONE);
    /* v49 upsert: RETURNING id, mention_count.  Consume the first row to learn
     * the dedup outcome (mention_count > 1 means an existing row was bumped
     * rather than a fresh row inserted), then drain to SQLITE_DONE.  Done
@@ -568,10 +621,12 @@ int memory_db_relation_supersede_ex(int user_id,
 
    /* A closed row's fact goes only when nothing it says is still open (a fact
     * listing two numbers stays when one of them changes), never the new fact
-    * itself, and only with a new fact to point at. */
+    * itself, never one outside text didn't teach for a batch that read some,
+    * and only with a new fact to point at. */
    for (int i = 0; i < n_closed_facts; i++) {
       const int64_t old_id = closed_facts[i];
-      if (old_id == fact_id || fact_has_open_relation_locked(user_id, old_id)) {
+      if (old_id == fact_id ||
+          fact_stays_locked(user_id, old_id, prov && outside_is_tainted(prov->outside))) {
          continue;
       }
       if (fact_id <= 0) {
@@ -623,9 +678,11 @@ int memory_db_relation_supersede_ex(int user_id,
 
 /* Reads SELECTs ordered:
  *   0:id, 1:subject_entity_id, 2:relation, 3:object_entity_id,
- *   4:object_name, 5:confidence, 6:valid_from, 7:valid_to, 8:mention_count
+ *   4:object_name, 5:confidence, 6:valid_from, 7:valid_to, 8:mention_count,
+ *   9:outside
  *
- * valid_* (cols 6, 7) appended in v33; mention_count (col 8) appended in v49.
+ * valid_* (cols 6, 7) appended in v33; mention_count (col 8) in v49; outside
+ * (col 9) in v113.
  * COALESCE in SQL converts SQL NULL → 0 in C for the validity columns.
  *
  * Must stay column-symmetric with populate_relation_outgoing_row() in
@@ -653,6 +710,7 @@ static void populate_relation_from_row(sqlite3_stmt *stmt, memory_relation_t *re
    rel->valid_to = sqlite3_column_int64(stmt, 7);
 
    rel->mention_count = sqlite3_column_int(stmt, 8);
+   rel->outside = sqlite3_column_int(stmt, 9);
 }
 
 int memory_db_relation_list_by_subject(int user_id,
@@ -905,77 +963,247 @@ int memory_db_relation_list_by_object_at(int user_id,
                                  object_entity_id, as_of_ts, out, max, count_out);
 }
 
-int memory_db_relation_list_with_canonical_roots_by_user(int user_id,
-                                                         memory_relation_t *out,
-                                                         int64_t *subj_roots,
-                                                         int64_t *obj_roots,
-                                                         int max,
-                                                         int *count_out) {
+/* A JSON array of @p ids ("[1,2,3]") for json_each(); NULL on failure.
+ * Caller frees. */
+static char *ids_json(const int64_t *ids, int n) {
+   const size_t cap = (size_t)n * 21 + 3;
+   char *buf = malloc(cap);
+   if (!buf) {
+      return NULL;
+   }
+   size_t len = 0;
+   buf[len++] = '[';
+   for (int i = 0; i < n; i++) {
+      char num[24];
+      int w = snprintf(num, sizeof(num), i ? ",%lld" : "%lld", (long long)ids[i]);
+      if (w < 0 || (size_t)w >= sizeof(num) || (size_t)w + 2 > cap - len) {
+         free(buf);
+         return NULL;
+      }
+      memcpy(buf + len, num, (size_t)w);
+      len += (size_t)w;
+   }
+   buf[len++] = ']';
+   buf[len] = '\0';
+   return buf;
+}
+
+int memory_db_relation_list_for_entities(int user_id,
+                                         const int64_t *entity_ids,
+                                         int n_ids,
+                                         int per_dir_max,
+                                         bool with_incoming,
+                                         memory_card_relation_t **out,
+                                         int *count_out) {
    if (count_out)
       *count_out = 0;
-   if (!out || !subj_roots || !obj_roots || max <= 0)
+   if (!out || !count_out || n_ids < 0 || (n_ids > 0 && !entity_ids))
       return MEMORY_DB_FAILURE;
+   *out = NULL;
+   if (n_ids == 0)
+      return MEMORY_DB_SUCCESS;
 
-   AUTH_DB_LOCK_OR_FAIL();
+   /* cls: every entity whose relations belong on a listed card, with that
+    * card: the listed entity itself (an alias id lists nothing of its own)
+    * and the aliases linked to it.  cand: each member's strongest rows per
+    * direction (outgoing, then incoming from outside its class), at most the
+    * limit each, so no member's whole edge list is ranked; ranked then keeps
+    * a card's strongest across its members.  tot: a card's full count per
+    * direction, from index counts, so the limit can be told.  A negative
+    * ?3 is no limit (SQLite reads LIMIT -1 as unlimited).
+    *
+    * The CROSS JOINs fix the join order: driven from the listed ids through
+    * the subject/object indexes, never a scan of the user's whole relation
+    * set (+x.user_id keeps the planner off the user_id indexes). */
+   static const char sql[] =
+       "WITH cls(id, card) AS ( "
+       "  SELECT e.id, e.id FROM json_each(?2) j CROSS JOIN memory_entities e ON e.id = j.value "
+       "   WHERE e.user_id = ?1 AND e.canonical_id IS NULL "
+       "  UNION ALL "
+       "  SELECT e.id, e.canonical_id FROM json_each(?2) j "
+       "   CROSS JOIN memory_entities e ON e.canonical_id = j.value WHERE e.user_id = ?1), "
+       "cand(card, incoming, rid, mc) AS ( "
+       "  SELECT c.card, 0, r.id, r.mention_count FROM cls c "
+       "   CROSS JOIN memory_relations r ON r.id IN ( "
+       "     SELECT x.id FROM memory_relations x WHERE x.subject_entity_id = c.id AND +x.user_id = "
+       "?1 "
+       "      ORDER BY x.mention_count DESC, x.id DESC LIMIT ?3) "
+       "  UNION ALL "
+       "  SELECT c.card, 1, r.id, r.mention_count FROM cls c "
+       "   CROSS JOIN memory_relations r ON r.id IN ( "
+       "     SELECT x.id FROM memory_relations x LEFT JOIN memory_entities s ON s.id = "
+       "x.subject_entity_id "
+       "      WHERE x.object_entity_id = c.id AND +x.user_id = ?1 "
+       "        AND COALESCE(s.canonical_id, s.id, 0) <> c.card "
+       "      ORDER BY x.mention_count DESC, x.id DESC LIMIT ?3) "
+       "   WHERE ?4), "
+       "tot(card, incoming, total) AS ( "
+       "  SELECT c.card, 0, SUM((SELECT COUNT(*) FROM memory_relations x "
+       "                          WHERE x.subject_entity_id = c.id AND +x.user_id = ?1)) "
+       "   FROM cls c GROUP BY c.card "
+       "  UNION ALL "
+       "  SELECT c.card, 1, SUM((SELECT COUNT(*) FROM memory_relations x "
+       "                          LEFT JOIN memory_entities s ON s.id = x.subject_entity_id "
+       "                          WHERE x.object_entity_id = c.id AND +x.user_id = ?1 "
+       "                            AND COALESCE(s.canonical_id, s.id, 0) <> c.card)) "
+       "   FROM cls c WHERE ?4 GROUP BY c.card), "
+       "ranked AS (SELECT card, incoming, rid, "
+       "  ROW_NUMBER() OVER (PARTITION BY card, incoming ORDER BY mc DESC, rid DESC) AS rn FROM "
+       "cand) "
+       "SELECT r.id, r.subject_entity_id, r.relation, "
+       "       CASE WHEN k.incoming THEN COALESCE(s.canonical_id, s.id, 0) "
+       "            ELSE r.object_entity_id END, "
+       "       CASE WHEN k.incoming THEN sc.name ELSE COALESCE(e.name, r.object_value) END, "
+       "       r.confidence, COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
+       "       r.mention_count, r.outside, k.card, k.incoming, t.total "
+       "FROM ranked k JOIN tot t ON t.card = k.card AND t.incoming = k.incoming "
+       "CROSS JOIN memory_relations r ON r.id = k.rid "
+       "LEFT JOIN memory_entities e ON e.id = r.object_entity_id "
+       "LEFT JOIN memory_entities s ON s.id = r.subject_entity_id "
+       "LEFT JOIN memory_entities sc ON sc.id = COALESCE(s.canonical_id, s.id) "
+       "WHERE ?3 < 0 OR k.rn <= ?3 "
+       "ORDER BY k.card, k.incoming, k.rn";
 
-   /* Single query: all relations for this user with canonical-root id
-    * resolved per side via COALESCE(canonical_id, id).  Object side reuses
-    * the existing `e` JOIN that resolves object_name; subject side gets
-    * its own JOIN aliased `s` (subject_entity_id is NOT NULL per schema,
-    * so the s row always exists for valid relations).
-    *
-    * subj_root / obj_root: 0 means orphaned (LEFT JOIN missed) — callers
-    * MUST filter via "root == specific_entity_id" rather than "root != 0"
-    * to avoid attributing orphaned-subject relations to any entity card.
-    *
-    * No ORDER BY — sorting on the computed subj_root materializes a temp
-    * B-tree (verified 2026-05-20 via EXPLAIN QUERY PLAN), and no caller
-    * depends on iteration order.  valid_from/valid_to appended in v33,
-    * mention_count appended in v49 — column order matches
-    * populate_relation_from_row.  Roots follow at indices 9/10.
-    *
-    * EXPLAIN QUERY PLAN (Jetson, 2026-05-20):
-    *   SEARCH r USING INDEX idx_memory_relations_user_validity (user_id=?)
-    *   SEARCH e USING INTEGER PRIMARY KEY (rowid=?)
-    *   SEARCH s USING INTEGER PRIMARY KEY (rowid=?)
-    * Three indexed seeks; no scans, no temp tables. */
-   sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(
-       s_db.db,
-       "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
-       "       COALESCE(e.name, r.object_value) AS object_name, r.confidence, "
-       "       COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
-       "       r.mention_count, "
-       "       COALESCE(s.canonical_id, s.id, 0) AS subj_root, "
-       "       COALESCE(e.canonical_id, e.id, 0) AS obj_root "
-       "FROM memory_relations r "
-       "LEFT JOIN memory_entities e ON r.object_entity_id = e.id "
-       "LEFT JOIN memory_entities s ON r.subject_entity_id = s.id "
-       "WHERE r.user_id = ? "
-       "LIMIT ?",
-       -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      AUTH_DB_UNLOCK();
+   char *ids = ids_json(entity_ids, n_ids);
+   if (!ids) {
       return MEMORY_DB_FAILURE;
    }
 
+   /* Locked by hand: the ids buffer must be freed on the not-ready path. */
+   pthread_mutex_lock(&s_db.mutex);
+   sqlite3_stmt *stmt = NULL;
+   if (!s_db.initialized || sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      free(ids);
+      return MEMORY_DB_FAILURE;
+   }
    sqlite3_bind_int(stmt, 1, user_id);
-   sqlite3_bind_int(stmt, 2, max);
+   sqlite3_bind_text(stmt, 2, ids, -1, SQLITE_STATIC);
+   sqlite3_bind_int(stmt, 3, per_dir_max > 0 ? per_dir_max : -1);
+   sqlite3_bind_int(stmt, 4, with_incoming ? 1 : 0);
 
+   memory_card_relation_t *rows = NULL;
    int count = 0;
-   while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
-      populate_relation_from_row(stmt, &out[count]);
-      /* Roots are appended after the columns populate_relation_from_row
-       * reads (it stops at mention_count / index 8 in v49).  Indices 9/10
-       * are ours. */
-      subj_roots[count] = sqlite3_column_int64(stmt, 9);
-      obj_roots[count] = sqlite3_column_int64(stmt, 10);
-      count++;
+   int cap = 0;
+   int rc = MEMORY_DB_SUCCESS;
+   int step;
+   while ((step = sqlite3_step(stmt)) == SQLITE_ROW) {
+      if (count == cap) {
+         const int next = cap ? cap * 2 : 64;
+         memory_card_relation_t *grown = realloc(rows, (size_t)next * sizeof(*rows));
+         if (!grown) {
+            rc = MEMORY_DB_FAILURE;
+            break;
+         }
+         rows = grown;
+         cap = next;
+      }
+      memory_card_relation_t *row = &rows[count++];
+      memset(row, 0, sizeof(*row));
+      populate_relation_from_row(stmt, &row->rel);
+      row->card_id = sqlite3_column_int64(stmt, 10);
+      row->incoming = sqlite3_column_int(stmt, 11) != 0;
+      row->total = sqlite3_column_int(stmt, 12);
+   }
+   if (rc == MEMORY_DB_SUCCESS && step != SQLITE_DONE) {
+      rc = MEMORY_DB_FAILURE;
    }
 
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
-   if (count_out)
-      *count_out = count;
+   free(ids);
+
+   if (rc != MEMORY_DB_SUCCESS) {
+      free(rows);
+      return rc;
+   }
+   *out = rows;
+   *count_out = count;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_relation_close(int user_id,
+                             int64_t relation_id,
+                             int64_t valid_to,
+                             int64_t closed_by_fact_id) {
+   if (user_id <= 0 || relation_id <= 0 || valid_to <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+   /* Open only, never before it began, and never more than a day ahead (a
+    * date written in another zone): a close records when a value ended. */
+   if (valid_to > (int64_t)time(NULL) + 86400) {
+      return MEMORY_DB_NOT_FOUND;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "UPDATE memory_relations SET valid_to = ?3, closed_by_fact_id = ?4 "
+                               "WHERE id = ?2 AND user_id = ?1 AND valid_to IS NULL AND "
+                               "(valid_from IS NULL OR valid_from <= ?3)",
+                               -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_int64(st, 2, relation_id);
+      sqlite3_bind_int64(st, 3, valid_to);
+      if (closed_by_fact_id > 0) {
+         sqlite3_bind_int64(st, 4, closed_by_fact_id);
+      } else {
+         sqlite3_bind_null(st, 4);
+      }
+      rc = sqlite3_step(st);
+   }
+   const int changed = rc == SQLITE_DONE ? sqlite3_changes(s_db.db) : 0;
+   if (rc != SQLITE_DONE) {
+      OLOG_WARNING("memory_db: closing relation %lld failed: %s", (long long)relation_id,
+                   sqlite3_errmsg(s_db.db));
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      return MEMORY_DB_FAILURE;
+   }
+   return changed > 0 ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}
+
+int memory_db_relation_list_open(int user_id,
+                                 int64_t subject_entity_id,
+                                 const char *relation,
+                                 memory_relation_t *out,
+                                 int max,
+                                 int *count_out) {
+   *count_out = 0;
+   if (!relation || !out || max <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* idx_memory_relations_subject_open (subject_entity_id, relation) WHERE valid_to IS NULL */
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id, "
+                               "COALESCE(e.name, r.object_value), r.confidence, "
+                               "COALESCE(r.valid_from, 0), COALESCE(r.valid_to, 0), "
+                               "r.mention_count, r.outside FROM memory_relations r LEFT JOIN "
+                               "memory_entities e ON r.object_entity_id = e.id WHERE "
+                               "r.subject_entity_id = ?2 AND r.relation = ?3 AND r.valid_to IS "
+                               "NULL AND r.user_id = ?1 ORDER BY r.id DESC LIMIT ?4",
+                               -1, &st, NULL);
+   int n = 0;
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      sqlite3_bind_int64(st, 2, subject_entity_id);
+      sqlite3_bind_text(st, 3, relation, -1, SQLITE_STATIC);
+      sqlite3_bind_int(st, 4, max);
+      while ((rc = sqlite3_step(st)) == SQLITE_ROW && n < max) {
+         memset(&out[n], 0, sizeof(out[n]));
+         populate_relation_from_row(st, &out[n]);
+         n++;
+      }
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      return MEMORY_DB_FAILURE;
+   }
+   *count_out = n;
    return MEMORY_DB_SUCCESS;
 }

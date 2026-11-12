@@ -423,10 +423,13 @@ static char *job_tool_callback(const char *action, char *value, int *should_resp
     * dispatch chain and silently miss them. */
    const bool starts_work = (strcmp(action, "spawn") == 0 || strcmp(action, "resume") == 0);
 
-   /* No caller context means no session to attribute this to.  Every other path
-    * (LLM tool call, legacy <command> tag) sets it; the one that does not is an
-    * MQTT publish, which is UNAUTHENTICATED on a broker without auth/TLS and
-    * would otherwise run as user_id 1 with the fan-out backstop wide open.
+   /* No caller context means no session to attribute this to.  An LLM tool call
+    * (llm_tools.c) and a direct voice command (dawn.c, around run_direct_command)
+    * set it, and the scheduler can't reach this tool (not schedulable); the one
+    * caller with none is an MQTT publish that names no live session
+    * (mosquitto_comms.c), UNAUTHENTICATED on a broker without auth/TLS, which
+    * would otherwise run as the default voice user with the fan-out backstop
+    * wide open.
     * Reads stay available (they are already user-scoped and harmless); anything
     * that starts work fails closed. */
    if (ctx == NULL && starts_work) {
@@ -438,8 +441,8 @@ static char *job_tool_callback(const char *action, char *value, int *should_resp
 
    /* Backstop: a background-job worker runs headless and must never start further
     * jobs (unbounded fan-out).  The `job` tool is already removed from a job
-    * session's schema, so the model shouldn't see it; this refuses any non-schema
-    * path (e.g. a legacy <command> tag) that reaches it from a job context.
+    * session's schema, so the model shouldn't see it; this refuses any path that
+    * doesn't go through the schema and reaches it from a job context.
     *
     * `resume` counts: it takes a pool slot and spawns a worker exactly like
     * spawn does, so leaving it out would reopen the fan-out this closes — via a
@@ -519,6 +522,7 @@ static const tool_action_kind_entry_t s_job_action_kinds[] = {
 
 static const tool_metadata_t job_metadata = {
    .name = "job",
+   .results = TOOL_RESULTS_OUTSIDE,
    .action_kinds = s_job_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_job_action_kinds),
    .device_string = "job",

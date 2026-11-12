@@ -150,6 +150,9 @@ static const char *DDL =
    "  num_chunks INTEGER NOT NULL,"
    "  is_global INTEGER DEFAULT 0,"
    "  created_at INTEGER NOT NULL,"
+   "  original_blob_id TEXT DEFAULT NULL,"
+   "  outside INTEGER NOT NULL DEFAULT 0,"
+   "  own INTEGER NOT NULL DEFAULT 0,"
    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
    ");"
    "CREATE TABLE IF NOT EXISTS document_chunks ("
@@ -222,15 +225,17 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO documents (user_id, filename, filepath, filetype, file_hash, "
-       "num_chunks, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+       "num_chunks, is_global, created_at, original_blob_id, outside) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ?4 = 'note' THEN 0 ELSE 5 END)",
        -1, &s_db.stmt_doc_create, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-                           "num_chunks, is_global, created_at FROM documents WHERE id = ?",
-                           -1, &s_db.stmt_doc_get, NULL);
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, filename, filepath, filetype, file_hash, "
+       "num_chunks, is_global, created_at, outside, own FROM documents WHERE id = ?",
+       -1, &s_db.stmt_doc_get, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
@@ -243,20 +248,21 @@ static int prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-                           "num_chunks, is_global, created_at FROM documents "
+                           "num_chunks, is_global, created_at, outside, own FROM documents "
                            "WHERE user_id = ? OR is_global = 1 ORDER BY created_at DESC "
                            "LIMIT ? OFFSET ?",
                            -1, &s_db.stmt_doc_list, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT d.id, d.user_id, d.filename, d.filepath, d.filetype, "
-                           "d.file_hash, d.num_chunks, d.is_global, d.created_at, "
-                           "COALESCE(u.username, '') FROM documents d "
-                           "LEFT JOIN users u ON d.user_id = u.id "
-                           "ORDER BY d.created_at DESC LIMIT ? OFFSET ?",
-                           -1, &s_db.stmt_doc_list_all, NULL);
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT d.id, d.user_id, d.filename, d.filepath, d.filetype, "
+       "d.file_hash, d.num_chunks, d.is_global, d.created_at, d.outside, d.own, "
+       "COALESCE(u.username, '') FROM documents d "
+       "LEFT JOIN users u ON d.user_id = u.id "
+       "ORDER BY d.created_at DESC LIMIT ? OFFSET ?",
+       -1, &s_db.stmt_doc_list_all, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
@@ -296,7 +302,7 @@ static int prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-                           "num_chunks, is_global, created_at "
+                           "num_chunks, is_global, created_at, outside, own "
                            "FROM documents "
                            "WHERE (user_id = ? OR is_global = 1) "
                            "AND filename LIKE ? ESCAPE '\\' COLLATE NOCASE "
@@ -919,6 +925,13 @@ static void print_usage(const char *prog) {
            "                                   floor (baseline = pre-2026-05-13 behavior);\n"
            "                                   0.30 is the natural kw_weight boundary.\n"
            "                                   Use to sweep the floor without rebuilding.\n"
+           "  --dump-candidates <path>         Memory-pipeline mode: write each batch's raw\n"
+           "                                   extraction facts to <path> as facts-JSONL\n"
+           "                                   (what extraction proposed, before storing).\n"
+           "  --consolidator <prompt|agent>    Memory-pipeline mode: override [memory]\n"
+           "                                   consolidator (how a batch is stored).\n"
+           "  --samples <1|2>                  Memory-pipeline mode, consolidator \"agent\":\n"
+           "                                   extraction samples per batch (default 1).\n"
            "  --help                           Show this help\n",
            prog);
 }
@@ -953,6 +966,9 @@ int main(int argc, char *argv[]) {
       { "extraction-model", required_argument, 0, 'Y' },
       { "extraction-effort", required_argument, 0, 'Z' },
       { "search-score-floor", required_argument, 0, 'F' },
+      { "dump-candidates", required_argument, 0, 'D' },
+      { "consolidator", required_argument, 0, 'O' },
+      { "samples", required_argument, 0, 'G' },
       { "help", no_argument, 0, 'h' },
       { 0, 0, 0, 0 },
    };
@@ -963,13 +979,16 @@ int main(int argc, char *argv[]) {
    const char *extraction_provider_override = NULL;
    const char *extraction_model_override = NULL;
    const char *extraction_effort_override = NULL;
+   const char *dump_candidates_path = NULL;
+   const char *consolidator_override = NULL;
+   int samples = 0; /* 0: the default */
    /* search_score_floor override: sentinel < 0 means "leave g_config alone";
     * any >= 0 value (including 0.0) means "override g_config after load".
     * The 0.0 override is meaningful — it represents the pre-2026-05-13
     * baseline (no floor) for ablation against the new default. */
    float search_score_floor_override = -1.0f;
    int opt;
-   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:C:X:Y:Z:F:MSrh", long_options,
+   while ((opt = getopt_long(argc, argv, "p:m:e:k:c:t:n:N:W:B:C:X:Y:Z:F:D:O:G:MSrh", long_options,
                              NULL)) != -1) {
       switch (opt) {
          case 'p':
@@ -1023,6 +1042,19 @@ int main(int argc, char *argv[]) {
          case 'Z':
             extraction_effort_override = optarg;
             break;
+         case 'D':
+            dump_candidates_path = optarg;
+            break;
+         case 'O':
+            consolidator_override = optarg;
+            break;
+         case 'G':
+            samples = atoi(optarg);
+            if (samples != 1 && samples != 2) {
+               fprintf(stderr, "bench: --samples must be 1 or 2 (got %s)\n", optarg);
+               return 1;
+            }
+            break;
          case 'F':
             search_score_floor_override = (float)atof(optarg);
             if (search_score_floor_override < 0.0f || search_score_floor_override > 1.0f) {
@@ -1073,6 +1105,11 @@ int main(int argc, char *argv[]) {
          snprintf(g_config.memory.extraction_model, sizeof(g_config.memory.extraction_model), "%s",
                   extraction_model_override);
       }
+      if (consolidator_override && consolidator_override[0]) {
+         snprintf(g_config.memory.consolidator, sizeof(g_config.memory.consolidator), "%s",
+                  consolidator_override);
+         config_clamp_memory(&g_config.memory); /* an unknown value becomes "prompt" */
+      }
       if (extraction_effort_override && extraction_effort_override[0]) {
          snprintf(g_config.memory.extraction_effort, sizeof(g_config.memory.extraction_effort),
                   "%s", extraction_effort_override);
@@ -1096,10 +1133,10 @@ int main(int argc, char *argv[]) {
    } else {
       memset(&g_config, 0, sizeof(g_config));
       memset(&g_secrets, 0, sizeof(g_secrets));
-      if (extraction_provider_override || extraction_model_override || extraction_effort_override) {
-         fprintf(stderr,
-                 "bench: --extraction-provider/--extraction-model/--extraction-effort require "
-                 "--memory-pipeline; ignored in default mode\n");
+      if (extraction_provider_override || extraction_model_override || extraction_effort_override ||
+          dump_candidates_path) {
+         fprintf(stderr, "bench: --extraction-provider/--extraction-model/--extraction-effort/"
+                         "--dump-candidates require --memory-pipeline; ignored in default mode\n");
       }
    }
 
@@ -1125,6 +1162,10 @@ int main(int argc, char *argv[]) {
        * fallback rules, which Haiku 4.5 rejects. */
       if (llm_context_init() != 0)
          return 1;
+      if (dump_candidates_path && bench_mp_dump_candidates(dump_candidates_path) != 0)
+         return 1;
+      if (samples > 0)
+         bench_mp_set_samples(samples);
       if (bench_mp_init() != 0)
          return 1;
       s_memory_pipeline_mode = true;
@@ -1167,10 +1208,11 @@ int main(int argc, char *argv[]) {
               "{\"status\":\"ready\",\"dims\":%d,\"provider\":\"%s\","
               "\"mode\":\"memory-pipeline\","
               "\"extraction_provider\":\"%s\",\"extraction_model\":\"%s\","
-              "\"extraction_effort\":\"%s\",\"extraction_prompt_sha256\":\"%s\"}\n",
+              "\"extraction_effort\":\"%s\",\"consolidator\":\"%s\","
+              "\"extraction_prompt_sha256\":\"%s\"}\n",
               embedding_engine_dims(), provider, g_config.memory.extraction_provider,
               g_config.memory.extraction_model, g_config.memory.extraction_effort,
-              bench_mp_extraction_prompt_sha256());
+              g_config.memory.consolidator, bench_mp_extraction_prompt_sha256());
    } else {
       fprintf(stdout,
               "{\"status\":\"ready\",\"dims\":%d,\"provider\":\"%s\","

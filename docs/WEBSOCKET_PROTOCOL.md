@@ -95,6 +95,7 @@ When to add what:
 
 | Flag | Since | Meaning |
 |------|-------|---------|
+| `memory_batches` | 2026-11-03 | The daemon records what memory learned per batch and answers `list_memory_batches`, `undo_memory_batch` and `keep_memory_op`, and pushes `memory_batch` (see Memory Management, Consolidation). Advertised while memory is enabled; a build without the WebUI never advertises it. Without it, offer no marker, Learned tab or undo. |
 | `email_refs` | 2026-10-09 | A `text` frame may carry `email_refs`: one email the user attached, by account and message id. The model reads it with the email tool, and the question row comes back with `email_ref` on every frame that delivers it (see Email, Email in chat). Advertised with `email_client`. Without it, send no `email_refs` (an older daemon ignores them, and the model never sees the email). |
 | `email_client` | 2026-10-07 | The mail panel's verbs answer: `email_list`, `email_search`, `email_read`, `email_set_flags`, `email_unread_counts`, `email_archive`, `email_trash`, `email_undo`, and the server pushes `email_changed` (see Email). Advertised only while the email service is up; a build without the WebUI or the email tool never advertises it. |
 | `document_attachments` | 2026-10-02 | A `text` frame may carry its documents as `attachments` (`[{filename, size, content, blob_id?}]`): the daemon defuses each body and filename and builds the `[ATTACHED DOCUMENT: …]…[END DOCUMENT]` text itself, so a document can't end its own span. Without it, inline the documents into `text` as before. Every daemon with it also has `turn_refs`. |
@@ -972,6 +973,24 @@ Search through stored memories.
 ```
 Response: `search_memory_response`
 
+#### `list_memory_entities`
+List entities (the Graph tab), most mentioned first.
+```json
+{"type": "list_memory_entities", "payload": {"limit": 20, "offset": 0}}
+```
+Response: `list_memory_entities_response`, with `entities`, `count` and `has_more`. Each
+entity (the same shape as the `entities` of `search_memory_response`) is a card: the entity and
+its aliases. Aliases are not listed on their own, but `count` and `has_more` count the entity rows
+read, aliases included: advance `offset` by `count`, not by `entities.length`.
+
+| Field | Meaning |
+|---|---|
+| `id`, `name`, `canonical_name`, `entity_type` | The entity |
+| `mention_count`, `first_seen`, `last_seen` | Across its aliases |
+| `alias_count`, `is_user_self` | Linked aliases; whether it is the user |
+| `relations` | Its relations, outgoing first, then incoming from outside the card. Each has `relation`, `object_name`, `object_entity_id`, `direction` (`out`/`in`), `confidence`, `mention_count`, and `valid_from`/`valid_to` when set. For `in`, `object_name`/`object_entity_id` name the other end's card |
+| `relations_total` | All of the card's relations. At most 50 per direction are sent, most seen first; when `relations_total` is larger, the rest exist but weren't sent |
+
 #### `get_memory_fact_source`
 Return the verbatim source conversation messages a fact was extracted from (memory provenance).
 ```json
@@ -1019,7 +1038,7 @@ Delete a specific memory fact.
    }
 }
 ```
-Response: `delete_memory_fact_response` with `success`, and `error` on failure ("Memory is still being
+Response: `delete_memory_fact_response` with `success`, the `fact_id` asked for, and `error` on failure ("Memory is still being
 saved; try again in a moment" while an extraction for the user runs past the wait; "Memory is busy with
 another change; try again shortly" when the user already has several deletes running). The duplicates
 merged into it are deleted with it; the values it replaced are current again: `restored_count` says how
@@ -1072,6 +1091,211 @@ Response: `restore_memory_fact_response` with `success`, `fact_id`, `both_curren
 that replaced it stays current too) and `error` on failure
 (the fact isn't the caller's, or was already restored or deleted).
 
+#### Consolidation: what memory learned per batch
+
+With `memory_batches` advertised.  Each time memory consolidates a conversation (a *batch*, run
+when the conversation ends or goes quiet with `[memory] consolidator = "agent"`), DAWN records
+what it did: each fact it added, reinforced, merged or replaced, each relation it closed, each
+entity it linked, each preference it set, and each candidate it dropped or set aside for later.
+A client shows a batch as a marker in its conversation and in a Learned list, and lets the user
+undo it, keep a candidate it dropped, or forget a fact it suggested forgetting.  Batches are not
+messages: they never appear in `messages`, the history, or what the model is sent.
+
+##### The batch object
+
+```json
+{
+   "batch_id": 412,
+   "conversation_id": 1703,
+   "from_message_id": 26230,
+   "after_message_id": 26244,
+   "created_at": 1793000000,
+   "path": "agent",
+   "status": "applied",
+   "outside": true,
+   "outside_from": "email",
+   "counts": {"added": 3, "reinforced": 2, "merged": 1, "replaced": 1, "closed": 1,
+              "linked": 0, "proposed": 0, "pref_set": 1, "dropped": 4, "deferred": 1,
+              "suggested_forget": 0, "refused": 0},
+   "ops": [ ]
+}
+```
+
+- `conversation_id`: the conversation whose messages hold `after_message_id`: the one the batch
+  read, never the root of a continuation chain (a continued conversation is its own and gets its
+  own batches); `null` for a batch with none.
+- `from_message_id`: the first message the batch learned from.
+- `after_message_id`: place the marker after this.  It may name a row the client doesn't render
+  as a bubble (a tool row, an intermediate assistant row of a tool loop, a request-context row);
+  message ids grow within a conversation, so **place the marker after the greatest rendered
+  message id ≤ `after_message_id`**.  When none is rendered (a range the client hasn't loaded),
+  show the batch only in the Learned list.  `0` or absent: the Learned list only.  Rows are never
+  renumbered (compaction changes what the model is sent, not what is stored); a retracted turn's
+  rows are deleted, which the ≤ rule absorbs.
+- `path`: `agent`, or `agent_partial` when the run didn't finish and only what can't lose a
+  stored item was applied, or the batch filled its record (256 ops) and what didn't fit wasn't
+  applied.
+- `status`: `applied` · `partial` (some ops undone, some not) · `undone` (every op that can be
+  undone was).
+- `outside`: the batch read outside text (an email, a web page, ...).  `outside_from`: what it
+  read, `null` when `outside` is false: `web` · `email` · `research` (a research report) ·
+  `messaging` (a message from a chat channel) · `document` · `calendar` (a calendar event) ·
+  `mcp` (an MCP server's result) · `other` (any other tool's result, DAWN's own posts, a device's
+  data).  Show it once per batch ("Read outside text: an email").  A memory DAWN recalled into the conversation doesn't count,
+  whatever it was learned from, and neither does the user's own document (a note, or one marked
+  My own text: see Document Library).
+- `counts`: the batch's ops by kind (a link that became a proposal counts as `proposed`); refused
+  ops count in `refused` only and are not listed.
+
+##### Op rows
+
+```json
+{
+   "op_id": 9001,
+   "op": "merged",
+   "status": "applied",
+   "outside": false,
+   "outside_from": null,
+   "fact_id": 7690,
+   "relation_id": null,
+   "entity_id": null,
+   "text": "...",
+   "target_fact_id": 7702,
+   "target_entity_id": null,
+   "target_text": "...",
+   "target_status": "current",
+   "reason": "...",
+   "reason_by": "model",
+   "action": "undo"
+}
+```
+The row of the fact kept (7702 here), when this batch added or reinforced it, also carries what was
+merged into it:
+```json
+{"op_id": 9000, "op": "added", "fact_id": 7702, "sources": [{"fact_id": 7690, "text": "..."}]}
+```
+
+- `op`: `added` · `reinforced` · `merged` · `replaced` · `closed` · `linked` · `pref_set` ·
+  `dropped` · `deferred` · `suggested_forget`.
+- `status`: `applied` · `proposed` (a link that became a merge proposal for the user to decide) ·
+  `undone` · `stale` (an undo found the row changed since; nothing was done) · `kept` (a dropped or
+  set-aside candidate the user kept) · `consumed` (a set-aside candidate a later batch took up) ·
+  `expired` (a set-aside candidate past its 30 days).  There is no `forgotten` status: forgetting
+  a fact removes every row naming it, so an acted-on suggestion leaves the list.
+- `outside`, `outside_from`: the batch's taint (a kept or set-aside candidate: its own batch's).
+  Tag a row only when they differ from the batch's.  A stored fact's own taint is read from the
+  fact.
+- `fact_id`: the op's own fact; absent or `null` for `closed`, `linked` and `pref_set`.
+- `text`: the op's item when it was recorded: fact text, a relation as "subject predicate
+  object", an entity name, a preference as "category: value"; `null` for a candidate dropped
+  because the user forgot it.
+- `target_fact_id`: `merged`: the fact kept; `replaced`: the newer value; `closed`: the fact
+  whose value closed it (if any).  `target_entity_id`: `linked`: the entity linked to.
+- `target_text`: the counterpart when recorded (it may be gone since).  `target_status`:
+  `current` · `superseded` · `gone`, the counterpart now (computed when the list is built);
+  absent when the op has none.
+- `sources`: on this batch's `added` or `reinforced` row of a fact a merge of this batch landed on:
+  the facts merged into it.  Absent otherwise (a merge into a stored fact the batch didn't touch
+  has no row to carry it; its `merged` row names the fact kept).
+- `reason`: one line.  **Render it as text (`textContent`), never as markup.**  `reason_by` says
+  who wrote it: `model` (the model's words: show them as such, e.g. "Model's reason:") or `dawn`
+  (DAWN's own, e.g. "not reached"); absent with no reason, or on a row recorded before it was kept.
+- `action`: `undo` (an applied op that can be undone) · `keep` (an applied dropped candidate, or
+  a set-aside one open or expired) · `forget` (an applied `suggested_forget`: send the existing
+  `delete_memory_fact` with its `fact_id`, which records the forget) · `null`.
+- `text`, `target_text` and `reason` are cut when recorded, on a character boundary: 511, 511 and
+  200 bytes.
+
+##### `list_memory_batches`
+```json
+{"type": "list_memory_batches", "payload": {"conversation_id": 1703, "limit": 20}}
+{"type": "list_memory_batches", "payload": {"before_batch_id": 380, "limit": 20}}
+```
+Keyset pages, newest first: `before_batch_id` (absent: from the newest), `limit` (default 20, at
+most 50), and `conversation_id` (absent: every conversation's).  Response:
+```json
+{
+   "type": "list_memory_batches_response",
+   "payload": {
+      "conversation_id": 1703,
+      "before_batch_id": null,
+      "limit": 20,
+      "batches": [ ],
+      "has_more": true,
+      "next_before_batch_id": 371,
+      "error": null
+   }
+}
+```
+The request's form is echoed (`conversation_id` only when asked for).  `next_before_batch_id` is
+present only when `has_more` is true; send it as the next request's `before_batch_id`.  A page
+also stops early when its batches reach 256 KB (then `has_more` is true).  A conversation that
+doesn't exist and one that isn't the caller's answer the same: `"error": "Not found"`, no batches.
+
+##### `undo_memory_batch`
+```json
+{"type": "undo_memory_batch", "payload": {"batch_id": 412, "op_id": 9001}}
+```
+`op_id` absent: every op of the batch that can be undone, the last applied first (a closed relation
+last, after the value that closed it).  An `op_id` that is present but not a number is "Not
+found", never the whole batch.  Each op is checked against what it left; if anything else changed
+that row since (a later batch's op still in effect on the same fact, relation, link or
+preference, or, for a merge, on the fact kept; a merge onto a fact it added; another conversation
+teaching it; a restore), it is left as it is and marked `stale`.  A closed relation stays closed while another value of it is open.
+What an undo removes is withdrawn from the conversations it was sent into, like a forget, but no
+forgotten record is made: memory may learn it again.  It waits for the user's running memory
+extraction, on a worker; the reply comes when it ends:
+```json
+{
+   "type": "undo_memory_batch_response",
+   "payload": {"batch_id": 412, "op_id": 9001, "status": "ok", "undone": [9001], "stale": [],
+               "error": null}
+}
+```
+`status`: `ok` (everything asked for was undone; undoing again is `ok` too) · `partial` (a whole
+batch with some ops stale: `undone` and `stale` list them) · `stale` (nothing could be undone:
+"This memory changed since; nothing was undone.") · `error` ("Not found"; "This one can't be
+undone."; "Couldn't undo this right now. Try again in a moment." when the extraction wait or the
+database refused, or an undo or keep of the user's is already running).  A batch or op that
+doesn't exist, or isn't the caller's, or an op named with another batch's id, is "Not found".
+
+##### `keep_memory_op`
+```json
+{"type": "keep_memory_op", "payload": {"batch_id": 412, "op_id": 9010}}
+```
+Stores a dropped or set-aside candidate through the same path and checks a batch stores with,
+carrying the outside text it was recorded with (a kept candidate from an email is still marked as
+from outside text, never as the user's own word).  The op becomes `kept` and a new `added` op
+(or `reinforced`, when it says a stored fact again) joins the batch, which can be undone.  On a
+worker, like an undo:
+```json
+{
+   "type": "keep_memory_op_response",
+   "payload": {"batch_id": 412, "op_id": 9010, "status": "ok", "fact_id": 8140, "error": null}
+}
+```
+A candidate whose text a current fact already says is only marked `kept`, its `fact_id` that fact
+(nothing new joins the batch).
+`status`: `ok` · `error` ("Not found"; "You asked me to forget this; it stays forgotten." when a
+forgotten record says it; "This batch is full; nothing more can be kept from it." when the batch
+holds 256 ops; "This one can't be kept." when it was kept already or is about the assistant; "Couldn't
+keep this right now. Try again in a moment." when the extraction wait, the store or its record failed,
+or an undo or keep of the user's is already running: nothing is stored then).
+
+##### `memory_batch` (push)
+```json
+{"type": "memory_batch", "payload": { }}
+```
+The batch object, to every browser tab of the user, after a batch is recorded, after every undo or
+keep (before the reply), and after a fact one of its ops names is forgotten (a Forget from a
+suggestion removes that row).  Replace a batch already shown by `batch_id`.
+
+A batch a forget removed (its conversation forgotten) comes as its id alone:
+```json
+{"type": "memory_batch", "payload": {"batch_id": 412, "removed": true}}
+```
+Drop it (its row and its conversation marker) wherever it is shown.
+
 #### `delete_memory_preference`
 Delete a specific user preference.
 ```json
@@ -1110,6 +1334,39 @@ Response: `delete_all_memories_response` with `success` and `error` on failure. 
 waits for a memory extraction in progress; if one doesn't finish in time it fails with "Memory is still
 being saved; try again in a minute" and nothing is deleted. On success the user's conversations count as
 extracted, so their memories aren't learned again from them.
+
+---
+
+### Document Library (Authenticated)
+
+The library panel's other requests (`doc_library_*`) are described in
+`include/webui/webui_doc_library.h`; this section covers whose words a document holds.
+
+In `doc_library_list_response`, each row of a document the requester owns carries:
+- `outside`: where its text came from (`outside_kind_t`, `include/core/outside_kind.h`): `0` the
+  user's own words, `5` a document (every upload, attachment or saved text), `3` a research
+  report; a note written in a turn that read outside text carries that text's kind.
+- `own`: whether a chunk of it recalled into a turn counts as the user's own words: the user
+  vouched for it (`set_document_own`), or `outside` is 0 or 8.  A note starts own, anything else
+  not.  The panel's switch shows this value.  Rows of another user's document (a global one, or
+  the admin All Users view) carry neither, and show no switch.
+
+#### `set_document_own`
+Vouch for one of the user's documents as their own text, or take it back.  On sets the vouch and
+keeps `outside` as it is (a research report stays 3, an attachment 5).  Off clears the vouch, and
+an `outside` of 0 or 8 becomes 5 (the user says it isn't their words); any other kind stays.  So
+the response's `own` is the value asked for.  Only the document's owner can, from the panel: no
+tool action sets it.
+```json
+{"type": "set_document_own", "payload": {"document_id": 42, "own": true}}
+```
+Response:
+```json
+{"type": "set_document_own_response", "payload": {"document_id": 42, "own": true, "outside": 5}}
+```
+or `{"document_id": 42, "error": "..."}` (a missing field, or not the user's document).  A save,
+edit or append by the model in a turn that read outside text clears the vouch; the next list
+shows it.  A deleted document recovered comes back without it.
 
 ---
 
@@ -1779,6 +2036,19 @@ The answer reaches a client by **either** route: this frame (turn completes whil
 attached) or the message batch on attach (already-finished job). `complete` carries
 `final_message_id` to correlate the two.
 
+`stream_id` (unsigned integer) is the stream the reply was delivered on; 0 = none (a user
+message, a research report). It counts per session, so two sessions of one user on the same
+conversation can both have a stream N. `reasoning` (string) carries the reply's reasoning, and is
+present only when there is some. `session_id` (unsigned integer, the value the `session`
+frame sends) names the session whose turn wrote the row. It is present if and only if a non-job
+session's turn wrote the row (a typed or spoken WebUI message and its reply, a job result
+re-engaging a conversation a browser is viewing), and absent for a background job's answer (its
+stream reaches every viewer of the job), a detached re-engagement and a research report. A
+client that streamed a reply adopts `message_id` onto its bubble when `conversation_id` and
+`stream_id` match and, if `session_id` is present, it is the session the client was on when it
+streamed; a row naming another session is that session's reply and is drawn as one. With
+`session_id` absent, match on the first two alone.
+
 A user message sent from the WebUI is fanned out the same way (`"role": "user"`, its saved
 text) to every browser of its user. The copy sent to the connection that sent it also carries
 `client_ref` when the `text` frame had one (flag `turn_refs`), so that connection can match it
@@ -2407,6 +2677,11 @@ conversation per daemon run.  `message` is DAWN's own plain-language text (show 
 The conversation isn't named (it may be another user's, or private); the daemon log's
 `LLM binding` line names it.
 
+#### `memory_batch`
+A consolidation batch recorded, undone, kept from, or changed by a forget: the batch object, to every
+browser tab of the user; one a forget removed: `{"batch_id", "removed": true}`. See Memory
+Management, Consolidation.
+
 #### `memory_proposals_changed`
 The count of pending memory proposals changed (signal to refresh a proposals view).
 ```json
@@ -2728,11 +3003,16 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `get_memory_stats` | `get_memory_stats_response` |
 | `list_memory_facts` | `list_memory_facts_response` |
 | `search_memory` | `search_memory_response` |
+| `list_memory_entities` | `list_memory_entities_response` |
 | `get_memory_fact_source` | `get_memory_fact_source_response` |
 | `delete_memory_fact` | `delete_memory_fact_response` |
 | `delete_all_memories` | `delete_all_memories_response` |
 | `list_memory_superseded` | `list_memory_superseded_response` |
 | `restore_memory_fact` | `restore_memory_fact_response` |
+| `list_memory_batches` | `list_memory_batches_response` |
+| `undo_memory_batch` | `undo_memory_batch_response` (when the worker ends) |
+| `keep_memory_op` | `keep_memory_op_response` (when the worker ends) |
+| `set_document_own` | `set_document_own_response` |
 | `music_subscribe` | `music_state` |
 | `music_control` | `music_state` |
 | `music_search` | `music_search_response` |
@@ -2781,6 +3061,7 @@ All `*_response` messages follow a common pattern:
 | `src/webui/webui_email_panel.c` | The mail panel's verbs (list, search, read, flags, counts) |
 | `src/webui/webui_email_exec.c` | Email work off the socket thread, one task per account |
 | `src/webui/webui_memory.c` | Memory facts, preferences, summaries |
+| `src/webui/webui_memory_batches.c` | What memory learned per batch: list, undo, keep (the Learned tab, the marker) |
 | `src/webui/webui_admin.c` | User management (CRUD, unlock) |
 | `src/webui/webui_session.c` | Session list and revocation |
 | `src/webui/webui_settings.c` | Personal user settings |

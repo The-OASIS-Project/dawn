@@ -31,11 +31,17 @@
 
 #include "auth/auth_db.h"
 #include "core/automated_event.h"
+#include "core/outside_kind.h"
+#include "core/outside_markers.h"
+#include "llm/llm_context_text.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_third_party.h"
+#include "llm/llm_turn_blocks.h"
 #include "logging.h"
+#include "memory/memory_history_loader.h"
 #include "memory/memory_note_guard.h"
 #include "prompts.h"
+#include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 
 /* Return a message for the extraction transcript with inline base64 image data
@@ -110,23 +116,326 @@ static struct json_object *extraction_message_strip_images(struct json_object *m
 #define MEMORY_EXTRACTION_MAX_MSG_BYTES 16384
 
 
-/* Whether a tool result's content (a string, or text parts) was framed as
- * someone else's (llm_third_party_frame). */
-static bool content_is_third_party(struct json_object *content) {
+/* The frame a tool result's content (a string, or text parts) was put in as
+ * someone else's text (llm_third_party_frame), or NULL. */
+static const char *content_frame(struct json_object *content) {
    if (json_object_is_type(content, json_type_string)) {
-      return llm_third_party_present(json_object_get_string(content)) != NULL;
+      return llm_third_party_present(json_object_get_string(content));
    }
    if (!json_object_is_type(content, json_type_array)) {
-      return false;
+      return NULL;
    }
    for (size_t i = 0; i < json_object_array_length(content); i++) {
       struct json_object *text = NULL;
+      const char *frame = NULL;
       if (json_object_object_get_ex(json_object_array_get_idx(content, i), "text", &text) &&
-          llm_third_party_present(json_object_get_string(text))) {
+          (frame = llm_third_party_present(json_object_get_string(text))) != NULL) {
+         return frame;
+      }
+   }
+   return NULL;
+}
+
+static bool content_is_third_party(struct json_object *content) {
+   return content_frame(content) != NULL;
+}
+
+/* The call @p id named, from the latest message before @p before that made
+ * it (an OpenAI tool_calls entry or a Claude tool_use part): its tool's name
+ * and its arguments (an object; OpenAI's are a JSON string, parsed into
+ * *@p parsed, which the caller frees).  False when no message made it. */
+static bool tool_call_find(struct json_object *history,
+                           size_t before,
+                           const char *id,
+                           const char **name,
+                           struct json_object **args,
+                           struct json_object **parsed) {
+   *name = NULL;
+   *args = *parsed = NULL;
+   for (size_t i = before; id && i-- > 0;) {
+      struct json_object *msg = json_object_array_get_idx(history, i), *calls = NULL;
+      if (!json_object_object_get_ex(msg, "tool_calls", &calls) &&
+          !json_object_object_get_ex(msg, "content", &calls)) {
+         continue;
+      }
+      for (size_t k = 0;
+           json_object_is_type(calls, json_type_array) && k < json_object_array_length(calls);
+           k++) {
+         struct json_object *call = json_object_array_get_idx(calls, k), *call_id = NULL;
+         struct json_object *v = NULL, *fn = NULL;
+         if (!json_object_object_get_ex(call, "id", &call_id) ||
+             strcmp(json_object_get_string(call_id), id) != 0) {
+            continue;
+         }
+         if (json_object_object_get_ex(call, "function", &fn)) {
+            if (json_object_object_get_ex(fn, "arguments", &v)) {
+               *parsed = json_tokener_parse(json_object_get_string(v));
+               *args = *parsed;
+            }
+            call = fn;
+         } else if (json_object_object_get_ex(call, "input", &v)) {
+            *args = v;
+         }
+         *name = json_object_object_get_ex(call, "name", &v) ? json_object_get_string(v) : NULL;
          return true;
       }
    }
    return false;
+}
+
+/* Whether call @p id's result is DAWN's own text: its tool (and action) says
+ * so in the registry (tool_registry.h, results).  A call not found, or a tool
+ * not registered, isn't. */
+static bool result_is_own(struct json_object *history, size_t at, const char *id) {
+   const char *name = NULL;
+   struct json_object *args = NULL, *parsed = NULL;
+   if (!tool_call_find(history, at, id, &name, &args, &parsed) || !name) {
+      json_object_put(parsed);
+      return false;
+   }
+   const tool_metadata_t *meta = tool_registry_find(name);
+   const char *param = meta ? tool_registry_get_action_param_name(meta->name) : NULL;
+   struct json_object *action = NULL;
+   if (param && json_object_is_type(args, json_type_object)) {
+      json_object_object_get_ex(args, param, &action);
+   }
+   const bool own = tool_results_own(meta, action ? json_object_get_string(action) : NULL);
+   json_object_put(parsed);
+   return own;
+}
+
+/* Whether @p text holds a source excerpt of a conversation that read outside
+ * text: a line "[source: conv=... msgs=...] (outside)" (memory_callback.c),
+ * under which the stored messages are quoted verbatim. */
+static bool text_has_outside_excerpt(const char *text) {
+   static const size_t head = sizeof(OUTSIDE_MARKER_SOURCE_HEAD) - 1;
+   static const size_t mark = sizeof(OUTSIDE_MARKER_MEMORY_MARK) - 1;
+   for (const char *line = text; line && *line;) {
+      const char *end = strchr(line, '\n');
+      const size_t n = end ? (size_t)(end - line) : strlen(line);
+      if (n >= head + mark && strncmp(line, OUTSIDE_MARKER_SOURCE_HEAD, head) == 0 &&
+          memcmp(line + n - mark, OUTSIDE_MARKER_MEMORY_MARK, mark) == 0) {
+         return true;
+      }
+      line = end ? end + 1 : NULL;
+   }
+   return false;
+}
+
+/* Whether a tool result's content (a string, or text parts) holds one. */
+static bool content_has_outside_excerpt(struct json_object *content) {
+   if (json_object_is_type(content, json_type_string)) {
+      return text_has_outside_excerpt(json_object_get_string(content));
+   }
+   for (size_t i = 0;
+        json_object_is_type(content, json_type_array) && i < json_object_array_length(content);
+        i++) {
+      struct json_object *text = NULL;
+      if (json_object_object_get_ex(json_object_array_get_idx(content, i), "text", &text) &&
+          text_has_outside_excerpt(json_object_get_string(text))) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* A tool result's outside kind: its frame's, when DAWN framed it; none for one
+ * of DAWN's own tools (the memory store's rows learned from outside text
+ * included: they say so, but are its own rendering of what it stored), unless
+ * it quotes a tainted conversation's messages (a source excerpt); any other
+ * tool's (or one whose call isn't found) counts as outside text. */
+static int result_outside(struct json_object *history,
+                          size_t at,
+                          const char *call_id,
+                          struct json_object *content) {
+   const char *frame = content_frame(content);
+   if (frame) {
+      return llm_third_party_outside_kind(frame);
+   }
+   if (!result_is_own(history, at, call_id) || content_has_outside_excerpt(content)) {
+      return OUTSIDE_OTHER;
+   }
+   return OUTSIDE_NONE;
+}
+
+/* The outside kind of the turn's items DAWN put in a turn context
+ * (focus_incremental.c renders "[M3 source kind date] text", or without the
+ * handle when an item has none): an item from an outside source carries
+ * "outside" in its kind word; any document's chunk makes it a document, else
+ * any calendar event a calendar event, else OTHER.  A recalled memory's
+ * "outside" (where it was learned) doesn't count; CONV_ROW_OUTSIDE_KIND_SQL
+ * reads stored rows the same way. */
+static int focus_items_outside(const char *text) {
+   int kind = OUTSIDE_NONE;
+   for (const char *line = text; line && *line;) {
+      const char *end = strchr(line, '\n');
+      const char *close = memchr(line, ']', end ? (size_t)(end - line) : strlen(line));
+      if (*line == '[' && close) {
+         const size_t n = (size_t)(close - line);
+         /* The header after its '[', led by a space so its first word (the
+          * source, when the line has no handle) is matched like the rest. */
+         char head[160];
+         const size_t len = n - 1 < sizeof(head) - 2 ? n - 1 : sizeof(head) - 2;
+         snprintf(head, sizeof(head), " %.*s", (int)len, line + 1);
+         if (strstr(head, " " OUTSIDE_MARKER_ITEM_KIND) &&
+             !strstr(head, " " OUTSIDE_MARKER_MEMORY_SOURCE)) {
+            if (strstr(head, " " OUTSIDE_MARKER_DOC_SOURCE " ")) {
+               return OUTSIDE_DOCUMENT;
+            }
+            kind = strstr(head, " " OUTSIDE_MARKER_CAL_SOURCE " ") ? OUTSIDE_CALENDAR
+                   : kind == OUTSIDE_NONE                          ? OUTSIDE_OTHER
+                                                                   : kind;
+         }
+      }
+      line = end ? end + 1 : NULL;
+   }
+   return kind;
+}
+
+static bool text_has_document(struct json_object *text) {
+   return json_object_is_type(text, json_type_string) &&
+          strstr(json_object_get_string(text), LLM_CONTEXT_DOC_OPEN) != NULL;
+}
+
+/* A user message's text that DAWN wrote for the turn and that holds outside
+ * text: a background job's result, a device's relayed data. */
+static int dawn_input_outside(const char *text) {
+   if (strncmp(text, AUTOMATED_EVENT_JOB_UPDATE, sizeof(AUTOMATED_EVENT_JOB_UPDATE) - 1) == 0) {
+      return OUTSIDE_RESEARCH;
+   }
+   if (strncmp(text, MQTT_DEVICE_DATA_PREFIX, sizeof(MQTT_DEVICE_DATA_PREFIX) - 1) == 0) {
+      return OUTSIDE_OTHER;
+   }
+   return OUTSIDE_NONE;
+}
+
+/* One part of a user message: a tool's result, a turn context's items, a
+ * document attached to the text. */
+static int part_outside(struct json_object *history, size_t at, struct json_object *part) {
+   struct json_object *type = NULL, *inner = NULL, *text = NULL, *id = NULL;
+   if (json_object_object_get_ex(part, "type", &type) &&
+       strcmp(json_object_get_string(type), "tool_result") == 0 &&
+       json_object_object_get_ex(part, "content", &inner)) {
+      json_object_object_get_ex(part, "tool_use_id", &id);
+      return result_outside(history, at, json_object_get_string(id), inner);
+   }
+   if (!json_object_object_get_ex(part, "text", &text)) {
+      return OUTSIDE_NONE;
+   }
+   if (llm_history_kind_of(part) == MESSAGE_KIND_TURN_CONTEXT) {
+      return focus_items_outside(json_object_get_string(text));
+   }
+   if (llm_history_is_context(part)) {
+      return dawn_input_outside(json_object_get_string(text));
+   }
+   return text_has_document(text) ? OUTSIDE_DOCUMENT : OUTSIDE_NONE;
+}
+
+/* What outside text message @p at of @p history carries.  DAWN's own input
+ * (a job's result, a turn context's items) is read too: it is where outside
+ * text reaches a turn without a tool. */
+static int message_outside(struct json_object *history, size_t at) {
+   struct json_object *msg = json_object_array_get_idx(history, at);
+   struct json_object *role = NULL, *content = NULL, *id = NULL;
+   if (!json_object_object_get_ex(msg, "role", &role) ||
+       !json_object_object_get_ex(msg, "content", &content)) {
+      return OUTSIDE_NONE;
+   }
+   if (strcmp(json_object_get_string(role), "tool") == 0) {
+      json_object_object_get_ex(msg, "tool_call_id", &id);
+      return result_outside(history, at, json_object_get_string(id), content);
+   }
+   if (strcmp(json_object_get_string(role), "user") != 0) {
+      return OUTSIDE_NONE;
+   }
+   if (json_object_is_type(content, json_type_string)) {
+      const char *text = json_object_get_string(content);
+      if (llm_history_kind_of(msg) == MESSAGE_KIND_TURN_CONTEXT) {
+         return focus_items_outside(text);
+      }
+      const int dawn = dawn_input_outside(text);
+      if (outside_is_tainted(dawn) || llm_history_is_context(msg)) {
+         return dawn;
+      }
+      return text_has_document(content) ? OUTSIDE_DOCUMENT : OUTSIDE_NONE;
+   }
+   for (size_t i = 0;
+        json_object_is_type(content, json_type_array) && i < json_object_array_length(content);
+        i++) {
+      const int kind = part_outside(history, at, json_object_array_get_idx(content, i));
+      if (outside_is_tainted(kind)) {
+         return kind;
+      }
+   }
+   return OUTSIDE_NONE;
+}
+
+/* Whether message @p i of @p history is one a batch from @p last_msg_id reads
+ * (id-less, or past the cursor). */
+static bool in_batch(struct json_object *history, size_t i, int64_t last_msg_id) {
+   struct json_object *id = NULL;
+   return !json_object_object_get_ex(json_object_array_get_idx(history, i), "id", &id) ||
+          json_object_get_int64(id) <= 0 || json_object_get_int64(id) > last_msg_id;
+}
+
+/* The first outside text in the rows of @p history a batch from
+ * @p last_msg_id reads; what came before is the conversation's floor
+ * (conversations.outside). */
+static int batch_outside(struct json_object *history, int64_t last_msg_id) {
+   for (size_t i = 0; i < json_object_array_length(history); i++) {
+      const int kind = in_batch(history, i, last_msg_id) ? message_outside(history, i)
+                                                         : OUTSIDE_NONE;
+      if (outside_is_tainted(kind)) {
+         return kind;
+      }
+   }
+   return OUTSIDE_NONE;
+}
+
+static bool has_summary(struct json_object *obj) {
+   return llm_history_kind_of(obj) == MESSAGE_KIND_SUMMARY;
+}
+
+/* Whether the batch's rows hold a compaction's summary: the rows it replaced
+ * are gone from the history, unread. */
+static bool batch_summarized(struct json_object *history, int64_t last_msg_id) {
+   for (size_t i = 0; i < json_object_array_length(history); i++) {
+      struct json_object *msg = json_object_array_get_idx(history, i), *content = NULL;
+      if (!in_batch(history, i, last_msg_id)) {
+         continue;
+      }
+      if (has_summary(msg)) {
+         return true;
+      }
+      for (size_t k = 0;
+           json_object_object_get_ex(msg, "content", &content) &&
+           json_object_is_type(content, json_type_array) && k < json_object_array_length(content);
+           k++) {
+         if (has_summary(json_object_array_get_idx(content, k))) {
+            return true;
+         }
+      }
+   }
+   return false;
+}
+
+/* What the batch's rows read, those a compaction removed included: read from
+ * the conversation's stored rows, or, with none (a history never saved),
+ * counted as outside text. */
+static int history_outside(int user_id,
+                           int64_t conversation_id,
+                           struct json_object *history,
+                           int64_t last_msg_id) {
+   const int kind = batch_outside(history, last_msg_id);
+   if (outside_is_tainted(kind) || !batch_summarized(history, last_msg_id)) {
+      return kind;
+   }
+   struct json_object *stored = conversation_id > 0
+                                    ? memory_history_load_from_db(conversation_id, user_id, NULL)
+                                    : NULL;
+   const int removed = stored ? batch_outside(stored, last_msg_id) : OUTSIDE_OTHER;
+   json_object_put(stored);
+   return outside_combine(kind, removed);
 }
 
 /* A copy of @p obj with its "content" replaced by @p content (taken). */
@@ -328,7 +637,8 @@ bool memory_extraction_input_has_question(struct json_object *input) {
  * fails (the caller then extracts nothing, and recovery retries). */
 static struct json_object *drop_unprompted(int user_id,
                                            struct json_object *row_ids,
-                                           struct json_object *filtered) {
+                                           struct json_object *filtered,
+                                           bool *dropped) {
    const int n = (int)json_object_array_length(row_ids);
    int64_t *unprompted = n > 0 ? malloc((size_t)n * sizeof(*unprompted)) : NULL;
    int count = 0;
@@ -340,6 +650,7 @@ static struct json_object *drop_unprompted(int user_id,
       json_object_put(filtered);
       return NULL;
    }
+   *dropped = count > 0;
    if (count == 0) {
       free(unprompted);
       return filtered;
@@ -364,10 +675,38 @@ static struct json_object *drop_unprompted(int user_id,
    return kept;
 }
 
+int memory_extraction_history_outside(int user_id,
+                                      int64_t conversation_id,
+                                      struct json_object *history,
+                                      int64_t last_msg_id) {
+   const int live = history_outside(user_id, conversation_id, history, last_msg_id);
+   /* What DAWN wrote into the stored rows past the cursor, as far as this
+    * history reaches: a history loaded from the database has no request
+    * context, and a compaction's rows aren't in the live one.  Unread (a
+    * failed query): outside text. */
+   int stored = OUTSIDE_NONE;
+   if (conversation_id > 0 && conv_db_rows_outside(conversation_id, user_id, last_msg_id,
+                                                   memory_extraction_history_max_id(history),
+                                                   &stored) != AUTH_DB_SUCCESS) {
+      stored = OUTSIDE_OTHER;
+   }
+   return outside_combine(live, stored);
+}
+
 struct json_object *memory_extraction_build_input(int user_id,
                                                   int64_t conversation_id,
                                                   struct json_object *conversation_history,
-                                                  int64_t last_msg_id) {
+                                                  int64_t last_msg_id,
+                                                  int *outside_out) {
+   /* Read with DAWN's request context (what it put in front of the model),
+    * then extracted without it. */
+   *outside_out = memory_extraction_history_outside(user_id, conversation_id, conversation_history,
+                                                    last_msg_id);
+   struct json_object *history = llm_history_strip_internal(conversation_history);
+   if (!history) {
+      return NULL;
+   }
+
    /* Note-extraction guard: collect note-filed bodies + document_read echoes
     * from the FULL history so they can be redacted out of the extraction input
     * (keeps reference text the user filed as a note out of semantic memory).
@@ -378,13 +717,13 @@ struct json_object *memory_extraction_build_input(int user_id,
     * Messages with missing or zero id (compaction markers, a turn's intermediate
     * tool-call entries, satellite sessions that persist nothing) are included
     * unconditionally.  System messages are always skipped by the role check. */
-   size_t arr_len = json_object_array_length(conversation_history);
+   size_t arr_len = json_object_array_length(history);
    struct json_object *filtered = json_object_new_array();
    struct json_object *row_ids = json_object_new_array(); /* DB ids of the rows sent */
    int unverified_user = 0;                               /* user messages with no row id */
 
    for (size_t i = 0; i < arr_len; i++) {
-      struct json_object *msg = json_object_array_get_idx(conversation_history, i);
+      struct json_object *msg = json_object_array_get_idx(history, i);
       struct json_object *role_obj, *id_obj;
       if (!json_object_object_get_ex(msg, "role", &role_obj))
          continue;
@@ -433,6 +772,7 @@ struct json_object *memory_extraction_build_input(int user_id,
    }
 
    memory_note_guard_free(note_guard);
+   json_object_put(history);
 
    /* Verify from the rows themselves that what is about to be extracted belongs
     * to conversation_id and to no private or background-job conversation.  The
@@ -485,7 +825,13 @@ struct json_object *memory_extraction_build_input(int user_id,
    /* In every build: DAWN's posts are in the database whether or not this
     * build checks row ownership (the bench re-extracts without the WebUI). */
    if (rows_ok && row_ids) {
-      filtered = drop_unprompted(user_id, row_ids, filtered);
+      bool posts = false;
+      filtered = drop_unprompted(user_id, row_ids, filtered, &posts);
+      /* DAWN's posts (a briefing, a delivered digest) retell outside content
+       * the user may answer. */
+      if (posts && !outside_is_tainted(*outside_out)) {
+         *outside_out = OUTSIDE_OTHER;
+      }
       if (!filtered) {
          OLOG_WARNING("memory_extraction: refusing conv %lld for user %d: unprompted-row lookup "
                       "failed",

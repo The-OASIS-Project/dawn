@@ -82,8 +82,6 @@
 
    function formatMarkdown(text) {
       const cleanText = text
-         // Strip command tags before rendering (they should go to debug panel only)
-         .replace(/<command>[\s\S]*?<\/command>/g, '')
          // Strip memory-citation tags (bookkeeping — the server audits + persists
          // clean text; this keeps them out of the live stream too, incl. an
          // orphan opener from a mid-stream break).

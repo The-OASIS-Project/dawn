@@ -63,8 +63,8 @@ struct focus_panel;
 #define PROMPT_FOCUS_ITEM_ID_LEN 64
 /** An item's date as its line shows it (" YYYY-MM-DD"), with its NUL. */
 #define PROMPT_FOCUS_DATE_LEN 16
-/** An item's kind word as its line shows it (" inferred"), at most. */
-#define PROMPT_FOCUS_KIND_LEN 16
+/** An item's kind word as its line shows it (" remembered on request, outside"), at most. */
+#define PROMPT_FOCUS_KIND_LEN 32
 
 /**
  * One item retrieved for a turn, ranked.  The turn's seam decides whether it

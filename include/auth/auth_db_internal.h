@@ -45,6 +45,8 @@
 #include "auth/auth_db.h"
 #include "auth/auth_db_messages.h"
 #include "core/hash_util.h"
+#include "core/outside_kind.h"
+#include "core/outside_markers.h"
 
 /* =============================================================================
  * Constants
@@ -66,7 +68,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 112
+#define AUTH_DB_SCHEMA_VERSION 114
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -565,11 +567,13 @@ typedef struct {
    sqlite3_stmt *stmt_memory_pref_upsert;
    sqlite3_stmt *stmt_memory_pref_get;
    sqlite3_stmt *stmt_memory_pref_list;
+   sqlite3_stmt *stmt_memory_pref_list_untainted;
    sqlite3_stmt *stmt_memory_pref_search;
    sqlite3_stmt *stmt_memory_pref_delete;
 
    sqlite3_stmt *stmt_memory_summary_create;
    sqlite3_stmt *stmt_memory_summary_list;
+   sqlite3_stmt *stmt_memory_summary_list_untainted;
    sqlite3_stmt *stmt_memory_summary_list_created_asc; /* WebUI sort: oldest first */
    sqlite3_stmt *stmt_memory_summary_mark_consolidated;
    sqlite3_stmt *stmt_memory_summary_search;
@@ -948,16 +952,160 @@ int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
    "COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.conversation_id = " conv \
    " AND m.kind IS NULL), 0)"
 
+/* A turn context row @p m's content with a recalled memory's outside word
+ * taken out of its item headers: a fact's kind word ("told, outside"), a
+ * relation's, summary's or entity's ("memory_relation outside").  What's left
+ * saying "outside" is an item from an outside source. */
+/* clang-format off */
+#define CONV_TURN_CONTEXT_FOREIGN_SQL(m) \
+   "replace(replace(replace(replace(replace(" m ".content, '" OUTSIDE_MARKER_KIND_SUFFIX \
+   "', ''), '" OUTSIDE_MARKER_MEMORY_SOURCE "fact " OUTSIDE_MARKER_ITEM_KIND "', ''), '" \
+   OUTSIDE_MARKER_MEMORY_SOURCE "entity " OUTSIDE_MARKER_ITEM_KIND "', ''), '" \
+   OUTSIDE_MARKER_MEMORY_SOURCE "relation " OUTSIDE_MARKER_ITEM_KIND "', ''), '" \
+   OUTSIDE_MARKER_MEMORY_SOURCE "summary " OUTSIDE_MARKER_ITEM_KIND "', '')"
+/* clang-format on */
+
+/* The outside kind a stored row @p m (a messages row, by name) carries as
+ * DAWN wrote it, NULL when none, by the live scan's rules
+ * (memory_extraction_input.c) for what isn't a tool's result: one of DAWN's
+ * posts, a turn context naming an item from an outside source ("[M3 source
+ * outside YYYY-MM-DD]" or no date; a recalled memory's "outside" doesn't
+ * count), a document attached to the user's message, a background job's
+ * result, a device's relayed data (core/outside_markers.h). */
+/* clang-format off */
+#define CONV_ROW_OUTSIDE_KIND_SQL(m) \
+   "(CASE WHEN " m ".id IN (SELECT message_id FROM message_unprompted) THEN 7 " \
+   "WHEN " m ".role != 'user' THEN NULL " \
+   "WHEN " m ".kind = 'turn_context' THEN (CASE WHEN " CONV_TURN_CONTEXT_FOREIGN_SQL(m) \
+   " GLOB '* " OUTSIDE_MARKER_ITEM_KIND " [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]]*' OR " \
+   "instr(" CONV_TURN_CONTEXT_FOREIGN_SQL(m) ", ' " OUTSIDE_MARKER_ITEM_KIND "]') > 0 THEN " \
+   "(CASE WHEN instr(" m ".content, '" OUTSIDE_MARKER_DOC_SOURCE " " OUTSIDE_MARKER_ITEM_KIND \
+   "') > 0 THEN 5 WHEN instr(" m ".content, '" OUTSIDE_MARKER_CAL_SOURCE " " \
+   OUTSIDE_MARKER_ITEM_KIND "') > 0 THEN 9 ELSE 7 END) END) " \
+   "WHEN " m ".kind IS NULL AND instr(" m ".content, '" OUTSIDE_MARKER_DOC_OPEN "') > 0 THEN 5 " \
+   "WHEN substr(" m ".content, 1, length('" OUTSIDE_MARKER_JOB_UPDATE "')) = '" \
+   OUTSIDE_MARKER_JOB_UPDATE "' THEN 3 " \
+   "WHEN substr(" m ".content, 1, length('" OUTSIDE_MARKER_DEVICE_DATA "')) = '" \
+   OUTSIDE_MARKER_DEVICE_DATA "' THEN 7 END)"
+/* clang-format on */
+_Static_assert(OUTSIDE_RESEARCH == 3 && OUTSIDE_DOCUMENT == 5 && OUTSIDE_OTHER == 7 &&
+                   OUTSIDE_CALENDAR == 9,
+               "CONV_ROW_OUTSIDE_KIND_SQL writes these outside kinds");
+
 /* The SET clause marking a conversations row extracted up to now (what was
  * learned so far: forgetting, delete-all), and extracting it again from the
- * start (the reextract wipe) beginning there too. */
-#define CONV_MARK_EXTRACTED_SET_SQL                                                              \
-   "last_extracted_msg_count = message_count, last_extracted_msg_id "                            \
-   "= " CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extract_floor_msg_id "             \
-                                                           "= " CONV_EXTRACTION_MAX_MSG_ID_SQL(  \
-                                                               "conversations.id") ", "          \
-                                                                                   "extraction_" \
-                                                                                   "attempts = 0"
+ * start (the reextract wipe) beginning there too.  The rows it passes are
+ * never scanned, so one carrying outside text (a tool's result, whichever
+ * tool, or CONV_ROW_OUTSIDE_KIND_SQL) raises the floor to OTHER. */
+/* clang-format off */
+#define CONV_MARK_EXTRACTED_SET_SQL \
+   "last_extracted_msg_count = message_count, last_extracted_msg_id = " \
+   CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extract_floor_msg_id = " \
+   CONV_EXTRACTION_MAX_MSG_ID_SQL("conversations.id") ", extraction_attempts = 0, " \
+   "outside = CASE WHEN outside IN (" OUTSIDE_UNTAINTED_SQL ") AND EXISTS (SELECT 1 FROM " \
+   "messages m WHERE m.conversation_id = conversations.id AND m.id > " \
+   "conversations.last_extracted_msg_id AND (m.role = 'tool' OR " \
+   CONV_ROW_OUTSIDE_KIND_SQL("m") " IS NOT NULL)) THEN 7 ELSE outside END"
+/* clang-format on */
+
+/* How far a walk up conversations.continued_from goes (a cycle the schema
+ * doesn't forbid stops here): the outside floor and its v113 fill. */
+#define CONV_CONTINUATION_DEPTH_MAX_SQL "64"
+
+/* The columns every fact read selects, in the order populate_fact_from_row
+ * (memory_db_facts.c) reads them: MEMORY_FACT_COLS bare, MEMORY_FACT_COLS_MF
+ * on the "mf" alias.  A statement's own extra column follows them.  Shared
+ * with the tests that prepare fact reads themselves. */
+#define MEMORY_FACT_COLS_SQL(t)                                                                \
+   t "id, " t "user_id, " t "fact_text, " t "confidence, " t "source, " t "created_at, " t     \
+     "last_accessed, " t "access_count, " t "superseded_by, " t "note_doc_id, " t "origin, " t \
+     "outside"
+#define MEMORY_FACT_COLS MEMORY_FACT_COLS_SQL("")
+#define MEMORY_FACT_COLS_MF MEMORY_FACT_COLS_SQL("mf.")
+
+/* A column added to the v113 ops table after v113 shipped: the conversation a
+ * row quotes when it isn't the batch's (a set-aside candidate taken up later).
+ * In the table and added on its own (guarded) for a database already at v113. */
+#define MEMORY_CONSOLIDATION_OPS_SOURCE_COL \
+   "source_conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE"
+
+/* Another: who wrote an op's reason, 'model' or 'dawn' (NULL: no reason, or a
+ * row recorded before it was kept).  A client shows the model's as its words. */
+#define MEMORY_CONSOLIDATION_OPS_REASON_BY_COL "reason_by TEXT"
+
+/* Indexes added to the v113 tables after v113 shipped: the record's ops by
+ * relation (a relation forgotten removes its ops) and its batches by age (the
+ * nightly prune).  Also created on their own for a database already at v113. */
+#define MEMORY_CONSOLIDATION_LATER_INDEXES_SQL                                    \
+   "CREATE INDEX IF NOT EXISTS idx_mco_rel ON memory_consolidation_ops(user_id, " \
+   "relation_id) WHERE relation_id IS NOT NULL;"                                  \
+   "CREATE INDEX IF NOT EXISTS idx_mcb_created ON "                               \
+   "memory_consolidation_batches(created_at);"
+
+/* The ops by the conversation they quote.  Created only after the column is
+ * there (never in the base schema: a database at v113 lacks the column until
+ * the step after v113 adds it). */
+#define MEMORY_CONSOLIDATION_SOURCE_INDEX_SQL                               \
+   "CREATE INDEX IF NOT EXISTS idx_mco_source ON memory_consolidation_ops(" \
+   "user_id, source_conversation_id) WHERE source_conversation_id IS NOT NULL;"
+
+/* The record of what a consolidation batch did to memory (v113): one row per
+ * batch, one per operation, each with what it changed so the user can undo it.
+ * In the base schema and repeated by the v113 step, so the two can't drift. */
+#define MEMORY_CONSOLIDATION_TABLES_SQL                                                     \
+   "CREATE TABLE IF NOT EXISTS memory_consolidation_batches ("                              \
+   "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                               \
+   "   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,"                    \
+   "   conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,"             \
+   "   msg_id_start INTEGER,"                                                               \
+   "   msg_id_end INTEGER,"                                                                 \
+   "   summary_id INTEGER REFERENCES memory_summaries(id) ON DELETE SET NULL,"              \
+   "   path TEXT NOT NULL,"                                                                 \
+   "   stop TEXT NOT NULL,"                                                                 \
+   "   outside INTEGER NOT NULL DEFAULT 0,"                                                 \
+   "   rounds INTEGER NOT NULL DEFAULT 0,"                                                  \
+   "   input_tokens INTEGER NOT NULL DEFAULT 0,"                                            \
+   "   created_at INTEGER NOT NULL,"                                                        \
+   "   undone_at INTEGER);"                                                                 \
+   "CREATE INDEX IF NOT EXISTS idx_mcb_conv ON "                                            \
+   "memory_consolidation_batches(conversation_id, msg_id_end);"                             \
+   "CREATE INDEX IF NOT EXISTS idx_mcb_user ON "                                            \
+   "memory_consolidation_batches(user_id, created_at DESC);"                                \
+   "CREATE INDEX IF NOT EXISTS idx_mcb_summary ON "                                         \
+   "memory_consolidation_batches(summary_id) WHERE summary_id IS NOT NULL;"                 \
+   "CREATE TABLE IF NOT EXISTS memory_consolidation_ops ("                                  \
+   "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                               \
+   "   batch_id INTEGER NOT NULL REFERENCES memory_consolidation_batches(id) "              \
+   "ON DELETE CASCADE,"                                                                     \
+   "   user_id INTEGER NOT NULL,"                                                           \
+   "   seq INTEGER NOT NULL,"                                                               \
+   "   op TEXT NOT NULL,"                                                                   \
+   "   fact_id INTEGER,"                                                                    \
+   "   other_fact_id INTEGER,"                                                              \
+   "   relation_id INTEGER,"                                                                \
+   "   entity_id INTEGER,"                                                                  \
+   "   other_entity_id INTEGER,"                                                            \
+   "   link_id INTEGER,"                                                                    \
+   "   outside INTEGER NOT NULL DEFAULT 0,"                                                 \
+   "   text TEXT,"                                                                          \
+   "   target_text TEXT,"                                                                   \
+   "   reason TEXT,"                                                                        \
+   "   pre_image TEXT,"                                                                     \
+   "   post_image TEXT,"                                                                    \
+   "   status TEXT NOT NULL DEFAULT 'applied',"                                             \
+   "   created_at INTEGER NOT NULL,"                                                        \
+   "   undone_at INTEGER,"                                                                  \
+   "   " MEMORY_CONSOLIDATION_OPS_SOURCE_COL ","                                            \
+   "   " MEMORY_CONSOLIDATION_OPS_REASON_BY_COL ");"                                        \
+   "CREATE INDEX IF NOT EXISTS idx_mco_batch ON memory_consolidation_ops(batch_id, seq);"   \
+   "CREATE INDEX IF NOT EXISTS idx_mco_fact ON memory_consolidation_ops(user_id, fact_id) " \
+   "WHERE fact_id IS NOT NULL;"                                                             \
+   "CREATE INDEX IF NOT EXISTS idx_mco_other ON "                                           \
+   "memory_consolidation_ops(user_id, other_fact_id) WHERE other_fact_id IS NOT "           \
+   "NULL;" MEMORY_CONSOLIDATION_LATER_INDEXES_SQL                                           \
+   "CREATE INDEX IF NOT EXISTS idx_mco_deferred ON "                                        \
+   "memory_consolidation_ops(user_id, created_at) "                                         \
+   "WHERE op = 'deferred' AND status = 'applied';"
 
 /* Close the open relations a new value supersedes (memory_db_relation_supersede_ex),
  * returning each one's fact_id.  ?1 close time, ?2 user, ?3 subject, ?4 relation,
@@ -965,11 +1113,15 @@ int64_t auth_db_query_int64(sqlite3 *db, const char *sql);
  * a re-mention is idempotent), ?7 the one replaced value to close (a literal or an
  * entity's name, case aside), or NULL for every other open value, ?8 the new
  * value's fact (closed_by_fact_id: what a restore of the old fact reopens; NULL
- * with none).  Shared with the tests that prepare it themselves. */
+ * with none), ?9 non-NULL when the new value comes from a batch that read
+ * outside text: only rows from such a batch are closed then (a clean or
+ * unjudged value stays open beside it).  Shared with the tests that prepare
+ * it themselves. */
 #define MEMORY_RELATION_CLOSE_OPEN_SQL                                             \
    "UPDATE memory_relations SET valid_to = ?1, closed_by_fact_id = ?8 "            \
    "WHERE user_id = ?2 AND subject_entity_id = ?3 AND relation = ?4 "              \
    "  AND valid_to IS NULL "                                                       \
+   "  AND (?9 IS NULL OR outside NOT IN (" OUTSIDE_UNTAINTED_SQL ")) "             \
    "  AND (COALESCE(object_entity_id, 0) != COALESCE(?5, 0) "                      \
    "    OR COALESCE(object_value, '') != COALESCE(?6, '')) "                       \
    "  AND (?7 IS NULL OR object_value = ?7 COLLATE NOCASE OR object_entity_id IN " \
@@ -1174,6 +1326,17 @@ int auth_db_migrations_v111(sqlite3 *db);
 
 /** v112: user_settings persona_values / persona_voice and their modes. */
 int auth_db_migrations_v112(sqlite3 *db);
+
+/** v113: a fact's origin and every memory row's outside kind (backfilled), and
+ *  the consolidation record tables. */
+int auth_db_migrations_v113(sqlite3 *db);
+
+/** v114: documents.outside, a note's outside kind (backfilled). */
+int auth_db_migrations_v114(sqlite3 *db);
+
+/** Whether any of v114's columns is missing (documents.outside, documents.own,
+ *  document_versions.outside), whatever the stored version says. */
+bool auth_db_migrations_v114_pending(sqlite3 *db);
 
 /**
  * @brief The v98 rebuild's room check: the bytes it needs free next to the

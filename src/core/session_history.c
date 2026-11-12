@@ -859,13 +859,13 @@ struct json_object *session_snapshot_history(session_t *session,
    pthread_mutex_lock(&session->history_mutex);
    struct json_object *copy = NULL;
    if (session->conversation_history) {
-      copy = llm_history_strip_internal(session->conversation_history);
+      copy = llm_history_copy_marked(session->conversation_history);
    }
    if (conv_out) {
       *conv_out = atomic_load(&session->history_conversation_id);
    }
-   if (count_out && copy) {
-      *count_out = (int)json_object_array_length(copy);
+   for (size_t i = 0; count_out && copy && i < json_object_array_length(copy); i++) {
+      *count_out += !llm_history_is_context(json_object_array_get_idx(copy, i));
    }
    pthread_mutex_unlock(&session->history_mutex);
    return copy;
@@ -2179,6 +2179,22 @@ int64_t session_history_conversation_of(session_t *session, struct json_object *
    }
    pthread_mutex_unlock(&session->history_mutex);
    return conv > 0 ? conv : 0;
+}
+
+struct json_object *session_snapshot_turn_history(session_t *session, int64_t *conv_out) {
+   *conv_out = 0;
+   if (!session) {
+      return NULL;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   struct json_object *h = session->turn_history ? session->turn_history
+                                                 : session->conversation_history;
+   struct json_object *copy = h ? llm_history_copy_marked(h) : NULL;
+   const int64_t conv = session->turn_active ? session->turn_history_conv
+                                             : atomic_load(&session->history_conversation_id);
+   pthread_mutex_unlock(&session->history_mutex);
+   *conv_out = conv > 0 ? conv : 0;
+   return copy;
 }
 
 struct json_object *session_get_turn_history(session_t *session) {

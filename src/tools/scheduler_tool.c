@@ -1460,6 +1460,7 @@ static const tool_action_kind_entry_t s_scheduler_action_kinds[] = {
 
 static const tool_metadata_t scheduler_metadata = {
    .name = "scheduler",
+   .results = TOOL_RESULTS_OWN,
    .action_kinds = s_scheduler_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_scheduler_action_kinds),
    .device_string = "scheduler",

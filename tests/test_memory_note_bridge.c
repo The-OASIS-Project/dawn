@@ -172,6 +172,9 @@ void test_rename_replaces_gloss_no_duplicate(void) {
    TEST_ASSERT_TRUE(gloss_text_of(second, text, sizeof(text)));
    TEST_ASSERT_NOT_NULL(strstr(text, "Dragon Con Bio"));
    TEST_ASSERT_NULL(strstr(text, "Public Bio"));
+   memory_fact_t renamed;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(second, 1, &renamed));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, renamed.outside);
 }
 
 void test_two_notes_two_distinct_glosses(void) {
@@ -331,6 +334,7 @@ void test_kind_word(void) {
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(gloss, 1, &f));
    TEST_ASSERT_EQUAL_INT64(100, f.note_doc_id);
    TEST_ASSERT_EQUAL_STRING("explicit", f.source);
+   TEST_ASSERT_EQUAL_INT(MEMORY_ORIGIN_NOTE, f.origin);
    TEST_ASSERT_EQUAL_STRING("noted", memory_fact_kind_word(&f));
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(told, 1, &f));
    TEST_ASSERT_EQUAL_INT64(0, f.note_doc_id);
@@ -348,11 +352,44 @@ void test_kind_word(void) {
    memset(&f, 0, sizeof(f));
    snprintf(f.source, sizeof(f.source), "inferred");
    TEST_ASSERT_EQUAL_STRING("inferred", memory_fact_kind_word(&f));
-   snprintf(f.source, sizeof(f.source), "import");
+   f.outside = OUTSIDE_WEB;
+   TEST_ASSERT_EQUAL_STRING("inferred, outside", memory_fact_kind_word(&f));
+   f.outside = OUTSIDE_UNKNOWN; /* stored before the kind was kept: not outside */
+   TEST_ASSERT_EQUAL_STRING("inferred", memory_fact_kind_word(&f));
+   snprintf(f.source, sizeof(f.source), "world");
+   TEST_ASSERT_EQUAL_STRING("world", memory_fact_kind_word(&f));
+   snprintf(f.source, sizeof(f.source), "explicit");
+   f.origin = MEMORY_ORIGIN_IMPORT;
    TEST_ASSERT_EQUAL_STRING("imported", memory_fact_kind_word(&f));
+   f.origin = MEMORY_ORIGIN_REQUESTED;
+   f.outside = OUTSIDE_EMAIL;
+   TEST_ASSERT_EQUAL_STRING("remembered on request, outside", memory_fact_kind_word(&f));
+   f.origin = MEMORY_ORIGIN_NOTE;
+   f.outside = OUTSIDE_NONE;
+   TEST_ASSERT_EQUAL_STRING("noted", memory_fact_kind_word(&f));
+   f.origin = MEMORY_ORIGIN_CONVERSATION;
    snprintf(f.source, sizeof(f.source), "whatever");
    TEST_ASSERT_NULL(memory_fact_kind_word(&f));
    TEST_ASSERT_NULL(memory_fact_kind_word(NULL));
+}
+
+/* A research report's gloss carries the research's outside kind. */
+void test_research_gloss_is_outside(void) {
+   seed_doc(100);
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         memory_note_bridge_upsert_gloss_from(1, 100, "Report", OUTSIDE_RESEARCH));
+   int64_t gloss = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_find_by_note_doc_id(1, 100, &gloss));
+   memory_fact_t f;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(gloss, 1, &f));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, f.outside);
+   TEST_ASSERT_EQUAL_STRING("noted, outside", memory_fact_kind_word(&f));
+
+   /* Renamed or edited as an ordinary note, it stays one outside text made. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_note_bridge_upsert_gloss(1, 100, "Report v2"));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_find_by_note_doc_id(1, 100, &gloss));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_get(gloss, 1, &f));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, f.outside);
 }
 
 /* The keyword search reads its score from the column after the shared ones:
@@ -389,5 +426,6 @@ int main(void) {
    RUN_TEST(test_cache_load_order_live_first_then_score);
    RUN_TEST(test_kind_word);
    RUN_TEST(test_bm25_reads_its_score);
+   RUN_TEST(test_research_gloss_is_outside);
    return UNITY_END();
 }

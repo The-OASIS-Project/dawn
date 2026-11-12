@@ -255,7 +255,7 @@ Source: `src/webui/webui_documents.c`, `www/js/ui/documents.js`
    - Authentication required (uses session validation)
 
 - **transcript.js** (document integration):
-   - Document markers stripped BEFORE routing logic in `addTranscriptEntry()` to prevent misrouting when document content contains `<command>` tags
+   - Document markers stripped BEFORE routing logic in `addTranscriptEntry()` to prevent misrouting when document content contains `[Tool Result:` text
    - `createDocumentChips()`: renders clickable chips in conversation entries
    - History replay: `prependTranscriptEntry()` also parses markers for saved conversations
 

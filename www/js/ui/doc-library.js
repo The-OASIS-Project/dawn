@@ -436,6 +436,12 @@
       });
    }
 
+   function requestSetOwn(docId, own) {
+      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return false;
+      DawnWS.send({ type: 'set_document_own', payload: { document_id: docId, own } });
+      return true;
+   }
+
    function requestIndex(filename, filetype, text, isGlobal) {
       if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) return;
       state.indexing = true;
@@ -543,6 +549,31 @@
             'success'
          );
       }
+   }
+
+   /* The "My own text" switch of one row, updated in place so it keeps focus. */
+   function ownSwitch(docId) {
+      return el.list
+         ? el.list.querySelector(`.doc-library-item-own-input[data-id="${docId}"]`)
+         : null;
+   }
+
+   function handleSetOwnResponse(payload) {
+      const doc = state.documents.find((d) => d.id === payload?.document_id);
+      const input = ownSwitch(payload?.document_id);
+      if (input) input.disabled = false;
+      if (!payload || payload.error) {
+         if (input && doc) input.checked = !!doc.own;
+         if (typeof DawnToast !== 'undefined') {
+            DawnToast.show(payload?.error || 'Failed to update document', 'error');
+         }
+         return;
+      }
+      if (doc) {
+         doc.own = !!payload.own;
+         doc.outside = payload.outside;
+      }
+      if (input) input.checked = !!payload.own;
    }
 
    /* =============================================================================
@@ -1039,6 +1070,11 @@
       const globalToggle = canToggleGlobal()
          ? `<button type="button" class="doc-library-item-global" data-id="${doc.id}" data-global="${doc.is_global ? '1' : '0'}" title="${doc.is_global ? 'Make private' : 'Share globally'}" aria-label="${doc.is_global ? 'Make private' : 'Share globally'}">${globeSvg}</button>`
          : '';
+      // Only the user's own documents carry `own`; another user's shows no switch.
+      const ownToggle =
+         typeof doc.own === 'boolean'
+            ? `<label class="dawn-toggle-row doc-library-item-own"><input type="checkbox" role="switch" class="dawn-toggle doc-library-item-own-input" data-id="${doc.id}" aria-label="My own text: ${escapeAttr(doc.filename)}" aria-describedby="doc-library-own-hint"${doc.own ? ' checked' : ''} /><span class="dawn-toggle-label">My own text</span></label>`
+            : '';
       // The name doubles as the "open read-only viewer" affordance — for notes
       // (text + edit) and documents (summary + version history), both with restore.
       const nameAttrs = `class="doc-library-item-name note-name-clickable" role="button" tabindex="0" data-view-id="${doc.id}" aria-label="View ${escapeAttr(doc.filename)}"`;
@@ -1048,6 +1084,7 @@
          <div class="doc-library-item-info">
             <div ${nameAttrs} title="${escapeAttr(doc.filename)}">${escapeHtml(doc.filename)}</div>
             <div class="doc-library-item-meta">${meta}${globalBadge}${ownerBadge}</div>
+            ${ownToggle}
          </div>
          ${editBtn}
          ${globalToggle}
@@ -1090,6 +1127,17 @@
       });
    }
 
+   function handleOwnChange(input) {
+      input.addEventListener('change', () => {
+         const id = parseInt(input.dataset.id, 10);
+         if (requestSetOwn(id, input.checked)) {
+            input.disabled = true; // until the reply: it says what was stored
+         } else {
+            input.checked = !input.checked;
+         }
+      });
+   }
+
    function handleGlobalClick(btn) {
       btn.addEventListener('click', (e) => {
          e.stopPropagation();
@@ -1128,6 +1176,9 @@
       container.querySelectorAll('.note-name-clickable').forEach((nameEl) => {
          handleNameClick(nameEl);
       });
+      container.querySelectorAll('.doc-library-item-own-input').forEach((input) => {
+         handleOwnChange(input);
+      });
    }
 
    function renderList() {
@@ -1139,11 +1190,19 @@
          else if (state.scope === 'notes') msg = 'No notes yet. Create one with “+ New note”.';
          else msg = 'No documents indexed yet';
          el.list.innerHTML = `<div class="doc-library-empty">${msg}</div>`;
+         updateOwnHint();
          return;
       }
 
       el.list.innerHTML = state.documents.map(renderDocItem).join('');
       bindItemButtons(el.list);
+      updateOwnHint();
+   }
+
+   // The "My own text" hint, only while a listed row carries the switch.
+   function updateOwnHint() {
+      const hint = document.getElementById('doc-library-own-hint');
+      if (hint) hint.classList.toggle('hidden', !el.list?.querySelector('.doc-library-item-own'));
    }
 
    function appendItems(docs) {
@@ -1168,7 +1227,10 @@
          if (editBtn) handleEditClick(editBtn);
          const nameEl = item.querySelector('.note-name-clickable');
          if (nameEl) handleNameClick(nameEl);
+         const ownInput = item.querySelector('.doc-library-item-own-input');
+         if (ownInput) handleOwnChange(ownInput);
       });
+      updateOwnHint();
    }
 
    function updateLoadMore() {
@@ -1252,6 +1314,7 @@
       handleDeleteResponse,
       handleIndexResponse,
       handleToggleGlobalResponse,
+      handleSetOwnResponse,
       handleNoteSaveResponse,
       handleNoteUpdateResponse,
       handleVersionListResponse,

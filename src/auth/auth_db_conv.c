@@ -36,6 +36,7 @@
 
 #include "auth/auth_db_conv_prefix.h"
 #include "auth/auth_db_internal.h"
+#include "core/outside_kind.h"
 #include "llm/llm_context_text.h"
 #include "logging.h"
 #include "prompts.h"
@@ -454,8 +455,12 @@ static int create_continuation(int user_id,
    const char *sql_create =
        "INSERT INTO conversations (user_id, title, created_at, updated_at, continued_from, "
        "compaction_summary, llm_type, cloud_provider, model, tools_mode, thinking_mode, "
-       "reasoning_effort, anchor_date, is_private) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+       "reasoning_effort, anchor_date, is_private, outside) "
+       /* The parent's floor as it is now; a later rise reaches the child
+        * through the walk in conv_db_get_outside, and deleting the parent
+        * hands its floor down (continuations_take_floor_locked). */
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT outside FROM conversations "
+       "WHERE id = ?5))";
    rc = sqlite3_prepare_v2(s_db.db, sql_create, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("conv_db_create_continuation: prepare insert failed: %s", sqlite3_errmsg(s_db.db));
@@ -764,7 +769,47 @@ static int unlink_usage_rows_locked(const char *where, int64_t arg) {
    return rc;
 }
 
-int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
+/* Lock held, before the rows go: @p user_id's consolidation batches of the
+ * conversations @p convs selects (an SQL condition on the conversation id; ?1
+ * is the user, ?2 @p conv_id), and the batches with rows quoting one, the
+ * newest CONV_DB_BATCHES_MAX into @p out (may be NULL). */
+static int batches_going_locked(int user_id,
+                                int64_t conv_id,
+                                const char *convs,
+                                conv_db_batches_t *out) {
+   if (!out) {
+      return SQLITE_DONE;
+   }
+   out->user_id = user_id;
+   out->n = 0;
+   char sql[512];
+   snprintf(sql, sizeof(sql),
+            "SELECT id FROM memory_consolidation_batches WHERE user_id = ?1 AND conversation_id "
+            "%s UNION SELECT batch_id FROM memory_consolidation_ops WHERE user_id = ?1 AND "
+            "source_conversation_id %s ORDER BY 1 DESC LIMIT %d",
+            convs, convs, CONV_DB_BATCHES_MAX);
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      if (sqlite3_bind_parameter_count(st) >= 2) {
+         sqlite3_bind_int64(st, 2, conv_id);
+      }
+      while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+         out->ids[out->n++] = sqlite3_column_int64(st, 0);
+      }
+   }
+   sqlite3_finalize(st);
+   return rc;
+}
+
+int conv_db_set_private(int64_t conv_id,
+                        int user_id,
+                        bool is_private,
+                        conv_db_batches_t *batches_out) {
+   if (batches_out) {
+      batches_out->n = 0;
+   }
    if (conv_id <= 0 || user_id <= 0) {
       return AUTH_DB_INVALID;
    }
@@ -820,6 +865,32 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
                                     "user_id = ?1 AND is_private = 1)",
                                     (int64_t)user_id);
    }
+   if (rc == SQLITE_DONE && changes > 0 && is_private) {
+      rc = batches_going_locked(user_id, 0,
+                                "IN (SELECT id FROM conversations WHERE user_id = ?1 AND "
+                                "is_private = 1)",
+                                batches_out);
+   }
+   if (rc == SQLITE_DONE && changes > 0 && is_private) {
+      /* What memory recorded of them goes too (it quotes what was learned):
+       * their batches, and the rows other batches made quoting a candidate
+       * they set aside. */
+      static const char *const k_sql[] = {
+         "DELETE FROM memory_consolidation_batches WHERE user_id = ?1 AND conversation_id IN "
+         "(SELECT id FROM conversations WHERE user_id = ?1 AND is_private = 1)",
+         "DELETE FROM memory_consolidation_ops WHERE user_id = ?1 AND source_conversation_id IN "
+         "(SELECT id FROM conversations WHERE user_id = ?1 AND is_private = 1)",
+      };
+      for (size_t i = 0; i < sizeof(k_sql) / sizeof(k_sql[0]) && rc == SQLITE_DONE; i++) {
+         sqlite3_stmt *st = NULL;
+         rc = sqlite3_prepare_v2(s_db.db, k_sql[i], -1, &st, NULL);
+         if (rc == SQLITE_OK) {
+            sqlite3_bind_int(st, 1, user_id);
+            rc = sqlite3_step(st);
+         }
+         sqlite3_finalize(st);
+      }
+   }
    if (rc != SQLITE_DONE) {
       OLOG_ERROR("conv_db_set_private: update failed: %s", sqlite3_errmsg(s_db.db));
    }
@@ -831,6 +902,9 @@ int conv_db_set_private(int64_t conv_id, int user_id, bool is_private) {
    AUTH_DB_UNLOCK();
 
    if (rc != SQLITE_DONE) {
+      if (batches_out) {
+         batches_out->n = 0;
+      }
       return AUTH_DB_FAILURE;
    }
 
@@ -957,6 +1031,71 @@ int conv_db_is_private(int64_t conv_id, int user_id, bool *is_private_out) {
    return AUTH_DB_NOT_FOUND;
 }
 
+int conv_db_get_outside(int64_t conv_id, int user_id, int *outside_out) {
+   if (conv_id <= 0 || !outside_out) {
+      return AUTH_DB_FAILURE;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   /* The conversation and those it continues, closest first: what a parent
+    * read shaped the continuation. */
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "WITH RECURSIVE chain(id, d) AS (SELECT ?1, 0 UNION ALL SELECT "
+                          "c.continued_from, chain.d + 1 FROM chain JOIN conversations c ON "
+                          "c.id = chain.id WHERE c.continued_from IS NOT NULL AND chain.d "
+                          "< " CONV_CONTINUATION_DEPTH_MAX_SQL
+                          ") SELECT c.outside, c.user_id, chain.d "
+                          "FROM chain JOIN conversations c ON c.id = chain.id ORDER BY chain.d",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(stmt, 1, conv_id);
+   int rc, outside = OUTSIDE_NONE;
+   bool found = false;
+   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+      if (sqlite3_column_int(stmt, 2) == 0) {
+         if (sqlite3_column_int(stmt, 1) != user_id) {
+            break; /* not this user's */
+         }
+         found = true;
+      }
+      outside = outside_combine(outside, sqlite3_column_int(stmt, 0));
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+      return AUTH_DB_FAILURE;
+   }
+   if (!found) {
+      return AUTH_DB_NOT_FOUND;
+   }
+   *outside_out = outside;
+   return AUTH_DB_SUCCESS;
+}
+
+int conv_db_raise_outside(int64_t conv_id, int user_id, int outside) {
+   if (conv_id <= 0 || !outside_is_tainted(outside)) {
+      return AUTH_DB_SUCCESS;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE conversations SET outside = ?1 WHERE id = ?2 AND user_id = ?3 "
+                          "AND outside IN (" OUTSIDE_UNTAINTED_SQL ")",
+                          -1, &stmt, NULL) != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int(stmt, 1, outside);
+   sqlite3_bind_int64(stmt, 2, conv_id);
+   sqlite3_bind_int(stmt, 3, user_id);
+   const int rc = sqlite3_step(stmt);
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
 int conv_db_messages_ownership(int user_id, const char *ids_json, conv_msg_ownership_t *out) {
    if (!ids_json || !out) {
       return AUTH_DB_FAILURE;
@@ -1029,6 +1168,45 @@ int conv_db_messages_unprompted(int user_id,
       if (*count_out < max) {
          ids_out[(*count_out)++] = sqlite3_column_int64(stmt, 0);
       }
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
+int conv_db_rows_outside(int64_t conv_id,
+                         int user_id,
+                         int64_t after_id,
+                         int64_t upto_id,
+                         int *kind_out) {
+   if (!kind_out) {
+      return AUTH_DB_FAILURE;
+   }
+   *kind_out = OUTSIDE_NONE;
+   AUTH_DB_LOCK_OR_FAIL();
+   /* kind-rows: request context is read for the outside text it put in front
+    * of the model, and only its kind is returned (extraction-time only). */
+   /* clang-format off */
+   static const char sql[] =
+       "SELECT k FROM (SELECT m.id, " CONV_ROW_OUTSIDE_KIND_SQL("m") " AS k FROM messages m "
+       "JOIN conversations c ON c.id = m.conversation_id WHERE m.conversation_id = ?1 AND "
+       "c.user_id = ?2 AND m.id > ?3 AND (?4 <= 0 OR m.id <= ?4)) WHERE k IS NOT NULL "
+       "ORDER BY id LIMIT 1";
+   /* clang-format on */
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_WARNING("conv_db: prepare rows_outside failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(stmt, 1, conv_id);
+   sqlite3_bind_int(stmt, 2, user_id);
+   sqlite3_bind_int64(stmt, 3, after_id);
+   sqlite3_bind_int64(stmt, 4, upto_id);
+   int rc = sqlite3_step(stmt);
+   if (rc == SQLITE_ROW) {
+      *kind_out = sqlite3_column_int(stmt, 0);
+      rc = SQLITE_DONE;
    }
    sqlite3_finalize(stmt);
    AUTH_DB_UNLOCK();
@@ -1201,6 +1379,31 @@ static int clear_memory_provenance(int64_t conv_id, int user_id) {
    return AUTH_DB_SUCCESS;
 }
 
+/* Before @p conv_id goes: each conversation continuing it takes what it and
+ * the conversations it continues read (as conv_db_get_outside combines them),
+ * which its walk up continued_from no longer reaches once the delete sets
+ * that NULL; a continuation's own taint stays.  Caller holds the lock. */
+static int continuations_take_floor_locked(int64_t conv_id) {
+   static const char sql[] =
+       "WITH RECURSIVE chain(id, d) AS (SELECT ?1, 0 UNION ALL SELECT c.continued_from, "
+       "chain.d + 1 FROM chain JOIN conversations c ON c.id = chain.id WHERE c.continued_from "
+       "IS NOT NULL AND chain.d < " CONV_CONTINUATION_DEPTH_MAX_SQL "), "
+       "eff(k) AS (SELECT COALESCE((SELECT c.outside FROM chain JOIN conversations c ON c.id = "
+       "chain.id WHERE c.outside NOT IN (" OUTSIDE_UNTAINTED_SQL ") ORDER BY chain.d LIMIT 1), "
+       "(SELECT c.outside FROM chain JOIN conversations c ON c.id = chain.id WHERE c.outside != 0 "
+       "LIMIT 1), 0)) "
+       "UPDATE conversations SET outside = (SELECT k FROM eff) WHERE continued_from = ?1 AND "
+       "outside IN (" OUTSIDE_UNTAINTED_SQL ") AND (SELECT k FROM eff) != 0";
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
+      return SQLITE_ERROR;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   const int rc = sqlite3_step(st);
+   sqlite3_finalize(st);
+   return rc;
+}
+
 /* Caller holds the auth_db lock and has bound @p del.  Clears the owner's
  * (@p owner, 0 = not found or not theirs) memory provenance for the
  * conversation, then deletes it, in one transaction: a memory is never left
@@ -1215,6 +1418,7 @@ static int delete_conversation_locked(sqlite3_stmt *del,
                                       int owner,
                                       conv_images_mode_t mode,
                                       conv_image_files_t *files,
+                                      conv_db_batches_t *batches,
                                       int *changes_out) {
    *changes_out = 0;
    if (sqlite3_exec(s_db.db, "SAVEPOINT conv_delete", NULL, NULL, NULL) != SQLITE_OK) {
@@ -1224,6 +1428,13 @@ static int delete_conversation_locked(sqlite3_stmt *del,
    int rc = SQLITE_DONE;
    if (owner > 0 && clear_memory_provenance(conv_id, owner) != AUTH_DB_SUCCESS) {
       rc = SQLITE_ERROR;
+   }
+   /* The batches the cascade takes (its own, and rows quoting it). */
+   if (rc == SQLITE_DONE && owner > 0) {
+      rc = batches_going_locked(owner, conv_id, "= ?2", batches);
+   }
+   if (rc == SQLITE_DONE && owner > 0) {
+      rc = continuations_take_floor_locked(conv_id);
    }
    /* The images it owns, before the cascade removes what names them. */
    if (rc == SQLITE_DONE &&
@@ -1250,6 +1461,9 @@ static int delete_conversation_locked(sqlite3_stmt *del,
    sqlite3_exec(s_db.db, "ROLLBACK TO conv_delete", NULL, NULL, NULL);
    sqlite3_exec(s_db.db, "RELEASE conv_delete", NULL, NULL, NULL);
    conv_image_files_free(files);
+   if (batches) {
+      batches->n = 0;
+   }
    return rc == SQLITE_DONE ? SQLITE_ERROR : rc;
 }
 
@@ -1273,9 +1487,13 @@ int conv_db_delete_ex(int64_t conv_id,
                       int user_id,
                       bool admin,
                       conv_images_mode_t mode,
-                      conv_image_files_t *files_out) {
+                      conv_image_files_t *files_out,
+                      conv_db_batches_t *batches_out) {
    if (files_out) {
       memset(files_out, 0, sizeof(*files_out));
+   }
+   if (batches_out) {
+      batches_out->n = 0;
    }
    if (conv_id <= 0 || (mode == CONV_IMAGES_DELETE && !files_out)) {
       return AUTH_DB_INVALID;
@@ -1293,7 +1511,8 @@ int conv_db_delete_ex(int64_t conv_id,
 
    int changes = 0;
    const int owner = conversation_owner_locked(conv_id, admin ? 0 : user_id);
-   const int rc = delete_conversation_locked(del, conv_id, owner, mode, files_out, &changes);
+   const int rc = delete_conversation_locked(del, conv_id, owner, mode, files_out, batches_out,
+                                             &changes);
 
    AUTH_DB_UNLOCK();
 
@@ -1312,11 +1531,14 @@ int conv_db_delete_ex(int64_t conv_id,
       return AUTH_DB_SUCCESS;
    }
 
+   if (batches_out) {
+      batches_out->n = 0;
+   }
    return AUTH_DB_NOT_FOUND;
 }
 
 int conv_db_delete(int64_t conv_id, int user_id) {
-   return conv_db_delete_ex(conv_id, user_id, false, CONV_IMAGES_KEEP, NULL);
+   return conv_db_delete_ex(conv_id, user_id, false, CONV_IMAGES_KEEP, NULL, NULL);
 }
 
 /* =============================================================================
@@ -2098,10 +2320,13 @@ int conv_db_briefing_mark_extracted(int64_t conv_id,
        "e AS (SELECT MAX(v.id) AS id FROM v, r WHERE r.id IS NULL OR v.id < r.id) "
        "SELECT e.id, (SELECT COUNT(*) FROM v WHERE v.id <= e.id), r.id IS NOT NULL "
        "FROM conversations c, f, e, r WHERE c.id = ?1 AND c.origin = 'briefing'";
-   /* Forward only: never undo a cursor something else (a forget) moved on. */
+   /* Forward only: never undo a cursor something else (a forget) moved on.
+    * The rows passed are DAWN's digest of outside content: the floor takes
+    * OTHER with the cursor. */
    static const char *mark_sql =
        "UPDATE conversations SET last_extracted_msg_id = MAX(last_extracted_msg_id, ?2), "
-       "last_extracted_msg_count = MAX(last_extracted_msg_count, ?3), extraction_attempts = 0 "
+       "last_extracted_msg_count = MAX(last_extracted_msg_count, ?3), extraction_attempts = 0, "
+       "outside = CASE WHEN outside IN (" OUTSIDE_UNTAINTED_SQL ") THEN 7 ELSE outside END "
        "WHERE id = ?1 AND last_extracted_msg_id < ?2";
 
    AUTH_DB_LOCK_OR_FAIL();

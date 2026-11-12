@@ -61,6 +61,7 @@ extern "C" {
 #define AEC_CAL_ERR_AMBIGUOUS_PEAK 5
 #define AEC_CAL_ERR_OUT_OF_RANGE 6
 #define AEC_CAL_ERR_INSUFFICIENT_DATA 7
+#define AEC_CAL_ERR_NO_MIC_DATA 8 /* no microphone audio (the mic wasn't there) */
 
 /**
  * @brief Minimum correlation threshold for valid calibration

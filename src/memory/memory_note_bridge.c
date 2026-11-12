@@ -67,6 +67,13 @@ static void build_gloss_text(char *buf, size_t buflen, const char *label) {
 }
 
 int memory_note_bridge_upsert_gloss(int user_id, int64_t note_doc_id, const char *label) {
+   return memory_note_bridge_upsert_gloss_from(user_id, note_doc_id, label, OUTSIDE_NONE);
+}
+
+int memory_note_bridge_upsert_gloss_from(int user_id,
+                                         int64_t note_doc_id,
+                                         const char *label,
+                                         int outside) {
    if (user_id <= 0 || note_doc_id <= 0 || !label || !label[0])
       return FAILURE;
    if (!g_config.memory.enabled)
@@ -89,14 +96,23 @@ int memory_note_bridge_upsert_gloss(int user_id, int64_t note_doc_id, const char
 
    /* Replace any existing gloss for this note (rename/overwrite → fresh text +
     * embedding).  Delete + create, because fact_text is immutable for FTS5
-    * contentless maintenance and the embedding must be recomputed. */
+    * contentless maintenance and the embedding must be recomputed.  The new
+    * one keeps the old one's outside kind (a research report's note, edited,
+    * is still one); unreadable, outside. */
    int64_t existing = 0;
    memory_db_fact_find_by_note_doc_id(user_id, note_doc_id, &existing);
-   if (existing > 0)
+   if (existing > 0) {
+      memory_fact_t old = { 0 };
+      outside = outside_combine(outside,
+                                memory_db_fact_get(existing, user_id, &old) == MEMORY_DB_SUCCESS
+                                    ? old.outside
+                                    : OUTSIDE_OTHER);
       memory_db_fact_delete(existing, user_id);
+   }
 
    int64_t fact_id = 0;
-   if (memory_db_fact_create(user_id, text, MEMORY_NOTE_GLOSS_CONFIDENCE, "explicit", NULL,
+   const memory_provenance_t gloss = { .origin = MEMORY_ORIGIN_NOTE, .outside = outside };
+   if (memory_db_fact_create(user_id, text, MEMORY_NOTE_GLOSS_CONFIDENCE, "explicit", &gloss,
                              &fact_id) != MEMORY_DB_SUCCESS ||
        fact_id <= 0) {
       OLOG_WARNING("memory_note_bridge: failed to create gloss for note %lld",

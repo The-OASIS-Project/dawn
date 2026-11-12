@@ -668,6 +668,7 @@ static const tool_action_kind_entry_t s_messaging_action_kinds[] = {
 
 static const tool_metadata_t messaging_metadata = {
    .name = "messaging",
+   .results = TOOL_RESULTS_OUTSIDE,
    .action_kinds = s_messaging_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_messaging_action_kinds),
    .device_string = "messaging",

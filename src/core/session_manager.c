@@ -1147,8 +1147,8 @@ void session_manager_finalize(session_t *session) {
          char session_id_str[32];
          snprintf(session_id_str, sizeof(session_id_str), "ws_%u", session->session_id);
 
-         /* The snapshot has provider state stripped (see
-          * llm_history_strip_internal); extraction copies it again. */
+         /* The snapshot keeps the request context (session_snapshot_history);
+          * extraction reads it, then strips it. */
          memory_extraction_fallback_t fb;
          memory_extraction_build_fallback(session, &fb);
          memory_trigger_extraction(session->metrics.user_id, conv_id, session_id_str, clean,

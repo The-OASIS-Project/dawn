@@ -611,6 +611,7 @@ static const tool_action_kind_entry_t s_sfx_tool_action_kinds[] = {
 
 static const tool_metadata_t sfx_tool_metadata = {
    .name = "sfx",
+   .results = TOOL_RESULTS_OWN,
    .action_kinds = s_sfx_tool_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_sfx_tool_action_kinds),
    .default_kind = TOOL_KIND_DEVICE,

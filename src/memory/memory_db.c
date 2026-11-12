@@ -195,6 +195,8 @@ int memory_db_delete_user_memories(int user_id) {
     * forgotten-fact records go with the rest.  One transaction: all of it, or
     * none (a delete whose marks failed would come back). */
    static const char *const k_steps[] = {
+      "DELETE FROM memory_consolidation_batches WHERE user_id = ?",
+      "DELETE FROM memory_consolidation_ops WHERE user_id = ?",
       "DELETE FROM memory_relations WHERE user_id = ?",
       "DELETE FROM memory_entities WHERE user_id = ?",
       "DELETE FROM memory_facts WHERE user_id = ?",
@@ -260,9 +262,11 @@ int memory_db_get_stats(int user_id, memory_stats_t *out_stats) {
        "(SELECT COUNT(*) FROM memory_entities WHERE user_id = ?1)",
        -1, &stmt, NULL);
 
+   bool ok = false;
    if (rc == SQLITE_OK) {
       sqlite3_bind_int(stmt, 1, user_id);
       if (sqlite3_step(stmt) == SQLITE_ROW) {
+         ok = true;
          out_stats->fact_count = sqlite3_column_int(stmt, 0);
          out_stats->oldest_fact = (time_t)sqlite3_column_int64(stmt, 1);
          out_stats->newest_fact = (time_t)sqlite3_column_int64(stmt, 2);
@@ -274,7 +278,7 @@ int memory_db_get_stats(int user_id, memory_stats_t *out_stats) {
    }
 
    AUTH_DB_UNLOCK();
-   return MEMORY_DB_SUCCESS;
+   return ok ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
 /* =============================================================================
@@ -303,16 +307,18 @@ int memory_db_get_last_extracted(int64_t conversation_id, int *count_out) {
    return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_set_last_extracted(int64_t conversation_id, int message_count, int64_t last_msg_id) {
+int memory_db_set_last_extracted(int64_t conversation_id,
+                                 int message_count,
+                                 int64_t last_msg_id,
+                                 int outside) {
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
 
    sqlite3_stmt *stmt = s_db.stmt_conv_set_last_extracted;
    sqlite3_reset(stmt);
-   /* Params: message_count, last_msg_id (x2 for CASE), conversation_id */
    sqlite3_bind_int(stmt, 1, message_count);
    sqlite3_bind_int64(stmt, 2, last_msg_id);
-   sqlite3_bind_int64(stmt, 3, last_msg_id);
-   sqlite3_bind_int64(stmt, 4, conversation_id);
+   sqlite3_bind_int64(stmt, 3, conversation_id);
+   sqlite3_bind_int(stmt, 4, outside);
 
    int rc = sqlite3_step(stmt);
    sqlite3_reset(stmt);
@@ -563,7 +569,8 @@ int memory_db_get_all_user_ids(int *out_ids, int max_ids, int *count_out) {
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db,
                                "SELECT user_id FROM memory_facts "
-                               "UNION SELECT user_id FROM memory_preferences",
+                               "UNION SELECT user_id FROM memory_preferences "
+                               "UNION SELECT user_id FROM memory_entities",
                                -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("memory_db: get_all_user_ids prepare failed: %s", sqlite3_errmsg(s_db.db));

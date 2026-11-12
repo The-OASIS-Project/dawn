@@ -103,6 +103,7 @@ static const treg_param_t search_params[] = {
 
 static const tool_metadata_t search_metadata = {
    .name = "search",
+   .results = TOOL_RESULTS_OUTSIDE,
    .default_kind = TOOL_KIND_FETCH,
    .third_party = TOOL_FRAME_WEB, /* results are the web's text, framed as such */
    .device_string = "search",

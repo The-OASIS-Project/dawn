@@ -73,7 +73,8 @@ sudo systemctl restart dawn-satellite
 ```
 
 The prebuilt binary ships **unsigned** — OTA trust is rooted in *your* key, not the publisher's
-(see below). Verify the download against the release `SHA256SUMS` before installing.
+(see below). Verify the download against the release `SHA256SUMS` before installing, and optionally its
+build attestation ([INSTALL_UBUNTU_PACKAGE.md](INSTALL_UBUNTU_PACKAGE.md#checking-where-a-release-came-from)).
 
 ### Fetching models
 

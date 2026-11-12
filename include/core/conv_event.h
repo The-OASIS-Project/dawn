@@ -199,6 +199,9 @@ struct session; /* forward decl — avoids pulling session_manager.h into this l
  * case) route through it today; the reinvoke path (job_reinvoke.c) still persists inline and
  * folds in as its own follow-up commit (it already reaches this seam with no include change).
  *
+ * The fan-out names @p session (`session_id`) unless it is a job's, whose stream reaches
+ * every viewer of the job: then the row names no session.
+ *
  * Callers own everything OUTSIDE this middle: arming `will_persist_turn`, bounded retry +
  * error frame, and post-persist side effects (a job's mark-fired).  Gate those on the return.
  *

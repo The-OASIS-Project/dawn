@@ -10,6 +10,19 @@
 # facts stored from the ones before it (dedup, supersede), as production does.
 # Runs compare fairly only over the same set: pick once, reuse the ids file.
 #
+# --dump-candidates also saves each batch's raw extraction facts, before the
+# store checks, merges or drops anything (reextract_<label>_candidates.jsonl):
+# coverage of a run's kept facts against another run's candidates splits what
+# was never proposed from what the store lost.
+#
+# --consolidator prompt|agent stores each batch with the fixed rules or the
+# consolidator (over the config's [memory] consolidator); --samples 1|2 sets
+# the consolidator's extraction samples per batch (default 1).  --forgotten
+# <file> seeds forgotten-fact records under data/ before the first batch, for
+# `comebacks`.  Each conversation's model calls and tokens are saved by call
+# kind (reextract_<label>_usage.jsonl; the consolidator's split into its
+# extraction samples and its rounds), which `store` summarizes per batch.
+#
 # Privacy: conversation text goes only to the bench binary and the extraction
 # model's API.  The bench's log lines (which can quote facts) are read and
 # dropped; this prints ids and counts only.
@@ -27,11 +40,20 @@ import time
 from collections import Counter, defaultdict
 
 from .storage import private_open
+from .store import load_forgotten
 
 READY_TIMEOUT_S = 60
 EXTRACT_TIMEOUT_S = 660  # the bench gives up on one extraction at 600 s
-USAGE_RE = re.compile(rb"LLM cache: provider=\S+ model=\S+ kind=\S+ .*? prompt=(\d+) "
-                      rb".* output=(\d+)")
+USAGE_RE = re.compile(rb"LLM cache: provider=\S+ model=\S+ kind=(\S+) .*?iter=(-?\d+) .*?"
+                      rb"prompt=(\d+) .* output=(\d+)")
+
+
+def usage_step(kind, iteration):
+    """A call's usage key: its kind, and for the consolidator whether it was an
+    extraction sample (iteration 0) or a consolidation round (1 and up)."""
+    if kind != "consolidation":
+        return kind
+    return "consolidation/sample" if iteration <= 0 else "consolidation/round"
 
 
 def pick_conversations(db, user_id, n, since, min_messages):
@@ -55,17 +77,42 @@ def pick_conversations(db, user_id, n, since, min_messages):
     return sorted(chosen)
 
 
+def bench_command(binary, provider, model, effort, config="", candidates="", consolidator="",
+                  samples=0):
+    """The bench's command line.  candidates: where it writes each batch's raw
+    extraction facts (--dump-candidates), or none; consolidator: "prompt" or
+    "agent" over the config's, or none; samples: the consolidator's extraction
+    samples per batch (1 or 2; 0: its default)."""
+    # The bench runs from run_dir: resolve relative paths here.
+    cmd = [os.path.abspath(binary), "--memory-pipeline", "--extraction-provider", provider,
+           "--extraction-model", model]
+    if effort:
+        cmd += ["--extraction-effort", effort]
+    if config:
+        cmd += ["--config", os.path.abspath(config)]
+    if candidates:
+        cmd += ["--dump-candidates", os.path.abspath(candidates)]
+    if consolidator:
+        cmd += ["--consolidator", consolidator]
+    if samples:
+        cmd += ["--samples", str(samples)]
+    return cmd
+
+
+def count_candidates(path):
+    """(candidates, conversations) in a --dump-candidates file."""
+    with open(path) as f:
+        rows = [json.loads(line) for line in f if line.strip()]
+    return len(rows), len({r["conversation"] for r in rows})
+
+
 class Bench:
     """One bench_retrieval --memory-pipeline process, spoken to over JSON lines."""
 
-    def __init__(self, binary, run_dir, provider, model, effort, config=""):
-        # The bench runs from run_dir: resolve a relative binary path here.
-        cmd = [os.path.abspath(binary), "--memory-pipeline", "--extraction-provider", provider,
-               "--extraction-model", model]
-        if effort:
-            cmd += ["--extraction-effort", effort]
-        if config:
-            cmd += ["--config", os.path.abspath(config)]
+    def __init__(self, binary, run_dir, provider, model, effort, config="", candidates="",
+                 consolidator="", samples=0):
+        cmd = bench_command(binary, provider, model, effort, config, candidates, consolidator,
+                            samples)
         # umask 077: the scratch DB and the saved snapshot hold copied
         # conversations, so nothing the bench creates is readable by others.
         self.proc = subprocess.Popen(cmd, cwd=run_dir, stdin=subprocess.PIPE,
@@ -73,6 +120,7 @@ class Bench:
                                      bufsize=0, preexec_fn=lambda: os.umask(0o077))
         self.buf = b""
         self.usage = Counter()  # model tokens, from the bench's numeric "LLM cache:" lines
+        self.by_kind = defaultdict(Counter)  # the same, by usage_step, since the last take
         self.ready = self.reply(READY_TIMEOUT_S)
         if self.ready.get("status") != "ready":
             raise SystemExit(f"bench did not start: {self.ready.get('message', '?')}")
@@ -91,9 +139,11 @@ class Bench:
                         return {"status": "error", "message": "unreadable reply"}
                 m = USAGE_RE.search(line)
                 if m:
-                    self.usage["calls"] += 1
-                    self.usage["in"] += int(m.group(1))
-                    self.usage["out"] += int(m.group(2))
+                    kind = usage_step(m.group(1).decode(), int(m.group(2)))
+                    for c in (self.usage, self.by_kind[kind]):
+                        c["calls"] += 1
+                        c["in"] += int(m.group(3))
+                        c["out"] += int(m.group(4))
             left = deadline - time.monotonic()
             if left <= 0:
                 return {"status": "error", "message": "timed out"}
@@ -104,6 +154,11 @@ class Bench:
             if not chunk:
                 return {"status": "error", "message": "bench exited"}
             self.buf += chunk
+
+    def take_by_kind(self):
+        """Tokens by usage_step since the last take."""
+        got, self.by_kind = self.by_kind, defaultdict(Counter)
+        return got
 
     def send(self, msg, timeout=60):
         self.proc.stdin.write((json.dumps(msg) + "\n").encode())
@@ -162,8 +217,22 @@ def run(a, data):
     if not convs:
         raise SystemExit("no conversations to extract")
 
-    bench = Bench(a.binary, a.run_dir, a.provider, a.model, a.effort, a.config)
+    # What extraction proposed, before the store: written while the run's name
+    # (from the bench's prompt hash) is still unknown, then renamed to it.
+    cand_tmp = ""
+    if a.dump_candidates:
+        cand_tmp = data(f"reextract_candidates_{os.getpid()}.part.jsonl")
+        private_open(cand_tmp).close()
+    bench = Bench(a.binary, a.run_dir, a.provider, a.model, a.effort, a.config, cand_tmp,
+                  getattr(a, "consolidator", ""), getattr(a, "samples", 0))
     ready = bench.ready
+    if getattr(a, "forgotten", ""):
+        texts = load_forgotten(data(a.forgotten))
+        r = bench.send({"cmd": "import_forgotten", "texts": texts})
+        if r.get("status") != "ok" or r.get("forgotten") != len(texts):
+            bench.close()
+            raise SystemExit(f"forgotten records not imported ({r.get('message', r)})")
+        print(f"{len(texts)} forgotten records seeded")
     sha = ready.get("extraction_prompt_sha256", "")[:8]
     model, effort = ready.get("extraction_model", "?"), ready.get("extraction_effort") or "off"
     # A filename: an OpenRouter model is a vendor/model slug.
@@ -171,7 +240,8 @@ def run(a, data):
     db_out, map_out = data(f"reextract_{label}.db"), data(f"reextract_{label}.map.json")
     # What the bench reports it runs, not what was asked for.
     print(f"prompt {sha}, {ready.get('extraction_provider', '?')} {model} effort {effort} "
-          f"-> {db_out}")
+          f"consolidator {ready.get('consolidator', '?')} -> {db_out}")
+    usage_rows = []
 
     outcome = Counter()
     t0 = time.time()
@@ -190,6 +260,9 @@ def run(a, data):
                 # the next conversation's numbers: stop rather than go on.
                 raise SystemExit(f"conv {cid}: extraction failed ({r.get('message')}); "
                                  "run stopped, nothing saved")
+            for kind, c in bench.take_by_kind().items():
+                usage_rows.append({"conversation": cid, "kind": kind, "calls": c["calls"],
+                                   "in": c["in"], "out": c["out"]})
             if r.get("transient"):
                 what = "failed (transient)"
             elif r.get("ran"):
@@ -206,7 +279,15 @@ def run(a, data):
         raise SystemExit(f"snapshot failed: {r.get('message')}")
     for p in (db_out, map_out):
         os.chmod(p, 0o600)
+    if cand_tmp:
+        cand_out = data(f"reextract_{label}_candidates.jsonl")
+        os.replace(cand_tmp, cand_out)
+        n, convs_with = count_candidates(cand_out)
+        print(f"{n} candidate facts from {convs_with} conversations -> {cand_out}")
 
+    with private_open(data(f"reextract_{label}_usage.jsonl")) as f:
+        for row in usage_rows:
+            f.write(json.dumps(row) + "\n")
     facts = scratch_facts(db_out)
     facts_out = data(f"reextract_{label}_facts.jsonl")
     with private_open(facts_out) as f:

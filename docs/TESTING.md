@@ -2,7 +2,7 @@
 
 What tests and checks DAWN has, what each one covers, what runs on every change, and what isn't covered.
 `scripts/code_metrics.sh` gives the current size and test counts. The coverage figures are as of
-October 2026; [Coverage](#coverage) has the commands that recompute them.
+November 2026; [Coverage](#coverage) has the commands that recompute them.
 
 ## Contents
 
@@ -137,22 +137,22 @@ Benchmarks measure quality, not correctness, and are run by hand.
 Unit-test line coverage, measured by the `coverage` preset and gcovr (`gcovr.cfg` counts DAWN's own code,
 not the tests or vendored code).
 
-**What the number means.** gcovr counts only files a test compiles. Unit tests compile 300 of DAWN's 526
-C and C++ source files, about half of the code by lines. In those files, **61.7% of
-lines** and 49.9% of branches run. Across all of DAWN's code, unit tests run roughly a third of it. The rest
+**What the number means.** gcovr counts only files a test compiles. Unit tests compile 357 of DAWN's 526
+C and C++ source files, about half of the code by lines. In those files, **66.3% of
+lines** and 53.7% of branches run. Across all of DAWN's code, unit tests run roughly a third of it. The rest
 (the WebUI server, `dawn.c`'s main loop, MQTT, ASR and TTS engines, the network clients) is exercised by
 the integration scripts and by use, and isn't counted here.
 
 | Directory | Source files a test compiles | Line coverage in those files |
 |---|---:|---:|
-| `src/core` | 64 of 81 | 79.2% |
-| `src/tools` | 55 of 127 | 67.6% |
+| `src/core` | 64 of 81 | 79.7% |
+| `src/tools` | 55 of 127 | 72.6% |
 | `src/messaging` | 7 of 17 | 63.6% |
 | `src/audio` | 6 of 25 | 64.4% |
 | `src/auth` | 48 of 61 | 62.7% |
-| `src/llm` | 51 of 51 | 50.2% |
-| `src/memory` | 40 of 48 | 48.9% |
-| `src/config` | 4 of 4 | 45.8% |
+| `src/llm` | 51 of 51 | 51.4% |
+| `src/memory` | 40 of 48 | 63.3% |
+| `src/config` | 4 of 4 | 46.5% |
 | `src/webui` | 6 of 52 | (the six are small helpers) |
 | `common` (shared with the satellite) | 11 of 15 | 69.6% |
 | `dawn_satellite` | 3 of 30 | 77.2% |

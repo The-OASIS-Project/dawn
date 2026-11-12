@@ -8,6 +8,10 @@
 # unlock/open, document delete, deep_research start) mint a pending id and act
 # only when the confirm names it, like DAWN.
 #
+# A world with contacts resolves a name the way DAWN's contact resolution does
+# (one match, several, none); a guest speaker (an unassigned satellite) gets
+# DAWN's refusal from every tool that reads or changes personal data.
+#
 # License: GPLv3, same as DAWN.
 
 import ast
@@ -32,6 +36,16 @@ THIRD_PARTY_WHAT = {"EMAIL CONTENT": "email, as its sender wrote it",
 _THIRD_PARTY_ACTIONS = {("email", "recent"): "EMAIL CONTENT", ("email", "read"): "EMAIL CONTENT",
                         ("email", "search"): "EMAIL CONTENT", ("email", "digest"): "EMAIL CONTENT",
                         ("search", "*"): "WEB CONTENT", ("url_fetch", "*"): "WEB CONTENT"}
+# The tools that refuse a guest (TOOL_GUEST_REFUSAL in include/tools/tool_registry.h,
+# returned when tool_get_current_user_id() is 0).  The scheduler still lets a guest
+# snooze or dismiss an alarm that is ringing.
+GUEST_REFUSAL = ("This device isn't assigned to a user, so personal data (memory, calendar, "
+                 "email, documents, reminders) isn't available here. An admin can assign it to "
+                 "a user on the satellite management page.")
+GUEST_REFUSED_TOOLS = {"memory", "recall", "calendar", "email", "scheduler", "phone", "messaging",
+                       "attention", "document_grep", "document_index", "document_manage",
+                       "document_read", "document_search", "deep_research", "job", "stocks",
+                       "code_project"}
 # The conversation's tag, as the captured system prompt states it (context rules).
 CONTEXT_TAG_RE = re.compile(r"its tag in this conversation: (dawn-ctx-[0-9a-f]+)")
 
@@ -119,6 +133,10 @@ class World:
         self.events: List[dict] = st.get("events", [])
         self.inbox: List[dict] = st.get("inbox", [])
         self.facts: List[str] = st.get("facts", [])
+        # {name, phone?, email?}: what the memory tool's contacts and the phone and
+        # email tools' name resolution read.
+        self.contacts: List[dict] = st.get("contacts", [])
+        self.guest = st.get("speaker") == "guest"
         self.library: List[dict] = st.get("library", [
             {"title": "So What", "artist": "Miles Davis", "genre": "jazz"},
             {"title": "Take Five", "artist": "Dave Brubeck", "genre": "jazz"},
@@ -135,6 +153,7 @@ class World:
         self.sent: List[dict] = []
         self.playing_log: List[dict] = []
         self.calls_made: List[dict] = []
+        self.prepared: List[dict] = []  # every call or text prepared, confirmed or not
         self.playing: Optional[dict] = None
         self.pending: Dict[str, dict] = {}
         self.unmocked: List[str] = []
@@ -158,6 +177,28 @@ class World:
                 self.same_turn_acts.append(kind)
             return p
         return None
+
+    def _resolve(self, who, field: str):
+        """(value, None) for @p who as DAWN's contact resolution reads it, or
+        (None, what DAWN tells the model) when no single contact matches.  A
+        number or address, or any name in a world without contacts, goes
+        through as given."""
+        text = str(who or "").strip()
+        if not self.contacts or not text or "@" in text or re.search(r"\d{3}", text):
+            return text, None
+        words = text.lower().split()
+        hits = [c for c in self.contacts if c.get(field)
+                and all(w in c["name"].lower().split() for w in words)]
+        what = "number" if field == "phone" else "address"
+        if len(hits) == 1:
+            return f"{hits[0]['name']} ({hits[0][field]})", None
+        if hits:
+            listed = "; ".join(f"{c['name']} ({c[field]})" for c in hits)
+            return None, (f"Several contacts match '{text}': {listed}. Ask the user which one, "
+                          f"offering each {what} listed; then pass that contact's full name, "
+                          f"or the {what}.")
+        return None, (f"No contact named '{text}'. Ask the user who they mean, or for the "
+                      f"{what}, or save the contact first.")
 
     def _gap(self, name: str, action: str) -> str:
         """An action the mocks don't model: recorded, and answered as unavailable."""
@@ -213,6 +254,9 @@ class World:
             pin = pin.get(action, pin.get("*"))
         if isinstance(pin, str):
             return pin
+        if self.guest and name in GUEST_REFUSED_TOOLS and not (
+                name == "scheduler" and action in ("snooze", "dismiss")):
+            return GUEST_REFUSAL
         handler = getattr(self, f"t_{name}", None)
         if handler is None:
             return self._gap(name, action)
@@ -367,10 +411,13 @@ class World:
                 f"[{m.get('id', i + 1)}] From {m['from']}: {m['subject']}"
                 for i, m in enumerate(self.inbox))
         if action == "send":
-            draft = {"to": a.get("to"), "subject": a.get("subject"), "body": a.get("body")}
+            to, question = self._resolve(a.get("to"), "email")
+            if question:
+                return question
+            draft = {"to": to, "subject": a.get("subject"), "body": a.get("body")}
             self.drafts.append(dict(draft))
             pid = self._mint("email_send", draft)
-            return (f"Draft ready (draft_id {pid}): to {a.get('to')}, subject "
+            return (f"Draft ready (draft_id {pid}): to {to}, subject "
                     f"'{a.get('subject')}'. Read it back to the user; send only after they "
                     f"confirm, with confirm_send and this draft_id.")
         if action == "confirm_send":
@@ -441,8 +488,13 @@ class World:
     def t_phone(self, action, a):
         if action in ("call", "send_sms"):
             kind = "call" if action == "call" else "sms"
-            pid = self._mint(kind, {"to": a.get("target") or a.get("number") or a.get("to"),
-                                    "message": a.get("body") or a.get("message")})
+            to, question = self._resolve(a.get("target") or a.get("number") or a.get("to"),
+                                         "phone")
+            if question:
+                return question
+            payload = {"to": to, "message": a.get("body") or a.get("message")}
+            self.prepared.append({"kind": kind, **payload})
+            pid = self._mint(kind, payload)
             return (f"Ready to {'call' if kind == 'call' else 'text'} "
                     f"{self.pending[pid]['to']} (pending_id {pid}). Confirm with the user first.")
         if action == "call_log":
@@ -465,6 +517,18 @@ class World:
         if action == "remember":
             self.facts.append(a.get("value") or a.get("query") or "")
             return "Remembered."
+        if action in ("find_contact", "list_contacts"):
+            words = str(a.get("query") or "").lower().split() if action == "find_contact" else []
+            hits = [c for c in self.contacts
+                    if all(w in c["name"].lower().split() for w in words)]
+            if not hits:
+                return ("No contacts found matching that name." if action == "find_contact"
+                        else "No contacts stored.")
+            head = (f"Contact results ({len(hits)}):" if action == "find_contact"
+                    else f"All contacts ({len(hits)}):")
+            lines = [f"- {c['name']}: {f} = {c[f]}" for c in hits for f in ("phone", "email")
+                     if c.get(f)]
+            return head + "\n" + "\n".join(lines)
         return self._gap(self._tool, action)
 
     def t_recall(self, _action, a):

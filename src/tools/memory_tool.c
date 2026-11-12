@@ -495,6 +495,7 @@ static int memory_describe_call(const char *action,
 
 static const tool_metadata_t memory_metadata = {
    .name = "memory",
+   .results = TOOL_RESULTS_OWN,
    .action_kinds = s_memory_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_memory_action_kinds),
    .device_string = "memory",

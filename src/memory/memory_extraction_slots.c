@@ -331,6 +331,10 @@ void memory_extraction_unqueue_user(int user_id) {
    pthread_mutex_unlock(&s_extraction_mutex);
 }
 
+bool memory_extraction_stopping(void) {
+   return atomic_load(&s_queue_stopped);
+}
+
 void memory_extraction_stop_queue(void) {
    atomic_store(&s_queue_stopped, true);
    pthread_mutex_lock(&s_extraction_mutex);

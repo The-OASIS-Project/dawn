@@ -4,7 +4,7 @@
 
 This document is the **architectural map**: directory layout, the cross-cutting rules every subsystem obeys (layering, threading, lock ordering, error handling, configuration), and a one-paragraph summary of each subsystem with a link to its detail doc. For the internals of any single subsystem — its components, data flow, DB schema, and tuning — open the linked file in [`docs/arch/subsystems/`](docs/arch/subsystems/).
 
-**Last updated**: October 2026.
+**Last updated**: November 2026.
 
 ## Table of Contents
 
@@ -124,7 +124,7 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 
 | Subsystem | Role | Detail doc |
 |---|---|---|
-| **Core** (`src/` root + `src/core/`) | Main entry, MQTT integration, legacy command parsing. `src/dawn.c` hosts the state machine; `src/mosquitto_comms.c/h` wires MQTT; `src/text_to_command_nuevo.c/h` extracts `<command>` tags from LLM output; `src/word_to_number.c/h` converts "twenty-three" → 23; `src/core/` contains the session manager, scheduler, command executor/router, worker pool, and wake-word detector. Logging macros (`OLOG_INFO/WARNING/ERROR/DEBUG`) come from `common/include/logging.h`, shared with the satellite. | *(inlined above)* |
+| **Core** (`src/` root + `src/core/`) | Main entry, MQTT integration, direct command matching. `src/dawn.c` hosts the state machine; `src/mosquitto_comms.c/h` wires MQTT; `src/text_to_command_nuevo.c/h` matches a spoken command against the tools' patterns; `src/word_to_number.c/h` converts "twenty-three" → 23; `src/core/` contains the session manager, scheduler, command executor/router, worker pool, and wake-word detector. Logging macros (`OLOG_INFO/WARNING/ERROR/DEBUG`) come from `common/include/logging.h`, shared with the satellite. | *(inlined above)* |
 | **ASR** | Speech recognition abstraction (Strategy pattern) over Whisper and Vosk, plus Silero VAD and chunking for long utterances. Whisper on Jetson GPU is the default; Vosk is retained for CPU-only builds. | [asr.md](docs/arch/subsystems/asr.md) |
 | **LLM** | Unified interface for OpenAI, Claude, Gemini, **OpenRouter** (a first-class `provider` fronting many vendors through one key; its `anthropic/` models use its Anthropic Messages endpoint on the Claude path, the rest its OpenAI-compatible one), and local (llama.cpp/Ollama). Streaming via SSE feeds a sentence buffer that hands complete sentences to TTS while the response is still generating. A conversation's request is append-only (`src/core/session_prefix.c`): its system prompt and tool set are frozen on its first turn, and later changes (instructions, the surface's directions, each turn's context) are appended where they happen, so providers cache the whole conversation and signed reasoning stays replayable. Runs on a dedicated worker thread so the main audio loop never blocks; wake-word interrupts abort in-flight API calls. | [llm.md](docs/arch/subsystems/llm.md) |
 | **TTS** | Piper + ONNX Runtime with preprocessing for natural phrasing. Mutex-protected so the main loop, network server, and streaming buffer can all synthesize safely. | [tts.md](docs/arch/subsystems/tts.md) |
@@ -133,7 +133,7 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 | **Audio** | Capture thread + thread-safe ring buffer, multi-format playback (FLAC/MP3/Ogg), and the unified music DB (local files + Plex) with source-aware dedup and background scanner. | [audio.md](docs/arch/subsystems/audio.md) |
 | **WebUI Audio** | Browser-side Opus streaming via WebCodecs + server-side decode/resample/ASR/TTS/encode pipeline. TTS is **server-authoritative and multi-target**: a turn's synthesized speech is fanned to **every TTS-enabled browser viewing that conversation** (origin included), synthesized **once per sentence** regardless of listener count and encoded once per format under the connection-registry lock (the audio half of the cross-viewer fan-out — see [SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN.md](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/archive/SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN.md)). Also hosts **always-on voice mode** (server-side VAD + wake word, no browser AI) and the **visual rendering tool** (inline SVG/HTML/Chart.js diagrams). Browser **music** playback decodes Opus **off the main thread** in a Web Worker (→ transferred `MessagePort` → AudioWorklet) over a dedicated music socket, with **closed-loop flow control** (client reports buffer depth; server paces a ~2s lead) — the same dedicated flow-controlled transport Tier-1 satellites use. | [webui-audio.md](docs/arch/subsystems/webui-audio.md) |
 | **Vision & Documents** | Image upload (client compression, server filesystem storage with source/retention policies, zero-copy HTTP serving) and document upload (PDF via MuPDF, DOCX via libzip+libxml2, plain text client-side). | [vision-documents.md](docs/arch/subsystems/vision-documents.md) |
-| **Memory** | Persistent user profile built by a **sleep-consolidation model**: extraction runs at session end, not during conversation, so chat latency is unchanged. Facts, preferences, summaries, entity graph, and contacts; hybrid keyword + semantic search via embeddings; nightly confidence decay. Conversation anchor on extraction (v42) resolves relative phrases ("yesterday", "last month") against the conversation's logical "now." | [memory.md](docs/arch/subsystems/memory.md). Historical design docs under [atlas/dawn/memory/](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/memory). |
+| **Memory** | Persistent user profile built by a **sleep-consolidation model**: extraction runs at session end, not during conversation, so chat latency is unchanged. Facts, preferences, summaries, entity graph, and contacts; hybrid keyword + semantic search via embeddings; nightly confidence decay. Conversation anchor on extraction (v42) resolves relative phrases ("yesterday", "last month") against the conversation's logical "now." With `[memory] consolidator = "agent"`, session-end consolidation runs as a guarded plan over the extracted candidates (the model decides each, code checks every op) with a record of every operation. | [memory.md](docs/arch/subsystems/memory.md). Historical design docs under [atlas/dawn/memory/](https://github.com/The-OASIS-Project/atlas/tree/main/dawn/memory). |
 | **Document Search / RAG** | Upload → chunk → embed → search, literal `document_grep`, or paginated read via LLM tools. Structure-aware chunking (one record per chunk) for YAML/CSV. Shares `embedding_engine.c` with the memory subsystem; supports ONNX (local), Ollama, and OpenAI-compatible embedding providers. Raw uploads are retained in a generic **blob store** (`src/blob_store.c`, `documents.original_blob_id`) so originals can be downloaded/re-processed. | [rag.md](docs/arch/subsystems/rag.md) |
 | **Notes / Reference Text** | First-class **notes** document kind (`DOC_KIND_NOTES`) on the same `document_db`/`embedding_engine` foundation: user- or LLM-authored reference text with hybrid lexical (BM25/FTS5 + Porter2 stemming, `libstemmer`) plus semantic search, surgical edit/append, version history with one-step undo (`document_versions`), and a notes↔memory bridge so fuzzy recall resolves to the right note. Filed note bodies are kept **out** of semantic memory by default (`note_extraction_guard`) so the canonical text lives only in the note store. | shares [rag.md](docs/arch/subsystems/rag.md) + [vision-documents.md](docs/arch/subsystems/vision-documents.md) |
 | **Deep Research** (`src/tools/research_*`, `src/core/research_worker.c`) | **P0 shipped 2026-08-13; P1 (controller-driven convergence) shipped 2026-08-14, live-validated.** Confirmation-gated `deep_research` tool spawns a detached **`research_worker`** (a background-job sibling — reuses `job_manager_*`, its own spawn path, NOT `job_worker.c`) that runs an **IterResearch** loop on a **bare, memory-free** session: each round resets history to a bounded digest + top open questions, plans sub-questions, does web `search`/`url_fetch` under a **read-only tool allowlist** (enforced at advertise AND execute), and records injection-gated evidence **claims** to a SQLite ledger (`research_runs/questions/claims/report_revisions`, schema v75; v76 adds `resolution_reason`). A **deterministic C stop-controller** ends it — natural-end reasons first (`concluded` via the agent's `research_conclude` signal → distinct-source `coverage`, with `research_mark_unanswerable` + **P1 stale-question auto-retirement** clearing dead questions → `saturation` after N dry rounds) then the **input-token budget as a high runaway backstop** (a per-round overshoot guard keeps it honest) — so a run stops on why it's actually done, not on spend. P1 adds **plan-freeze** (no new top-level questions after round K) and a **fresh-context completeness critic** (§6 item 4) that may re-arm a stop-eligible run at an untried angle up to `critic_max_rearm` times (each re-arm resets the saturation streak so a multi-round gap gets a fresh window). A final **no-tools synthesis turn** writes the answer (exec summary + direct answer/recommendation + honest gaps) over the **claims evidence** (a view over `research_claims` — the ledger retains every recorded claim, so synthesis works from evidence rather than a lossy running summary; the render is bounded by a generous per-report claim cap with an explicit truncation marker beyond it), so every terminal path yields a real answer; it's filed to notes and persisted to the job conversation (never re-entering a tool session or `reinvoke_parent` — the untrusted-content boundary, §11). A voice/WebUI run posts a JARVIS-style **completion take** back into the originating conversation (`completion_commentary`). Off by default (`[research] enabled`). P2–P4 (parallel fan-out, attach/replay specialization, TUI) remain design-only. | [DEEP_RESEARCH_DESIGN.md](docs/DEEP_RESEARCH_DESIGN.md) |
@@ -171,6 +171,11 @@ Layer 1 (Core infrastructure) — deps: Layer 0
 ├── src/core/tz.c               Clock times in a named zone (libical), never the process's TZ.  tz_lookup only
 │                               returns zones libical lists (it never makes libical load a name, which appends to
 │                               a list other threads read); only tz_daemon_init, at startup, loads other names
+├── include/core/outside_kind.h What outside text a memory row's batch or a conversation read (stored values:
+│                               append only); tainted vs clean vs UNKNOWN, read by memory, llm and tools alike
+├── include/core/outside_markers.h The bytes DAWN writes around outside text in a message (an attached document,
+│                               a job's result, a device's data, an outside focus item); stored, so append only;
+│                               the live extraction scan and the SQL over stored rows match the same definitions
 ├── include/core/turn_origin.h  Where a pending action was made; a confirm carries it out only in the same
 │                               session, on the next turn, and never in a turn carrying an email the user
 │                               attached
@@ -254,6 +259,7 @@ them as one Layer-2 unit, not as separate modules with a direction between them.
 | lower-layer broadcasts (scheduler, jobs, calendar, phone, ...) | `webui_broadcasts.c` | weak no-op default, strong WebUI override |
 | `src/tools/email_service_move.c` (a move or undo changed a mailbox) | `webui_email_changed.c` (email_changed to every tab of the user) | weak `email_changed_notify` |
 | `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |
+| `src/memory/memory_consolidate.c`, `memory_consolidation_undo.c` (a batch recorded, undone or kept) | `webui_broadcasts.c` (`memory_batch` to every tab of the user) | weak `memory_consolidation_batch_notify` |
 
 \* **Orchestration-unit note.** `job_worker.c` and `research_worker.c` physically live in
 `src/core/` but are **application-orchestration units**: each is a detached top-of-stack sequencer
@@ -371,6 +377,9 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │                    learned from a conversation made    │
 │                    private; forgets one fact, all of   │
 │                    them (waits out an extraction)      │
+│  Memory undo     — detached, one per user: undoes or   │
+│                    keeps what a consolidation batch    │
+│                    did (waits out an extraction)       │
 │  Music player    — one per playing music player (each  │
 │                    WebUI music session's, and the      │
 │                    local speaker's): opens tracks      │
@@ -620,6 +629,8 @@ Per-module locks (scoped to a single subsystem):
                                                                      registry, then its metrics_mutex for the owner check) BEFORE the deliver_mutex is
                                                                      taken.  A deliberate module-before-session exception to rule 1: the send only
                                                                      queues, so nothing waits on a session while it's held
+  memory_consolidation_undo::s_inflight_mutex (src/memory/memory_consolidation_undo.c) — users with an undo or
+                                                                     Keep running (LEAF: held only to claim or free a slot)
   email_undo::s_mutex (src/tools/email_undo.c) — the trash/archive undo tokens (LEAF: held only to add, claim, finish or release
                                                                      a token; never across a call into anything else)
   email_service_move::s_pace_mutex (src/tools/email_service_move.c) — Gmail's per-account call pacing, shared by the tool and
@@ -1023,11 +1034,11 @@ The session manager, response queue, LLM pipeline, tool system, and conversation
 
 ## Command Processing
 
-DAWN supports three parallel command-processing paths — direct regex matching, native LLM tool calls, and legacy `<command>` tags — that all converge on a single unified executor (`command_execute()`).
+DAWN supports two parallel command-processing paths — direct regex matching and native LLM tool calls — that both converge on a single unified executor (`command_execute()`).
 
 - **Tool registry** (`src/tools/tool_registry.c`): self-registration with FNV-1a hash tables for O(1) lookup, automatic schema generation for multiple LLM providers, and capability flags (`TOOL_CAP_NETWORK`, `TOOL_CAP_DANGEROUS`).
 - **Processing mode** is selected in `dawn.toml`: `direct_only`, `llm_only`, or `direct_first`.
-- **Native tools** vs. **legacy `<command>` tags** use the same enable/disable flags and the same executor; only the transport differs.
+- **Native tool calling** is the only way a model calls a tool; `[llm.tools] enabled` turns it off. Text a model writes is never parsed for commands.
 
 **Full flowchart, tool list, and definition sources**: see [command-processing.md](docs/arch/command-processing.md).
 

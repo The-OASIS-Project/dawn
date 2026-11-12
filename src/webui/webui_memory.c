@@ -96,6 +96,17 @@ void handle_get_memory_stats(ws_connection_t *conn) {
  * Memory Facts Handlers
  * ============================================================================= */
 
+/* The outside kind an imported item's "outside" field names; UNKNOWN when it
+ * has none or one out of range (the file isn't DAWN's to vouch for). */
+static int import_outside(json_object *item) {
+   json_object *v = NULL;
+   if (!json_object_object_get_ex(item, "outside", &v) || !json_object_is_type(v, json_type_int)) {
+      return OUTSIDE_UNKNOWN;
+   }
+   const int outside = json_object_get_int(v);
+   return outside >= OUTSIDE_NONE && outside <= OUTSIDE_KIND_MAX ? outside : OUTSIDE_UNKNOWN;
+}
+
 /* The panel's word for how a fact was learned ("told", "noted", ...); left out
  * when there is none, and the panel shows the raw source. */
 static void add_fact_kind(json_object *obj, const memory_fact_t *fact) {
@@ -369,6 +380,9 @@ static json_object *build_preferences_json_array(const memory_preference_t *pref
       json_object_object_add(pref_obj, "updated_at", json_object_new_int64(prefs[i].updated_at));
       json_object_object_add(pref_obj, "reinforcement_count",
                              json_object_new_int(prefs[i].reinforcement_count));
+      if (outside_is_tainted(prefs[i].outside)) {
+         json_object_object_add(pref_obj, "outside", json_object_new_boolean(1));
+      }
       json_object_array_add(prefs_array, pref_obj);
    }
    return prefs_array;
@@ -376,112 +390,101 @@ static json_object *build_preferences_json_array(const memory_preference_t *pref
 
 /**
  * @brief Serialize an entity array to a JSON array, enriched with
- * Phase 1 entity-merge alias summaries (drop alias rows, attach
- * `alias_count` to canonicals) and relation bulk-load (emit each
- * entity's outgoing + incoming edges inline).  Shared by the
- * paginated list handler and the search handler.
+ * entity-merge alias summaries (drop alias rows, attach `alias_count` to
+ * canonicals) and each card's relations (outgoing, then incoming from
+ * outside its class).  Shared by the paginated list handler and the search
+ * handler.
  *
- * Pulls alias summary + relation set in two queries regardless of
- * @p count; duplicating these on each search keystroke is acceptable
- * at the dev's 264-entity scale, and the alternative — caching them
- * in the connection — leaks state across tabs.
+ * Relations are read for the listed cards only, so a card's edges never
+ * depend on how large the rest of the graph is.  A hub entity (the user, say)
+ * can carry thousands of edges: each card sends its strongest
+ * ENTITIES_JSON_RELATIONS_PER_DIR per direction and `relations_total`, the
+ * count before that limit, so the panel can say how many it isn't showing.
  */
 #define ENTITIES_JSON_ALIAS_SUMMARY_MAX 512
-/* Bulk relation pull cap.  At 2000, sizeof(memory_relation_t) ~= 176 →
- * ~352 KB stack per call, comfortable on the LWS service thread's 8 MB
- * pthread stack.  Bumped from 400 once a real user crossed it (1700+
- * relations after a corpus consolidation).  Per-entity capping (filed in
- * docs/TODO.md as a follow-up) is the right shape past ~5000 relations;
- * keep this single-global cap as the cheap intermediate.
- *
- * Soft-linked to EXPORT_MAX_RELATIONS below — they happen to share a
- * value today because both budgets scale with the user's total relation
- * count.  NOT a hard contract: this gates an interactive hot path that
- * fires per search keystroke, while EXPORT_MAX_RELATIONS gates a one-shot
- * cold export.  They can legitimately diverge (e.g. lift the export cap
- * higher when paging lands while leaving the live cap modest).  When
- * bumping one, look at the other and decide on merit — don't reflexively
- * keep them equal. */
-#define ENTITIES_JSON_RELATIONS_MAX 2000
+#define ENTITIES_JSON_RELATIONS_PER_DIR 50
+
+static void add_relation_json(json_object *relations, const memory_card_relation_t *row) {
+   const memory_relation_t *rel = &row->rel;
+   json_object *rel_obj = json_object_new_object();
+   json_object_object_add(rel_obj, "relation", json_object_new_string(rel->relation));
+   /* For an incoming row these name the subject's class head (the card the
+    * click opens), not the stored object. */
+   json_object_object_add(rel_obj, "object_name", json_object_new_string(rel->object_name));
+   json_object_object_add(rel_obj, "object_entity_id",
+                          json_object_new_int64(rel->object_entity_id));
+   json_object_object_add(rel_obj, "direction",
+                          json_object_new_string(row->incoming ? "in" : "out"));
+   json_object_object_add(rel_obj, "confidence", json_object_new_double(rel->confidence));
+   /* Per-row re-witness count; the panel sums rows of one class. */
+   json_object_object_add(rel_obj, "mention_count", json_object_new_int(rel->mention_count));
+   /* Omitted when unset so the client can tell "no date recorded" from a
+    * real value rather than rendering 1970. */
+   if (rel->valid_from > 0) {
+      json_object_object_add(rel_obj, "valid_from", json_object_new_int64(rel->valid_from));
+   }
+   if (rel->valid_to > 0) {
+      json_object_object_add(rel_obj, "valid_to", json_object_new_int64(rel->valid_to));
+   }
+   json_object_array_add(relations, rel_obj);
+}
+
 static json_object *build_entities_json_array(int user_id,
                                               const memory_entity_t *entities,
                                               int count) {
    memory_alias_summary_row_t alias_summary[ENTITIES_JSON_ALIAS_SUMMARY_MAX];
    int alias_summary_count = 0;
-   /* Initialize relations + per-row canonical-root arrays unconditionally
-    * so subsequent indexed reads cannot hit uninitialized stack data on
-    * any future caller path that skips the SQL load.  subj_roots[] and
-    * obj_roots[] are parallel to all_rels[] — entry i in each array
-    * describes the same relation.
-    *
-    * Stack-footprint guard: at the current 2000-row cap the combined
-    * locals weigh ~400 KB (368 KB for all_rels + 16 KB × 2 for the roots);
-    * post-v49 mention_count field bumped sizeof(memory_relation_t) from
-    * 176 → 184 bytes.  Comfortable on the LWS service thread's 8 MB glibc
-    * default, but a future bump past 4000 rows should heap-allocate via
-    * the same calloc pattern handle_export_memories uses below.
-    * Static-assert backstops a silent cap-bump from blowing the stack on
-    * a deep call chain. */
-   _Static_assert((sizeof(memory_relation_t) + sizeof(int64_t) * 2) * ENTITIES_JSON_RELATIONS_MAX <
-                      512 * 1024,
-                  "build_entities_json_array stack locals exceed 512 KB — heap-allocate "
-                  "via calloc (see handle_export_memories) before bumping the cap further");
-   memory_relation_t all_rels[ENTITIES_JSON_RELATIONS_MAX];
-   int64_t subj_roots[ENTITIES_JSON_RELATIONS_MAX];
-   int64_t obj_roots[ENTITIES_JSON_RELATIONS_MAX];
-   memset(all_rels, 0, sizeof(all_rels));
-   memset(subj_roots, 0, sizeof(subj_roots));
-   memset(obj_roots, 0, sizeof(obj_roots));
-   int total_rels = 0;
+   /* Callers pass at most MAX_MEMORY_LIMIT entities (their array size). */
+   bool is_alias[MAX_MEMORY_LIMIT] = { false };
+   int64_t card_ids[MAX_MEMORY_LIMIT];
+   int card_count = 0;
+   memory_card_relation_t *rels = NULL;
+   int rel_count = 0;
    int64_t user_self_id = 0;
+   if (count > MAX_MEMORY_LIMIT) {
+      count = MAX_MEMORY_LIMIT;
+   }
 
-   /* Skip both bulk queries when there are no entities to enrich — an
-    * empty entity-search keystroke runs through this helper roughly every
-    * 300 ms while the user types.  Trims one prepare/step/finalize per
-    * empty keystroke and one mutex acquisition. */
+   /* Skip the queries when there are no entities to enrich — an empty
+    * entity-search keystroke runs through this helper roughly every 300 ms
+    * while the user types. */
    if (count > 0) {
       memory_db_entity_alias_summary(user_id, alias_summary, ENTITIES_JSON_ALIAS_SUMMARY_MAX,
                                      &alias_summary_count);
-      memory_db_relation_list_with_canonical_roots_by_user(user_id, all_rels, subj_roots, obj_roots,
-                                                           ENTITIES_JSON_RELATIONS_MAX,
-                                                           &total_rels);
-      /* Single per-user lookup, consumed below to set is_user_self on the
-       * matching row's JSON.  Consumed by JS-side direction-preference
-       * guard in memory_aliases.js (never auto-suggest demoting the
-       * user_self anchor in manual-link confirm modals).  Failure
-       * leaves user_self_id = 0 which renders is_user_self=false on
-       * every entity — degraded but safe; log so a real DB error
-       * doesn't go silent. */
+      for (int i = 0; i < count; i++) {
+         for (int a = 0; a < alias_summary_count; a++) {
+            if (alias_summary[a].alias_entity_id == entities[i].id) {
+               is_alias[i] = true;
+               break;
+            }
+         }
+         if (!is_alias[i]) {
+            card_ids[card_count++] = entities[i].id;
+         }
+      }
+      if (memory_db_relation_list_for_entities(user_id, card_ids, card_count,
+                                               ENTITIES_JSON_RELATIONS_PER_DIR, true, &rels,
+                                               &rel_count) != MEMORY_DB_SUCCESS) {
+         OLOG_WARNING("entities_json: relation read failed for user %d — cards sent without "
+                      "relations",
+                      user_id);
+      }
+      /* Consumed by the JS-side direction-preference guard in
+       * memory_aliases.js (never auto-suggest demoting the user_self anchor
+       * in manual-link confirm modals).  Failure leaves user_self_id = 0,
+       * which renders is_user_self=false on every entity — degraded but
+       * safe; log so a real DB error doesn't go silent. */
       if (memory_db_entity_get_user_self_id(user_id, &user_self_id) != MEMORY_DB_SUCCESS) {
          OLOG_WARNING("entities_json: get_user_self_id failed for user %d — "
                       "is_user_self defaults to false for all entities",
                       user_id);
          user_self_id = 0;
       }
-      /* Bulk relation pull is bounded by ENTITIES_JSON_RELATIONS_MAX —
-       * a graph denser than that loses tail edges silently from rendered
-       * cards.  Surface a warning so the operator knows to bump the cap
-       * (or switch to a paginated edge query) before the UI starts mis-
-       * representing the user's data.  Not user-facing yet; when this
-       * fires in practice we add a `relations_truncated` JSON field and
-       * an entity-card banner. */
-      if (total_rels >= ENTITIES_JSON_RELATIONS_MAX) {
-         OLOG_WARNING("entities_json: relation pull saturated cap %d for user %d — entity cards "
-                      "may be missing edges",
-                      ENTITIES_JSON_RELATIONS_MAX, user_id);
-      }
    }
 
    json_object *entities_array = json_object_new_array();
    for (int i = 0; i < count; i++) {
-      bool is_alias = false;
-      for (int a = 0; a < alias_summary_count; a++) {
-         if (alias_summary[a].alias_entity_id == entities[i].id) {
-            is_alias = true;
-            break;
-         }
-      }
-      if (is_alias) {
+      if (is_alias[i]) {
          continue;
       }
 
@@ -514,91 +517,28 @@ static json_object *build_entities_json_array(int user_id,
                              json_object_new_int64(entities[i].first_seen));
       json_object_object_add(entity_obj, "last_seen", json_object_new_int64(entities[i].last_seen));
 
-      /* Equivalence-class-aware relation emit: subj_roots[]/obj_roots[]
-       * carry each relation's canonical-root entity id (resolved by SQL,
-       * Bundle 2 pattern).  Match on root == entities[i].id so relations
-       * attached to any alias in the class roll up under the canonical.
-       * Without this, a card shows only edges attached directly to the
-       * canonical row, while mention_count aggregates the full class —
-       * the "card says 48 mentions but only 2 relations" mismatch. */
+      /* Rows come grouped by card, outgoing before incoming, and every row
+       * of a direction carries that direction's total. */
       json_object *relations_array = json_object_new_array();
-
-      /* OUT: subject's canonical-root is this entity. */
-      for (int r = 0; r < total_rels; r++) {
-         if (subj_roots[r] != entities[i].id)
+      int relations_total = 0;
+      int last_dir = -1;
+      for (int r = 0; r < rel_count; r++) {
+         if (rels[r].card_id != entities[i].id) {
             continue;
-         json_object *rel_obj = json_object_new_object();
-         json_object_object_add(rel_obj, "relation", json_object_new_string(all_rels[r].relation));
-         json_object_object_add(rel_obj, "object_name",
-                                json_object_new_string(all_rels[r].object_name));
-         json_object_object_add(rel_obj, "object_entity_id",
-                                json_object_new_int64(all_rels[r].object_entity_id));
-         json_object_object_add(rel_obj, "direction", json_object_new_string("out"));
-         json_object_object_add(rel_obj, "confidence",
-                                json_object_new_double(all_rels[r].confidence));
-         /* v49: per-row re-witness count.  JS aggregates across alias rows
-          * within the same class (display-only — UNIQUE invariant is scoped
-          * to literal entity_id, so cross-alias dedup happens at render). */
-         json_object_object_add(rel_obj, "mention_count",
-                                json_object_new_int(all_rels[r].mention_count));
-         /* Validity range — "spoke_at Dragon Con 2024" is a good deal less
-          * useful without WHEN.  Omitted when unset so the client can tell
-          * "no date recorded" from a real value rather than rendering 1970. */
-         if (all_rels[r].valid_from > 0) {
-            json_object_object_add(rel_obj, "valid_from",
-                                   json_object_new_int64(all_rels[r].valid_from));
          }
-         if (all_rels[r].valid_to > 0) {
-            json_object_object_add(rel_obj, "valid_to",
-                                   json_object_new_int64(all_rels[r].valid_to));
+         if ((int)rels[r].incoming != last_dir) {
+            last_dir = (int)rels[r].incoming;
+            relations_total += rels[r].total;
          }
-         json_object_array_add(relations_array, rel_obj);
-      }
-
-      /* IN: object's canonical-root is this entity AND subject's root
-       * is NOT (within-class relations would already have been emitted
-       * above; skipping prevents double-counting).  Display name + click
-       * target use subj_roots[r] — the canonical id — NOT the raw
-       * subject_entity_id.  entities[] is filtered to canonicals at the
-       * top of this function (alias-skip), so looking up by the raw
-       * alias id would silently miss and render a blank name; looking
-       * up by canonical id finds the right card. */
-      for (int r = 0; r < total_rels; r++) {
-         if (obj_roots[r] != entities[i].id)
-            continue;
-         if (subj_roots[r] == entities[i].id)
-            continue;
-         const char *subj_name = "";
-         for (int e = 0; e < count; e++) {
-            if (entities[e].id == subj_roots[r]) {
-               subj_name = entities[e].name;
-               break;
-            }
-         }
-         json_object *rel_obj = json_object_new_object();
-         json_object_object_add(rel_obj, "relation", json_object_new_string(all_rels[r].relation));
-         json_object_object_add(rel_obj, "object_name", json_object_new_string(subj_name));
-         json_object_object_add(rel_obj, "object_entity_id", json_object_new_int64(subj_roots[r]));
-         json_object_object_add(rel_obj, "direction", json_object_new_string("in"));
-         json_object_object_add(rel_obj, "confidence",
-                                json_object_new_double(all_rels[r].confidence));
-         json_object_object_add(rel_obj, "mention_count",
-                                json_object_new_int(all_rels[r].mention_count));
-         if (all_rels[r].valid_from > 0) {
-            json_object_object_add(rel_obj, "valid_from",
-                                   json_object_new_int64(all_rels[r].valid_from));
-         }
-         if (all_rels[r].valid_to > 0) {
-            json_object_object_add(rel_obj, "valid_to",
-                                   json_object_new_int64(all_rels[r].valid_to));
-         }
-         json_object_array_add(relations_array, rel_obj);
+         add_relation_json(relations_array, &rels[r]);
       }
 
       json_object_object_add(entity_obj, "relations", relations_array);
+      json_object_object_add(entity_obj, "relations_total", json_object_new_int(relations_total));
       json_object_array_add(entities_array, entity_obj);
    }
 
+   free(rels);
    return entities_array;
 }
 
@@ -1167,17 +1107,96 @@ void handle_delete_all_memories(ws_connection_t *conn, struct json_object *paylo
  * Memory Export Handler
  * ============================================================================= */
 
-/* Maximum items to export per type */
-#define EXPORT_MAX_FACTS 500
-#define EXPORT_MAX_PREFS 200
-#define EXPORT_MAX_ENTITIES 200
-/* Soft-linked to ENTITIES_JSON_RELATIONS_MAX above (see comment there for
- * the full rationale).  Same value today because both budgets scale with
- * the user's total relation count.  Independent in principle: this caps
- * a one-shot cold export, the other caps an interactive hot path.  Keep
- * the cross-reference in mind when bumping either, but evaluate on merit
- * — they're allowed to diverge. */
-#define EXPORT_MAX_RELATIONS 2000
+/* Everything an export holds, each list read whole. */
+typedef struct {
+   memory_fact_t *facts;
+   int fact_count;
+   memory_preference_t *prefs;
+   int pref_count;
+   memory_entity_t *entities;
+   int entity_count;
+   memory_card_relation_t *rels; /* Outgoing, sorted by card id */
+   int rel_count;
+} export_set_t;
+
+static void export_set_free(export_set_t *set) {
+   free(set->facts);
+   free(set->prefs);
+   free(set->entities);
+   free(set->rels);
+   memset(set, 0, sizeof(*set));
+}
+
+/* The first of @p rows (sorted by card id) at or after @p card. */
+static int first_card_row(const memory_card_relation_t *rows, int n, int64_t card) {
+   int lo = 0;
+   int hi = n;
+   while (lo < hi) {
+      const int mid = lo + (hi - lo) / 2;
+      if (rows[mid].card_id < card) {
+         lo = mid + 1;
+      } else {
+         hi = mid;
+      }
+   }
+   return lo;
+}
+
+/* Each list is sized from the stored counts plus one: a list that fills it
+ * grew between the two reads, and the export fails rather than leave rows out
+ * of a file the user keeps.  Returns NULL, or the error to send. */
+static const char *export_set_load(int user_id, bool with_graph, export_set_t *set) {
+   memset(set, 0, sizeof(*set));
+   memory_stats_t stats;
+   if (memory_db_get_stats(user_id, &stats) != MEMORY_DB_SUCCESS) {
+      return "Failed to read memories";
+   }
+   const int fact_max = stats.fact_count + 1;
+   const int pref_max = stats.pref_count + 1;
+   const int entity_max = with_graph ? stats.entity_count + 1 : 0;
+   set->facts = calloc((size_t)fact_max, sizeof(memory_fact_t));
+   set->prefs = calloc((size_t)pref_max, sizeof(memory_preference_t));
+   set->entities = with_graph ? calloc((size_t)entity_max, sizeof(memory_entity_t)) : NULL;
+   if (!set->facts || !set->prefs || (with_graph && !set->entities)) {
+      export_set_free(set);
+      return "Memory allocation failed";
+   }
+
+   if (memory_db_fact_list(user_id, set->facts, fact_max, 0, &set->fact_count) !=
+           MEMORY_DB_SUCCESS ||
+       memory_db_pref_list(user_id, set->prefs, pref_max, 0, &set->pref_count) !=
+           MEMORY_DB_SUCCESS ||
+       (with_graph && memory_db_entity_list(user_id, set->entities, entity_max, 0,
+                                            &set->entity_count) != MEMORY_DB_SUCCESS)) {
+      export_set_free(set);
+      return "Failed to read memories";
+   }
+   if (set->fact_count == fact_max || set->pref_count == pref_max ||
+       (with_graph && set->entity_count == entity_max)) {
+      export_set_free(set);
+      return "Memories changed during the export; try again";
+   }
+   if (!with_graph || set->entity_count == 0) {
+      return NULL;
+   }
+
+   int64_t *ids = malloc((size_t)set->entity_count * sizeof(int64_t));
+   if (!ids) {
+      export_set_free(set);
+      return "Memory allocation failed";
+   }
+   for (int i = 0; i < set->entity_count; i++) {
+      ids[i] = set->entities[i].id;
+   }
+   const int rc = memory_db_relation_list_for_entities(user_id, ids, set->entity_count, 0, false,
+                                                       &set->rels, &set->rel_count);
+   free(ids);
+   if (rc != MEMORY_DB_SUCCESS) {
+      export_set_free(set);
+      return "Failed to read memories";
+   }
+   return NULL;
+}
 
 /**
  * @brief Export all memories for the current user
@@ -1214,34 +1233,39 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
       json_object_put(response);
       return;
    }
+   /* Copy format before response is freed (format may point into payload JSON) */
+   const bool is_text = (strcmp(format, "text") == 0);
 
-   if (strcmp(format, "text") == 0) {
+   export_set_t set;
+   const char *load_err = export_set_load(conn->auth_user_id, !is_text, &set);
+   if (load_err) {
+      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+      json_object_object_add(resp_payload, "error", json_object_new_string(load_err));
+      json_object_object_add(response, "payload", resp_payload);
+      send_json_response(conn, response);
+      json_object_put(response);
+      return;
+   }
+   const memory_fact_t *facts = set.facts;
+   const int fact_count = set.fact_count;
+   const memory_preference_t *prefs = set.prefs;
+   const int pref_count = set.pref_count;
+
+   if (is_text) {
       /* --- Human-readable text export --- */
-      memory_fact_t *facts = calloc(EXPORT_MAX_FACTS, sizeof(memory_fact_t));
-      memory_preference_t *prefs = calloc(EXPORT_MAX_PREFS, sizeof(memory_preference_t));
-      if (!facts || !prefs) {
-         free(facts);
-         free(prefs);
-         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-         json_object_object_add(resp_payload, "error",
-                                json_object_new_string("Memory allocation failed"));
-         json_object_object_add(response, "payload", resp_payload);
-         send_json_response(conn, response);
-         json_object_put(response);
-         return;
+      /* Build text output: one line per memory, sized exactly from the
+       * loaded rows (headers and line framing included), so the whole store
+       * fits in one allocation and no fixed cap cuts a large one off.  Each
+       * term is bounded by its field's array size, so the sum can't wrap. */
+      size_t need = 64;
+      for (int i = 0; i < fact_count; i++) {
+         need += strlen(facts[i].fact_text) + 3;
       }
-
-      int fact_count = 0;
-      memory_db_fact_list(conn->auth_user_id, facts, EXPORT_MAX_FACTS, 0, &fact_count);
-      int pref_count = 0;
-      memory_db_pref_list(conn->auth_user_id, prefs, EXPORT_MAX_PREFS, 0, &pref_count);
-
-      /* Build text output: one line per memory.  Use strbuf (growable) so a
-       * dense profile can't silently truncate facts/prefs the way the prior
-       * fixed-size buffer did.  Initial cap sized to a reasonable per-row
-       * estimate; will grow if rows are larger. */
+      for (int i = 0; i < pref_count; i++) {
+         need += strlen(prefs[i].category) + strlen(prefs[i].value) + 5;
+      }
       strbuf_t sb;
-      strbuf_init(&sb, (size_t)(fact_count + pref_count + 10) * 200);
+      strbuf_init_with_max(&sb, need, need);
 
       strbuf_append(&sb, "# My Memories\n\n");
 
@@ -1262,81 +1286,31 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
          }
       }
 
+      const char *text_err = NULL;
+      char *text_buf = NULL;
       if (strbuf_oom(&sb)) {
          strbuf_free(&sb);
-         free(facts);
-         free(prefs);
-         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-         json_object_object_add(resp_payload, "error",
-                                json_object_new_string("Export buffer exceeded safety cap"));
-         json_object_object_add(response, "payload", resp_payload);
-         send_json_response(conn, response);
-         json_object_put(response);
-         return;
+         text_err = "Memory allocation failed";
+      } else if (!(text_buf = strbuf_steal(&sb))) {
+         text_err = "Memory allocation failed";
       }
 
-      char *text_buf = strbuf_steal(&sb);
-      if (!text_buf) {
-         free(facts);
-         free(prefs);
+      if (text_err) {
          json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-         json_object_object_add(resp_payload, "error",
-                                json_object_new_string("Memory allocation failed"));
-         json_object_object_add(response, "payload", resp_payload);
-         send_json_response(conn, response);
-         json_object_put(response);
-         return;
+         json_object_object_add(resp_payload, "error", json_object_new_string(text_err));
+      } else {
+         json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
+         json_object_object_add(resp_payload, "format", json_object_new_string("text"));
+         json_object_object_add(resp_payload, "data", json_object_new_string(text_buf));
+         json_object_object_add(resp_payload, "fact_count", json_object_new_int(fact_count));
+         json_object_object_add(resp_payload, "pref_count", json_object_new_int(pref_count));
       }
-
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-      json_object_object_add(resp_payload, "format", json_object_new_string("text"));
-      json_object_object_add(resp_payload, "data", json_object_new_string(text_buf));
-      json_object_object_add(resp_payload, "fact_count", json_object_new_int(fact_count));
-      json_object_object_add(resp_payload, "pref_count", json_object_new_int(pref_count));
-
       free(text_buf);
-      free(facts);
-      free(prefs);
 
    } else {
       /* --- DAWN JSON export (lossless with metadata) --- */
-      memory_fact_t *facts = calloc(EXPORT_MAX_FACTS, sizeof(memory_fact_t));
-      memory_preference_t *prefs = calloc(EXPORT_MAX_PREFS, sizeof(memory_preference_t));
-      memory_entity_t *entities = calloc(EXPORT_MAX_ENTITIES, sizeof(memory_entity_t));
-      memory_relation_t *relations = calloc(EXPORT_MAX_RELATIONS, sizeof(memory_relation_t));
-      /* Parallel arrays for canonical-root resolution — see build_entities_
-       * json_array above for the same pattern.  Without these, relations
-       * attached to alias rows would be silently dropped from the export
-       * under the canonical entity (the bug Bundle 2's aggregation pattern
-       * already solved for mention_count). */
-      int64_t *subj_roots = calloc(EXPORT_MAX_RELATIONS, sizeof(int64_t));
-      int64_t *obj_roots = calloc(EXPORT_MAX_RELATIONS, sizeof(int64_t));
-      if (!facts || !prefs || !entities || !relations || !subj_roots || !obj_roots) {
-         free(facts);
-         free(prefs);
-         free(entities);
-         free(relations);
-         free(subj_roots);
-         free(obj_roots);
-         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-         json_object_object_add(resp_payload, "error",
-                                json_object_new_string("Memory allocation failed"));
-         json_object_object_add(response, "payload", resp_payload);
-         send_json_response(conn, response);
-         json_object_put(response);
-         return;
-      }
-
-      int fact_count = 0;
-      memory_db_fact_list(conn->auth_user_id, facts, EXPORT_MAX_FACTS, 0, &fact_count);
-      int pref_count = 0;
-      memory_db_pref_list(conn->auth_user_id, prefs, EXPORT_MAX_PREFS, 0, &pref_count);
-      int entity_count = 0;
-      memory_db_entity_list(conn->auth_user_id, entities, EXPORT_MAX_ENTITIES, 0, &entity_count);
-      int relation_count = 0;
-      memory_db_relation_list_with_canonical_roots_by_user(conn->auth_user_id, relations,
-                                                           subj_roots, obj_roots,
-                                                           EXPORT_MAX_RELATIONS, &relation_count);
+      const memory_entity_t *entities = set.entities;
+      const int entity_count = set.entity_count;
 
       /* Build export JSON */
       json_object *export_obj = json_object_new_object();
@@ -1352,6 +1326,8 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
          json_object_object_add(f, "confidence", json_object_new_double(facts[i].confidence));
          json_object_object_add(f, "source", json_object_new_string(facts[i].source));
          json_object_object_add(f, "created_at", json_object_new_int64(facts[i].created_at));
+         json_object_object_add(f, "origin", json_object_new_int(facts[i].origin));
+         json_object_object_add(f, "outside", json_object_new_int(facts[i].outside));
          json_object_array_add(facts_arr, f);
       }
       json_object_object_add(export_obj, "facts", facts_arr);
@@ -1365,6 +1341,7 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
          json_object_object_add(p, "confidence", json_object_new_double(prefs[i].confidence));
          json_object_object_add(p, "source", json_object_new_string(prefs[i].source));
          json_object_object_add(p, "created_at", json_object_new_int64(prefs[i].created_at));
+         json_object_object_add(p, "outside", json_object_new_int(prefs[i].outside));
          json_object_array_add(prefs_arr, p);
       }
       json_object_object_add(export_obj, "preferences", prefs_arr);
@@ -1378,22 +1355,17 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
          json_object_object_add(e, "mention_count", json_object_new_int(entities[i].mention_count));
          json_object_object_add(e, "first_seen", json_object_new_int64(entities[i].first_seen));
 
-         /* Attach relations for this entity.  Equivalence-class-aware:
-          * match subj_roots[r] against the canonical's id (not the raw
-          * subject_entity_id), so relations attached to alias rows roll
-          * up under the canonical in the export. */
+         /* Its card's outgoing relations, aliases' included (an alias
+          * entity's own list is empty: its rows belong to its canonical). */
          json_object *rels_arr = json_object_new_array();
-         for (int r = 0; r < relation_count; r++) {
-            if (subj_roots[r] != entities[i].id)
-               continue;
+         for (int r = first_card_row(set.rels, set.rel_count, entities[i].id);
+              r < set.rel_count && set.rels[r].card_id == entities[i].id; r++) {
+            const memory_relation_t *row = &set.rels[r].rel;
             json_object *rel = json_object_new_object();
-            json_object_object_add(rel, "relation", json_object_new_string(relations[r].relation));
-            json_object_object_add(rel, "object_name",
-                                   json_object_new_string(relations[r].object_name));
-            json_object_object_add(rel, "confidence",
-                                   json_object_new_double(relations[r].confidence));
-            json_object_object_add(rel, "mention_count",
-                                   json_object_new_int(relations[r].mention_count));
+            json_object_object_add(rel, "relation", json_object_new_string(row->relation));
+            json_object_object_add(rel, "object_name", json_object_new_string(row->object_name));
+            json_object_object_add(rel, "confidence", json_object_new_double(row->confidence));
+            json_object_object_add(rel, "mention_count", json_object_new_int(row->mention_count));
             json_object_array_add(rels_arr, rel);
          }
          json_object_object_add(e, "relations", rels_arr);
@@ -1408,17 +1380,8 @@ void handle_export_memories(ws_connection_t *conn, struct json_object *payload) 
       json_object_object_add(resp_payload, "fact_count", json_object_new_int(fact_count));
       json_object_object_add(resp_payload, "pref_count", json_object_new_int(pref_count));
       json_object_object_add(resp_payload, "entity_count", json_object_new_int(entity_count));
-
-      free(facts);
-      free(prefs);
-      free(entities);
-      free(relations);
-      free(subj_roots);
-      free(obj_roots);
    }
-
-   /* Copy format before response is freed (format may point into payload JSON) */
-   bool is_text = (strcmp(format, "text") == 0);
+   export_set_free(&set);
 
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
@@ -1548,10 +1511,14 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
             float confidence = MEMORY_IMPORT_DEFAULT_CONFIDENCE;
             if (json_object_object_get_ex(f, "confidence", &conf_obj))
                confidence = memory_import_confidence(json_object_get_double(conf_obj));
+            /* An export's outside kind, UNKNOWN when it has none (a file
+             * older than the kind, or from elsewhere); its origin is left: an
+             * imported fact is imported. */
+            const int outside = import_outside(f);
 
             char stored[MEMORY_FACT_TEXT_MAX];
             memory_import_status_t st = memory_import_fact(conn->auth_user_id, text, confidence,
-                                                           commit, stored);
+                                                           outside, commit, stored);
             if (!count_import_status(st, &skipped_blocked, &skipped_dupes, &skipped_failed)) {
                continue;
             }
@@ -1610,8 +1577,9 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
             json_object_array_add(preview_arr, preview_item);
 
             if (commit) {
+               const memory_provenance_t imported = { .outside = import_outside(p) };
                memory_db_pref_upsert(conn->auth_user_id, category, value, confidence, "import",
-                                     NULL);
+                                     &imported);
             }
             imported_prefs++;
          }
@@ -1695,8 +1663,8 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
          }
 
          char stored[MEMORY_FACT_TEXT_MAX];
-         memory_import_status_t st = memory_import_fact(conn->auth_user_id, fact_text, 0.7f, commit,
-                                                        stored);
+         memory_import_status_t st = memory_import_fact(conn->auth_user_id, fact_text, 0.7f,
+                                                        OUTSIDE_UNKNOWN, commit, stored);
          if (!count_import_status(st, &skipped_blocked, &skipped_dupes, &skipped_failed)) {
             line = strtok_r(NULL, "\n", &saveptr);
             continue;

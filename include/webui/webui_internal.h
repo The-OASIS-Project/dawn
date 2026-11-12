@@ -339,10 +339,10 @@ typedef struct {
       } context;
       struct {
          uint32_t stream_id;
-         int64_t conversation_id; /* Conversation this turn belongs to (0 = none) */
-         char text[1024];         /* Buffer for delta/end text (increased for thinking) */
-         bool will_persist;       /* stream_end only: server promises to persist this turn
-                                     (Model A intent, SERVER_AUTHORITATIVE §6 step 2) */
+         int64_t conversation_id;           /* Conversation this turn belongs to (0 = none) */
+         char text[WEBUI_STREAM_TEXT_SIZE]; /* Buffer for delta/end text */
+         bool will_persist;                 /* stream_end only: server promises to persist this turn
+                                               (Model A intent, SERVER_AUTHORITATIVE §6 step 2) */
       } stream;
       struct {
          char state[16];   /* idle, listening, thinking, speaking, error */
@@ -978,8 +978,9 @@ void send_error_impl_ex(struct lws *wsi,
 /**
  * @brief A persisted message fanned out to every browser of its user, the
  *        sender's own connection getting a copy that names its turn
- * @param origin     The session whose turn wrote it (its connection gets
- *                   payload.client_ref); NULL: every connection gets the same
+ * @param origin     The session whose turn wrote it (payload.session_id; its
+ *                   connection gets payload.client_ref); NULL: no session_id,
+ *                   and every connection gets the same
  * @param client_ref That turn's client_ref; NULL or "" sends none
  * @param email_ref  A user row's email_ref (messages.email_ref), or NULL
  * Otherwise as webui_broadcast_message_appended (conv_event.h).

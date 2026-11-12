@@ -211,13 +211,13 @@ void aec_add_reference(const int16_t *samples, size_t num_samples);
  * This allows the AEC to accurately predict when audio will actually
  * play through the speaker, improving echo cancellation timing.
  *
- * Call this AFTER snd_pcm_writei() or pa_simple_write() returns.
- * Query the delay using snd_pcm_delay() or pa_simple_get_latency().
+ * Call this AFTER the playback write returns.
+ * Query the delay using snd_pcm_delay() or pa_stream_get_latency().
  *
  * @param samples Audio samples (16-bit signed, 16kHz - internally upsampled)
  * @param num_samples Number of samples
  * @param playback_delay_us Delay in microseconds until audio plays through speaker
- *                          (from snd_pcm_delay or pa_simple_get_latency)
+ *                          (from snd_pcm_delay or pa_stream_get_latency)
  */
 void aec_add_reference_with_delay(const int16_t *samples,
                                   size_t num_samples,

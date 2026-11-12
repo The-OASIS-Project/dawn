@@ -139,6 +139,7 @@ static const treg_param_t voice_amplifier_params[] = {
 
 static const tool_metadata_t voice_amplifier_metadata = {
    .name = "voice_amplifier",
+   .results = TOOL_RESULTS_OUTSIDE,
    .default_kind = TOOL_KIND_DEVICE,
    .device_string = "voice amplifier",
    .topic = "dawn",
@@ -207,6 +208,7 @@ static const tool_device_map_t audio_device_map[] = {
 
 static const tool_metadata_t audio_device_metadata = {
    .name = "audio_device",
+   .results = TOOL_RESULTS_OWN,
    /* Kind of action: act (the default): acts on whichever device its type names. */
    .device_string = "audio_device",
    .topic = "dawn",

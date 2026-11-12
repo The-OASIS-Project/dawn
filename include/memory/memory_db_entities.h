@@ -163,6 +163,24 @@ int memory_db_relation_create(int user_id,
                               int64_t valid_to,
                               const memory_provenance_t *prov);
 
+/**
+ * @brief memory_db_relation_create(), saying which row it wrote: its id into
+ *        @p id_out and whether it is new (not an open one said again) into
+ *        @p created_out (either may be NULL; 0 and false on failure)
+ */
+int memory_db_relation_create_ex(int user_id,
+                                 int64_t subject_entity_id,
+                                 const char *relation,
+                                 int64_t object_entity_id,
+                                 const char *object_value,
+                                 int64_t fact_id,
+                                 float confidence,
+                                 int64_t valid_from,
+                                 int64_t valid_to,
+                                 const memory_provenance_t *prov,
+                                 int64_t *id_out,
+                                 bool *created_out);
+
 /** memory_db_relation_supersede_ex(): the user said the new value replaces an
  *  old one, but not which. */
 #define MEMORY_RELATION_REPLACES_UNKNOWN ""
@@ -254,6 +272,42 @@ int memory_db_relation_supersede_ex(int user_id,
                                     const char *replaces,
                                     const memory_provenance_t *prov,
                                     int64_t *out_old_fact_id);
+
+/**
+ * @brief Close one open relation: it held until @p valid_to
+ *
+ * Refused (MEMORY_DB_NOT_FOUND) when the relation isn't the user's, isn't
+ * open, began after @p valid_to, or @p valid_to is more than a day ahead.
+ * Nothing is deleted; a restore of @p closed_by_fact_id's forget reopens it.
+ *
+ * @param closed_by_fact_id The fact whose new value ended it (0: none)
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
+ */
+int memory_db_relation_close(int user_id,
+                             int64_t relation_id,
+                             int64_t valid_to,
+                             int64_t closed_by_fact_id);
+
+/**
+ * @brief Reopen a closed relation: open again (valid_to and the fact that
+ *        closed it cleared), unless that value, or for a one-at-a-time
+ *        relation any value, or its contradiction on the same object, is open
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (not the user's, not closed,
+ *         or kept closed by an open value) or MEMORY_DB_FAILURE
+ */
+int memory_db_relation_reopen(int user_id, int64_t relation_id);
+
+/**
+ * @brief The open relations of one entity (not its aliases) with one
+ *        predicate, newest first
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_relation_list_open(int user_id,
+                                 int64_t subject_entity_id,
+                                 const char *relation,
+                                 memory_relation_t *out,
+                                 int max,
+                                 int *count_out);
 
 /**
  * @brief List relations where entity is subject (outgoing).  Returns ALL
@@ -419,43 +473,52 @@ int memory_db_relation_distinct_predicates(int user_id,
                                            int *count_out);
 
 /**
- * @brief Bulk-load all relations for a user with canonical-root resolution
+ * @brief One relation as it belongs on an entity's card
  *
- * Single query that joins memory_relations against memory_entities on both
- * subject and object sides, returning each relation along with its
- * SUBJECT and OBJECT canonical-root entity ids (or 0 for object-as-literal
- * where memory_relations.object_entity_id is NULL).  Canonical-root = the
- * entity's `canonical_id` if set, else the entity's own `id` — i.e. the
- * head of the row's equivalence class under the single-level alias
- * invariant.  Bundle 2 (May 13) established that equivalence-class
- * aggregation belongs in SQL; this is the read-side complement to the
- * mention_count / first_seen / last_seen aggregation already done there.
+ * A card is an equivalence class: the listed entity and the aliases linked to
+ * it.  For an outgoing row, @c rel is the relation as stored.  For an incoming
+ * row (an edge from outside the class into it), @c rel.object_entity_id and
+ * @c rel.object_name name the subject's class head instead, so the card can
+ * show and link the other end.
+ */
+typedef struct {
+   memory_relation_t rel;
+   int64_t card_id; /* The listed entity this row belongs to */
+   bool incoming;   /* true: an edge into the card from outside its class */
+   int total;       /* The card's rows in this direction, before any limit */
+} memory_card_relation_t;
+
+/**
+ * @brief Relations of the listed entities, attributed to their cards
  *
- * Callers (build_entities_json_array, memory_export) use the resolved
- * roots to attribute relations to the canonical entity for the class,
- * not the row they happen to be attached to.  Without this, a relation
- * like `(sugar hill, located_in, georgia)` attached to alias entity "sugar
- * hill" would NOT surface on the canonical "sugar hill, georgia" card.
+ * Reads only the relations of @p entity_ids and their aliases, driven through
+ * the subject/object indexes, so its cost and size follow the cards asked
+ * for, not the user's whole graph.  An id that is itself an alias lists
+ * nothing (its relations belong to its canonical's card).  Rows are sorted by
+ * card id ascending, then direction (outgoing first), then strongest first
+ * (mention_count, then newest), so a caller can find a card's rows by binary
+ * search on @c card_id.
  *
- * Returned sorted by subject canonical-root for predictable iteration.
+ * With @p per_dir_max > 0, each card keeps at most that many rows per
+ * direction; every row carries @c total, so a caller can say how many were
+ * left out.  <= 0 keeps them all.
  *
- * Output arrays are PARALLEL — out[i], subj_roots[i], and obj_roots[i]
- * all describe the same relation row.  All three must be sized >= @p max.
- *
- * @param user_id     User ID
- * @param out         Output array of relations (size >= max)
- * @param subj_roots  Output: subject canonical-root id for each rel
- * @param obj_roots   Output: object canonical-root id, or 0 for literals
- * @param max         Maximum relations to return
- * @param count_out   Output: number of relations actually written
+ * @param user_id        User ID
+ * @param entity_ids     Entity ids to list relations for
+ * @param n_ids          Number of ids (0 returns no rows)
+ * @param per_dir_max    Rows per card and direction; <= 0 for no limit
+ * @param with_incoming  Also return edges into each card
+ * @param out            Output: heap array the caller frees (NULL when empty)
+ * @param count_out      Output: rows in @p out
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_relation_list_with_canonical_roots_by_user(int user_id,
-                                                         memory_relation_t *out,
-                                                         int64_t *subj_roots,
-                                                         int64_t *obj_roots,
-                                                         int max,
-                                                         int *count_out);
+int memory_db_relation_list_for_entities(int user_id,
+                                         const int64_t *entity_ids,
+                                         int n_ids,
+                                         int per_dir_max,
+                                         bool with_incoming,
+                                         memory_card_relation_t **out,
+                                         int *count_out);
 
 /**
  * @brief List all entities for a user, ordered by mention count
@@ -496,6 +559,33 @@ int memory_db_entity_search(int user_id,
  * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND, or MEMORY_DB_FAILURE
  */
 int memory_db_entity_delete(int64_t entity_id, int user_id);
+
+/**
+ * @brief Delete those of @p ids (entities a batch just created) that nothing
+ *        names: no fact, relation, alias, merge proposal, contact or
+ *        consolidation record row; never the user's own entity
+ *
+ * The extraction names every thing it saw as an entity; one no fact or
+ * relation of the batch ended up naming is noise that undo and forget never
+ * reach.  One statement; the entity cache is invalidated when any went.
+ *
+ * @param deleted_out Receives how many went (may be NULL)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_delete_orphans(int user_id, const int64_t *ids, int n, int *deleted_out);
+
+/**
+ * @brief Delete user @p user_id's entities first seen before @p older_than
+ *        that nothing names (as memory_db_entity_delete_orphans): the nightly
+ *        sweep of those left before batches removed their own
+ *
+ * Hold the user's extraction around it: an entity a running batch just made
+ * may carry its conversation's (older) time and be named a moment later.
+ *
+ * @param deleted_out Receives how many went (may be NULL)
+ * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_sweep_orphans(int user_id, int64_t older_than, int *deleted_out);
 
 /**
  * @brief Set an entity's photo (image store reference).
@@ -550,6 +640,20 @@ int memory_db_entities_get_by_ids(int user_id,
                                   int n,
                                   memory_entity_t *out,
                                   int *count_out);
+
+/** An entity's canonical and the other names of its class. */
+typedef struct {
+   memory_entity_t entity; /* the canonical */
+   int n_names;            /* the aliases' names */
+   char names[MEMORY_ENTITY_CLASS_MAX][MEMORY_ENTITY_NAME_MAX];
+} memory_entity_names_t;
+
+/**
+ * @brief An entity's canonical (itself, or the entity it is an alias of) with
+ *        the names of its aliases
+ * @return MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (not the user's), or MEMORY_DB_FAILURE
+ */
+int memory_db_entity_get_with_aliases(int user_id, int64_t entity_id, memory_entity_names_t *out);
 
 /** An alias's name and the canonical entity it stands for. */
 typedef struct {

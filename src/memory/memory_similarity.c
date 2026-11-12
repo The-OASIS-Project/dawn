@@ -27,6 +27,7 @@
 #include "memory/memory_similarity.h"
 
 #include <ctype.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -195,6 +196,35 @@ uint32_t memory_hash_text(const char *normalized_text) {
    }
 
    return hash;
+}
+
+char *memory_text_fold(const char *text) {
+   if (!text) {
+      return NULL;
+   }
+   const size_t len = strlen(text);
+   char *out = malloc(len + 1);
+   if (!out) {
+      return NULL;
+   }
+   size_t n = 0;
+   bool space = false;
+   for (const char *c = text; *c; c++) {
+      if (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r') {
+         space = n > 0;
+         continue;
+      }
+      if (space) {
+         out[n++] = ' ';
+         space = false;
+      }
+      out[n++] = (*c >= 'A' && *c <= 'Z') ? (char)(*c - 'A' + 'a') : *c;
+   }
+   while (n > 0 && (out[n - 1] == '.' || out[n - 1] == ' ')) {
+      n--;
+   }
+   out[n] = '\0';
+   return out;
 }
 
 uint32_t memory_normalize_and_hash(const char *text) {

@@ -212,7 +212,8 @@ static int store_summary_only(int user_id,
                               int64_t conv_id,
                               const char *response,
                               int message_count,
-                              int duration_seconds) {
+                              int duration_seconds,
+                              int outside) {
    struct json_object *root = memory_extraction_parse_json(response);
    if (root == NULL) {
       OLOG_WARNING("memory_summarize_missing: unparseable LLM response for conv %lld",
@@ -267,10 +268,15 @@ static int store_summary_only(int user_id,
     * is a deliberate "from the beginning" sentinel — the live extractor
     * uses (last_extracted_msg_id+1) for incremental coverage, but a
     * backfilled summary necessarily spans the whole conversation. */
-   memory_provenance_t prov = { .conv_id = conv_id, .msg_id_start = 1, .msg_id_end = 0 };
+   memory_provenance_t prov = { .conv_id = conv_id,
+                                .msg_id_start = 1,
+                                .msg_id_end = 0,
+                                .outside = outside };
    int64_t max_msg_id = 0;
    if (conv_db_get_max_msg_id(conv_id, user_id, &max_msg_id) == AUTH_DB_SUCCESS && max_msg_id > 0) {
       prov.msg_id_end = max_msg_id;
+   } else {
+      prov.conv_id = prov.msg_id_start = 0; /* no range; the outside kind stays */
    }
 
    /* Inherit the conversation's created_at so backfilled summaries land at
@@ -290,8 +296,7 @@ static int store_summary_only(int user_id,
 
    int64_t summary_id = 0;
    int rc = memory_db_summary_create_at(user_id, session_id, summary, topics, "neutral",
-                                        message_count, duration_seconds,
-                                        prov.msg_id_end > 0 ? &prov : NULL, conv_created_at,
+                                        message_count, duration_seconds, &prov, conv_created_at,
                                         &summary_id);
    if (rc != MEMORY_DB_SUCCESS) {
       OLOG_WARNING("memory_summarize_missing: store failed for conv %lld (rc=%d)",
@@ -339,7 +344,14 @@ static int process_one_conv(int user_id,
 
    /* What extraction would send: the rows checked to be this conversation's,
     * DAWN's injected context and a turn's reasoning left out. */
-   struct json_object *input = memory_extraction_build_input(user_id, conv_id, history, 0);
+   /* The whole conversation is read, with what one it continues read. */
+   int outside = OUTSIDE_NONE, floor = OUTSIDE_NONE;
+   if (conv_db_get_outside(conv_id, user_id, &floor) != AUTH_DB_SUCCESS) {
+      floor = OUTSIDE_OTHER; /* unreadable: fail closed */
+   }
+   struct json_object *input = memory_extraction_build_input(user_id, conv_id, history, 0,
+                                                             &outside);
+   outside = outside_combine(floor, outside);
    json_object_put(history);
    if (input && !memory_extraction_input_has_question(input)) {
       OLOG_INFO("memory_summarize_missing: conv %lld has nothing the user said, skipping",
@@ -402,7 +414,7 @@ static int process_one_conv(int user_id,
       return FAILURE;
    }
 
-   int rc = store_summary_only(user_id, conv_id, response, message_count, 0);
+   int rc = store_summary_only(user_id, conv_id, response, message_count, 0, outside);
    free(response);
    return rc;
 }

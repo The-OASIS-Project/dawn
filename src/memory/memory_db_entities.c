@@ -36,6 +36,7 @@
 #include "logging.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_aliases.h"
+#include "memory/memory_db_consolidation.h"
 #include "memory/memory_db_internal.h"
 #include "memory/memory_embeddings.h"
 #include "utils/string_utils.h"
@@ -397,7 +398,8 @@ int memory_db_entity_list(int user_id, memory_entity_t *out, int max, int offset
    sqlite3_bind_int(s_db.stmt_memory_entity_search, 4, offset);
 
    int count = 0;
-   while (count < max && sqlite3_step(s_db.stmt_memory_entity_search) == SQLITE_ROW) {
+   int rc = SQLITE_DONE;
+   while (count < max && (rc = sqlite3_step(s_db.stmt_memory_entity_search)) == SQLITE_ROW) {
       populate_entity_from_row(s_db.stmt_memory_entity_search, &out[count]);
       count++;
    }
@@ -406,7 +408,8 @@ int memory_db_entity_list(int user_id, memory_entity_t *out, int max, int offset
    AUTH_DB_UNLOCK();
    if (count_out)
       *count_out = count;
-   return MEMORY_DB_SUCCESS;
+   /* A step error ends the read early: report it, not a short list. */
+   return (rc == SQLITE_ROW || rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
 int memory_db_entity_search(int user_id,
@@ -505,7 +508,14 @@ int memory_db_entity_get_photo(int user_id,
 }
 
 int memory_db_entity_delete(int64_t entity_id, int user_id) {
+   memory_consolidation_touched_t touched = { .n = 0 };
    AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   /* One transaction: the entity, its relations, and the consolidation record's
+    * rows that name it go together. */
+   if (auth_db_txn_begin_locked("memory_db: entity delete") != AUTH_DB_SUCCESS) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
 
    /* Delete relations where this entity is subject or object */
    sqlite3_stmt *rel_stmt = s_db.stmt_memory_relation_delete_by_entity;
@@ -513,24 +523,33 @@ int memory_db_entity_delete(int64_t entity_id, int user_id) {
    sqlite3_bind_int(rel_stmt, 1, user_id);
    sqlite3_bind_int64(rel_stmt, 2, entity_id);
    sqlite3_bind_int64(rel_stmt, 3, entity_id);
-   int rel_rc = sqlite3_step(rel_stmt);
+   int rc = sqlite3_step(rel_stmt);
    sqlite3_reset(rel_stmt);
-   if (rel_rc != SQLITE_DONE) {
+   if (rc != SQLITE_DONE) {
       OLOG_ERROR("memory_db: relation delete failed for entity %ld: %s", (long)entity_id,
                  sqlite3_errmsg(s_db.db));
-      AUTH_DB_UNLOCK();
-      return MEMORY_DB_FAILURE;
    }
 
    /* Delete the entity itself */
-   sqlite3_stmt *stmt = s_db.stmt_memory_entity_delete;
-   sqlite3_reset(stmt);
-   sqlite3_bind_int64(stmt, 1, entity_id);
-   sqlite3_bind_int(stmt, 2, user_id);
-
-   int rc = sqlite3_step(stmt);
-   int changes = sqlite3_changes(s_db.db);
-   sqlite3_reset(stmt);
+   int changes = 0;
+   if (rc == SQLITE_DONE) {
+      sqlite3_stmt *stmt = s_db.stmt_memory_entity_delete;
+      sqlite3_reset(stmt);
+      sqlite3_bind_int64(stmt, 1, entity_id);
+      sqlite3_bind_int(stmt, 2, user_id);
+      rc = sqlite3_step(stmt);
+      changes = sqlite3_changes(s_db.db);
+      sqlite3_reset(stmt);
+   }
+   /* The consolidation record mustn't keep its name, or its relations' text. */
+   if (rc == SQLITE_DONE && changes > 0 &&
+       memory_db_consolidation_scrub_entities_locked(user_id, &touched) != MEMORY_DB_SUCCESS) {
+      rc = SQLITE_ERROR;
+   }
+   if (auth_db_txn_end_locked(rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
+                              "memory_db: entity delete") != AUTH_DB_SUCCESS) {
+      rc = SQLITE_ERROR;
+   }
 
    AUTH_DB_UNLOCK();
 
@@ -541,7 +560,94 @@ int memory_db_entity_delete(int64_t entity_id, int user_id) {
       /* A deleted entity mustn't stay findable from the embedding cache. */
       memory_embeddings_invalidate_entity_cache_for_user(user_id);
    }
+   memory_consolidation_touched_notify(user_id, &touched);
    return (changes > 0) ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
+}
+
+/* An entity (user ?1) the nightly sweep may remove: nothing names it
+ * (MEMORY_ENTITY_UNREFERENCED), and, what only the sweep keeps (a forget
+ * removes these records with the entity), no photo, alias from it, merge
+ * proposal or consolidation record row names it. */
+/* clang-format off */
+#define ENTITY_ORPHAN_SQL \
+   MEMORY_ENTITY_UNREFERENCED " AND photo_id IS NULL " \
+   "AND id NOT IN (SELECT source_entity_id FROM memory_entity_aliases WHERE user_id = ?1 AND " \
+   "source_entity_id IS NOT NULL) " \
+   "AND id NOT IN (SELECT source_entity_id FROM memory_entity_merge_proposals WHERE " \
+   "user_id = ?1) " \
+   "AND id NOT IN (SELECT target_entity_id FROM memory_entity_merge_proposals WHERE " \
+   "user_id = ?1) " \
+   "AND id NOT IN (SELECT entity_id FROM memory_consolidation_ops WHERE user_id = ?1 AND " \
+   "entity_id IS NOT NULL) " \
+   "AND id NOT IN (SELECT other_entity_id FROM memory_consolidation_ops WHERE user_id = ?1 AND " \
+   "other_entity_id IS NOT NULL)"
+/* clang-format on */
+
+/* Delete user @p user_id's entities that @p sql (binding ?2) picks and
+ * nothing names; @p bind_text or @p bind_int is ?2. */
+static int delete_orphans(int user_id,
+                          const char *sql,
+                          const char *bind_text,
+                          int64_t bind_int,
+                          int *deleted_out) {
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int(st, 1, user_id);
+      if (bind_text) {
+         sqlite3_bind_text(st, 2, bind_text, -1, SQLITE_STATIC);
+      } else {
+         sqlite3_bind_int64(st, 2, bind_int);
+      }
+      rc = sqlite3_step(st);
+   }
+   const int changes = rc == SQLITE_DONE ? sqlite3_changes(s_db.db) : 0;
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("memory_db: removing unnamed entities failed: %s", sqlite3_errmsg(s_db.db));
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (changes > 0) {
+      memory_embeddings_invalidate_entity_cache_for_user(user_id);
+   }
+   if (deleted_out) {
+      *deleted_out = changes;
+   }
+   return rc == SQLITE_DONE ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
+}
+
+int memory_db_entity_delete_orphans(int user_id, const int64_t *ids, int n, int *deleted_out) {
+   if (deleted_out) {
+      *deleted_out = 0;
+   }
+   if (n <= 0 || !ids) {
+      return MEMORY_DB_SUCCESS;
+   }
+   char *list = auth_db_internal_ids_json(ids, n);
+   if (!list) {
+      return MEMORY_DB_FAILURE;
+   }
+   int deleted = 0;
+   const int rc = delete_orphans(user_id,
+                                 "DELETE FROM memory_entities WHERE user_id = ?1 AND id IN "
+                                 "(SELECT value FROM json_each(?2)) AND " ENTITY_ORPHAN_SQL,
+                                 list, 0, &deleted);
+   free(list);
+   if (deleted > 0) {
+      OLOG_INFO("memory_db: removed %d unnamed entities of user %d", deleted, user_id);
+   }
+   if (deleted_out) {
+      *deleted_out = deleted;
+   }
+   return rc;
+}
+
+int memory_db_entity_sweep_orphans(int user_id, int64_t older_than, int *deleted_out) {
+   return delete_orphans(user_id,
+                         "DELETE FROM memory_entities WHERE user_id = ?1 AND first_seen < ?2 "
+                         "AND " ENTITY_ORPHAN_SQL,
+                         NULL, older_than, deleted_out);
 }
 
 int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id) {
@@ -834,4 +940,36 @@ int memory_db_entity_get_embeddings(int user_id,
    if (count_out)
       *count_out = count;
    return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_entity_get_with_aliases(int user_id, int64_t entity_id, memory_entity_names_t *out) {
+   if (!out || user_id <= 0 || entity_id <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+   memset(out, 0, sizeof(*out));
+   int64_t ids[MEMORY_ENTITY_CLASS_MAX];
+   int n = 0;
+   if (memory_db_entity_class_members(user_id, entity_id, ids, MEMORY_ENTITY_CLASS_MAX, &n) !=
+       MEMORY_DB_SUCCESS) {
+      return MEMORY_DB_FAILURE;
+   }
+   if (n == 0) {
+      return MEMORY_DB_NOT_FOUND;
+   }
+   memory_entity_t rows[MEMORY_ENTITY_CLASS_MAX];
+   int got = 0;
+   if (memory_db_entities_get_by_ids(user_id, ids, n, rows, &got) != MEMORY_DB_SUCCESS) {
+      return MEMORY_DB_FAILURE;
+   }
+   bool found = false;
+   for (int i = 0; i < got; i++) {
+      if (rows[i].id == ids[0]) {
+         out->entity = rows[i];
+         found = true;
+      } else if (out->n_names < MEMORY_ENTITY_CLASS_MAX) {
+         safe_strscpy(out->names[out->n_names], rows[i].name);
+         out->n_names++;
+      }
+   }
+   return found ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
 }

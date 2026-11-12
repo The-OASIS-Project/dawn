@@ -830,15 +830,14 @@ static void webui_tts_pace_after_send(ws_connection_t *conn,
    }
 }
 
-/* Clean one sentence for TTS synthesis: strip residual command/end-of-turn + memory-citation
+/* Clean one sentence for TTS synthesis: strip an end-of-turn marker + memory-citation
  * tags, drop '*' and emojis, trim trailing whitespace.  Returns a malloc'd string (possibly
  * empty for an all-markup sentence — caller checks length), or NULL on alloc failure.  Shared
  * by the single-target and multi-target (§Phase-4 fanout) callbacks so the strip rules can't
  * drift between them. */
 static char *webui_clean_sentence_for_tts(const char *sentence) {
-   /* Fast path: skip 4 string scans if sentence has no special content */
-   bool needs_cleaning = (strstr(sentence, "<command>") != NULL ||
-                          strstr(sentence, "<end_of_turn>") != NULL ||
+   /* Fast path: skip the strips if the sentence has no special content */
+   bool needs_cleaning = (strstr(sentence, END_OF_TURN_TAG) != NULL ||
                           strstr(sentence, "<cited>") != NULL || strchr(sentence, '*') != NULL);
 
    char *cleaned = strdup(sentence);
@@ -846,10 +845,10 @@ static char *webui_clean_sentence_for_tts(const char *sentence) {
       return NULL;
 
    if (needs_cleaning) {
-      /* Defensively strip residual command/end-of-turn tags + the memory-citation tag from
-       * spoken text — shared whole-string strips (the text stream path strips <cited>
-       * separately via the streaming text_filter_cited_tags). */
-      text_filter_command_strip(cleaned, true); /* per-sentence TTS: drop a mid-split tag */
+      /* Strip the end-of-turn marker + the memory-citation tag from spoken text —
+       * shared whole-string strips (the text stream path strips <cited> separately
+       * via the streaming text_filter_cited_tags). */
+      text_filter_end_of_turn_strip(cleaned);
       text_filter_cited_strip(cleaned);
       remove_chars(cleaned, "*");
    }
@@ -1567,10 +1566,12 @@ static void *audio_worker_thread(void *arg) {
    /* Fan the user message out to every OTHER viewer of this conversation (§12c).
     * INVARIANT (mirrors webui_text_processing.c): guard on user_msg_id > 0 so a save
     * failure (id 0) emits ONLY the echo, never a second frame the client can't dedup —
-    * a spoken turn has no optimistic bubble, so an id-0 fan-out would double it. */
+    * a spoken turn has no optimistic bubble, so an id-0 fan-out would double it.
+    * The row names this session, as a typed user message does (an id > 0 means
+    * turn_conv > 0; the transcript is non-blank). */
    if (user_msg_id > 0 && conn && conn->auth_user_id > 0) {
-      conv_event_notify_message_appended(turn_conv, conn->auth_user_id, user_msg_id, "user",
-                                         transcript, NULL, 0);
+      webui_broadcast_message_appended_origin(conn->auth_user_id, turn_conv, user_msg_id, "user",
+                                              transcript, NULL, 0, session, NULL, NULL);
    }
 
 

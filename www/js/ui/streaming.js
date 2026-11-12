@@ -272,12 +272,13 @@
    function renderStreamingContent() {
       if (!DawnState.streamingState.textElement) return;
 
-      // Strip command tags and self-inserted <thinking> tags before rendering.
+      // Strip self-inserted <thinking> tags before rendering.
       // Claude sometimes emits <thinking>...</thinking> in its text even when
       // extended thinking is disabled — these are chain-of-thought, not output.
-      const cleanText = DawnState.streamingState.content
-         .replace(/<command>[\s\S]*?<\/command>/g, '')
-         .replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '');
+      const cleanText = DawnState.streamingState.content.replace(
+         /<thinking>[\s\S]*?<\/thinking>\s*/g,
+         ''
+      );
 
       // Apply markdown formatting (visuals are siblings of .text, not children,
       // so innerHTML overwrite does not affect them)
@@ -462,13 +463,22 @@
 
    function recordFinalized(conv, streamId, el) {
       if (conv == null || !streamId || !el) return;
-      finalizedRing.push({ conv: String(conv), streamId: streamId, el: el, messageId: null });
+      // stream_id counts per session, so remember which session this tab was when it
+      // streamed the reply: another session's stream N on this conversation isn't ours.
+      finalizedRing.push({
+         conv: String(conv),
+         streamId: streamId,
+         sessionId: DawnState.authState.sessionId,
+         el: el,
+         messageId: null,
+      });
       if (finalizedRing.length > FINALIZED_RING_MAX) finalizedRing.shift();
    }
 
    /**
     * Handle a `message_appended` fan-out frame (server-authoritative persistence §6a).
-    *   ORIGIN: (conv, stream_id) matches a finalized bubble still awaiting an id →
+    *   ORIGIN: (conv, stream_id) matches a finalized bubble still awaiting an id, and
+    *           the row's session_id (when sent) is the session that bubble streamed on →
     *           adopt message_id onto it, do NOT re-render (already on screen).
     *   NON-ORIGIN, active view → render the pushed reply inline (+ reasoning panel),
     *           tagged with its message_id.  Dedup: a bubble already carrying that
@@ -485,7 +495,14 @@
       if (streamId) {
          for (var i = 0; i < finalizedRing.length; i++) {
             var e = finalizedRing[i];
-            if (e.messageId == null && e.streamId === streamId && String(e.conv) === String(conv)) {
+            if (
+               e.messageId == null &&
+               e.streamId === streamId &&
+               String(e.conv) === String(conv) &&
+               (payload.session_id === undefined ||
+                  e.sessionId === undefined ||
+                  e.sessionId === payload.session_id)
+            ) {
                e.messageId = msgId;
                if (e.el && msgId != null) {
                   e.el.setAttribute('data-message-id', String(msgId));

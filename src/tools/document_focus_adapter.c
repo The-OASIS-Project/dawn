@@ -65,6 +65,7 @@
 #include "core/focus/focus_candidate_helpers.h"
 #include "core/focus/focus_recency.h"
 #include "core/focus/focus_source.h"
+#include "core/outside_markers.h"
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
@@ -142,8 +143,8 @@ static int emit_candidates(document_ranked_t *const *chosen,
       (void)snprintf(rendered, sizeof(rendered), "[%s] %s", fname, c->text);
 
       char item_id[FOCUS_ITEM_ID_BUFLEN];
-      if (focus_candidate_format_item_id(item_id, sizeof(item_id), "document_chunk", c->chunk_id) !=
-          SUCCESS) {
+      if (focus_candidate_format_item_id(item_id, sizeof(item_id), OUTSIDE_MARKER_DOC_SOURCE,
+                                         c->chunk_id) != SUCCESS) {
          OLOG_ERROR("document_adapter: item_id formatting failed (chunk_id=%lld)",
                     (long long)c->chunk_id);
          focus_adapter_failure_cleanup(out, produced, out_candidates, out_count);
@@ -154,7 +155,11 @@ static int emit_candidates(document_ranked_t *const *chosen,
       /* Scores are 0..1 and FOCUS_SCORE_NA is a negative sentinel, so a
        * negative cosine (possible with some models) reads as no similarity. */
       const float semantic = c->has_cosine ? fmaxf(c->cosine, 0.0f) : FOCUS_SCORE_NA;
-      if (focus_candidate_init(&out[produced], "document_chunk", FOCUS_SOURCE_EXTERNAL, rendered,
+      /* The reader's own text (a note, or a document they marked as theirs) is
+       * internal, so its line carries no "outside" kind word and doesn't make
+       * the turn read outside text. */
+      if (focus_candidate_init(&out[produced], OUTSIDE_MARKER_DOC_SOURCE,
+                               c->is_own ? FOCUS_SOURCE_INTERNAL : FOCUS_SOURCE_EXTERNAL, rendered,
                                item_id, c->created_at, semantic, recency,
                                DOCUMENT_DEFAULT_IMPORTANCE, &truncated_warned) != SUCCESS) {
          OLOG_ERROR("document_adapter: focus_candidate_init failed (chunk_id=%lld)",
@@ -237,7 +242,7 @@ static int document_adapter_query(int user_id,
 }
 
 static const focus_source_adapter_t k_document_focus_adapter = {
-   .source_id = "document_chunk",
+   .source_id = OUTSIDE_MARKER_DOC_SOURCE,
    .source_type = FOCUS_SOURCE_EXTERNAL,
    .requires_embedding = false,
    .query = document_adapter_query,

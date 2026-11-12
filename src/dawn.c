@@ -625,15 +625,15 @@ static void dawn_tts_sentence_callback(const char *sentence, void *userdata) {
 
    // The expression tag first (its name opens this sentence on the robot;
    // removing it can join the text around it, which the later strips must see).
-   // Then command tags + <end_of_turn> (processed from the full response later),
-   // then the <cited> memory-citation tag — shared whole-string strips, the same
-   // ones the response finalizer and WebUI-audio TTS use.  Both truncate on an
-   // orphan opener so a sentence that breaks mid-tag can't leak a partial into TTS.
+   // Then <end_of_turn> and the <cited> memory-citation tag — shared whole-string
+   // strips, the same ones the response finalizer and WebUI-audio TTS use.  The
+   // cited strip truncates on an orphan opener so a sentence that breaks mid-tag
+   // can't leak a partial into TTS.
    char expression[EMOTE_NAME_MAX];
    if (text_filter_emote_strip(cleaned, expression, sizeof(expression))) {
       snprintf(s_pending_expression, sizeof(s_pending_expression), "%s", expression);
    }
-   text_filter_command_strip(cleaned, true); /* per-sentence TTS: drop a mid-split tag */
+   text_filter_end_of_turn_strip(cleaned);
    text_filter_cited_strip(cleaned);
 
    // Remove special characters that cause problems
@@ -2400,9 +2400,6 @@ int main(int argc, char *argv[]) {
       audio_capture_ctx = audio_capture_start(pcm_capture_device, 262144, 1);
       if (!audio_capture_ctx) {
          OLOG_ERROR("Failed to start audio capture thread");
-         OLOG_ERROR("  Hint: Check that capture device '%s' exists and isn't in use by another "
-                    "application",
-                    pcm_capture_device);
          return 1;
       }
    } else {

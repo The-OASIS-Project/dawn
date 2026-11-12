@@ -73,6 +73,7 @@ static const treg_param_t url_params[] = {
 
 static const tool_metadata_t url_metadata = {
    .name = "url_fetch",
+   .results = TOOL_RESULTS_OUTSIDE,
    .default_kind = TOOL_KIND_FETCH,
    .third_party = TOOL_FRAME_WEB,
    .device_string = "url_fetch",

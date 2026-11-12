@@ -1382,6 +1382,7 @@ static const treg_param_t email_params[] = {
 
 static const tool_metadata_t email_metadata = {
    .name = "email",
+   .results = TOOL_RESULTS_OUTSIDE,
    .action_kinds = s_email_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_email_action_kinds),
    .describe_call = email_describe_call,
