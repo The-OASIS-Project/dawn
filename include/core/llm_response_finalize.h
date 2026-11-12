@@ -20,13 +20,12 @@
  *
  * Turns a completed raw LLM response into the CANONICAL CLEAN TEXT that every
  * surface (voice, WebUI, satellite, messaging, jobs, reinvoke) persists and
- * delivers.  Phase 0 strips residual non-user-facing tags — `<command>…
- * </command>` pairs and the `<end_of_turn>` local-model marker — and trims
+ * delivers.  It truncates at the `<end_of_turn>` local-model marker and trims
  * trailing whitespace (Claude rejects assistant turns ending in whitespace).
  *
- * It does NOT execute anything (the legacy `<command>` transport was retired)
- * and does NOT touch TTS-specific cleaning (markdown `*`, emojis) — that stays
- * on the spoken-output path.  It also strips `<cited>` memory-citation tags and,
+ * It does NOT execute anything and does NOT touch TTS-specific cleaning
+ * (markdown `*`, emojis) — that stays on the spoken-output path.  It also
+ * strips `<cited>` memory-citation tags and,
  * via `memory_citation_capture(session, …)`, audits which surfaced `[M#]` items
  * the model cited (self-gating on `g_config.memory.citation_enabled`); the
  * `session` carries the per-turn citation stash used for that.
@@ -72,8 +71,8 @@ typedef struct {
 /**
  * @brief Produce canonical clean text from a completed LLM response.
  *
- * Strips `<command>…</command>` pairs and truncates at `<end_of_turn>`, then
- * trims trailing whitespace.  The input is not modified.
+ * Truncates at `<end_of_turn>`, strips `<cited>` tags, then trims trailing
+ * whitespace.  The input is not modified.
  *
  * @param session      The turn's session (carries the citation stash); may be NULL
  *                     (citation capture then no-ops).

@@ -23,9 +23,6 @@
  * This module provides native tool calling support for OpenAI, Claude, and
  * local LLMs (via llama.cpp with --jinja flag). Tools are defined once and
  * converted to provider-specific formats.
- *
- * Tool calling reduces system prompt size by ~70% and improves reliability
- * by using structured responses instead of parsing <command> tags from text.
  */
 
 #include "llm/llm_tools.h"
@@ -735,11 +732,10 @@ void llm_tools_refresh(void) {
       }
 
       /* Deep research is opt-in (costs real tokens/time): the [research] master
-       * switch gates the NATIVE schema here.  is_available() alone is NOT enough
-       * — it is consulted only in the armor block above and on the legacy
-       * <command> path, so a non-armor tool must be gated by name like search /
-       * memory or it stays advertised.  deep_research_callback also refuses at
-       * execution as a backstop for any non-schema path. */
+       * switch gates the schema here.  is_available() alone is NOT enough — it
+       * is consulted only in the armor block above, so a non-armor tool must be
+       * gated by name like search / memory or it stays advertised.
+       * deep_research_callback also refuses at execution as a backstop. */
       if (strcmp(t->name, "deep_research") == 0) {
          t->enabled = g_config.research.enabled;
       }
@@ -1072,42 +1068,6 @@ int llm_tools_set_enabled(const char *tool_name, bool enabled_local, bool enable
 
    OLOG_WARNING("Tool '%s' not found", tool_name);
    return 1; /* FAILURE - tool not found */
-}
-
-bool llm_tools_is_device_enabled(const char *device_name, bool is_remote) {
-   if (!device_name || !llm_tools_ready) {
-      return false;
-   }
-
-   pthread_mutex_lock(&llm_tools_mutex);
-
-   /* Search tools by name - tools use device_string for device name mapping */
-   for (int i = 0; i < llm_tools_count; i++) {
-      /* Check both the tool name and the device_string (underlying device) */
-      if (strcmp(llm_tools_table[i].name, device_name) == 0 ||
-          (llm_tools_table[i].device_name &&
-           strcmp(llm_tools_table[i].device_name, device_name) == 0)) {
-         /* Check if the tool is enabled at all */
-         if (!llm_tools_table[i].enabled) {
-            pthread_mutex_unlock(&llm_tools_mutex);
-            return false;
-         }
-
-         /* Check session-specific enable state */
-         bool enabled = is_remote ? llm_tools_table[i].enabled_remote
-                                  : llm_tools_table[i].enabled_local;
-         pthread_mutex_unlock(&llm_tools_mutex);
-         return enabled;
-      }
-   }
-
-   pthread_mutex_unlock(&llm_tools_mutex);
-
-   /* Device not found in tools array. Only devices with tool blocks in
-    * commands_config_nuevo.json become tools and should appear in prompts.
-    * Plain MQTT devices (like armor_display without a tool block) are NOT
-    * controllable via LLM and should return false for prompt filtering. */
-   return false;
 }
 
 /* Mark set[i]=true for each registered tool named in names[0..count). */

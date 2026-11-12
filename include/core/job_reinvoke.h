@@ -139,8 +139,11 @@ void job_reinvoke_process_pending(const job_record_t *rows, int n);
 
 /* NOTE: the former job_reinvoke_notify_conv_appended weak seam (a
  * conversation_messages_appended refetch nudge) was retired in Phase 1 of
- * SERVER_AUTHORITATIVE_PERSISTENCE — the reinvoke reply now fans out inline via
- * conv_event_notify_message_appended (§6b), the sole active-view channel. */
+ * SERVER_AUTHORITATIVE_PERSISTENCE.  The reinvoke reply is persisted by
+ * webui_persist_final_answer, which fans out one message_appended to every
+ * browser of the user (webui_broadcast_message_appended_origin): from the live
+ * path it names the viewer's session; from the detached path (a job session)
+ * it names none. */
 
 #ifdef __cplusplus
 }

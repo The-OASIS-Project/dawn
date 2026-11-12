@@ -1,6 +1,6 @@
 /**
  * DAWN Transcript Module
- * Renders chat messages with debug/command separation
+ * Renders chat messages with debug/tool-result separation
  *
  * Usage:
  *   DawnTranscript.addEntry(role, text)        // Add transcript entry (routes debug content)
@@ -239,12 +239,12 @@
    // =============================================================================
 
    /**
-    * Check if text contains command tags
+    * Check if text contains model-written tool results
     * @param {string} text - Text to check
     * @returns {boolean}
     */
-   function containsCommandTags(text) {
-      return text.includes('<command>') || text.includes('[Tool Result:');
+   function containsToolResults(text) {
+      return text.includes('[Tool Result:');
    }
 
    /**
@@ -253,49 +253,34 @@
     * @returns {boolean}
     */
    function isOnlyDebugContent(text) {
-      // Remove all command tags and tool results, see if anything meaningful remains
-      const stripped = text
-         .replace(/<command>[\s\S]*?<\/command>/g, '')
-         .replace(/\[Tool Result:[\s\S]*?\]/g, '')
-         .trim();
+      // Remove all tool results, see if anything meaningful remains
+      const stripped = text.replace(/\[Tool Result:[\s\S]*?\]/g, '').trim();
       return stripped.length === 0;
    }
 
    /**
-    * Extract non-command text from a mixed message
+    * Extract the text outside tool results from a mixed message
     * @param {string} text - Text to extract from
     * @returns {string}
     */
    function extractUserFacingText(text) {
-      return text
-         .replace(/<command>[\s\S]*?<\/command>/g, '')
-         .replace(/\[Tool Result:[\s\S]*?\]/g, '')
-         .trim();
+      return text.replace(/\[Tool Result:[\s\S]*?\]/g, '').trim();
    }
 
    /**
-    * Extract command/debug portions from a message
+    * Extract the tool results from a message
     * @param {string} text - Text to extract from
-    * @returns {{commands: string[], toolResults: string[]}}
+    * @returns {{toolResults: string[]}}
     */
    function extractDebugContent(text) {
-      const commands = [];
       const toolResults = [];
-
-      // Extract command tags
-      const cmdRegex = /<command>([\s\S]*?)<\/command>/g;
-      let match;
-      while ((match = cmdRegex.exec(text)) !== null) {
-         commands.push(match[0]);
-      }
-
-      // Extract tool results
       const toolRegex = /\[Tool Result:[\s\S]*?\]/g;
+      let match;
       while ((match = toolRegex.exec(text)) !== null) {
          toolResults.push(match[0]);
       }
 
-      return { commands, toolResults };
+      return { toolResults };
    }
 
    // =============================================================================
@@ -496,19 +481,16 @@
    // =============================================================================
 
    /**
-    * Format command text for debug display
-    * @param {string} text - Text to format
+    * Format escaped text for debug display
+    * @param {string} text - Escaped text to format
     * @returns {string}
     */
-   function formatCommandText(text) {
-      // Highlight <command> tags (accent) and tool results (success) via theme tokens.
-      return text
-         .replace(/(<command>)/g, '<span class="cmd-tag">$1</span>')
-         .replace(/(<\/command>)/g, '<span class="cmd-tag">$1</span>')
-         .replace(
-            /(\[Tool Result:[\s\S]*?(?:\](?=\s*$)|$))/g,
-            '<span class="tool-result-tag">$1</span>'
-         );
+   function formatDebugText(text) {
+      // Highlight tool results (success) via theme tokens.
+      return text.replace(
+         /(\[Tool Result:[\s\S]*?(?:\](?=\s*$)|$))/g,
+         '<span class="tool-result-tag">$1</span>'
+      );
    }
 
    // =============================================================================
@@ -517,7 +499,7 @@
 
    /**
     * Add a debug entry to the transcript
-    * @param {string} label - Debug label (command, tool result, etc.)
+    * @param {string} label - Debug label (tool call, tool result, etc.)
     * @param {string} content - Debug content
     */
    function addDebugEntry(label, content) {
@@ -528,9 +510,7 @@
 
       // Determine specific debug class based on label
       let debugClass = 'debug';
-      if (label === 'command') {
-         debugClass = 'debug command';
-      } else if (label === 'tool result') {
+      if (label === 'tool result') {
          debugClass = 'debug tool-result';
       } else if (label === 'tool call') {
          debugClass = 'debug tool-call';
@@ -539,7 +519,7 @@
       entry.className = `transcript-entry ${debugClass}`;
       entry.innerHTML = `
       <div class="role">${DawnFormat.escapeHtml(label)}</div>
-      <div class="text">${formatCommandText(DawnFormat.escapeHtml(content))}</div>
+      <div class="text">${formatDebugText(DawnFormat.escapeHtml(content))}</div>
     `;
       // Visibility controlled by CSS via body.debug-mode class
       transcript.appendChild(entry);
@@ -705,7 +685,7 @@
       }
 
       // Strip document markers BEFORE any routing logic — document content may
-      // contain <command> tags or [Tool Result:] text that would cause misrouting
+      // contain [Tool Result:] text that would cause misrouting
       let extractedDocs = [];
       if (DawnDocuments && DawnDocuments.parseDocumentMarkers) {
          const docData = DawnDocuments.parseDocumentMarkers(text);
@@ -829,7 +809,7 @@
          return;
       }
 
-      const hasDebugContent = containsCommandTags(text);
+      const hasDebugContent = containsToolResults(text);
 
       // messageId is passed into addNormalEntry so it stamps data-message-id on the
       // bubble SYNCHRONOUSLY at creation (§6a/§12c) — robust against the fan-out dedup
@@ -838,7 +818,7 @@
          // Pure user-facing message - show normally
          await addNormalEntry(role, text, extractedDocs, messageId, emailRef);
       } else if (isOnlyDebugContent(text)) {
-         // Pure debug message (only commands/tool results) - debug only
+         // Pure debug message (only tool results) - debug only
          // Still render document chips if present
          if (extractedDocs.length > 0 || emailRef) {
             await addNormalEntry(role, '', extractedDocs, messageId, emailRef);
@@ -848,12 +828,7 @@
       } else {
          // Mixed message - show user-facing text normally AND debug content separately
          const userText = extractUserFacingText(text);
-         const { commands, toolResults } = extractDebugContent(text);
-
-         // Add debug entries for commands
-         commands.forEach((cmd) => {
-            addDebugEntry('command', cmd);
-         });
+         const { toolResults } = extractDebugContent(text);
 
          // Add debug entries for tool results
          toolResults.forEach((result) => {
@@ -965,7 +940,7 @@
       addDebug: addDebugEntry,
       addNormal: addNormalEntry,
       // Expose helpers for other modules
-      containsCommandTags: containsCommandTags,
+      containsToolResults: containsToolResults,
       isOnlyDebugContent: isOnlyDebugContent,
       extractUserFacingText: extractUserFacingText,
       // Reused by the memory source viewer (mini-chat render)

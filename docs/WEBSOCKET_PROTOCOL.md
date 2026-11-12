@@ -1024,6 +1024,24 @@ Search through stored memories.
 ```
 Response: `search_memory_response`
 
+#### `list_memory_entities`
+List entities (the Graph tab), most mentioned first.
+```json
+{"type": "list_memory_entities", "payload": {"limit": 20, "offset": 0}}
+```
+Response: `list_memory_entities_response`, with `entities`, `count` and `has_more`. Each
+entity (the same shape as the `entities` of `search_memory_response`) is a card: the entity and
+its aliases. Aliases are not listed on their own, but `count` and `has_more` count the entity rows
+read, aliases included: advance `offset` by `count`, not by `entities.length`.
+
+| Field | Meaning |
+|---|---|
+| `id`, `name`, `canonical_name`, `entity_type` | The entity |
+| `mention_count`, `first_seen`, `last_seen` | Across its aliases |
+| `alias_count`, `is_user_self` | Linked aliases; whether it is the user |
+| `relations` | Its relations, outgoing first, then incoming from outside the card. Each has `relation`, `object_name`, `object_entity_id`, `direction` (`out`/`in`), `confidence`, `mention_count`, and `valid_from`/`valid_to` when set. For `in`, `object_name`/`object_entity_id` name the other end's card |
+| `relations_total` | All of the card's relations. At most 50 per direction are sent, most seen first; when `relations_total` is larger, the rest exist but weren't sent |
+
 #### `get_memory_fact_source`
 Return the verbatim source conversation messages a fact was extracted from (memory provenance).
 ```json
@@ -2069,6 +2087,19 @@ The answer reaches a client by **either** route: this frame (turn completes whil
 attached) or the message batch on attach (already-finished job). `complete` carries
 `final_message_id` to correlate the two.
 
+`stream_id` (unsigned integer) is the stream the reply was delivered on; 0 = none (a user
+message, a research report). It counts per session, so two sessions of one user on the same
+conversation can both have a stream N. `reasoning` (string) carries the reply's reasoning, and is
+present only when there is some. `session_id` (unsigned integer, the value the `session`
+frame sends) names the session whose turn wrote the row. It is present if and only if a non-job
+session's turn wrote the row (a typed or spoken WebUI message and its reply, a job result
+re-engaging a conversation a browser is viewing), and absent for a background job's answer (its
+stream reaches every viewer of the job), a detached re-engagement and a research report. A
+client that streamed a reply adopts `message_id` onto its bubble when `conversation_id` and
+`stream_id` match and, if `session_id` is present, it is the session the client was on when it
+streamed; a row naming another session is that session's reply and is drawn as one. With
+`session_id` absent, match on the first two alone.
+
 A user message sent from the WebUI is fanned out the same way (`"role": "user"`, its saved
 text) to every browser of its user. The copy sent to the connection that sent it also carries
 `client_ref` when the `text` frame had one (flag `turn_refs`), so that connection can match it
@@ -3103,6 +3134,7 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `get_memory_stats` | `get_memory_stats_response` |
 | `list_memory_facts` | `list_memory_facts_response` |
 | `search_memory` | `search_memory_response` |
+| `list_memory_entities` | `list_memory_entities_response` |
 | `get_memory_fact_source` | `get_memory_fact_source_response` |
 | `delete_memory_fact` | `delete_memory_fact_response` |
 | `delete_all_memories` | `delete_all_memories_response` |

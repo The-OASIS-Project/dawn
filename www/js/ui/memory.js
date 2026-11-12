@@ -849,6 +849,14 @@
            `+${relations.length - maxVisible} more</div>`
          : '';
 
+      /* The server sends a card's strongest relations per direction;
+         relations_total counts them all, so say what wasn't sent. */
+      const notSent = Math.max(0, (entity.relations_total || 0) - (entity.relations || []).length);
+      const notSentHtml = notSent
+         ? `<div class="entity-relation entity-relations-unsent">${notSent} more ` +
+           `relation${notSent === 1 ? '' : 's'} not loaded</div>`
+         : '';
+
       const hiddenHtml = hasMore
          ? `<div class="entity-relations-hidden" data-entity-hidden="${entity.id}" style="display:none">` +
            relations
@@ -916,7 +924,7 @@
               `connecting this entity to another entity or a literal value. Aggregated across ` +
               `all soft aliases.">` +
               `Relations</div>` +
-              `${relationsHtml}${hiddenHtml}${moreHtml}` +
+              `${relationsHtml}${hiddenHtml}${moreHtml}${notSentHtml}` +
               `</div>`
             : '') +
          `</div>`

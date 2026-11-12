@@ -4,7 +4,7 @@
 
 This document is the **architectural map**: directory layout, the cross-cutting rules every subsystem obeys (layering, threading, lock ordering, error handling, configuration), and a one-paragraph summary of each subsystem with a link to its detail doc. For the internals of any single subsystem — its components, data flow, DB schema, and tuning — open the linked file in [`docs/arch/subsystems/`](docs/arch/subsystems/).
 
-**Last updated**: October 2026.
+**Last updated**: November 2026.
 
 ## Table of Contents
 
@@ -124,7 +124,7 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 
 | Subsystem | Role | Detail doc |
 |---|---|---|
-| **Core** (`src/` root + `src/core/`) | Main entry, MQTT integration, legacy command parsing. `src/dawn.c` hosts the state machine; `src/mosquitto_comms.c/h` wires MQTT; `src/text_to_command_nuevo.c/h` extracts `<command>` tags from LLM output; `src/word_to_number.c/h` converts "twenty-three" → 23; `src/core/` contains the session manager, scheduler, command executor/router, worker pool, and wake-word detector. Logging macros (`OLOG_INFO/WARNING/ERROR/DEBUG`) come from `common/include/logging.h`, shared with the satellite. | *(inlined above)* |
+| **Core** (`src/` root + `src/core/`) | Main entry, MQTT integration, direct command matching. `src/dawn.c` hosts the state machine; `src/mosquitto_comms.c/h` wires MQTT; `src/text_to_command_nuevo.c/h` matches a spoken command against the tools' patterns; `src/word_to_number.c/h` converts "twenty-three" → 23; `src/core/` contains the session manager, scheduler, command executor/router, worker pool, and wake-word detector. Logging macros (`OLOG_INFO/WARNING/ERROR/DEBUG`) come from `common/include/logging.h`, shared with the satellite. | *(inlined above)* |
 | **ASR** | Speech recognition abstraction (Strategy pattern) over Whisper and Vosk, plus Silero VAD and chunking for long utterances. Whisper on Jetson GPU is the default; Vosk is retained for CPU-only builds. | [asr.md](docs/arch/subsystems/asr.md) |
 | **LLM** | Unified interface for OpenAI, Claude, Gemini, **OpenRouter** (a first-class `provider` fronting many vendors through one key; its `anthropic/` models use its Anthropic Messages endpoint on the Claude path, the rest its OpenAI-compatible one), and local (llama.cpp/Ollama). Streaming via SSE feeds a sentence buffer that hands complete sentences to TTS while the response is still generating. A conversation's request is append-only (`src/core/session_prefix.c`): its system prompt and tool set are frozen on its first turn, and later changes (instructions, the surface's directions, each turn's context) are appended where they happen, so providers cache the whole conversation and signed reasoning stays replayable. Runs on a dedicated worker thread so the main audio loop never blocks; wake-word interrupts abort in-flight API calls. | [llm.md](docs/arch/subsystems/llm.md) |
 | **TTS** | Piper + ONNX Runtime with preprocessing for natural phrasing. Mutex-protected so the main loop, network server, and streaming buffer can all synthesize safely. | [tts.md](docs/arch/subsystems/tts.md) |
@@ -1069,11 +1069,11 @@ The session manager, response queue, LLM pipeline, tool system, and conversation
 
 ## Command Processing
 
-DAWN supports three parallel command-processing paths — direct regex matching, native LLM tool calls, and legacy `<command>` tags — that all converge on a single unified executor (`command_execute()`).
+DAWN supports two parallel command-processing paths — direct regex matching and native LLM tool calls — that both converge on a single unified executor (`command_execute()`).
 
 - **Tool registry** (`src/tools/tool_registry.c`): self-registration with FNV-1a hash tables for O(1) lookup, automatic schema generation for multiple LLM providers, and capability flags (`TOOL_CAP_NETWORK`, `TOOL_CAP_DANGEROUS`).
 - **Processing mode** is selected in `dawn.toml`: `direct_only`, `llm_only`, or `direct_first`.
-- **Native tools** vs. **legacy `<command>` tags** use the same enable/disable flags and the same executor; only the transport differs.
+- **Native tool calling** is the only way a model calls a tool; `[llm.tools] enabled` turns it off. Text a model writes is never parsed for commands.
 
 **Full flowchart, tool list, and definition sources**: see [command-processing.md](docs/arch/command-processing.md).
 

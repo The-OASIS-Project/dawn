@@ -300,7 +300,8 @@ int memory_db_fact_list_sorted(int user_id,
    sqlite3_bind_int64(stmt, 4, fact_expiry_guard_now()); /* expiry guard (v58) */
 
    int count = 0;
-   while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
+   int rc = SQLITE_DONE;
+   while (count < max_facts && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {
       populate_fact_from_row(stmt, &out_facts[count]);
       count++;
    }
@@ -309,7 +310,8 @@ int memory_db_fact_list_sorted(int user_id,
    AUTH_DB_UNLOCK();
    if (count_out)
       *count_out = count;
-   return MEMORY_DB_SUCCESS;
+   /* A step error ends the read early: report it, not a short list. */
+   return (rc == SQLITE_ROW || rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
 /* v48: FTS5 maintenance helpers.  Called from fact_create / fact_delete

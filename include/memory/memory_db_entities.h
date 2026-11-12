@@ -473,43 +473,52 @@ int memory_db_relation_distinct_predicates(int user_id,
                                            int *count_out);
 
 /**
- * @brief Bulk-load all relations for a user with canonical-root resolution
+ * @brief One relation as it belongs on an entity's card
  *
- * Single query that joins memory_relations against memory_entities on both
- * subject and object sides, returning each relation along with its
- * SUBJECT and OBJECT canonical-root entity ids (or 0 for object-as-literal
- * where memory_relations.object_entity_id is NULL).  Canonical-root = the
- * entity's `canonical_id` if set, else the entity's own `id` — i.e. the
- * head of the row's equivalence class under the single-level alias
- * invariant.  Bundle 2 (May 13) established that equivalence-class
- * aggregation belongs in SQL; this is the read-side complement to the
- * mention_count / first_seen / last_seen aggregation already done there.
+ * A card is an equivalence class: the listed entity and the aliases linked to
+ * it.  For an outgoing row, @c rel is the relation as stored.  For an incoming
+ * row (an edge from outside the class into it), @c rel.object_entity_id and
+ * @c rel.object_name name the subject's class head instead, so the card can
+ * show and link the other end.
+ */
+typedef struct {
+   memory_relation_t rel;
+   int64_t card_id; /* The listed entity this row belongs to */
+   bool incoming;   /* true: an edge into the card from outside its class */
+   int total;       /* The card's rows in this direction, before any limit */
+} memory_card_relation_t;
+
+/**
+ * @brief Relations of the listed entities, attributed to their cards
  *
- * Callers (build_entities_json_array, memory_export) use the resolved
- * roots to attribute relations to the canonical entity for the class,
- * not the row they happen to be attached to.  Without this, a relation
- * like `(sugar hill, located_in, georgia)` attached to alias entity "sugar
- * hill" would NOT surface on the canonical "sugar hill, georgia" card.
+ * Reads only the relations of @p entity_ids and their aliases, driven through
+ * the subject/object indexes, so its cost and size follow the cards asked
+ * for, not the user's whole graph.  An id that is itself an alias lists
+ * nothing (its relations belong to its canonical's card).  Rows are sorted by
+ * card id ascending, then direction (outgoing first), then strongest first
+ * (mention_count, then newest), so a caller can find a card's rows by binary
+ * search on @c card_id.
  *
- * Returned sorted by subject canonical-root for predictable iteration.
+ * With @p per_dir_max > 0, each card keeps at most that many rows per
+ * direction; every row carries @c total, so a caller can say how many were
+ * left out.  <= 0 keeps them all.
  *
- * Output arrays are PARALLEL — out[i], subj_roots[i], and obj_roots[i]
- * all describe the same relation row.  All three must be sized >= @p max.
- *
- * @param user_id     User ID
- * @param out         Output array of relations (size >= max)
- * @param subj_roots  Output: subject canonical-root id for each rel
- * @param obj_roots   Output: object canonical-root id, or 0 for literals
- * @param max         Maximum relations to return
- * @param count_out   Output: number of relations actually written
+ * @param user_id        User ID
+ * @param entity_ids     Entity ids to list relations for
+ * @param n_ids          Number of ids (0 returns no rows)
+ * @param per_dir_max    Rows per card and direction; <= 0 for no limit
+ * @param with_incoming  Also return edges into each card
+ * @param out            Output: heap array the caller frees (NULL when empty)
+ * @param count_out      Output: rows in @p out
  * @return MEMORY_DB_SUCCESS or MEMORY_DB_FAILURE
  */
-int memory_db_relation_list_with_canonical_roots_by_user(int user_id,
-                                                         memory_relation_t *out,
-                                                         int64_t *subj_roots,
-                                                         int64_t *obj_roots,
-                                                         int max,
-                                                         int *count_out);
+int memory_db_relation_list_for_entities(int user_id,
+                                         const int64_t *entity_ids,
+                                         int n_ids,
+                                         int per_dir_max,
+                                         bool with_incoming,
+                                         memory_card_relation_t **out,
+                                         int *count_out);
 
 /**
  * @brief List all entities for a user, ordered by mention count

@@ -3158,6 +3158,17 @@ if(ENABLE_WEBUI)
       LABEL   ci)
 endif()
 
+# The message_appended frame: its fields, which session a persisted row names,
+# and the sender's client_ref copy.  Built with the WebUI, like its source.
+if(ENABLE_WEBUI)
+   dawn_add_unit_test(test_webui_message_appended
+      SOURCES test_webui_message_appended.c
+              ${SRC_ROOT}/src/webui/webui_message_frame.c
+              ${SRC_ROOT}/src/webui/webui_email_ref.c
+      LIBS    dawn_common unity sodium ${JSONC_LIBRARIES}
+      LABEL   ci)
+endif()
+
 dawn_add_unit_test(bench_contradiction
    NO_TEST
    SOURCES ${SRC_ROOT}/benchmarks/bench_contradiction.c

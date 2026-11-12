@@ -43,9 +43,6 @@ typedef void (*sentence_callback)(const char *sentence, void *userdata);
  *
  * Accumulates text chunks and extracts complete sentences based on
  * punctuation boundaries (., !, ?, :) followed by space or end of input.
- *
- * Note: Callers should pre-filter any content (e.g., <command> tags)
- * before feeding to this buffer.
  */
 typedef struct sentence_buffer sentence_buffer_t;
 

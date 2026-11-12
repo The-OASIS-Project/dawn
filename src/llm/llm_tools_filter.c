@@ -86,12 +86,8 @@ bool llm_tools_enabled_for_session(const tool_definition_t *t, bool is_remote) {
     * research-only tools are hidden.  t->enabled is still honored (a globally-
     * disabled web tool stays off even for research).
     *
-    * NOTE: this gates only the NATIVE tool path.  The legacy <command>-tag path
-    * (command_execute) does NOT consult this, so it is NOT closed here — the
-    * research fetch loop must run native-tools-only, and command_execute needs a
-    * research-aware refusal as defense-in-depth (DEEP_RESEARCH_DESIGN §11 HIGH-1).
-    * Both are the research_worker's session-setup responsibility (Step 6), with a
-    * regression test that a research-context command_execute is refused. */
+    * command_execute() refuses a research-context call on its own as
+    * defense-in-depth (DEEP_RESEARCH_DESIGN §11 HIGH-1). */
    session_t *ctx = session_get_command_context();
    /* No-tools turn (e.g. the deep-research synthesis turn): deny EVERY tool so the
     * turn is pure text.  Checked before the allowlist so it also suppresses the read
@@ -110,7 +106,7 @@ bool llm_tools_enabled_for_session(const tool_definition_t *t, bool is_remote) {
    /* Headless background-job workers must not fan out into more jobs — hide the
     * job-spawn tool from a SESSION_TYPE_JOB context's schema so the model never
     * sees it.  (handle_spawn also hard-refuses a job-context caller as a backstop
-    * for any non-schema path, e.g. a legacy <command> tag.) */
+    * for any path that doesn't go through the schema.) */
    if (strcmp(t->name, "job") == 0) {
       if (ctx != NULL && ctx->type == SESSION_TYPE_JOB) {
          return false;

@@ -36,7 +36,7 @@
 
 #include "config/dawn_config.h"
 #include "core/prompt_parts.h"  // For composed_prompt_t
-#include "core/text_filter.h"   // For cmd_tag_filter_state_t
+#include "core/text_filter.h"   // For cited_tag_filter_state_t
 #include "dawn_error.h"
 #include "llm/llm_interface.h"  // For session_llm_config_t
 
@@ -762,10 +762,6 @@ typedef struct session {
    session_metrics_tracker_t metrics;
    pthread_mutex_t metrics_mutex;  // Protects metrics (lock level 4)
 
-   // Command tag filter state (strips <command>...</command> from stream)
-   // Used when native tool calling is disabled (legacy command tag mode)
-   cmd_tag_filter_state_t cmd_tag_filter;  // State for text_filter_command_tags()
-   bool cmd_tag_filter_bypass;             // Cached: true if native tools enabled (skip filtering)
    cited_tag_filter_state_t
        cited_tag_filter;  // Live-stream <cited>…</cited> strip (all stream paths)
 

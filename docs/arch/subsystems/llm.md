@@ -54,10 +54,12 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Sends complete sentences to TTS for natural phrasing
    - Reduces perceived latency (speak while generating)
 
-- **llm_command_parser.c/h**: JSON command extraction
-   - Extracts `<command>` JSON tags from LLM responses
-   - Validates JSON structure
-   - Handles malformed JSON gracefully
+- **llm_command_parser.c/h**: system-prompt pieces
+   - Builds and caches the system instructions (reply rules, tool rules when tools are on)
+   - The persona (its values and voice halves, the effective persona) and the TOOL DEFAULTS
+     line (location, units, timezone); drops a stored copy of a built-in persona
+   - Whether vision is on for the session's LLM type
+   - The effective voice-output directives (local and WebUI) and the ASR disambiguation hint
 
 - **llm_rate_limit.c/h**: Cloud API rate limiter
    - Process-wide sliding window throttle (default 40 RPM, configurable)
@@ -355,7 +357,11 @@ User Query → LLM Provider (OpenAI/Claude/Local)
                     ↓ (text chunks)
             Sentence Buffer → TTS (as sentences complete)
                     ↓ (complete response)
-            Command Parser → MQTT Commands
+            Response finalizer (llm_response_finalize: <cited> audit, [emote:]
+              strip on the local surface, <end_of_turn> cut, <cited> strip,
+              neutralize + conversation-tag mask)
+                    ↓ (canonical clean text)
+            Saved to the conversation history → delivered to the surface
 ```
 
 ## Performance Comparison

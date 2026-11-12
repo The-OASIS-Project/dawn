@@ -326,6 +326,9 @@
                   DawnState.authState.authenticated = msg.payload.authenticated;
                   DawnState.authState.isAdmin = msg.payload.is_admin || false;
                   DawnState.authState.username = msg.payload.username || '';
+                  // This connection's session: a message_appended naming another
+                  // session is that session's reply, never this tab's bubble.
+                  DawnState.authState.sessionId = msg.payload.session_id;
                   DawnSettings.updateAuthVisibility();
                }
                if (msg.payload.authenticated) DawnTime.setZone(msg.payload.timezone);
