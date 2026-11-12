@@ -50,6 +50,10 @@ A prebuilt Tier-1 package is published on the GitHub release page
 sudo apt install ./dawn-satellite_2.1.0_arm64.deb   # pulls runtime Depends
 ```
 
+The package's speech recognition is Whisper tiny-q5_1 (its binary is built with Whisper only), the
+hardware table below's pick for a **Pi 5**. On a Pi 4, where that table recommends Vosk, install with
+`scripts/install.sh` instead.
+
 This installs everything except the ML models (fetched separately — see below) and lays down the
 **Debian-correct layout**:
 
@@ -79,8 +83,8 @@ build attestation ([INSTALL_UBUNTU_PACKAGE.md](INSTALL_UBUNTU_PACKAGE.md#checkin
 ### Fetching models
 
 ```bash
-sudo dawn-satellite-fetch-models                 # VAD + Piper TTS + Whisper base (matches the shipped config)
-sudo dawn-satellite-fetch-models --whisper-model tiny   # a smaller Whisper model (set [asr] model_path to match)
+sudo dawn-satellite-fetch-models                 # VAD + Piper TTS + Whisper tiny-q5_1 (matches the shipped config)
+sudo dawn-satellite-fetch-models --whisper-model base   # Whisper base (Pi 5 8GB; set [asr] model_path to match)
 ```
 
 Models are fetched (not bundled) so the package stays small and you accept their licenses. The helper

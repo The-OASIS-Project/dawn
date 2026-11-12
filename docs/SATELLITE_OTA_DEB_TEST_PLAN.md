@@ -37,7 +37,7 @@ piper/espeak; launcher is libc-only; marker codec + launcher decision-matrix pas
    - Confirm `/etc/dawn/ota_pubkey` is root-owned and NOT writable by `dawn` (it's outside ReadWritePaths).
 
 ## D. Models  (voice mode)
-- Models: `sudo dawn-satellite-fetch-models` (VAD + Piper TTS + Whisper base, matching the shipped config).
+- Models: `sudo dawn-satellite-fetch-models` (VAD + Piper TTS + Whisper tiny-q5_1, matching the shipped config).
 - Else copy models manually into `/var/lib/dawn-satellite/models/` (chown dawn).
 - Enable voice in `/etc/dawn-satellite/satellite.toml`, `systemctl restart`, confirm wake-word + a query works.
 

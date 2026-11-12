@@ -183,10 +183,11 @@ void satellite_config_init_defaults(satellite_config_t *config) {
    config->wake_word.sensitivity = 0.5f;
 
    /* ASR defaults: the engine this binary was built with (Whisper when present, as in the
-    * shipped satellite.toml), so a config without [asr] never names a missing engine */
+    * .deb's satellite.toml), so a config without [asr] never names a missing engine */
 #ifdef HAVE_ASR_WHISPER
    safe_strcpy(config->asr.engine, "whisper", sizeof(config->asr.engine));
-   safe_strcpy(config->asr.model_path, "models/whisper.cpp/ggml-base.en.bin", CONFIG_PATH_SIZE);
+   safe_strcpy(config->asr.model_path, "models/whisper.cpp/ggml-tiny.en-q5_1.bin",
+               CONFIG_PATH_SIZE);
 #else
    safe_strcpy(config->asr.engine, "vosk", sizeof(config->asr.engine));
    safe_strcpy(config->asr.model_path, "models/vosk-model-small-en-us-0.15", CONFIG_PATH_SIZE);

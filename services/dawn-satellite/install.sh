@@ -242,7 +242,7 @@ find_binary() {
 
 Build instructions:
   cd dawn_satellite && mkdir -p build && cd build
-  cmake .. -DENABLE_VOICE=ON -DENABLE_WHISPER_ASR=ON
+  cmake .. -DENABLE_VOICE=ON -DENABLE_VOSK_ASR=ON
   make -j\$(nproc)"
 }
 
@@ -493,6 +493,13 @@ if [ -n "$CONFIG_SRC" ]; then
 else
     CONFIG_SRC="$SCRIPT_DIR/satellite.toml"
 fi
+# The config the service will run with: an existing one is kept unless --config
+# was given (see "Install configuration" below), so models and the Whisper-libs
+# check follow it, not the template.
+ACTIVE_CONFIG="$CONFIG_SRC"
+if [ -f "$CONFIG_DIR/satellite.toml" ] && [ "$CONFIG_EXPLICIT" = false ]; then
+    ACTIVE_CONFIG="$CONFIG_DIR/satellite.toml"
+fi
 
 # Stop the running service before touching binaries / libraries. Linux
 # refuses `cp` over a running executable (Text file busy), and stopping
@@ -540,7 +547,7 @@ rm -f /usr/local/bin/dawn_satellite 2>/dev/null || true
 # these libs aren't produced and their absence is expected — quiet the
 # "no libs found" warning in that case to avoid false alarms.
 BUILD_DIR="$(dirname "$BINARY_PATH")"
-configured_engine=$(parse_toml_str asr engine "$CONFIG_SRC" 2>/dev/null || echo "")
+configured_engine=$(parse_toml_str asr engine "$ACTIVE_CONFIG" 2>/dev/null || echo "")
 log "Installing whisper/ggml shared libraries from $BUILD_DIR to $LIB_DIR"
 mkdir -p "$LIB_DIR"
 installed_libs=0
@@ -584,8 +591,8 @@ if [ -n "$MODELS_DIR" ]; then
             find "$DATA_DIR/models" -mindepth 1 -delete 2>/dev/null || true
         fi
 
-        log "Installing models referenced by $CONFIG_SRC"
-        install_selected_models "$CONFIG_SRC"
+        log "Installing models referenced by $ACTIVE_CONFIG"
+        install_selected_models "$ACTIVE_CONFIG"
     fi
 fi
 
