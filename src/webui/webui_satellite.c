@@ -134,10 +134,6 @@ void satellite_send_stream_start(session_t *session) {
    uint32_t sid = atomic_fetch_add(&session->current_stream_id, 1) + 1;
    atomic_store(&session->llm_streaming_active, true);
 
-   /* Reset command tag filter state for new stream */
-   session->cmd_tag_filter.nesting_depth = 0;
-   session->cmd_tag_filter.len = 0;
-
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_STREAM_START,
                           .stream = {

@@ -328,11 +328,7 @@ body.debug-mode .transcript-entry.debug {
    word-break: break-word;
 }
 
-/* Inline highlight tags inside debug text (formatCommandText) — theme tokens, not hex. */
-.cmd-tag {
-   color: var(--accent);
-}
-
+/* Inline highlight tags inside debug text (formatDebugText) — theme tokens, not hex. */
 .tool-result-tag {
    color: var(--success);
 }
@@ -345,16 +341,6 @@ body.debug-mode .transcript-entry.debug {
 
 .transcript-entry.debug.tool-result .role {
    color: var(--success);
-}
-
-/* Command specific styling (accent theme) */
-.transcript-entry.debug.command {
-   background-color: var(--accent-border);
-   border-left: 3px solid var(--accent);
-}
-
-.transcript-entry.debug.command .role {
-   color: var(--accent);
 }
 
 /* Tool call specific styling (purple theme) */

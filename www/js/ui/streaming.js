@@ -272,12 +272,13 @@
    function renderStreamingContent() {
       if (!DawnState.streamingState.textElement) return;
 
-      // Strip command tags and self-inserted <thinking> tags before rendering.
+      // Strip self-inserted <thinking> tags before rendering.
       // Claude sometimes emits <thinking>...</thinking> in its text even when
       // extended thinking is disabled — these are chain-of-thought, not output.
-      const cleanText = DawnState.streamingState.content
-         .replace(/<command>[\s\S]*?<\/command>/g, '')
-         .replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '');
+      const cleanText = DawnState.streamingState.content.replace(
+         /<thinking>[\s\S]*?<\/thinking>\s*/g,
+         ''
+      );
 
       // Apply markdown formatting (visuals are siblings of .text, not children,
       // so innerHTML overwrite does not affect them)

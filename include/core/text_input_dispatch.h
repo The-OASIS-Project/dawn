@@ -22,8 +22,7 @@
  * text path and (in future) the messaging-channels engine (Telegram,
  * Discord, Slack, SMS).  Handles: add-user-message-to-history, persist to
  * conv_db, per-turn focus injection, LLM call with optional TTS sentence
- * streaming.  Does NOT post-process `<command>` tags — that's a Layer 4
- * concern handled per-provider by the caller.
+ * streaming.
  *
  * Synchronous from the caller's perspective; intended to be invoked from a
  * worker thread, NEVER from the libwebsockets service thread or any other
@@ -205,7 +204,6 @@ typedef struct {
  *
  * Does NOT:
  *   - Increment / read session->request_generation (caller's lifecycle).
- *   - Post-process `<command>` tags in the response.
  *   - Release the session reference (caller acquired, caller releases).
  *
  * Thread safety: must be called from a worker thread.  Adds messages

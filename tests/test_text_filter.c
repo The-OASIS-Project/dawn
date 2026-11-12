@@ -18,7 +18,7 @@
  * enhancements, or additions to the project. These contributions become
  * part of the project and are adopted by the project author(s).
  *
- * Unit tests for text_filter command tag stripping.
+ * Unit tests for text_filter: the reply-tag strips and text_split_pieces.
  */
 
 #include <stdio.h>
@@ -26,153 +26,15 @@
 
 #include "core/text_filter.h"
 #include "unity.h"
-#include "webui/webui_server.h" /* WEBUI_STREAM_DELTA_PIECE */
+#include "webui/webui_server.h" /* WEBUI_STREAM_TEXT_SIZE */
 
-static cmd_tag_filter_state_t s_state;
 static cited_tag_filter_state_t s_cited;
 
 void setUp(void) {
-   text_filter_reset(&s_state);
    text_filter_cited_reset(&s_cited);
 }
 
 void tearDown(void) {
-}
-
-/* ── helper for buffer tests ────────────────────────────────────────────── */
-
-static void filter_to_buf(const char *input, char *out, size_t out_size) {
-   text_filter_command_tags_to_buffer(&s_state, input, out, out_size);
-}
-
-/* ── tests ──────────────────────────────────────────────────────────────── */
-
-static void test_no_tags(void) {
-   char buf[128];
-   filter_to_buf("Hello world", buf, sizeof(buf));
-   TEST_ASSERT_EQUAL_STRING("Hello world", buf);
-}
-
-static void test_simple_tag_removal(void) {
-   char buf[128];
-   filter_to_buf("Hello <command>do stuff</command> world", buf, sizeof(buf));
-   TEST_ASSERT_EQUAL_STRING("Hello  world", buf);
-}
-
-static void test_tag_at_start(void) {
-   char buf[128];
-   filter_to_buf("<command>hidden</command>visible", buf, sizeof(buf));
-   TEST_ASSERT_EQUAL_STRING("visible", buf);
-}
-
-static void test_tag_at_end(void) {
-   char buf[128];
-   filter_to_buf("visible<command>hidden</command>", buf, sizeof(buf));
-   TEST_ASSERT_EQUAL_STRING("visible", buf);
-}
-
-static void test_only_tag_content(void) {
-   char buf[128];
-   filter_to_buf("<command>all hidden</command>", buf, sizeof(buf));
-   TEST_ASSERT_EQUAL_STRING("", buf);
-}
-
-static void test_nested_tags(void) {
-   char buf[128];
-   filter_to_buf("<command>outer<command>inner</command></command>", buf, sizeof(buf));
-   TEST_ASSERT_EQUAL_STRING("", buf);
-}
-
-static void test_multiple_tags(void) {
-   char buf[128];
-   filter_to_buf("a<command>x</command>b<command>y</command>c", buf, sizeof(buf));
-   TEST_ASSERT_EQUAL_STRING("abc", buf);
-}
-
-static void test_streaming_across_chunks(void) {
-   char buf[128] = "";
-   int len = 0;
-
-   len = text_filter_command_tags_to_buffer(&s_state, "<com", buf, sizeof(buf));
-
-   char buf2[128] = "";
-   int len2 = text_filter_command_tags_to_buffer(&s_state, "mand>hidden</command>after", buf2,
-                                                 sizeof(buf2));
-
-   TEST_ASSERT_EQUAL_STRING("after", buf2);
-   TEST_ASSERT_EQUAL_INT(5, len2);
-   (void)len;
-}
-
-static void test_partial_tag_not_matching(void) {
-   char buf[128];
-   filter_to_buf("<comm!and>", buf, sizeof(buf));
-   TEST_ASSERT_EQUAL_STRING("<comm!and>", buf);
-}
-
-static void test_empty_input(void) {
-   char buf[128];
-   filter_to_buf("", buf, sizeof(buf));
-   TEST_ASSERT_EQUAL_STRING("", buf);
-}
-
-static void test_buffer_overflow_protection(void) {
-   char buf[5];
-   int len = text_filter_command_tags_to_buffer(&s_state, "Hello world", buf, sizeof(buf));
-   buf[sizeof(buf) - 1] = '\0';
-   TEST_ASSERT_EQUAL_INT(4, len);
-   TEST_ASSERT_EQUAL_STRING("Hell", buf);
-}
-
-static void test_reset_mid_tag(void) {
-   char buf[128];
-
-   /* Start a tag but don't finish it */
-   filter_to_buf("<command>partial", buf, sizeof(buf));
-   TEST_ASSERT_EQUAL_STRING("", buf);
-   TEST_ASSERT_TRUE(s_state.nesting_depth > 0);
-
-   /* Reset state */
-   text_filter_reset(&s_state);
-   TEST_ASSERT_EQUAL_INT(0, s_state.nesting_depth);
-   TEST_ASSERT_EQUAL_INT(0, s_state.len);
-
-   /* After reset, text passes through normally */
-   filter_to_buf("clean text", buf, sizeof(buf));
-   TEST_ASSERT_EQUAL_STRING("clean text", buf);
-}
-
-/* ── callback test ──────────────────────────────────────────────────────── */
-
-typedef struct {
-   char chunks[8][64];
-   int count;
-} capture_ctx_t;
-
-static void capture_callback(const char *text, size_t len, void *ctx) {
-   capture_ctx_t *cap = (capture_ctx_t *)ctx;
-   if (cap->count < 8 && len < 64) {
-      memcpy(cap->chunks[cap->count], text, len);
-      cap->chunks[cap->count][len] = '\0';
-      cap->count++;
-   }
-}
-
-static void test_callback_receives_chunks(void) {
-   capture_ctx_t cap = { .count = 0 };
-
-   text_filter_command_tags(&s_state, "before<command>hidden</command>after", capture_callback,
-                            &cap);
-
-   TEST_ASSERT_EQUAL_INT(2, cap.count);
-   TEST_ASSERT_EQUAL_STRING("before", cap.chunks[0]);
-   TEST_ASSERT_EQUAL_STRING("after", cap.chunks[1]);
-}
-
-static void test_deeply_nested(void) {
-   char buf[128];
-   filter_to_buf("<command><command>deep</command></command>", buf, sizeof(buf));
-   TEST_ASSERT_EQUAL_STRING("", buf);
 }
 
 /* ── <cited> memory-citation stream filter ──────────────────────────────── */
@@ -311,13 +173,6 @@ static void test_cited_two_blocks_one_stream(void) {
    TEST_ASSERT_EQUAL_STRING("abc", out);
 }
 
-static void test_command_double_open_bracket(void) {
-   /* Lockstep regression for the same held-'<' fix in the command filter. */
-   char buf[128];
-   filter_to_buf("5 <<command>x</command>", buf, sizeof(buf));
-   TEST_ASSERT_EQUAL_STRING("5 <", buf);
-}
-
 /* ── whole-string cited strip (text_filter_cited_strip) ──────────────────── */
 
 static void test_cited_strip_trailing_tag(void) {
@@ -392,30 +247,34 @@ static void test_cited_normalize_null_safe(void) {
    text_filter_cited_normalize(NULL); /* must not crash */
 }
 
-/* ── whole-string command strip (text_filter_command_strip) ──────────────── */
+/* ── end-of-turn cut (text_filter_end_of_turn_strip) ───────────────────── */
 
-static void test_command_strip_pair_and_eot(void) {
-   char s[128] = "hi <command>{\"a\":1}</command> there<end_of_turn>trailing";
-   text_filter_command_strip(s, true);
-   TEST_ASSERT_EQUAL_STRING("hi  there", s);
+static void test_end_of_turn_strip_truncates(void) {
+   char s[128] = "hi there<end_of_turn>trailing";
+   text_filter_end_of_turn_strip(s);
+   TEST_ASSERT_EQUAL_STRING("hi there", s);
 }
 
-static void test_command_strip_orphan_truncates_when_true(void) {
-   /* Per-sentence TTS intent: drop a mid-split opener. */
-   char s[128] = "oops <command>{\"a\":1} no close";
-   text_filter_command_strip(s, true);
-   TEST_ASSERT_EQUAL_STRING("oops ", s);
+static void test_end_of_turn_strip_no_marker_unchanged(void) {
+   char s[128] = "hi there";
+   text_filter_end_of_turn_strip(s);
+   TEST_ASSERT_EQUAL_STRING("hi there", s);
 }
 
-static void test_command_strip_orphan_left_when_false(void) {
-   /* Complete-response intent: an unclosed <command> is left as literal text. */
-   char s[128] = "oops <command>{\"a\":1} no close";
-   text_filter_command_strip(s, false);
-   TEST_ASSERT_EQUAL_STRING("oops <command>{\"a\":1} no close", s);
+static void test_end_of_turn_strip_null_safe(void) {
+   text_filter_end_of_turn_strip(NULL); /* must not crash */
 }
 
-static void test_command_strip_null_safe(void) {
-   text_filter_command_strip(NULL, true); /* must not crash */
+static void test_end_of_turn_strip_at_start_empties(void) {
+   char s[128] = "<end_of_turn>trailing";
+   text_filter_end_of_turn_strip(s);
+   TEST_ASSERT_EQUAL_STRING("", s);
+}
+
+static void test_end_of_turn_strip_partial_tag_kept(void) {
+   char s[128] = "hi there<end_of";
+   text_filter_end_of_turn_strip(s);
+   TEST_ASSERT_EQUAL_STRING("hi there<end_of", s);
 }
 
 /* ── text_filter_emote_strip ────────────────────────────────────────────── */
@@ -588,10 +447,10 @@ static void test_split_pieces_never_splits_a_character(void) {
    TEST_ASSERT_EQUAL_INT(0, p.broken);
 }
 
-/* The TTS stream's filter buffer and piece (session_manager_llm.c): one filtered
- * piece is one stream delta. */
-#define FILTER_BUF (WEBUI_STREAM_DELTA_PIECE + 1)
-#define PIECE_MAX (FILTER_BUF - CMD_TAG_BUF_SIZE)
+/* A stream delta's filter buffer and piece (webui_send_stream_delta): one
+ * filtered piece is one frame. */
+#define FILTER_BUF WEBUI_STREAM_TEXT_SIZE
+#define PIECE_MAX (FILTER_BUF - CITED_TAG_BUF_SIZE)
 
 typedef struct {
    char out[2048];
@@ -601,17 +460,17 @@ typedef struct {
 static void filter_piece(const char *piece, void *ctx) {
    filtered_t *f = (filtered_t *)ctx;
    char filtered[FILTER_BUF];
-   text_filter_command_tags_to_buffer(&s_state, piece, filtered, sizeof(filtered));
+   text_filter_cited_tags_to_buffer(&s_cited, piece, filtered, sizeof(filtered));
    append(f->out, sizeof(f->out), filtered);
    f->calls++;
 }
 
 /* A chunk longer than the filter buffer, a tag across the piece boundary:
- * filtered piece by piece (as the TTS stream does) nothing is lost and the tag
+ * filtered piece by piece (as a stream delta is) nothing is lost and the tag
  * is still removed, where filtering it whole into the buffer cuts it short. */
 static void test_split_pieces_chunk_longer_than_filter_buffer(void) {
-   static const char tag[] = "<command>hidden</command>";
-   const size_t before = PIECE_MAX - 4; /* "<com" ends the first piece */
+   static const char tag[] = "<cited>M1,M7</cited>";
+   const size_t before = PIECE_MAX - 4; /* "<cit" ends the first piece */
    char text[2048] = "";
    char expected[2048] = "";
    size_t n = 0;
@@ -631,33 +490,19 @@ static void test_split_pieces_chunk_longer_than_filter_buffer(void) {
    TEST_ASSERT_TRUE(before < PIECE_MAX && PIECE_MAX < before + sizeof(tag) - 1);
 
    char whole[FILTER_BUF];
-   filter_to_buf(text, whole, sizeof(whole));
+   text_filter_cited_tags_to_buffer(&s_cited, text, whole, sizeof(whole));
    TEST_ASSERT_TRUE(strlen(whole) < strlen(expected));
 
-   text_filter_reset(&s_state);
+   text_filter_cited_reset(&s_cited);
    filtered_t f = { 0 };
    text_split_pieces(text, PIECE_MAX, filter_piece, &f);
    TEST_ASSERT_EQUAL_INT(2, f.calls);
    TEST_ASSERT_EQUAL_STRING(expected, f.out);
-   TEST_ASSERT_NULL(strstr(f.out, "hidden"));
+   TEST_ASSERT_NULL(strstr(f.out, "M1"));
 }
 
 int main(void) {
    UNITY_BEGIN();
-   RUN_TEST(test_no_tags);
-   RUN_TEST(test_simple_tag_removal);
-   RUN_TEST(test_tag_at_start);
-   RUN_TEST(test_tag_at_end);
-   RUN_TEST(test_only_tag_content);
-   RUN_TEST(test_nested_tags);
-   RUN_TEST(test_multiple_tags);
-   RUN_TEST(test_streaming_across_chunks);
-   RUN_TEST(test_partial_tag_not_matching);
-   RUN_TEST(test_empty_input);
-   RUN_TEST(test_buffer_overflow_protection);
-   RUN_TEST(test_reset_mid_tag);
-   RUN_TEST(test_callback_receives_chunks);
-   RUN_TEST(test_deeply_nested);
    RUN_TEST(test_cited_no_tag);
    RUN_TEST(test_cited_whole_tag_one_delta);
    RUN_TEST(test_cited_split_opener_across_deltas);
@@ -672,7 +517,6 @@ int main(void) {
    RUN_TEST(test_cited_stray_bracket_in_closer);
    RUN_TEST(test_cited_near_full_false_opener);
    RUN_TEST(test_cited_two_blocks_one_stream);
-   RUN_TEST(test_command_double_open_bracket);
    RUN_TEST(test_cited_strip_trailing_tag);
    RUN_TEST(test_cited_strip_multiple_tags);
    RUN_TEST(test_cited_strip_orphan_opener_truncates);
@@ -684,10 +528,11 @@ int main(void) {
    RUN_TEST(test_cited_normalize_wellformed_unchanged);
    RUN_TEST(test_cited_normalize_non_tag_untouched);
    RUN_TEST(test_cited_normalize_null_safe);
-   RUN_TEST(test_command_strip_pair_and_eot);
-   RUN_TEST(test_command_strip_orphan_truncates_when_true);
-   RUN_TEST(test_command_strip_orphan_left_when_false);
-   RUN_TEST(test_command_strip_null_safe);
+   RUN_TEST(test_end_of_turn_strip_truncates);
+   RUN_TEST(test_end_of_turn_strip_no_marker_unchanged);
+   RUN_TEST(test_end_of_turn_strip_null_safe);
+   RUN_TEST(test_end_of_turn_strip_at_start_empties);
+   RUN_TEST(test_end_of_turn_strip_partial_tag_kept);
    RUN_TEST(test_emote_strip_leading_tag);
    RUN_TEST(test_emote_strip_spaced_and_cased);
    RUN_TEST(test_emote_strip_first_known_name_wins);
