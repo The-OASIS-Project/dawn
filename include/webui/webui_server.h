@@ -35,7 +35,6 @@
 
 #include <stdbool.h>
 
-#include "core/text_filter.h"  /* CITED_TAG_BUF_SIZE */
 #include "image_store.h"       /* IMAGE_ID_LEN */
 #include "webui/webui_audio.h" /* For WEBUI_MAX_RECORDING_SECONDS */
 
@@ -398,14 +397,6 @@ void webui_send_stream_start(struct session *session);
 #define WEBUI_STREAM_TEXT_SIZE 1024
 
 /**
- * Longest piece of a delta webui_send_stream_delta filters at once: a held
- * partial <cited> opener (under CITED_TAG_BUF_SIZE bytes) can come out ahead of
- * it, and the result must still fit a frame.  A delta no longer than this is
- * filtered whole, never split again.
- */
-#define WEBUI_STREAM_DELTA_PIECE (WEBUI_STREAM_TEXT_SIZE - CITED_TAG_BUF_SIZE)
-
-/**
  * @brief Send incremental text chunk during LLM streaming
  *
  * Appends text to the current streaming entry on the client. Should only
@@ -418,27 +409,6 @@ void webui_send_stream_start(struct session *session);
  * @note No-op if session->llm_streaming_active is false
  */
 void webui_send_stream_delta(struct session *session, const char *text);
-
-/**
- * @brief Filter command tags from text and return filtered result
- *
- * Strips <command>...</command> tags from text using the session's filter state.
- * Used by callers that need the filtered text (e.g., TTS sentence buffer).
- * Uses the same state machine as webui_send_stream_delta for consistency.
- *
- * @param session Session with filter state
- * @param text Input text to filter
- * @param out_buf Output buffer for filtered text
- * @param out_size Size of output buffer
- * @return Length of filtered text written to out_buf
- *
- * @note Filter state persists across calls for partial tag handling
- * @note If native tools are enabled, returns input unchanged
- */
-int webui_filter_command_tags(struct session *session,
-                              const char *text,
-                              char *out_buf,
-                              size_t out_size);
 
 /**
  * @brief End the current LLM token stream

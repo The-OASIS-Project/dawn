@@ -18,7 +18,7 @@
  * enhancements, or additions to the project. These contributions become
  * part of the project and are adopted by the project author(s).
  *
- * Text filtering utilities for command tag stripping.
+ * Filters for the tags a model writes into its reply text.
  */
 
 #include "core/text_filter.h"
@@ -27,142 +27,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
-
-/* Use constants from header (CMD_TAG_OPEN, CMD_TAG_CLOSE, etc.) */
-
-void text_filter_reset(cmd_tag_filter_state_t *state) {
-   if (state) {
-      memset(state, 0, sizeof(*state));
-   }
-}
-
-void text_filter_command_tags(cmd_tag_filter_state_t *state,
-                              const char *text,
-                              text_filter_output_fn output_fn,
-                              void *ctx) {
-   if (!state || !text || !output_fn) {
-      return;
-   }
-
-   const char *p = text;
-   const char *output_start = NULL;
-
-   while (*p) {
-      if (state->nesting_depth > 0) {
-         /* Inside command tag - look for <command> (nested) or </command> */
-         if (*p == '<') {
-            state->buffer[0] = '<';
-            state->len = 1;
-            p++;
-            continue;
-         }
-
-         if (state->len > 0) {
-            /* Bounds check for safety */
-            if (state->len >= CMD_TAG_BUF_SIZE - 1) {
-               state->len = 0;
-               p++;
-               continue;
-            }
-
-            /* Check for nested <command> opening tag */
-            if (*p == CMD_TAG_OPEN[state->len]) {
-               state->buffer[state->len++] = *p;
-
-               if (state->len == CMD_TAG_OPEN_LEN) {
-                  /* Found nested <command> - increase depth with overflow protection */
-                  if (state->nesting_depth < CMD_TAG_MAX_NESTING) {
-                     state->nesting_depth++;
-                  }
-                  /* Beyond max depth, stay at max (still filters content) */
-                  state->len = 0;
-               }
-               p++;
-               continue;
-            }
-
-            /* Check for </command> closing tag */
-            if (*p == CMD_TAG_CLOSE[state->len]) {
-               state->buffer[state->len++] = *p;
-
-               if (state->len == CMD_TAG_CLOSE_LEN) {
-                  /* Found </command> - decrease nesting depth */
-                  state->nesting_depth--;
-                  state->len = 0;
-               }
-               p++;
-               continue;
-            }
-
-            /* Not matching either tag - reset buffer */
-            state->len = 0;
-            p++;
-            continue;
-         }
-
-         /* Inside command, not matching any tag - discard */
-         p++;
-         continue;
-      }
-
-      /* Normal mode - look for <command> */
-      if (*p == '<') {
-         /* Flush pending output before buffering potential tag */
-         if (output_start) {
-            output_fn(output_start, (size_t)(p - output_start), ctx);
-            output_start = NULL;
-         }
-         /* Emit any held partial-tag bytes before restarting on this '<': no tag
-          * has an interior '<', so a held partial can never continue past one —
-          * those bytes are confirmed non-tag text (fixes a dropped '<' on "<<command>"). */
-         if (state->len > 0) {
-            output_fn(state->buffer, state->len, ctx);
-         }
-         state->buffer[0] = '<';
-         state->len = 1;
-         p++;
-         continue;
-      }
-
-      if (state->len > 0) {
-         /* Bounds check for safety */
-         if (state->len >= CMD_TAG_BUF_SIZE - 1) {
-            output_fn(state->buffer, state->len, ctx);
-            state->len = 0;
-            continue;
-         }
-
-         /* Single-char comparison instead of strncmp */
-         if (*p != CMD_TAG_OPEN[state->len]) {
-            /* Not open tag - emit buffer and re-process current char */
-            output_fn(state->buffer, state->len, ctx);
-            state->len = 0;
-            continue;
-         }
-
-         state->buffer[state->len++] = *p;
-
-         if (state->len == CMD_TAG_OPEN_LEN) {
-            /* Found <command> - enter command mode */
-            state->nesting_depth = 1;
-            state->len = 0;
-         }
-         p++;
-         continue;
-      }
-
-      /* Normal character - add to output span */
-      if (!output_start) {
-         output_start = p;
-      }
-      p++;
-   }
-
-   /* Flush any remaining output */
-   if (output_start) {
-      output_fn(output_start, (size_t)(p - output_start), ctx);
-   }
-}
 
 /* Context for buffer output callback */
 typedef struct {
@@ -188,28 +52,11 @@ static void buffer_output_fn(const char *text, size_t len, void *ctx) {
    }
 }
 
-int text_filter_command_tags_to_buffer(cmd_tag_filter_state_t *state,
-                                       const char *text,
-                                       char *out_buf,
-                                       size_t out_size) {
-   if (!state || !text || !out_buf || out_size == 0) {
-      return 0;
-   }
-
-   buffer_ctx_t ctx = { .buf = out_buf, .size = out_size, .len = 0 };
-   out_buf[0] = '\0';
-
-   text_filter_command_tags(state, text, buffer_output_fn, &ctx);
-
-   return (int)ctx.len;
-}
-
 /* =============================================================================
  * Memory-citation tag filter — strips <cited>…</cited> from streamed text.
  *
- * Same chunk-spanning discipline as the command filter, minus nesting: once the
- * opener is matched, ALL bytes are suppressed until the closer.  Mirrors the
- * command state machine so the restart-on-mismatch behavior is identical.
+ * Tolerates a tag split across chunks.  No nesting: once the opener is matched,
+ * ALL bytes are suppressed until the closer.
  * ============================================================================= */
 
 void text_filter_cited_reset(cited_tag_filter_state_t *state) {
@@ -276,21 +123,9 @@ void text_filter_cited_normalize(char *text) {
    }
 }
 
-void text_filter_command_strip(char *text, bool truncate_orphan) {
+void text_filter_end_of_turn_strip(char *text) {
    if (!text)
       return;
-
-   char *s;
-   while ((s = strstr(text, COMMAND_TAG_OPEN)) != NULL) {
-      char *e = strstr(s, COMMAND_TAG_CLOSE);
-      if (e == NULL) {
-         if (truncate_orphan)
-            *s = '\0'; /* mid-stream split — drop the partial so it isn't spoken */
-         break;        /* else: unclosed in a complete response — leave as literal */
-      }
-      e += COMMAND_TAG_CLOSE_LEN;
-      memmove(s, e, strlen(e) + 1);
-   }
 
    char *eot = strstr(text, END_OF_TURN_TAG);
    if (eot != NULL) {
@@ -371,7 +206,7 @@ void text_filter_cited_tags(cited_tag_filter_state_t *state,
          }
          if (*p != CITED_TAG_OPEN[state->len]) {
             /* Partial match broke — emit held bytes and re-process current char
-             * (a '<' among them restarts a fresh match, as in the command filter). */
+             * (a '<' among them restarts a fresh match). */
             output_fn(state->buffer, state->len, ctx);
             state->len = 0;
             continue;

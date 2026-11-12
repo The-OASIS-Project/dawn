@@ -22,8 +22,8 @@
  * The allowlist IS the security boundary of a research run, and it is checked in
  * two structurally different executors — the native tool path
  * (is_tool_enabled_for_session in llm_tools.c, at both schema advertisement and
- * execution) and the legacy <command>/direct/no-callback fallback path
- * (command_execute in command_executor.c, the HIGH-1 defense-in-depth close).
+ * execution) and the direct/no-callback fallback path (command_execute in
+ * command_executor.c, the HIGH-1 defense-in-depth close).
  * Duplicating the name list across the two would let the boundary drift; this
  * header keeps it in one place.  Pure leaf (string.h + stdbool.h only) so a
  * Layer-1 executor can include it without a link or layering dependency.

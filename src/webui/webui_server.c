@@ -2547,13 +2547,6 @@ void webui_send_stream_start(session_t *session) {
    int64_t conv_id = session->stream_conversation_id;
    conv_stream_begin(conv_id, sid);
 
-   /* Reset command tag filter state for new stream */
-   session->cmd_tag_filter.nesting_depth = 0;
-   session->cmd_tag_filter.len = 0;
-
-   /* Cache whether to bypass filtering (native tools enabled) */
-   session->cmd_tag_filter_bypass = llm_tools_enabled(NULL);
-
    /* Transition to "speaking" state when streaming begins */
    webui_send_state(session, "speaking");
 
@@ -2582,14 +2575,6 @@ void webui_send_stream_start(session_t *session) {
    }
 }
 
-/* Command tag filter uses shared constants from core/text_filter.h */
-
-/**
- * @brief Output callback for WebUI streaming (adapter for text_filter API)
- *
- * This callback adapts the shared text_filter's signature to WebUI needs.
- * Session is passed via ctx parameter.
- */
 /* True if [text, text+len) is empty or only whitespace.  Used to avoid opening a
  * streaming bubble for whitespace-only content (e.g. the "\n\n" tool-iteration flush
  * on a tool-only iteration), which would otherwise leave an empty bubble. */
@@ -2602,86 +2587,13 @@ static bool stream_text_is_all_whitespace(const char *text, size_t len) {
    return true;
 }
 
-static void webui_filter_output(const char *text, size_t len, void *ctx) {
-   session_t *session = (session_t *)ctx;
-   if (!session || !text || len == 0) {
-      return;
-   }
-
-   /* Don't open a bubble for whitespace-only first content (iteration-boundary flush). */
-   if (!session->llm_streaming_active && stream_text_is_all_whitespace(text, len)) {
-      return;
-   }
-
-   /* Start stream on first content (lazy initialization) */
-   if (!session->llm_streaming_active) {
-      webui_send_stream_start(session);
-   }
-
-   /* Null-terminate the input for processing */
-   char temp_buf[4096];
-   size_t safe_len = len < sizeof(temp_buf) - 1 ? len : sizeof(temp_buf) - 1;
-   memcpy(temp_buf, text, safe_len);
-   temp_buf[safe_len] = '\0';
-
-   ws_response_t resp = { .session = session,
-                          .type = WS_RESP_STREAM_DELTA,
-                          .stream = {
-                              .stream_id = session->current_stream_id,
-                              .conversation_id = session->stream_conversation_id,
-                          } };
-
-   /* A frame carries at most its text field; a longer chunk is cut there. */
-   snprintf(resp.stream.text, sizeof(resp.stream.text), "%.*s", (int)sizeof(resp.stream.text) - 1,
-            temp_buf);
-
-   session->stream_had_content = true;
-   conv_stream_append(session->stream_conversation_id, session->current_stream_id,
-                      resp.stream.text);
-   queue_response(&resp);
-}
-
-/**
- * @brief Filter command tags and return filtered text
- *
- * Public function for callers that need the filtered text (e.g., TTS).
- * Uses the same state machine as WebUI streaming.
- *
- * @param session Session with filter state
- * @param text Input text to filter
- * @param out_buf Output buffer for filtered text
- * @param out_size Size of output buffer
- * @return Length of filtered text written to out_buf
- */
-int webui_filter_command_tags(session_t *session,
-                              const char *text,
-                              char *out_buf,
-                              size_t out_size) {
-   if (!session || !text || !out_buf || out_size == 0) {
-      return 0;
-   }
-
-   /* Native tools mode: no command tags to filter */
-   if (session->cmd_tag_filter_bypass) {
-      size_t len = strlen(text);
-      size_t copy = len < out_size - 1 ? len : out_size - 1;
-      memcpy(out_buf, text, copy);
-      out_buf[copy] = '\0';
-      return (int)copy;
-   }
-
-   /* Use shared text filter implementation */
-   return text_filter_command_tags_to_buffer(&session->cmd_tag_filter, text, out_buf, out_size);
-}
-
 /**
  * @brief Emit one already-tag-stripped delta chunk to the stream.
  *
- * Shared tail of the native-tools stream path: opens the bubble on first real
- * content, appends to the replay ring, and queues the
- * frame.  Callers must pass text that has already passed through any tag filter
- * (it is NOT re-filtered here) — used by both the live delta path and the
- * stream-end <cited> flush.
+ * Opens the bubble on first real content, appends to the replay ring, and
+ * queues the frame.  Callers must pass text that has already passed through the
+ * <cited> filter (it is NOT re-filtered here) — used by both the live delta path
+ * and the stream-end <cited> flush.
  */
 static void webui_emit_clean_delta(session_t *session, const char *text) {
    if (!text || text[0] == '\0') {
@@ -2710,9 +2622,11 @@ static void webui_emit_clean_delta(session_t *session, const char *text) {
    queue_response(&resp);
 }
 
-/* A thinking delta has no tag filter: a piece is a frame's text less its NUL.  A
- * delta piece, plus the <cited> filter's held bytes (under CITED_TAG_BUF_SIZE)
- * and a NUL, fits a frame's text. */
+/* Longest piece of a delta webui_send_stream_delta filters at once: a held
+ * partial <cited> opener (under CITED_TAG_BUF_SIZE bytes) can come out ahead of
+ * it, and the result, with its NUL, must still fit a frame's text.  A thinking
+ * delta has no tag filter: a piece is a frame's text less its NUL. */
+#define WEBUI_STREAM_DELTA_PIECE (WEBUI_STREAM_TEXT_SIZE - CITED_TAG_BUF_SIZE)
 #define WEBUI_THINKING_DELTA_PIECE (WEBUI_STREAM_TEXT_SIZE - 1)
 _Static_assert(WEBUI_STREAM_DELTA_PIECE <= TEXT_PIECE_MAX, "delta piece exceeds TEXT_PIECE_MAX");
 _Static_assert(WEBUI_STREAM_DELTA_PIECE + (CITED_TAG_BUF_SIZE - 1) + 1 <= WEBUI_STREAM_TEXT_SIZE,
@@ -2726,33 +2640,18 @@ static void webui_stream_delta_piece(const char *text, void *ctx) {
 
    /* Strip the live <cited> memory-citation tag on EVERY stream path.  The
     * finalizer only cleans the completed/persisted copy; the browser renders
-    * deltas live, so an unstripped tag leaks its inner text.  The tag is gated
-    * purely on citation_enabled (independent of tool mode), so both the native
-    * and legacy branches below can carry it — run the strip before the branch
-    * rather than inside the native one.  Stateful: a tag may split across deltas;
-    * held-back partial-opener bytes surface on a later delta or the stream-end
-    * flush. */
+    * deltas live, so an unstripped tag leaks its inner text.  Stateful: a tag
+    * may split across deltas; held-back partial-opener bytes surface on a later
+    * delta or the stream-end flush. */
    char cited_clean[sizeof(((ws_response_t *)0)->stream.text)];
    text_filter_cited_tags_to_buffer(&session->cited_tag_filter, text, cited_clean,
                                     sizeof(cited_clean));
-   if (cited_clean[0] == '\0') {
-      return; /* whole delta was tag content, or held back pending more input */
-   }
-
-   /* Native tools: pass through without command-tag filtering. */
-   if (session->cmd_tag_filter_bypass) {
-      webui_emit_clean_delta(session, cited_clean);
-      return;
-   }
-
-   /* Legacy command tag mode: filter the cited-stripped text for <command> tags. */
-   text_filter_command_tags(&session->cmd_tag_filter, cited_clean, webui_filter_output, session);
+   webui_emit_clean_delta(session, cited_clean);
 }
 
 /**
- * @brief Send streaming text to WebUI with command tag filtering
+ * @brief Send streaming text to WebUI, <cited> tags stripped
  *
- * Filters <command>...</command> tags when in legacy mode (native tools disabled).
  * Automatically starts the stream on first content. Thread-safe per session.
  * A delta longer than a frame's text goes out in pieces, none lost.
  */
@@ -2774,19 +2673,12 @@ void webui_send_stream_end(session_t *session, const char *reason) {
    /* Flush any held-back <cited> filter bytes as a final delta while the stream
     * is still active.  A partial-opener that never completed is real trailing
     * text and must reach the browser + replay ring; a mid-tag remainder (closer
-    * never arrived) is dropped inside the flush.  Route by path exactly as the
-    * delta does — native emits directly (NOT back through webui_send_stream_delta,
-    * which would re-filter the clean bytes); legacy feeds the command filter, since
-    * a held '<' could begin a <command> tag. */
+    * never arrived) is dropped inside the flush.  Emitted directly, NOT back
+    * through webui_send_stream_delta, which would re-filter the clean bytes. */
    char cited_flush[CITED_TAG_BUF_SIZE];
    if (text_filter_cited_flush_to_buffer(&session->cited_tag_filter, cited_flush,
                                          sizeof(cited_flush)) > 0) {
-      if (session->cmd_tag_filter_bypass) {
-         webui_emit_clean_delta(session, cited_flush);
-      } else {
-         text_filter_command_tags(&session->cmd_tag_filter, cited_flush, webui_filter_output,
-                                  session);
-      }
+      webui_emit_clean_delta(session, cited_flush);
    }
 
    /* Mark streaming inactive */
