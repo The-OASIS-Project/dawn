@@ -865,6 +865,9 @@ dawn_add_unit_test(test_session_prefix
 # conversation builds, as the Claude and Responses builders render them.
 dawn_add_unit_test(test_history_reload
    SOURCES test_history_reload.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
+           ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tool_images.c
            ${SRC_ROOT}/src/core/text_input_dispatch.c
            ${SRC_ROOT}/src/core/session_manager_llm.c
            ${SRC_ROOT}/src/core/session_history.c
