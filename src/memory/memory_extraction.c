@@ -746,8 +746,8 @@ static void *extraction_thread(void *arg) {
             OLOG_WARNING("memory_extraction: conv %lld: cursor not advanced",
                          (long long)ctx->conversation_id);
          }
-         OLOG_INFO("memory_extraction: updated high-water mark to %d (msg_id=%lld) for conv %ld",
-                   ctx->message_count, (long long)prov.msg_id_end, (long)ctx->conversation_id);
+         OLOG_INFO("memory_extraction: updated high-water mark to msg_id=%lld for conv %ld",
+                   (long long)prov.msg_id_end, (long)ctx->conversation_id);
       }
 
       /* Run fact pruning if enabled */
