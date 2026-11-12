@@ -823,37 +823,61 @@ dawn_add_unit_test(test_llm_context_text
    LIBS    unity
    LABEL   ci)
 
+# The session unit and the request it builds, shared by the tests that run it.
+set(SESSION_UNIT_TEST_SOURCES
+   ${SRC_ROOT}/src/core/session_prefix.c
+   ${SRC_ROOT}/src/core/session_focus.c
+   ${SRC_ROOT}/src/core/focus/focus_incremental.c
+   ${SRC_ROOT}/src/core/session_compaction.c
+   ${SRC_ROOT}/src/llm/llm_compaction.c
+   ${SRC_ROOT}/src/llm/llm_compaction_range.c
+   ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+   ${SRC_ROOT}/src/memory/memory_history_loader.c
+   ${SRC_ROOT}/src/core/image_rehydrate.c
+   ${SRC_ROOT}/src/core/ocp_helpers.c
+   ${SRC_ROOT}/src/image_store.c
+   ${SRC_ROOT}/src/blob_store.c
+   ${SRC_ROOT}/src/blob_store_util.c
+   ${SRC_ROOT}/src/core/prefix_message.c
+   ${SRC_ROOT}/src/core/prefix_in_force.c
+   ${SRC_ROOT}/src/core/prompt_sections.c
+   ${SRC_ROOT}/src/core/strbuf.c
+   ${SRC_ROOT}/src/llm/llm_history_kind.c
+   ${SRC_ROOT}/src/llm/llm_context_text.c
+   ${SRC_ROOT}/src/llm/llm_history_rows.c
+   ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+   ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+   ${SRC_ROOT}/src/llm/llm_claude_parts.c
+   ${AUTH_DB_SOURCES}
+   ${SRC_ROOT}/src/core/prefix_tools.c
+   ${SRC_ROOT}/src/llm/llm_tool_defs.c
+)
+
 # The append-only request: the first turn freezes the system prompt, changes
 # are appended after the question, the turn's context goes in front of it.
 dawn_add_unit_test(test_session_prefix
    SOURCES test_session_prefix.c
-           ${SRC_ROOT}/src/core/session_prefix.c
-           ${SRC_ROOT}/src/core/session_focus.c
-           ${SRC_ROOT}/src/core/focus/focus_incremental.c
-           ${SRC_ROOT}/src/core/session_compaction.c
-           ${SRC_ROOT}/src/llm/llm_compaction.c
-           ${SRC_ROOT}/src/llm/llm_compaction_range.c
-           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
-           ${SRC_ROOT}/src/memory/memory_history_loader.c
-           ${SRC_ROOT}/src/core/image_rehydrate.c
-           ${SRC_ROOT}/src/core/ocp_helpers.c
-           ${SRC_ROOT}/src/image_store.c
-           ${SRC_ROOT}/src/blob_store.c
-           ${SRC_ROOT}/src/blob_store_util.c
-           ${SRC_ROOT}/src/core/prefix_message.c
-           ${SRC_ROOT}/src/core/prefix_in_force.c
-           ${SRC_ROOT}/src/core/prompt_sections.c
-           ${SRC_ROOT}/src/core/strbuf.c
-           ${SRC_ROOT}/src/llm/llm_history_kind.c
-           ${SRC_ROOT}/src/llm/llm_context_text.c
-           ${SRC_ROOT}/src/llm/llm_history_rows.c
-           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
-           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
-           ${SRC_ROOT}/src/llm/llm_claude_parts.c
-           ${AUTH_DB_SOURCES}
-           ${SRC_ROOT}/src/core/prefix_tools.c
-           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+           ${SESSION_UNIT_TEST_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# A session's history after each kind of turn is the request a reload of its
+# conversation builds, as the Claude and Responses builders render them.
+dawn_add_unit_test(test_history_reload
+   SOURCES test_history_reload.c
+           ${SRC_ROOT}/src/core/text_input_dispatch.c
+           ${SRC_ROOT}/src/core/session_manager_llm.c
+           ${SRC_ROOT}/src/core/session_history.c
+           ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_claude_tools.c
+           ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
+           ${SRC_ROOT}/src/llm/llm_model_version.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
+           ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
+           ${SESSION_UNIT_TEST_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
 
 dawn_add_unit_test(test_satellite_remap

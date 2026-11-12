@@ -143,15 +143,19 @@ static void keep_reply_blocks(session_t *session, struct json_object *blocks) {
    }
 }
 
-/* A cancelled reply the caller saves anyway: its blocks, as the history would
- * have held them. */
-static void keep_cancelled_reply_blocks(session_t *session, const char *text) {
+/* The turn's reply into its history, with its blocks (the model's reasoning,
+ * and the answer as DAWN keeps it): the message a reload of its saved row
+ * rebuilds. */
+static void add_reply_to_history(session_t *session, const char *text) {
    struct json_object *blocks = NULL;
-   if (session->final_answer.blocks && text && *text) {
+   if (session->final_answer.blocks) {
       blocks = llm_turn_blocks_with_final_text(session->final_answer.blocks, text);
+      json_object_put(session->final_answer.blocks);
+      session->final_answer.blocks = NULL;
    }
-   json_object_put(session->final_answer.reply_blocks);
-   session->final_answer.reply_blocks = blocks;
+   keep_reply_blocks(session, blocks);
+   session_add_turn_assistant(session, text, blocks);
+   json_object_put(blocks);
 }
 
 /**
@@ -166,12 +170,19 @@ static int llm_call_prepare(session_t *session,
                             bool skip_add_message) {
    memset(ctx, 0, sizeof(*ctx));
 
-   /* Turn-start reset of the cancel-at-buzzer stash (SERVER_AUTHORITATIVE §9/G4):
-    * free any completed-but-cancelled reply a PRIOR turn stashed and no caller
-    * consumed (only the persist-owning reinvoke worker takes it; other surfaces
-    * leave it), so it can never persist onto the wrong row.  The current turn's
-    * stash, if any, is written later in llm_call_finalize. */
+   /* Turn-start reset of the cancel-at-buzzer stash (SERVER_AUTHORITATIVE §9/G4).
+    * Only a turn whose caller armed will_persist_turn stashes a reply (the WebUI
+    * text worker, the WebUI voice worker incl. Tier-2 satellites, and the live
+    * reinvoke), and each of them takes it whenever its dispatch returns NULL, so
+    * a stash left here was never saved although its reply is in the history.
+    * Freed so it can never persist onto the wrong row.  The current turn's stash,
+    * if any, is written later in llm_call_finalize (one call per dispatch). */
    if (session->cancelled_final_response != NULL) {
+      if (session->cancelled_final_response[0] != '\0') {
+         OLOG_WARNING("Session %u: a stopped reply kept in the history was never saved; "
+                      "dropping it",
+                      session->session_id);
+      }
       free(session->cancelled_final_response);
       session->cancelled_final_response = NULL;
    }
@@ -357,15 +368,20 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
        * persist PROMISE (will_persist_turn) AND the reply actually completed, the
        * streamed viewer already stood down from client-saving — a plain free would
        * lose a finished reply.  Finalize + stash it so the persist-owning caller
-       * (the reinvoke worker) can persist it post-dispatch.  Only under the promise:
-       * an ordinary barge-in (no will_persist) keeps today's abort semantics, so
-       * voice/messaging/local/research are byte-for-byte unaffected. */
+       * can persist it post-dispatch, and add it to the history as a finished
+       * turn's reply is: the caller saves it, so the next request carries it as
+       * a reload would.  Only under the promise (the WebUI text and voice
+       * workers, Tier-2 satellite voice, the live reinvoke): a caller that doesn't
+       * arm it (the local mic, Tier-1 satellites, jobs, messaging, the detached
+       * reinvoke, research) keeps today's abort semantics, byte-for-byte. */
       if (response && *response && atomic_load(&session->will_persist_turn)) {
          response_final_t fin;
          if (llm_response_finalize(session, response, &fin) == SUCCESS) {
             free(response);
+            if (*fin.text) {
+               add_reply_to_history(session, fin.text);
+            }
             session->cancelled_final_response = fin.text; /* caller takes + frees */
-            keep_cancelled_reply_blocks(session, fin.text);
          } else {
             /* It couldn't be made safe (out of memory): dropped, never kept
              * as it came (a reply is neutralized before it is kept). */
@@ -415,18 +431,9 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
       response = fin.text;  // take ownership of the clean buffer
    }
 
-   // Add assistant response to history (only if non-empty to avoid Claude API errors),
-   // with its blocks: the model's reasoning, and the answer as DAWN keeps it
+   // Add assistant response to history (only if non-empty to avoid Claude API errors)
    if (*response) {
-      struct json_object *blocks = NULL;
-      if (session->final_answer.blocks) {
-         blocks = llm_turn_blocks_with_final_text(session->final_answer.blocks, response);
-         json_object_put(session->final_answer.blocks);
-         session->final_answer.blocks = NULL;
-      }
-      keep_reply_blocks(session, blocks);
-      session_add_turn_assistant(session, response, blocks);
-      json_object_put(blocks);
+      add_reply_to_history(session, response);
    } else {
       OLOG_WARNING("Session %u: LLM returned empty response, not adding to history",
                    session->session_id);

@@ -682,8 +682,7 @@ void session_stamp_last_message_id(session_t *session, const char *role, int64_t
 
    /* The turn's own reply is stamped where it is, whatever was appended after
     * it.  Without one, an assistant row must be the final entry: when the reply never reached the
-    * history (e.g. finalized after a cancel), scanning back would stamp an OLDER reply with this
-    * id. */
+    * history, scanning back would stamp an OLDER reply with this id. */
    if (strcmp(role, "assistant") == 0 && session->turn_active && session->turn_reply) {
       if (!json_object_object_get_ex(session->turn_reply, "id", NULL)) {
          json_object_object_add(session->turn_reply, "id", json_object_new_int64(msg_id));
