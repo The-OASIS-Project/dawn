@@ -20,7 +20,9 @@
  * real schema and the real history loader: what DAWN wrote around outside
  * text (a turn context's outside items, a job's result) counts though the
  * loader leaves those rows out, and rows a compaction took from the live
- * history are read from the database.
+ * history are read from the database.  A history that lacks rows of its
+ * conversation (another session's, a compaction's) is replaced by the stored
+ * conversation before it is extracted.
  */
 
 #include <json-c/json.h>
@@ -32,9 +34,11 @@
 #include "auth/auth_db_messages.h"
 #include "config/dawn_config.h"
 #include "core/outside_kind.h"
+#include "llm/llm_third_party.h"
 #include "memory/memory_extraction_input.h"
 #include "memory/memory_history_loader.h"
 #include "memory/memory_note_guard.h"
+#include "tools/tool_registry.h"
 #include "unity.h"
 
 /* The note guard isn't under test: nothing is redacted. */
@@ -175,10 +179,269 @@ static void test_compacted_rows_are_read_from_the_database(void) {
    TEST_ASSERT_EQUAL_INT(OUTSIDE_CALENDAR, outside_of(ctx, json_tokener_parse(live)));
 }
 
+/* A message as a session's history holds it (@p id 0: none). */
+static struct json_object *hmsg(const char *role, const char *content, int64_t id) {
+   struct json_object *m = json_object_new_object();
+   json_object_object_add(m, "role", json_object_new_string(role));
+   json_object_object_add(m, "content", json_object_new_string(content));
+   if (id > 0) {
+      json_object_object_add(m, "id", json_object_new_int64(id));
+   }
+   return m;
+}
+
+static bool holds_id(struct json_object *hist, int64_t id) {
+   for (size_t i = 0; i < json_object_array_length(hist); i++) {
+      struct json_object *v = NULL;
+      if (json_object_object_get_ex(json_object_array_get_idx(hist, i), "id", &v) &&
+          json_object_get_int64(v) == id) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* Two sessions on one conversation: A's history has its own turns, not B's
+ * between them.  Extraction reads the stored conversation, B's rows included,
+ * up to the true end; from a cursor past B's rows A's history is whole. */
+static void test_history_without_another_sessions_rows_reads_the_database(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Shared", &conv));
+   const int64_t q1 = add(conv, &(conv_message_row_t){ .role = "user", .content = "a1" });
+   const int64_t a1 = add(conv, &(conv_message_row_t){ .role = "assistant", .content = "r1" });
+   const int64_t q2 = add(conv, &(conv_message_row_t){ .role = "user", .content = "b1" });
+   const int64_t a2 = add(conv, &(conv_message_row_t){ .role = "assistant", .content = "r2" });
+   const int64_t q3 = add(conv, &(conv_message_row_t){ .role = "user", .content = "a2" });
+   const int64_t a3 = add(conv, &(conv_message_row_t){ .role = "assistant", .content = "r3" });
+
+   struct json_object *a_hist = json_object_new_array();
+   json_object_array_add(a_hist, hmsg("user", "a1", q1));
+   json_object_array_add(a_hist, hmsg("assistant", "r1", a1));
+   json_object_array_add(a_hist, hmsg("user", "a2", q3));
+   json_object_array_add(a_hist, hmsg("assistant", "r3", a3));
+
+   struct json_object *whole = memory_extraction_history_whole(s_user, conv, a_hist, 0);
+   TEST_ASSERT_NOT_NULL(whole);
+   TEST_ASSERT_TRUE(whole != a_hist);
+   TEST_ASSERT_EQUAL_INT64(a3, memory_extraction_history_max_id(whole));
+   int kind = -1;
+   struct json_object *input = memory_extraction_build_input(s_user, conv, whole, 0, &kind);
+   TEST_ASSERT_NOT_NULL(input);
+   TEST_ASSERT_TRUE(holds_id(input, q2));
+   TEST_ASSERT_TRUE(holds_id(input, a2));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, kind);
+   json_object_put(input);
+   json_object_put(whole);
+
+   /* Past B's rows: nothing between the cursor and A's end is missing. */
+   whole = memory_extraction_history_whole(s_user, conv, a_hist, a2);
+   TEST_ASSERT_TRUE(whole == a_hist);
+   json_object_put(whole);
+   json_object_put(a_hist);
+}
+
+/* A history that holds every exchange row but not the rows a live history
+ * never carries an id for (a turn's tool call and result), request context,
+ * or DAWN's posts: used as it is.  So is any history of conversation 0. */
+static void test_complete_history_is_used_as_is(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Whole", &conv));
+   const int64_t q1 = add(conv, &(conv_message_row_t){ .role = "user", .content = "weather?" });
+   add(conv, &(conv_message_row_t){ .role = "user",
+                                    .kind = "turn_context",
+                                    .context_of = q1,
+                                    .content = "[M1 memory_fact told 2026-10-01] Lives in Ely" });
+   add(conv,
+       &(conv_message_row_t){ .role = "assistant",
+                              .content = "",
+                              .tool_calls = "[{\"id\":\"c1\",\"type\":\"function\",\"function\":"
+                                            "{\"name\":\"weather\",\"arguments\":\"{}\"}}]" });
+   add(conv, &(conv_message_row_t){ .role = "tool", .tool_call_id = "c1", .content = "Rain" });
+   const int64_t a1 = add(conv, &(conv_message_row_t){ .role = "assistant", .content = "Rain." });
+   add(conv, &(conv_message_row_t){ .role = "assistant",
+                                    .content = "Morning briefing.",
+                                    .unprompted = true });
+   const int64_t q2 = add(conv, &(conv_message_row_t){ .role = "user", .content = "thanks" });
+
+   struct json_object *hist = json_object_new_array();
+   json_object_array_add(hist, hmsg("user", "weather?", q1));
+   json_object_array_add(hist, hmsg("tool", "Rain", 0));
+   json_object_array_add(hist, hmsg("assistant", "Rain.", a1));
+   json_object_array_add(hist, hmsg("user", "thanks", q2));
+   struct json_object *whole = memory_extraction_history_whole(s_user, conv, hist, 0);
+   TEST_ASSERT_TRUE(whole == hist);
+   json_object_put(whole);
+
+   /* Conversation 0 (a voice session never saved): nothing to compare with. */
+   whole = memory_extraction_history_whole(s_user, 0, hist, 0);
+   TEST_ASSERT_TRUE(whole == hist);
+   json_object_put(whole);
+   json_object_put(hist);
+}
+
+/* An assistant row whose tool calls are an empty list is an answer like any
+ * other: a history without it reads the database.  A system row is not an
+ * exchange row: a history without it is whole. */
+static void test_empty_tool_calls_count_and_system_rows_do_not(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Rows", &conv));
+   const int64_t q1 = add(conv, &(conv_message_row_t){ .role = "user", .content = "one" });
+   add(conv, &(conv_message_row_t){ .role = "assistant", .content = "1", .tool_calls = "[]" });
+   add(conv, &(conv_message_row_t){ .role = "system", .content = "Be brief." });
+   const int64_t q2 = add(conv, &(conv_message_row_t){ .role = "user", .content = "two" });
+
+   struct json_object *hist = json_object_new_array();
+   json_object_array_add(hist, hmsg("user", "one", q1));
+   json_object_array_add(hist, hmsg("user", "two", q2));
+   struct json_object *whole = memory_extraction_history_whole(s_user, conv, hist, 0);
+   TEST_ASSERT_NOT_NULL(whole);
+   TEST_ASSERT_TRUE(whole != hist);
+   json_object_put(whole);
+   json_object_put(hist);
+
+   int64_t sys = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "System", &sys));
+   const int64_t q3 = add(sys, &(conv_message_row_t){ .role = "user", .content = "three" });
+   add(sys, &(conv_message_row_t){ .role = "system", .content = "Be brief." });
+   const int64_t a3 = add(sys, &(conv_message_row_t){ .role = "assistant", .content = "3" });
+   hist = json_object_new_array();
+   json_object_array_add(hist, hmsg("user", "three", q3));
+   json_object_array_add(hist, hmsg("assistant", "3", a3));
+   whole = memory_extraction_history_whole(s_user, sys, hist, 0);
+   TEST_ASSERT_TRUE(whole == hist);
+   json_object_put(whole);
+   json_object_put(hist);
+}
+
+/* A voice save's history: the rows a compaction took out, each with its own
+ * id, then the live ones: whole.  A WebUI history whose summary stands for
+ * rows: the stored conversation, those rows included. */
+static void test_compacted_history_reads_the_database_unless_it_kept_its_rows(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Long", &conv));
+   const int64_t q1 = add(conv, &(conv_message_row_t){ .role = "user", .content = "one" });
+   const int64_t a1 = add(conv, &(conv_message_row_t){ .role = "assistant", .content = "1" });
+   const int64_t q2 = add(conv, &(conv_message_row_t){ .role = "user", .content = "two" });
+   const int64_t a2 = add(conv, &(conv_message_row_t){ .role = "assistant", .content = "2" });
+
+   struct json_object *voice = json_object_new_array();
+   json_object_array_add(voice, hmsg("user", "one", q1));
+   json_object_array_add(voice, hmsg("assistant", "1", a1));
+   json_object_array_add(voice, hmsg("user", "two", q2));
+   json_object_array_add(voice, hmsg("assistant", "2", a2));
+   struct json_object *whole = memory_extraction_history_whole(s_user, conv, voice, 0);
+   TEST_ASSERT_TRUE(whole == voice);
+   json_object_put(whole);
+   json_object_put(voice);
+
+   char live[512];
+   snprintf(live, sizeof(live),
+            "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"_kind\":\"summary\",\"text\":"
+            "\"Earlier.\"},{\"type\":\"text\",\"text\":\"two\"}],\"id\":%lld},"
+            "{\"role\":\"assistant\",\"content\":\"2\",\"id\":%lld}]",
+            (long long)q2, (long long)a2);
+   struct json_object *webui = json_tokener_parse(live);
+   whole = memory_extraction_history_whole(s_user, conv, webui, 0);
+   TEST_ASSERT_NOT_NULL(whole);
+   TEST_ASSERT_TRUE(whole != webui);
+   TEST_ASSERT_TRUE(holds_id(whole, q1));
+   TEST_ASSERT_TRUE(holds_id(whole, a1));
+   json_object_put(whole);
+   json_object_put(webui);
+}
+
+/* A tool result another session's turn wrote, framed as someone else's text,
+ * past the cursor: the batch reads it though the history doesn't hold it. */
+static void test_another_sessions_framed_result_taints_the_batch(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Web", &conv));
+   char *page = llm_third_party_frame(TOOL_FRAME_WEB, "dawn-ctx-0a1b2c3d", "A page\n");
+   TEST_ASSERT_NOT_NULL(page);
+   const int64_t q1 = add(conv, &(conv_message_row_t){ .role = "user", .content = "hi" });
+   add(conv, &(conv_message_row_t){ .role = "tool", .tool_call_id = "w1", .content = page });
+   free(page);
+   const int64_t a1 = add(conv, &(conv_message_row_t){ .role = "assistant", .content = "Hello." });
+
+   char json[256];
+   snprintf(json, sizeof(json),
+            "[{\"role\":\"user\",\"content\":\"hi\",\"id\":%lld},"
+            "{\"role\":\"assistant\",\"content\":\"Hello.\",\"id\":%lld}]",
+            (long long)q1, (long long)a1);
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, outside_of(conv, json_tokener_parse(json)));
+}
+
+/* Each frame's stored result reads as the kind the live scan gives it, tagged
+ * or not; a result in no frame (an own tool's, a document read the user
+ * owns), or prose that only starts like a frame, reads clean. */
+static void test_stored_frames_agree_with_the_live_scan(void) {
+   static const char *const k_frames[] = TOOL_FRAMES_ALL;
+   for (size_t i = 0; i < sizeof(k_frames) / sizeof(k_frames[0]); i++) {
+      for (int tagged = 0; tagged < 2; tagged++) {
+         char *text = llm_third_party_frame(k_frames[i], tagged ? "dawn-ctx-0a1b2c3d" : NULL,
+                                            "Someone's words\n");
+         TEST_ASSERT_NOT_NULL(text);
+         char body[1024];
+         TEST_ASSERT_TRUE(snprintf(body, sizeof(body), "Results:\n%s", text) < (int)sizeof(body));
+         free(text);
+         const int live = llm_third_party_outside_kind(llm_third_party_present(body));
+         int64_t conv = 0;
+         TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Frame", &conv));
+         add(conv, &(conv_message_row_t){ .role = "tool", .tool_call_id = "c", .content = body });
+         int stored = -1;
+         TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_rows_outside(conv, s_user, 0, 0, &stored));
+         TEST_ASSERT_TRUE(outside_is_tainted(live));
+         TEST_ASSERT_EQUAL_INT_MESSAGE(live, stored, k_frames[i]);
+      }
+   }
+
+   static const char *const k_clean[] = {
+      "Noted: your locker is 314.",
+      "[Groceries] Eggs, milk",
+      "--- " TOOL_FRAME_WEB " ACCESSIBILITY ---\nGuidelines",
+   };
+   for (size_t i = 0; i < sizeof(k_clean) / sizeof(k_clean[0]); i++) {
+      TEST_ASSERT_NULL(llm_third_party_present(k_clean[i]));
+      int64_t conv = 0;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Own", &conv));
+      add(conv,
+          &(conv_message_row_t){ .role = "tool", .tool_call_id = "c", .content = k_clean[i] });
+      int stored = -1;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_rows_outside(conv, s_user, 0, 0, &stored));
+      TEST_ASSERT_EQUAL_INT_MESSAGE(OUTSIDE_NONE, stored, k_clean[i]);
+   }
+
+   /* A near-miss of the open line (a dash too many, a tag that isn't one,
+    * more text after it): the live scan finds no frame, the stored rule is
+    * looser and taints it.  Expected: the stored rule errs toward taint. */
+   static const char *const k_near[] = {
+      "--- " TOOL_FRAME_WEB " ----",
+      "--- " TOOL_FRAME_WEB " (dawn-ctx-zz",
+      "--- " TOOL_FRAME_WEB " --- and more on the line",
+   };
+   for (size_t i = 0; i < sizeof(k_near) / sizeof(k_near[0]); i++) {
+      char body[256];
+      TEST_ASSERT_TRUE(snprintf(body, sizeof(body), "Results:\n%s\nA page", k_near[i]) <
+                       (int)sizeof(body));
+      TEST_ASSERT_NULL_MESSAGE(llm_third_party_present(body), k_near[i]);
+      int64_t conv = 0;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Near", &conv));
+      add(conv, &(conv_message_row_t){ .role = "tool", .tool_call_id = "c", .content = body });
+      int stored = -1;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_rows_outside(conv, s_user, 0, 0, &stored));
+      TEST_ASSERT_EQUAL_INT_MESSAGE(OUTSIDE_WEB, stored, k_near[i]);
+   }
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_loaded_history_reads_request_context);
    RUN_TEST(test_compacted_rows_are_read_from_the_database);
    RUN_TEST(test_recalled_memories_are_not_outside);
+   RUN_TEST(test_history_without_another_sessions_rows_reads_the_database);
+   RUN_TEST(test_complete_history_is_used_as_is);
+   RUN_TEST(test_empty_tool_calls_count_and_system_rows_do_not);
+   RUN_TEST(test_compacted_history_reads_the_database_unless_it_kept_its_rows);
+   RUN_TEST(test_another_sessions_framed_result_taints_the_batch);
+   RUN_TEST(test_stored_frames_agree_with_the_live_scan);
    return UNITY_END();
 }

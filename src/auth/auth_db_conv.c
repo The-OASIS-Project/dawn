@@ -40,6 +40,7 @@
 #include "llm/llm_context_text.h"
 #include "logging.h"
 #include "prompts.h"
+#include "tools/tool_registry.h" /* the frame names CONV_TOOL_FRAME_KIND_SQL reads */
 #include "utils/string_utils.h"
 
 /* Weak no-op fallback for the WebUI "conversation list changed, update" broadcast.
@@ -1184,11 +1185,15 @@ int conv_db_rows_outside(int64_t conv_id,
    }
    *kind_out = OUTSIDE_NONE;
    AUTH_DB_LOCK_OR_FAIL();
-   /* kind-rows: request context is read for the outside text it put in front
-    * of the model, and only its kind is returned (extraction-time only). */
+   /* A framed tool result counts too: another session's isn't in the history
+    * the live scan reads. */
    /* clang-format off */
    static const char sql[] =
-       "SELECT k FROM (SELECT m.id, " CONV_ROW_OUTSIDE_KIND_SQL("m") " AS k FROM messages m "
+       "SELECT k FROM (SELECT m.id, COALESCE(" CONV_TOOL_FRAME_KIND_SQL("m") ", "
+       /* kind-rows: request context is read for the outside text it put in
+        * front of the model; only its kind is returned (extraction-time only).
+        * Keep within 4 lines above FROM messages: check_message_kind_confined.sh. */
+       CONV_ROW_OUTSIDE_KIND_SQL("m") ") AS k FROM messages m "
        "JOIN conversations c ON c.id = m.conversation_id WHERE m.conversation_id = ?1 AND "
        "c.user_id = ?2 AND m.id > ?3 AND (?4 <= 0 OR m.id <= ?4)) WHERE k IS NOT NULL "
        "ORDER BY id LIMIT 1";
@@ -1206,6 +1211,49 @@ int conv_db_rows_outside(int64_t conv_id,
    int rc = sqlite3_step(stmt);
    if (rc == SQLITE_ROW) {
       *kind_out = sqlite3_column_int(stmt, 0);
+      rc = SQLITE_DONE;
+   }
+   sqlite3_finalize(stmt);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
+int conv_db_exchange_rows_missing(int64_t conv_id,
+                                  int user_id,
+                                  int64_t after_id,
+                                  int64_t upto_id,
+                                  const char *ids_json,
+                                  int *missing_out,
+                                  int64_t *first_out) {
+   if (!ids_json || !missing_out || !first_out) {
+      return AUTH_DB_FAILURE;
+   }
+   *missing_out = 0;
+   *first_out = 0;
+   AUTH_DB_LOCK_OR_FAIL();
+   /* Extraction-time only, like conv_db_rows_outside. */
+   static const char sql[] =
+       "SELECT COUNT(*), COALESCE(MIN(m.id), 0) FROM messages m "
+       "JOIN conversations c ON c.id = m.conversation_id WHERE m.conversation_id = ?1 AND "
+       "c.user_id = ?2 AND m.id > ?3 AND m.id <= ?4 AND m.kind IS NULL AND "
+       "m.role IN ('user', 'assistant') AND COALESCE(m.tool_calls, '') IN ('', '[]') AND "
+       "m.id NOT IN (SELECT message_id FROM message_unprompted) AND "
+       "m.id NOT IN (SELECT value FROM json_each(?5) WHERE value IS NOT NULL)";
+   sqlite3_stmt *stmt = NULL;
+   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+      OLOG_WARNING("conv_db: prepare exchange_rows_missing failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(stmt, 1, conv_id);
+   sqlite3_bind_int(stmt, 2, user_id);
+   sqlite3_bind_int64(stmt, 3, after_id);
+   sqlite3_bind_int64(stmt, 4, upto_id);
+   sqlite3_bind_text(stmt, 5, ids_json, -1, SQLITE_TRANSIENT);
+   int rc = sqlite3_step(stmt);
+   if (rc == SQLITE_ROW) {
+      *missing_out = sqlite3_column_int(stmt, 0);
+      *first_out = sqlite3_column_int64(stmt, 1);
       rc = SQLITE_DONE;
    }
    sqlite3_finalize(stmt);

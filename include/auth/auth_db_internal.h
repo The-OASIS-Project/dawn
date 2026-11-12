@@ -993,6 +993,52 @@ _Static_assert(OUTSIDE_RESEARCH == 3 && OUTSIDE_DOCUMENT == 5 && OUTSIDE_OTHER =
                    OUTSIDE_CALENDAR == 9,
                "CONV_ROW_OUTSIDE_KIND_SQL writes these outside kinds");
 
+/* Whether stored row @p m's content holds frame @p name's opening line as
+ * llm_third_party_frame writes it ("--- NAME ---" or "--- NAME (dawn-ctx-...",
+ * at the start of a line), the line llm_third_party_present finds.  The
+ * neutralizer defuses an imitation in the text itself, so one found is
+ * DAWN's own.
+ *
+ * Deliberately looser than llm_third_party_present, which also wants the
+ * tag's 8 hex digits and its closing ")" and " ---" ending the line: a
+ * near-miss line ("--- NAME ----") is tainted here and clean live, so the
+ * stored rule errs toward taint.
+ *
+ * The v113 migration's backfill uses this too: a change here also changes
+ * what an install upgrading from before v113 marks, so check
+ * auth_db_migrations_v113.c when editing it. */
+/* clang-format off */
+#define CONV_FRAME_OPEN_SQL(name) "'--- " name " ---'"
+#define CONV_FRAME_OPEN_TAGGED_SQL(name) "'--- " name " (dawn-ctx-'"
+#define CONV_FRAMED_SQL(m, name) \
+   "(substr(" m ".content, 1, length(" CONV_FRAME_OPEN_SQL(name) ")) = " \
+   CONV_FRAME_OPEN_SQL(name) " OR substr(" m ".content, 1, length(" \
+   CONV_FRAME_OPEN_TAGGED_SQL(name) ")) = " CONV_FRAME_OPEN_TAGGED_SQL(name) " " \
+   "OR instr(" m ".content, char(10) || " CONV_FRAME_OPEN_SQL(name) ") > 0 " \
+   "OR instr(" m ".content, char(10) || " CONV_FRAME_OPEN_TAGGED_SQL(name) ") > 0)"
+
+/* The outside kind of stored tool result @p m that DAWN framed as someone
+ * else's text, NULL when it isn't one: the live scan's rule
+ * (memory_extraction_input.c, result_outside), the frames of TOOL_FRAMES_ALL
+ * in their order with llm_third_party_outside_kind's kinds.  An unframed
+ * result is judged by its call, which only the live scan reads.  The frame
+ * names come from tools/tool_registry.h, included where this is used.  A row
+ * with no line starting "--- " is no frame's, so it costs one scan; the frames
+ * are then tried in order, the first found winning, as the live scan does. */
+#define CONV_TOOL_FRAME_KIND_SQL(m) \
+   "(CASE WHEN " m ".role != 'tool' OR " m ".kind IS NOT NULL THEN NULL " \
+   "WHEN NOT (substr(" m ".content, 1, 4) = '--- ' OR " \
+   "instr(" m ".content, char(10) || '--- ') > 0) THEN NULL " \
+   "WHEN " CONV_FRAMED_SQL(m, TOOL_FRAME_EMAIL) " THEN 2 " \
+   "WHEN " CONV_FRAMED_SQL(m, TOOL_FRAME_WEB) " THEN 1 " \
+   "WHEN " CONV_FRAMED_SQL(m, TOOL_FRAME_DOCUMENT) " THEN 5 " \
+   "WHEN " CONV_FRAMED_SQL(m, TOOL_FRAME_CALENDAR) " THEN 9 " \
+   "WHEN " CONV_FRAMED_SQL(m, TOOL_FRAME_AGENT) " THEN 6 END)"
+/* clang-format on */
+_Static_assert(OUTSIDE_WEB == 1 && OUTSIDE_EMAIL == 2 && OUTSIDE_DOCUMENT == 5 &&
+                   OUTSIDE_MCP == 6 && OUTSIDE_CALENDAR == 9,
+               "CONV_TOOL_FRAME_KIND_SQL writes these outside kinds");
+
 /* The SET clause marking a conversations row extracted up to now (what was
  * learned so far: forgetting, delete-all), and extracting it again from the
  * start (the reextract wipe) beginning there too.  The rows it passes are

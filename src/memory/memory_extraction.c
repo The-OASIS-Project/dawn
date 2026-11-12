@@ -746,8 +746,8 @@ static void *extraction_thread(void *arg) {
             OLOG_WARNING("memory_extraction: conv %lld: cursor not advanced",
                          (long long)ctx->conversation_id);
          }
-         OLOG_INFO("memory_extraction: updated high-water mark to %d (msg_id=%lld) for conv %ld",
-                   ctx->message_count, (long long)prov.msg_id_end, (long)ctx->conversation_id);
+         OLOG_INFO("memory_extraction: updated high-water mark to msg_id=%lld for conv %ld",
+                   (long long)prov.msg_id_end, (long)ctx->conversation_id);
       }
 
       /* Run fact pruning if enabled */
@@ -978,20 +978,37 @@ static int trigger_extraction(int user_id,
       ctx->fallback = *fallback;
    }
 
+   /* A session's history may lack rows of its conversation (another
+    * session's, a compaction's): then the stored conversation is read, so the
+    * cursor never passes a row nothing read. */
+   struct json_object *history = memory_extraction_history_whole(user_id, conversation_id,
+                                                                 conversation_history, last_msg_id);
+   if (!history) {
+      free(ctx);
+      extraction_slot_release(user_id);
+      return 0;
+   }
+
    /* The messages to extract, verified to belong to conversation_id (see
     * memory_extraction_build_input).  NULL: refused or out of memory; either
     * way nothing is extracted and memory_recovery picks up anything eligible. */
    int batch_outside = OUTSIDE_NONE;
-   struct json_object *filtered = memory_extraction_build_input(user_id, conversation_id,
-                                                                conversation_history, last_msg_id,
-                                                                &batch_outside);
+   struct json_object *filtered = memory_extraction_build_input(user_id, conversation_id, history,
+                                                                last_msg_id, &batch_outside);
    ctx->outside = outside_combine(floor, batch_outside);
-   ctx->checked_max_id = memory_extraction_history_max_id(conversation_history);
+   ctx->checked_max_id = memory_extraction_history_max_id(history);
+   json_object_put(history);
    if (!filtered) {
       free(ctx);
       extraction_slot_release(user_id);
       return 0;
    }
+   /* The batch is the rows being sent, not the caller's count less the stored
+    * one: those two are in different units when the history isn't the stored
+    * conversation (a shared or compacted one), and their difference can be
+    * negative. */
+   new_messages = (int)json_object_array_length(filtered);
+   ctx->new_message_count = new_messages;
    /* Nothing the user said is new (only DAWN's own posts, say): mark it done
     * rather than send the model an empty conversation.  Only as far as the
     * history checked: a reply arriving since then is still to be read. */
@@ -1001,8 +1018,8 @@ static int trigger_extraction(int user_id,
       /* The rows passed may still have read outside text (DAWN's posts): the
        * floor takes it with the cursor. */
       const int outside = ctx->outside;
+      const int64_t checked_id = ctx->checked_max_id;
       free(ctx);
-      const int64_t checked_id = memory_extraction_history_max_id(conversation_history);
       if (conversation_id > 0 && checked_id > last_msg_id &&
           memory_db_set_last_extracted(conversation_id, message_count, checked_id, outside) !=
               MEMORY_DB_SUCCESS) {

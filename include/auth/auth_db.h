@@ -2168,8 +2168,10 @@ int conv_db_messages_unprompted(int user_id,
  *
  * By CONV_ROW_OUTSIDE_KIND_SQL: DAWN's posts, a turn context's outside items,
  * a job's result, an attached document, a device's data, request-context
- * rows included (the history loaders leave those out).  Tool results aren't
- * judged here (the live scan judges them).
+ * rows included (the history loaders leave those out); and by
+ * CONV_TOOL_FRAME_KIND_SQL a tool result DAWN framed as someone else's text.
+ * An unframed tool result isn't judged here (the live scan judges it by its
+ * call).
  *
  * @param conv_id  Conversation (owned by @p user_id)
  * @param user_id  Owner
@@ -2183,6 +2185,38 @@ int conv_db_rows_outside(int64_t conv_id,
                          int64_t after_id,
                          int64_t upto_id,
                          int *kind_out);
+
+/**
+ * @brief The exchange rows of a conversation that a history lacks
+ *
+ * The rows in (@p after_id, @p upto_id] whose ids aren't in @p ids_json, of
+ * these only: ordinary user and assistant rows, typed, spoken or sent over a
+ * messaging channel alike, with no kind (no request context), no tool calls
+ * (an empty list counts as none), and not one of DAWN's unprompted posts.
+ * Such a row is missing when another session wrote it into the conversation,
+ * or a compaction took it out of a live history (extraction-time only).
+ *
+ * Tool-call and tool-result rows are left out: a live history's copies of
+ * them carry no id, so counting them would report every tool turn missing.
+ * The narration on a tool-call row is therefore not guarded.  A null in
+ * @p ids_json is ignored, so it can only make a row count as missing.
+ *
+ * @param conv_id     Conversation (owned by @p user_id)
+ * @param user_id     Owner
+ * @param after_id    Rows with a larger id are read
+ * @param upto_id     ... up to and including this id
+ * @param ids_json    JSON array of the ids the history holds
+ * @param missing_out Receives how many are missing
+ * @param first_out   Receives the lowest missing id (0 when none)
+ * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ */
+int conv_db_exchange_rows_missing(int64_t conv_id,
+                                  int user_id,
+                                  int64_t after_id,
+                                  int64_t upto_id,
+                                  const char *ids_json,
+                                  int *missing_out,
+                                  int64_t *first_out);
 
 /**
  * Sentinel value for "no anchor recorded" on conversations.anchor_date.
