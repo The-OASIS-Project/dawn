@@ -34,9 +34,11 @@
 #include "auth/auth_db_messages.h"
 #include "config/dawn_config.h"
 #include "core/outside_kind.h"
+#include "llm/llm_third_party.h"
 #include "memory/memory_extraction_input.h"
 #include "memory/memory_history_loader.h"
 #include "memory/memory_note_guard.h"
+#include "tools/tool_registry.h"
 #include "unity.h"
 
 /* The note guard isn't under test: nothing is redacted. */
@@ -348,6 +350,88 @@ static void test_compacted_history_reads_the_database_unless_it_kept_its_rows(vo
    json_object_put(webui);
 }
 
+/* A tool result another session's turn wrote, framed as someone else's text,
+ * past the cursor: the batch reads it though the history doesn't hold it. */
+static void test_another_sessions_framed_result_taints_the_batch(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Web", &conv));
+   char *page = llm_third_party_frame(TOOL_FRAME_WEB, "dawn-ctx-0a1b2c3d", "A page\n");
+   TEST_ASSERT_NOT_NULL(page);
+   const int64_t q1 = add(conv, &(conv_message_row_t){ .role = "user", .content = "hi" });
+   add(conv, &(conv_message_row_t){ .role = "tool", .tool_call_id = "w1", .content = page });
+   free(page);
+   const int64_t a1 = add(conv, &(conv_message_row_t){ .role = "assistant", .content = "Hello." });
+
+   char json[256];
+   snprintf(json, sizeof(json),
+            "[{\"role\":\"user\",\"content\":\"hi\",\"id\":%lld},"
+            "{\"role\":\"assistant\",\"content\":\"Hello.\",\"id\":%lld}]",
+            (long long)q1, (long long)a1);
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, outside_of(conv, json_tokener_parse(json)));
+}
+
+/* Each frame's stored result reads as the kind the live scan gives it, tagged
+ * or not; a result in no frame (an own tool's, a document read the user
+ * owns), or prose that only starts like a frame, reads clean. */
+static void test_stored_frames_agree_with_the_live_scan(void) {
+   static const char *const k_frames[] = TOOL_FRAMES_ALL;
+   for (size_t i = 0; i < sizeof(k_frames) / sizeof(k_frames[0]); i++) {
+      for (int tagged = 0; tagged < 2; tagged++) {
+         char *text = llm_third_party_frame(k_frames[i], tagged ? "dawn-ctx-0a1b2c3d" : NULL,
+                                            "Someone's words\n");
+         TEST_ASSERT_NOT_NULL(text);
+         char body[1024];
+         TEST_ASSERT_TRUE(snprintf(body, sizeof(body), "Results:\n%s", text) < (int)sizeof(body));
+         free(text);
+         const int live = llm_third_party_outside_kind(llm_third_party_present(body));
+         int64_t conv = 0;
+         TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Frame", &conv));
+         add(conv, &(conv_message_row_t){ .role = "tool", .tool_call_id = "c", .content = body });
+         int stored = -1;
+         TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_rows_outside(conv, s_user, 0, 0, &stored));
+         TEST_ASSERT_TRUE(outside_is_tainted(live));
+         TEST_ASSERT_EQUAL_INT_MESSAGE(live, stored, k_frames[i]);
+      }
+   }
+
+   static const char *const k_clean[] = {
+      "Noted: your locker is 314.",
+      "[Groceries] Eggs, milk",
+      "--- " TOOL_FRAME_WEB " ACCESSIBILITY ---\nGuidelines",
+   };
+   for (size_t i = 0; i < sizeof(k_clean) / sizeof(k_clean[0]); i++) {
+      TEST_ASSERT_NULL(llm_third_party_present(k_clean[i]));
+      int64_t conv = 0;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Own", &conv));
+      add(conv,
+          &(conv_message_row_t){ .role = "tool", .tool_call_id = "c", .content = k_clean[i] });
+      int stored = -1;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_rows_outside(conv, s_user, 0, 0, &stored));
+      TEST_ASSERT_EQUAL_INT_MESSAGE(OUTSIDE_NONE, stored, k_clean[i]);
+   }
+
+   /* A near-miss of the open line (a dash too many, a tag that isn't one,
+    * more text after it): the live scan finds no frame, the stored rule is
+    * looser and taints it.  Expected: the stored rule errs toward taint. */
+   static const char *const k_near[] = {
+      "--- " TOOL_FRAME_WEB " ----",
+      "--- " TOOL_FRAME_WEB " (dawn-ctx-zz",
+      "--- " TOOL_FRAME_WEB " --- and more on the line",
+   };
+   for (size_t i = 0; i < sizeof(k_near) / sizeof(k_near[0]); i++) {
+      char body[256];
+      TEST_ASSERT_TRUE(snprintf(body, sizeof(body), "Results:\n%s\nA page", k_near[i]) <
+                       (int)sizeof(body));
+      TEST_ASSERT_NULL_MESSAGE(llm_third_party_present(body), k_near[i]);
+      int64_t conv = 0;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Near", &conv));
+      add(conv, &(conv_message_row_t){ .role = "tool", .tool_call_id = "c", .content = body });
+      int stored = -1;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_rows_outside(conv, s_user, 0, 0, &stored));
+      TEST_ASSERT_EQUAL_INT_MESSAGE(OUTSIDE_WEB, stored, k_near[i]);
+   }
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_loaded_history_reads_request_context);
@@ -357,5 +441,7 @@ int main(void) {
    RUN_TEST(test_complete_history_is_used_as_is);
    RUN_TEST(test_empty_tool_calls_count_and_system_rows_do_not);
    RUN_TEST(test_compacted_history_reads_the_database_unless_it_kept_its_rows);
+   RUN_TEST(test_another_sessions_framed_result_taints_the_batch);
+   RUN_TEST(test_stored_frames_agree_with_the_live_scan);
    return UNITY_END();
 }

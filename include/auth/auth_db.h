@@ -2131,8 +2131,10 @@ int conv_db_messages_unprompted(int user_id,
  *
  * By CONV_ROW_OUTSIDE_KIND_SQL: DAWN's posts, a turn context's outside items,
  * a job's result, an attached document, a device's data, request-context
- * rows included (the history loaders leave those out).  Tool results aren't
- * judged here (the live scan judges them).
+ * rows included (the history loaders leave those out); and by
+ * CONV_TOOL_FRAME_KIND_SQL a tool result DAWN framed as someone else's text.
+ * An unframed tool result isn't judged here (the live scan judges it by its
+ * call).
  *
  * @param conv_id  Conversation (owned by @p user_id)
  * @param user_id  Owner

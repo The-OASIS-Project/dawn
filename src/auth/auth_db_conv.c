@@ -40,6 +40,7 @@
 #include "llm/llm_context_text.h"
 #include "logging.h"
 #include "prompts.h"
+#include "tools/tool_registry.h" /* the frame names CONV_TOOL_FRAME_KIND_SQL reads */
 #include "utils/string_utils.h"
 
 /* Weak no-op fallback for the WebUI "conversation list changed, update" broadcast.
@@ -1184,11 +1185,15 @@ int conv_db_rows_outside(int64_t conv_id,
    }
    *kind_out = OUTSIDE_NONE;
    AUTH_DB_LOCK_OR_FAIL();
-   /* kind-rows: request context is read for the outside text it put in front
-    * of the model, and only its kind is returned (extraction-time only). */
+   /* A framed tool result counts too: another session's isn't in the history
+    * the live scan reads. */
    /* clang-format off */
    static const char sql[] =
-       "SELECT k FROM (SELECT m.id, " CONV_ROW_OUTSIDE_KIND_SQL("m") " AS k FROM messages m "
+       "SELECT k FROM (SELECT m.id, COALESCE(" CONV_TOOL_FRAME_KIND_SQL("m") ", "
+       /* kind-rows: request context is read for the outside text it put in
+        * front of the model; only its kind is returned (extraction-time only).
+        * Keep within 4 lines above FROM messages: check_message_kind_confined.sh. */
+       CONV_ROW_OUTSIDE_KIND_SQL("m") ") AS k FROM messages m "
        "JOIN conversations c ON c.id = m.conversation_id WHERE m.conversation_id = ?1 AND "
        "c.user_id = ?2 AND m.id > ?3 AND (?4 <= 0 OR m.id <= ?4)) WHERE k IS NOT NULL "
        "ORDER BY id LIMIT 1";
