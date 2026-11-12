@@ -38,7 +38,8 @@
 #define ASK_MAX 4096
 #define POST_MAX 1024
 
-static int64_t g_parent = 7;
+/* Read by the report threads, which the tests never join. */
+static _Atomic int64_t g_parent = 7;
 static bool g_injection;
 static const char *g_take = "It fixed it and the tests pass.";
 static atomic_int g_posts;
@@ -57,7 +58,7 @@ int conv_db_job_get(int64_t conv_id, int user_id, job_record_t *out) {
    memset(out, 0, sizeof(*out));
    out->id = conv_id;
    out->user_id = user_id;
-   out->parent_id = g_parent;
+   out->parent_id = atomic_load(&g_parent);
    snprintf(out->title, sizeof(out->title), "fix the oracle");
    return AUTH_DB_SUCCESS;
 }
@@ -146,7 +147,7 @@ static void report(const char *kind, const char *data_json, int expect_posts) {
    TEST_ASSERT_FALSE(atomic_load(&g_streamed_at_end));
    TEST_ASSERT_FALSE(atomic_load(&g_no_persona));
    if (expect_posts > 0) {
-      TEST_ASSERT_EQUAL_INT64(g_parent, atomic_load(&g_posted_to));
+      TEST_ASSERT_EQUAL_INT64(atomic_load(&g_parent), atomic_load(&g_posted_to));
    }
 }
 
@@ -158,7 +159,7 @@ static const char *k_done = "{\"summary\":\"Did it.\",\"branch\":\"agent/x\","
                             "{\"command\":\"ctest -L ci\",\"ok\":false}]}";
 
 void setUp(void) {
-   g_parent = 7;
+   atomic_store(&g_parent, 7);
    g_injection = false;
    g_take = "It fixed it and the tests pass.";
    g_post[0] = g_ask[0] = '\0';
@@ -244,7 +245,7 @@ static void test_other_ends(void) {
 
 /* A job with no conversation to report into: nothing posted. */
 static void test_no_parent(void) {
-   g_parent = 0;
+   atomic_store(&g_parent, 0);
    report("completed", k_done, 0);
 }
 
