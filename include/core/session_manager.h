@@ -649,10 +649,13 @@ typedef struct session {
    // the completed response and returns NULL), the finalized text is stashed HERE
    // instead of freed, so the persist-owning caller can still persist it post-
    // dispatch (the browser already stood down on will_persist → a naive free would
-   // lose the reply from the DB).  Owned by the session; the consuming caller takes
-   // it (sets NULL) + frees.  Cleared at turn start (llm_call_prepare) and freed at
-   // session teardown.  Single-writer per turn on the dispatch thread, read by the
-   // same worker after dispatch returns (turn-queue serialized) — no lock needed.
+   // lose the reply from the DB).  The reply is in the turn's history, as a
+   // completed reply is; the caller that armed will_persist_turn takes the stash
+   // and saves it as it saves a completed reply.  Owned by the session; the
+   // consuming caller takes it (sets NULL) + frees.  Cleared at turn start
+   // (llm_call_prepare) and freed at session teardown.  Single-writer per turn on
+   // the dispatch thread, read by the same worker after dispatch returns
+   // (turn-queue serialized) — no lock needed.
    char *cancelled_final_response;
 
    // The final answer's stash, written by the tool loop at every text-returning path
