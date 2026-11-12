@@ -177,6 +177,16 @@ void pending_slots_drop(const pending_slots_t *slots,
 /** Clear one slot and the struct it heads. */
 void pending_slots_clear(const pending_slots_t *slots, pending_slot_t *slot);
 
+/**
+ * @brief A live item (not expired) staged in session @p session_id, of @p kind
+ *        (any kind when @p kind < 0), or NULL.  The caller holds the table's
+ *        mutex while it uses the result.
+ */
+pending_slot_t *pending_slots_live(const pending_slots_t *slots,
+                                   uint32_t session_id,
+                                   int kind,
+                                   time_t now);
+
 /** Seconds @p slot has left before the table's TTL expires it, at @p now. */
 int pending_slots_valid_for(const pending_slots_t *slots, const pending_slot_t *slot, time_t now);
 

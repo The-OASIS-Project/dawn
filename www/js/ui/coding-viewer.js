@@ -45,6 +45,7 @@
    let ui = {};
    let job = 0;
    let opener = null;
+   let openerRoot = null; /* where the opener lives: a rebuilt one is looked for there */
    let escToken = null;
    let cache = new Map(); /* 'path|view' -> the gateway's answer, for this open */
    let nonceSeq = 0;
@@ -190,6 +191,8 @@
       if (dlg.open) close();
       job = Number(jobId) || 0;
       opener = from || document.activeElement;
+      openerRoot =
+         opener && opener.closest ? opener.closest('#jobs-popover, #llm-controls-grid') : null;
       cache = new Map();
       current = null;
       view = 'diff';
@@ -225,7 +228,9 @@
       const again =
          opener && opener.isConnected
             ? opener
-            : document.querySelector('[data-action="changes"][data-job-id="' + String(job) + '"]');
+            : (openerRoot || document).querySelector(
+                 '[data-action="changes"][data-job-id="' + String(job) + '"]'
+              );
       if (again) again.focus();
    }
 

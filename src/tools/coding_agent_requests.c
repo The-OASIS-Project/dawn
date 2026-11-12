@@ -470,13 +470,7 @@ char *coding_requests_confirm_approve(struct json_object *details,
 
 /* Session @p sid's live approval (caller holds s_pending_mutex), or NULL. */
 static const cr_pending_t *approval_live_locked(uint32_t sid, time_t now) {
-   for (int i = 0; i < CR_PENDING_MAX; i++) {
-      const pending_slot_t *h = &s_pending[i].hdr;
-      if (h->active && h->origin.session_id == sid && now - h->made_at <= s_pending_slots.ttl_sec) {
-         return &s_pending[i];
-      }
-   }
-   return NULL;
+   return (const cr_pending_t *)pending_slots_live(&s_pending_slots, sid, -1, now);
 }
 
 uint32_t coding_requests_stage_unasked(session_t *session,

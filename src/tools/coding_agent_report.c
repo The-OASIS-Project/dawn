@@ -60,7 +60,10 @@
 static atomic_bool s_stopping;
 static atomic_int s_in_flight;
 static pthread_mutex_t s_take_mutex = PTHREAD_MUTEX_INITIALIZER;
-static session_t *s_take; /* the take running now, if any (stop cancels it) */
+/* The takes being written now (stop cancels them): one per job that ended.
+ * More at once than this aren't cancelled at stop, only waited for. */
+#define CR_TAKES_MAX 8
+static session_t *s_takes[CR_TAKES_MAX];
 
 typedef struct {
    int64_t job;
@@ -242,8 +245,14 @@ static char *write_take(const cr_work_t *w, const job_record_t *rec) {
       return NULL;
    }
    atomic_store(&s->stream_conversation_id, 0); /* nothing streams into the job's own panel */
+   int slot = -1;
    pthread_mutex_lock(&s_take_mutex);
-   s_take = s;
+   for (int i = 0; i < CR_TAKES_MAX && slot < 0; i++) {
+      if (s_takes[i] == NULL) {
+         slot = i;
+         s_takes[i] = s;
+      }
+   }
    pthread_mutex_unlock(&s_take_mutex);
 
    char persona[LLM_PERSONA_MAX];
@@ -269,9 +278,11 @@ static char *write_take(const cr_work_t *w, const job_record_t *rec) {
    }
    strbuf_free(&sys);
    strbuf_free(&ask);
-   pthread_mutex_lock(&s_take_mutex);
-   s_take = NULL;
-   pthread_mutex_unlock(&s_take_mutex);
+   if (slot >= 0) {
+      pthread_mutex_lock(&s_take_mutex);
+      s_takes[slot] = NULL; /* only its own */
+      pthread_mutex_unlock(&s_take_mutex);
+   }
    job_manager_end(s);
    return take;
 }
@@ -363,8 +374,10 @@ void coding_report_job_end(int64_t job,
 void coding_report_stop(void) {
    atomic_store(&s_stopping, true);
    pthread_mutex_lock(&s_take_mutex);
-   if (s_take != NULL) {
-      session_cancel_turn(s_take); /* its thread then posts the fixed line */
+   for (int i = 0; i < CR_TAKES_MAX; i++) {
+      if (s_takes[i] != NULL) {
+         session_cancel_turn(s_takes[i]); /* its thread then posts the fixed line */
+      }
    }
    pthread_mutex_unlock(&s_take_mutex);
    for (int waited = 0; atomic_load(&s_in_flight) > 0 && waited < CR_STOP_WAIT_MS;

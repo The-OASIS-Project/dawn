@@ -1,4 +1,21 @@
 /*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
  * DawnCodingEvents — a coding job in the WebUI: its trail (the agent_step /
  * agent_request / agent_end events DawnAgentEvents hands over) and the card
  * that answers what the job waits on.
@@ -78,7 +95,7 @@
 
    function agentSelect(label, value) {
       const wrap = document.createDocumentFragment();
-      wrap.appendChild(elem('label', 'llm-label', label));
+      wrap.appendChild(elem('span', 'llm-label', label));
       const sel = elem('select', 'llm-agent-select');
       sel.disabled = true;
       sel.setAttribute('aria-label', label + ' ' + value);
@@ -119,11 +136,8 @@
             );
             view.appendChild(note);
             if (typeof DawnCodingViewer !== 'undefined') {
-               const btn = elem(
-                  'button',
-                  'coding-card-btn secondary llm-agent-changes',
-                  'View changes'
-               );
+               const btn = elem('button', 'jobs-open-btn llm-agent-changes', 'View changes');
+               btn.setAttribute('aria-label', 'Changes made by coding job #' + attachedJob);
                btn.type = 'button';
                btn.dataset.jobId = String(attachedJob);
                btn.dataset.action = 'changes';
@@ -146,6 +160,14 @@
       if (input) {
          if (on && savedPlaceholder === null) savedPlaceholder = input.placeholder;
          input.readOnly = on;
+         /* A placeholder doesn't show over a draft: say why it's locked anyway. */
+         if (on) {
+            input.title = AGENT_NOTE;
+            input.setAttribute('aria-description', AGENT_NOTE);
+         } else {
+            input.removeAttribute('title');
+            input.removeAttribute('aria-description');
+         }
          input.placeholder = on ? AGENT_NOTE : savedPlaceholder || input.placeholder;
          input.classList.toggle('agent-locked', on);
          if (!on) savedPlaceholder = null;
@@ -551,13 +573,11 @@
             );
          case 'merged': {
             const n = Number(p.unpublished) || 0;
-            return (
-               'Pull request merged; ' +
-               n +
-               ' newer ' +
-               (n === 1 ? 'commit' : 'commits') +
-               ' not published'
-            );
+            const d = Number(p.uncommitted) || 0;
+            const left = [];
+            if (n) left.push(n + ' newer ' + (n === 1 ? 'commit' : 'commits') + ' not published');
+            if (d) left.push(d + ' changed ' + (d === 1 ? 'file' : 'files') + ' never committed');
+            return 'Pull request merged; ' + (left.join(', ') || 'work left over');
          }
          case 'closed':
             return p.reason === 'merged'

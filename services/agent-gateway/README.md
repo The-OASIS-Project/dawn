@@ -26,14 +26,17 @@ client (DAWN)  --MCP + bearer token-->  agent-gateway (user dawn, 127.0.0.1:9760
   clone, the repo's tool cache (`~/.cache/repo/<repo>`: downloads and build caches, such as
   pip, npm, ccache and arduino-cli's cores, kept for that repo's later tasks and hidden from
   other repos' tasks) and `/tmp` (the gateway's own: its unit has `PrivateTmp`,
-  so nothing there is the host's, and it empties when the gateway restarts). Read and edit tools are held to the same places by permission rules. Claude Code itself
+  so nothing there is the host's, and it empties when the gateway restarts). Read and edit tools are
+  held to the same places by permission rules. Claude Code itself
   is the copy the gateway's Python SDK ships, root-owned, with self-update off.
 - **Fixed rules** (`agent_gateway/floor.json`) are the only settings the agent runs with: the
   gateway passes them with every run and loads none from the repo or the agent's home, so a
   repo's `.claude/` settings can't pre-approve calls, run hooks, start MCP servers or turn on
   bypass mode. Nothing is installed machine-wide (a managed-settings file would govern every
-  Claude Code session on the machine). The sandbox hides the agent's credentials and other
-  tasks' clones. A repo's `CLAUDE.md` still applies: the gateway reads it from its mirror, as the
+  Claude Code session on the machine). The sandbox hides the agent's credentials, other
+  tasks' clones, the gateway's own files (the mirrors) and DAWN's data (`[paths] deny_read`,
+  `/var/lib/dawn` by default), from its shell commands as well as its file tools. A repo's
+  `CLAUDE.md` still applies: the gateway reads it from its mirror, as the
   base branch has it, and adds it to the agent's instructions; a repo without one gets
   `agent_gateway/CLAUDE.template.md`.
 - **Git the agent can't steer.** A repo's config can make git run programs, and the agent controls
@@ -123,8 +126,9 @@ as a standard-library script on the installed interpreter: root never runs code 
 3. Run the gateway's tests on it, then a live check (`agent_gateway/canary.py`): one real task
    on a throwaway repo built to misbehave, run as the gateway user. It must fix, test and commit
    with no prompts; a blocked host must stop the run as a request; and the agent must show the
-   sandbox refusing loopback, its own credentials and a write outside its clone (an error it
-   reports, not just a missing answer); the repo's hook and MCP server must never run. It costs
+   sandbox refusing loopback, its own credentials, the gateway's files and a write outside its
+   clone (an error it reports, not just a missing answer); the repo's hook and MCP server must never
+   run. It costs
    one small task (about $0.20) and runs only when there is a new version.
 4. If both pass and no task is running, point `current` at it and restart the gateway; if the
    gateway doesn't come back, point back. A version that fails a check, or that the gateway
@@ -211,7 +215,8 @@ git fetch /var/lib/dawn-gateway/mirrors/<repo>.git refs/agent/<id>:agent/<id>
 ```
 
 A task's clone stays in `/var/lib/dawn-agent/work/<id>` for `keep_worktrees_days` (checked
-hourly); its branch stays in the mirror until the task is closed, so it can still be published. To take a task
+hourly); its branch stays in the mirror until the task is closed, so it can still be published. To
+take a task
 over by hand: `cd /var/lib/dawn-agent/work/<id> && sudo -u dawn-agent -H
 /usr/local/lib/agent-gateway/claude --resume <session_id>`.
 

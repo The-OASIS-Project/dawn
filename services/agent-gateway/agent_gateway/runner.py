@@ -93,7 +93,7 @@ def _model_id(value) -> str | None:
 
 
 def floor_settings(agent_home: str, work_dir: str, worktree: str, domains: list[str],
-                   repo: str = "") -> str:
+                   repo: str = "", hidden: list[str] = ()) -> str:
    """The agent's fixed rules plus this run's pieces, passed with every run.
    Command-line settings outrank a repo's own and can't be changed by the
    agent, and a run's sandbox settings would otherwise replace these (seen: a
@@ -107,8 +107,11 @@ def floor_settings(agent_home: str, work_dir: str, worktree: str, domains: list[
    s["sandbox"]["network"]["allowedDomains"] = domains
    fs = s["sandbox"]["filesystem"]
    # Other tasks' clones and other repos' caches are hidden; its own are not.
+   # The permission rules bind only the file tools: what they hide that a
+   # shell command could still read (the mirrors, DAWN's data) is hidden here.
    fs["denyRead"] = [p.replace("~/", home, 1) if p.startswith("~/") else p
-                     for p in fs["denyRead"]] + [work_dir, home + REPO_CACHE_SUBDIR]
+                     for p in fs["denyRead"]] + [work_dir, home + REPO_CACHE_SUBDIR,
+                                                 *hidden]
    fs["allowRead"] = [worktree]
    # /tmp: builds and tests expect to write there.  Run as agent-gateway.service
    # (PrivateTmp), it is the gateway's own /tmp, not the host's; a gateway
@@ -311,7 +314,8 @@ class Runner:
             continue  # revised since the list was read, or being changed
          self.busy.add(task_id)
          try:
-            await self.collect_for_close(t)  # a stopped run's commits outlive its clone
+            if await self.collect_for_close(t):
+               continue  # uncommitted edits: kept until the task is closed
             await self.repos.remove(task_id)
             self.store.update_task(task_id, worktree="")
          except Exception as e:  # the clone stays: its work couldn't be kept, or removed
@@ -351,12 +355,15 @@ class Runner:
       self.busy.add(t["id"])  # no revise between the count and the close
       try:
          left = await self.unpublished_commits(t)
-         if left == 0:
+         dirty = (await self.repos.uncommitted(t["id"])
+                  if t["worktree"] and os.path.isdir(t["worktree"]) else 0)
+         if left == 0 and dirty == 0:
             await self.close_held(t, "merged")
          else:
             # Newer work isn't in what merged: said once, nothing dropped.
             self.store.set_published(t["id"], json.dumps({**prev, "merged_seen": True}))
-            self.store.add_event(t["id"], "merged", pr_url=prev["pr_url"], unpublished=left)
+            self.store.add_event(t["id"], "merged", pr_url=prev["pr_url"], unpublished=left,
+                                 uncommitted=dirty)
       finally:
          self.busy.discard(t["id"])
 
@@ -367,9 +374,9 @@ class Runner:
 
    async def close(self, task_id: str, dawn_user_id: int, head: str | None) -> dict:
       """Drop a finished task's work: its clone and its collected branch.  Without
-      `head`, only when nothing would be lost (no commits, or all of them
-      published); with it, only while the branch is still at that commit (the one
-      the user agreed to lose)."""
+      `head`, only when nothing would be lost (no unpublished commits and no
+      uncommitted edits); with it, only while the branch is still at that commit
+      (the one the user agreed to lose; "" when only edits would be)."""
       t = self.owned(task_id, dawn_user_id)
       if t["closed"]:
          return {"closed": True, "task": t}
@@ -381,29 +388,36 @@ class Runner:
          raise ValueError("the task is busy (being published, revised or cleaned up); try again")
       self.busy.add(task_id)  # held across every await below: no revise or publish slips in
       try:
-         await self.collect_for_close(t)
+         dirty = await self.collect_for_close(t)
          left = await self.unpublished_commits(t)
-         if left:
-            now, _ = await self.repos.agent_ref(t["repo"], task_id, t["base"])
-            if not head:
-               return {"closed": False, "unpublished_commits": left, "head": now}
+         if left or dirty:
+            now = (await self.repos.agent_ref(t["repo"], task_id, t["base"]))[0] if left else ""
+            if head is None:
+               return {"closed": False, "unpublished_commits": left, "uncommitted": dirty,
+                       "head": now}
             if head.lower() != now:
-               raise ValueError(f"the branch moved since it was shown (it is now at {now[:12]})")
+               raise ValueError(f"the branch moved since it was shown (it is now at "
+                                f"{now[:12] or 'no commits'})")
          await self.close_held(t, "user")
       finally:
          self.busy.discard(task_id)
       return {"closed": True, "task": self.store.task(task_id)}
 
-   async def collect_for_close(self, t: dict) -> None:
-      """The clone's commits into the mirror before they're counted: a run that
-      was cancelled (or stopped late) never collected its own.  An empty clone
+   async def collect_for_close(self, t: dict) -> int:
+      """The clone's commits into the mirror before they're counted (a run that
+      was cancelled, or stopped late, never collected its own), and its
+      uncommitted edits, counted: both are lost with the clone.  An empty clone
       keeps what was collected before (a cancel is when its state is least
       trusted).  Work that can't be read refuses the close."""
-      if (t["status"] == st.COMPLETED or not t["worktree"] or not os.path.isdir(t["worktree"])
+      if (not t["worktree"] or not os.path.isdir(t["worktree"])
             or not self.store.task_events(t["id"], "started", 1)):
-         return  # collected as it completed; or no clone, or one cancelled before it was made
+         return 0  # no clone, or one cancelled before it was made
       try:
-         await self.repos.collect(t["repo"], t["id"], t["branch"], t["base"], keep_on_empty=True)
+         if t["status"] == st.COMPLETED:  # its commits were collected as it completed
+            return await self.repos.uncommitted(t["id"])
+         out = await self.repos.collect(t["repo"], t["id"], t["branch"], t["base"],
+                                        keep_on_empty=True)
+         return out["uncommitted"]
       except (GitError, KeyError) as e:  # KeyError: its repo left the config
          log.warning("task %s: could not collect its branch before closing: %s", t["id"], e)
          raise ValueError("the task's work couldn't be read, so nothing was closed") from e
@@ -427,6 +441,8 @@ class Runner:
                            self.cfg.work_dir)
          if d.allow:
             return PermissionResultAllow()
+         if d.ask_kind and self.store.task(task["id"])["status"] not in st.OPEN:
+            return PermissionResultDeny(message="the task was stopped")  # no request left behind
          if d.ask_kind:
             shown = clip(json.dumps(tool_input), PAYLOAD_CAP)
             payload = {"tool": tool, "input": shown}
@@ -471,7 +487,8 @@ class Runner:
          setting_sources=[], strict_mcp_config=True, mcp_servers=mcp,
          disallowed_tools=[f"mcp__cbm__{t}" for t in CBM_WRITE_TOOLS] + list(NO_BACKGROUND_TOOLS),
          settings=floor_settings(self.cfg.agent_home, self.cfg.work_dir, task["worktree"],
-                                 domains, task["repo"]),
+                                 domains, task["repo"],
+                                 [self.cfg.state_dir, self.cfg.mirrors_dir, *self.cfg.deny_read]),
          # The CLI restores a session's running cost on resume, so its budget
          # check is against the whole task: give it the whole budget.
          max_budget_usd=task["budget_usd"],

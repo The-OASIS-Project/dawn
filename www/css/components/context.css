@@ -370,7 +370,8 @@
    cursor: not-allowed;
 }
 
-.agent-locked {
+/* The action button stays lit: it is Stop while a turn runs. */
+.agent-locked:not(#action-btn) {
    opacity: 0.5;
 }
 

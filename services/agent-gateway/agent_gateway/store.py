@@ -201,6 +201,14 @@ class Store:
       self.new_event.set()
       return cur.lastrowid
 
+   def run_seq(self, task_id: str) -> int:
+      """Where the task's latest run began (started, resumed or revised): an end
+      before it is an earlier run's."""
+      row = self.db.execute(
+         "SELECT COALESCE(MAX(seq), 0) FROM events WHERE task_id = ? "
+         "AND kind IN ('started', 'resumed', 'revised')", (task_id,)).fetchone()
+      return row[0]
+
    def task_events(self, task_id: str, kind: str, limit: int) -> list[dict]:
       """A task's last @limit events of @kind, oldest first, data decoded."""
       rows = self.db.execute(

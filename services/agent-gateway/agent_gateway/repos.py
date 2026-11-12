@@ -262,6 +262,10 @@ class Repos:
       with the repo's secrets."""
       return [".github/workflows/**", *self.repos[name].get("protected", [])]
 
+   async def uncommitted(self, task_id: str) -> int:
+      """Files changed in the task's clone but not committed (lost with the clone)."""
+      return len(text(await self.jailed_git(task_id, "status", "--porcelain")).splitlines())
+
    async def unpublished(self, name: str, task_id: str, base: str,
                          published_head: str | None) -> int:
       """Commits on the task's collected branch that are neither on its base nor in

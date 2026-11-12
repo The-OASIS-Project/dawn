@@ -35,6 +35,9 @@ class Config:
    mirrors_dir: str = "/var/lib/dawn-gateway/mirrors"
    agent_home: str = "/var/lib/dawn-agent"
    work_dir: str = "/var/lib/dawn-agent/work"
+   # Hidden from the agent's shell too (its file tools are denied by the floor):
+   # DAWN's own data.  The gateway's state dir (its mirrors) always is.
+   deny_read: list[str] = field(default_factory=lambda: ["/var/lib/dawn"])
    claude_cli: str = f"{LIB}/claude-as-agent"
    agent_gitconfig: str = f"{LIB}/agent-gitconfig"
    claude_bin: str | None = None  # an installed version to run; None = current
@@ -58,7 +61,7 @@ class Config:
 # prefix are not settable from the file.
 SECTIONS = {
    "server": ("host", "port"),
-   "paths": ("state_dir", "mirrors_dir", "agent_home", "work_dir"),
+   "paths": ("state_dir", "mirrors_dir", "agent_home", "work_dir", "deny_read"),
    "agent": ("auth", "model", "git_name", "git_email"),
    "limits": ("task_budget_usd", "daily_budget_usd", "max_concurrent_tasks",
               "keep_worktrees_days"),
@@ -94,6 +97,9 @@ def load(path: str, **overrides) -> Config:
                           "patterns (no leading or trailing /)")
       c.repos[r["name"]] = {"url": r["url"], "base": r.get("base", "main"),
                             "protected": protected}
+   if not isinstance(c.deny_read, list) or not all(isinstance(p, str) and p.startswith("/")
+                                                    for p in c.deny_read):
+      raise ValueError("[paths] deny_read is a list of absolute paths")
    if c.auth not in ("subscription", "api_key"):
       raise ValueError("[agent] auth must be 'subscription' or 'api_key'")
    if c.task_budget_usd <= 0 or c.max_concurrent_tasks < 1:

@@ -13,6 +13,9 @@ state_dir = "/var/lib/dawn-gateway"            # the gateway's database
 mirrors_dir = "/var/lib/dawn-gateway/mirrors"  # gateway-owned copy of each repo
 agent_home = "/var/lib/dawn-agent"
 work_dir = "/var/lib/dawn-agent/work"          # one clone per task
+# Hidden from the agent's commands as well as its file tools (the gateway's
+# state_dir and mirrors_dir always are): DAWN's data.
+deny_read = ["/var/lib/dawn"]
 
 [agent]
 # "subscription": `claude login` as dawn-agent, counted against your plan.

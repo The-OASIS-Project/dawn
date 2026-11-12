@@ -365,12 +365,48 @@ void webui_coding_handle_reply(ws_connection_t *conn, json_object *payload) {
  *
  * Answered to every tab of the user (an open list there stays current).  The
  * handshake's origin check covers a forged revoke; the gateway checks owner.
+ * One at a time per user: a list asked for meanwhile is the running one's
+ * answer; a second revoke is asked to wait a moment.
  * ============================================================================= */
 
 typedef struct {
    int user_id;
    int64_t revoke; /* 0: just the list */
 } wc_grants_t;
+
+static int s_granting[WC_USERS_MAX]; /* users with a grants request running (0: free) */
+static pthread_mutex_t s_granting_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Claim a slot for @p user_id: true when none of theirs runs and one is free. */
+static bool granting_claim(int user_id, bool *busy) {
+   bool claimed = false;
+   *busy = false;
+   pthread_mutex_lock(&s_granting_mutex);
+   int free_slot = -1;
+   for (int i = 0; i < WC_USERS_MAX; i++) {
+      *busy = *busy || s_granting[i] == user_id;
+      if (s_granting[i] == 0 && free_slot < 0) {
+         free_slot = i;
+      }
+   }
+   if (!*busy && free_slot >= 0) {
+      s_granting[free_slot] = user_id;
+      claimed = true;
+   }
+   pthread_mutex_unlock(&s_granting_mutex);
+   return claimed;
+}
+
+static void granting_release(int user_id) {
+   pthread_mutex_lock(&s_granting_mutex);
+   for (int i = 0; i < WC_USERS_MAX; i++) {
+      if (s_granting[i] == user_id) {
+         s_granting[i] = 0;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_granting_mutex);
+}
 
 static void grants_run(void *arg) {
    wc_grants_t *w = arg;
@@ -403,11 +439,28 @@ static void grants_run(void *arg) {
    } else {
       json_object_put(payload);
    }
+   granting_release(w->user_id);
    free(w);
 }
 
 static void grants_start(ws_connection_t *conn, int64_t revoke) {
    if (!conn || !conn->authenticated || conn->is_satellite || conn->auth_user_id <= 0) {
+      return;
+   }
+   bool busy = false;
+   if (!granting_claim(conn->auth_user_id, &busy)) {
+      if (busy && revoke == 0) {
+         return; /* the one running answers every tab */
+      }
+      struct json_object *payload = json_object_new_object();
+      json_object_object_add(payload, "error", json_object_new_string("Try again in a moment."));
+      if (revoke > 0) {
+         json_object_object_add(payload, "revoked", json_object_new_int64(revoke));
+         json_object_object_add(payload, "ok", json_object_new_boolean(false));
+         json_object_object_add(payload, "message",
+                                json_object_new_string("Try again in a moment."));
+      }
+      send_to_user(conn->auth_user_id, "coding_grants_response", payload);
       return;
    }
    wc_grants_t *w = calloc(1, sizeof(*w));
@@ -417,6 +470,7 @@ static void grants_start(ws_connection_t *conn, int64_t revoke) {
    }
    if (w == NULL || coding_gateway_run_async(grants_run, w) != SUCCESS) {
       free(w);
+      granting_release(conn->auth_user_id);
       struct json_object *payload = json_object_new_object();
       json_object_object_add(payload, "error", json_object_new_string("Try again in a moment."));
       send_to_user(conn->auth_user_id, "coding_grants_response", payload);

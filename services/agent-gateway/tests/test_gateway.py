@@ -142,6 +142,10 @@ class FakeRepos:
       pass
 
    left = 0  # commits only the mirror has
+   dirty = 0  # uncommitted edits in the clone
+
+   async def uncommitted(self, task_id):
+      return self.dirty
 
    async def unpublished(self, name, task_id, base, published_head):
       return self.left
@@ -743,7 +747,8 @@ def test_close_drops_only_what_is_safe_to_drop(store, tmp_path):
    finished_with_clone(store, tmp_path)
    r.repos.left = 2
    out = asyncio.run(r.close("t1", 1, None))
-   assert out == {"closed": False, "unpublished_commits": 2, "head": "abcdef1234567890"}
+   assert out == {"closed": False, "unpublished_commits": 2, "uncommitted": 0,
+                  "head": "abcdef1234567890"}
    assert not store.task("t1")["closed"] and not closed_events(store)
    with pytest.raises(ValueError, match="moved"):
       asyncio.run(r.close("t1", 1, "1111111111111111"))
@@ -896,7 +901,7 @@ def test_close_collects_before_counting(store, tmp_path):
          if self.fail:
             raise GitError("bundle failed")
          self.calls.append(keep_on_empty)
-         return await super().collect(name, task_id, branch, base)
+         return {**await super().collect(name, task_id, branch, base), "uncommitted": 0}
    from agent_gateway.repos import GitError
    r = runner(store)
    r.repos = Recording()
@@ -931,7 +936,7 @@ def test_prune_collects_before_removing_and_keeps_what_it_cant(store, tmp_path):
       async def collect(self, *a, **kw):
          if self.fail:
             raise GitError("bundle failed")
-         return {"commits": []}
+         return {"commits": [], "uncommitted": 0}
 
       async def remove(self, task_id):
          self.removed.append(task_id)
@@ -947,6 +952,52 @@ def test_prune_collects_before_removing_and_keeps_what_it_cant(store, tmp_path):
    r.repos.fail = False
    asyncio.run(r.prune())
    assert r.repos.removed == ["t1"] and store.task("t1")["worktree"] == ""
+
+
+def test_close_asks_before_dropping_uncommitted_edits(store, tmp_path):
+   """Edits never committed are lost with the clone: asked about like commits."""
+   r = runner(store)
+   finished_with_clone(store, tmp_path)
+   store.add_event("t1", "started", repo="r", branch="b", task="x")
+   r.repos.dirty = 3
+   out = asyncio.run(r.close("t1", 1, None))
+   assert out == {"closed": False, "unpublished_commits": 0, "uncommitted": 3, "head": ""}
+   assert not store.task("t1")["closed"]
+   assert asyncio.run(r.close("t1", 1, ""))["closed"]  # the user agreed
+
+
+def test_no_request_after_the_task_stopped(store):
+   r = runner(store)
+   add_task(store)
+   store.update_task("t1", status=st.CANCELLED)
+   handler = r.permission_handler(store.task("t1"), [])
+   out = asyncio.run(handler("WebFetch", {"url": "https://example.org/x"}, None))
+   assert out.__class__.__name__ == "PermissionResultDeny"
+   assert store.pending_requests("t1") == []
+
+
+def test_merge_keeps_a_clone_with_uncommitted_edits(store, tmp_path, monkeypatch):
+   """Merged, all commits published, but edits never committed: said, not dropped."""
+   from agent_gateway import runner as rmod
+   monkeypatch.setattr(rmod, "pr_state", lambda url, token: "merged")
+   r = runner(store, github_token="tok")
+   finished_with_clone(store, tmp_path)
+   store.update_task("t1", published=json.dumps({"pr_url": "https://github.com/o/r/pull/1",
+                                                 "head": "abcdef1234567890"}))
+   r.repos.dirty = 2
+   asyncio.run(r.watch_merges())
+   assert not store.task("t1")["closed"]
+   merged = [e["data"] for e in store.events_after(0) if e["kind"] == "merged"]
+   assert merged == [{"pr_url": "https://github.com/o/r/pull/1", "unpublished": 0,
+                      "uncommitted": 2}]
+
+
+def test_run_seq_marks_where_the_latest_run_began(store):
+   add_task(store)
+   store.add_event("t1", "started", repo="r", branch="b", task="x")
+   end = store.add_event("t1", "completed", summary="one")
+   revised = store.add_event("t1", "revised", revise_ref="a", budget_added=1)
+   assert store.run_seq("t1") == revised > end  # the first end is an earlier run's
 
 
 def test_close_waits_for_a_run_still_stopping(store, tmp_path):
@@ -1303,8 +1354,11 @@ def test_canary_needs_positive_refusals():
 def test_every_run_carries_the_whole_floor():
    from agent_gateway.runner import floor_settings
    s = json.loads(floor_settings("/var/lib/dawn-agent", "/var/lib/dawn-agent/work",
-                                 "/var/lib/dawn-agent/work/aaaa0001", ["api.anthropic.com"], "dawn"))
+                                 "/var/lib/dawn-agent/work/aaaa0001", ["api.anthropic.com"], "dawn",
+                                 ["/var/lib/dawn-gateway", "/var/lib/dawn"]))
    fs = s["sandbox"]["filesystem"]
+   # The mirrors and DAWN's data are hidden from the shell too, not only the file tools.
+   assert "/var/lib/dawn-gateway" in fs["denyRead"] and "/var/lib/dawn" in fs["denyRead"]
    # Writable beyond the clone: /tmp and that repo's tool cache; other repos'
    # caches hidden, its own readable.
    assert fs["allowWrite"] == ["/tmp", "/var/lib/dawn-agent/.cache/repo/dawn"]

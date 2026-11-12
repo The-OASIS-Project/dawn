@@ -1,4 +1,22 @@
 #!/bin/sh
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# By contributing to this project, you agree to license your contributions
+# under the GPLv3 (or any later version) or any future licenses chosen by
+# the project author(s).
+#
 # Runs as the agent user: pick the credential, then exec Claude Code.  The
 # binary is one the gateway's Python SDK ships, root-owned, so the agent can't
 # replace the program that sets up its own sandbox.  DAWN_AGENT_CLAUDE picks an

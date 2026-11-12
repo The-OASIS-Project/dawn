@@ -202,3 +202,17 @@ int pending_slots_valid_for(const pending_slots_t *slots, const pending_slot_t *
    }
    return (int)(slots->ttl_sec - (now - slot->made_at));
 }
+
+pending_slot_t *pending_slots_live(const pending_slots_t *slots,
+                                   uint32_t session_id,
+                                   int kind,
+                                   time_t now) {
+   for (int i = 0; i < slots->count; i++) {
+      pending_slot_t *s = slot_at(slots, i);
+      if (s->active && s->origin.session_id == session_id && (kind < 0 || s->kind == kind) &&
+          !expired(slots, s, now)) {
+         return s;
+      }
+   }
+   return NULL;
+}

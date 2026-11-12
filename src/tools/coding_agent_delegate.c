@@ -85,14 +85,9 @@ static const pending_slots_t s_pending_slots = {
 };
 
 bool coding_delegate_live(uint32_t session_id) {
-   const time_t now = pending_slots_now();
-   bool live = false;
    pthread_mutex_lock(&s_pending_mutex);
-   for (int i = 0; i < CA_PENDING_MAX && !live; i++) {
-      const pending_slot_t *h = &s_pending[i].hdr;
-      live = h->active && h->origin.session_id == session_id &&
-             now - h->made_at <= s_pending_slots.ttl_sec; /* as pending_slots */
-   }
+   const bool live = pending_slots_live(&s_pending_slots, session_id, -1, pending_slots_now()) !=
+                     NULL;
    pthread_mutex_unlock(&s_pending_mutex);
    return live;
 }

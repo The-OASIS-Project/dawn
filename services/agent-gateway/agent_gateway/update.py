@@ -75,7 +75,12 @@ def sh(*argv: str, timeout: int = 1800, **kw) -> subprocess.CompletedProcess:
 
 def latest_release() -> str:
    with urllib.request.urlopen(f"https://pypi.org/pypi/{SDK}/json", timeout=30) as r:
-      return json.load(r)["info"]["version"]
+      version = json.load(r)["info"]["version"]
+   # It names a directory this (root) program creates and removes: a plain
+   # release number only.
+   if not re.fullmatch(r"\d+(\.\d+){1,3}", str(version)):
+      raise ValueError(f"unexpected version from PyPI: {str(version)[:40]!r}")
+   return version
 
 
 def site_packages(venv: str) -> str:

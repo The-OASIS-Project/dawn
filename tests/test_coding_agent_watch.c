@@ -206,6 +206,7 @@ static atomic_int g_cancels;
 static atomic_int g_polls;
 static bool g_has_task = true;  /* task_list finds the task */
 static bool g_pending = true;   /* ...with a request waiting */
+static int64_t g_run_seq;       /* ...whose latest run began at this sequence */
 static bool g_events_on = true; /* task_events has the completion */
 
 const char *coding_gateway_alias(void) {
@@ -258,12 +259,15 @@ int coding_gateway_call(int user_id,
    json_object_put(args);
    *err = NULL;
    if (strcmp(tool, "task_list") == 0) {
-      *out = json_tokener_parse(!g_has_task ? "{\"task\":null,\"pending\":[]}"
-                                : g_pending ? "{\"task\":{\"status\":\"input_required\"},"
-                                              "\"pending\":[{\"id\":1,\"kind\":\"domain\","
-                                              "\"payload\":{\"value\":\"pypi.org\"}}]}"
-                                            : "{\"task\":{\"status\":\"working\"},"
-                                              "\"pending\":[]}");
+      /* Its status (open again only once revised) and what it waits on. */
+      char buf[256];
+      snprintf(buf, sizeof(buf),
+               "{\"task\":{\"status\":\"completed\"},\"run_seq\":%lld,\"pending\":%s}",
+               (long long)g_run_seq,
+               g_pending ? "[{\"id\":1,\"kind\":\"domain\",\"payload\":{\"value\":"
+                           "\"pypi.org\"}}]"
+                         : "[]");
+      *out = json_tokener_parse(g_has_task ? buf : "{\"task\":null,\"pending\":[]}");
       return CODING_GW_OK;
    }
    /* task_events: one completion, then nothing new. */
@@ -322,6 +326,7 @@ void setUp(void) {
    g_notices = 0;
    g_reports = 0;
    g_pending = true;
+   g_run_seq = 0;
    g_viewer = false;
    g_staged_id = 0;
    atomic_store(&g_cancels, 0);
@@ -452,6 +457,12 @@ static void test_after_the_end(void) {
    coding_watch_apply(e);
    json_object_put(e);
    TEST_ASSERT_NOT_NULL(strstr(g_posted, "2 newer commits on its branch are not published"));
+   e = event("merged", "job:42.1000", 5); /* only edits left: no word about publishing */
+   json_object_object_add(json_object_object_get(e, "data"), "uncommitted", json_object_new_int(3));
+   coding_watch_apply(e);
+   json_object_put(e);
+   TEST_ASSERT_NOT_NULL(
+       strstr(g_posted, "but 3 changed files were never committed. Close the job"));
    TEST_ASSERT_EQUAL_STRING("", g_end);
 }
 
@@ -472,6 +483,25 @@ static void test_update_events(void) {
    TEST_ASSERT_EQUAL_INT(1, g_notices); /* the admin, once */
    TEST_ASSERT_NOT_NULL(strstr(g_notice, "Claude Agent SDK (1.0.0)"));
    TEST_ASSERT_EQUAL_INT(0, g_events);
+}
+
+/* A replayed end of an earlier run (the job was revised since): the job stays
+ * as it is, whether the revision still runs or has ended too. */
+static void test_stale_end_of_a_revised_job(void) {
+   row("running", JOB_KIND_CODING);
+   g_pending = false;
+   g_run_seq = 50; /* the revision began at 50; the replayed end is at 7 */
+   struct json_object *e = event("completed", "job:42.1000", 5);
+   json_object_object_add(e, "seq", json_object_new_int64(7));
+   coding_watch_apply(e);
+   json_object_put(e);
+   TEST_ASSERT_EQUAL_STRING("", g_end);
+   TEST_ASSERT_EQUAL_INT(0, g_reports);
+   e = event("completed", "job:42.1000", 5); /* the revision's own end */
+   json_object_object_add(e, "seq", json_object_new_int64(60));
+   coding_watch_apply(e);
+   json_object_put(e);
+   TEST_ASSERT_EQUAL_STRING("done", g_end);
 }
 
 /* A deleted job's task is stopped; its end needs nothing. */
@@ -659,6 +689,7 @@ int main(void) {
    RUN_TEST(test_ended_job_takes_nothing_and_its_task_is_stopped);
    RUN_TEST(test_after_the_end);
    RUN_TEST(test_update_events);
+   RUN_TEST(test_stale_end_of_a_revised_job);
    RUN_TEST(test_deleted_job);
    RUN_TEST(test_task_of_an_earlier_job_with_the_id);
    RUN_TEST(test_unreadable_job_is_left_alone);

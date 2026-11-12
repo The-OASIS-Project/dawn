@@ -432,6 +432,13 @@
             return;
          }
       }
+      /* A card's control is gone once its request is answered: its row stays. */
+      if (mark.action.indexOf('coding-') === 0) {
+         const view = list.querySelector(
+            '.jobs-open-btn[data-action="view"][data-job-id="' + mark.jobId + '"]'
+         );
+         if (view) view.focus();
+      }
    }
 
    /* Whether the user is writing an answer on a row's card. */

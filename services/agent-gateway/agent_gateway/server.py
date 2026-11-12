@@ -157,7 +157,7 @@ def build(runner, cfg) -> MCPServer:
          except GitError:
             left = None  # unknown (the mirror can't be read): the task still answers
          return {"task": public(t), "pending": store.pending_requests(t["id"]),
-                 "unpublished_commits": left}
+                 "unpublished_commits": left, "run_seq": store.run_seq(t["id"])}
       return {"tasks": [public(t) for t in store.tasks(dawn_user_id)]}
 
    @tool

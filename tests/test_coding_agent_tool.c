@@ -1571,12 +1571,15 @@ static void test_publish_then_confirm(void) {
    snprintf(g_status, sizeof(g_status), "done");
    g_task_status = "completed";
    g_unpublished = 1;
+   g_task_extra = ",\"summary\":\"Fixed the oracle.\"";
    char *preview = call("publish", "{\"job\":42}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
    TEST_ASSERT_NOT_NULL(strstr(preview, "push branch agent/t1-fix of dawn at commit 0123456789ab"));
    TEST_ASSERT_NOT_NULL(strstr(preview, "1 protected path"));
    TEST_ASSERT_NOT_NULL(strstr(preview, "open a pull request against main"));
-   TEST_ASSERT_NOT_NULL(strstr(preview, "[" TOOL_FRAME_AGENT "]\nCommits:\n- fix the oracle"));
+   /* The public description, framed with the agent's other words. */
+   TEST_ASSERT_NOT_NULL(strstr(preview, "[" TOOL_FRAME_AGENT "]\nPull request description:\n"
+                                        "Fixed the oracle.\nCommits:\n- fix the oracle"));
    TEST_ASSERT_EQUAL_INT(-1, last_call("task_publish"));
    char args[48];
    snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));

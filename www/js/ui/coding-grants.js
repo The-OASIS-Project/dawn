@@ -59,18 +59,18 @@
       const li = elem('li', 'coding-grant');
       const what = elem('span', 'coding-grant-what');
       const kind = g.kind === 'tool' ? 'Tool' : 'Host';
-      what.appendChild(elem('span', 'coding-grant-kind', kind));
+      what.appendChild(elem('span', 'dawn-badge muted', kind));
       const value = elem('span', 'coding-grant-value', g.value || '');
       value.setAttribute('dir', 'auto');
       what.appendChild(value);
       if (!g.checked) {
-         what.appendChild(elem('span', 'coding-grant-odd', 'unrecognized value'));
+         what.appendChild(elem('span', 'dawn-badge warning soft', 'unrecognized value'));
       }
       const scope = g.repo ? 'every task on ' + g.repo : 'every repo';
       what.appendChild(elem('span', 'coding-grant-scope', scope));
       li.appendChild(what);
       const mine = g.id === revoking; /* this tab's revoke, still on its way */
-      const btn = elem('button', 'coding-card-btn secondary', mine ? 'Revoking…' : 'Revoke');
+      const btn = elem('button', 'coding-card-btn secondary danger', mine ? 'Revoking…' : 'Revoke');
       if (mine) btn.setAttribute('aria-disabled', 'true');
       btn.type = 'button';
       btn.setAttribute('aria-label', 'Revoke ' + kind + ' ' + (g.value || '') + ', ' + scope);
@@ -114,7 +114,8 @@
 
    function handleResponse(payload) {
       if (!payload) return;
-      last = payload;
+      /* An answer without a list (busy, or the gateway away) keeps the one shown. */
+      if (Array.isArray(payload.grants) || !last || !Array.isArray(last.grants)) last = payload;
       const own = !!payload.revoked && payload.revoked === revoking;
       if (own || (payload.error && revoking)) {
          revoking = 0; /* answered, or the request never reached the gateway */

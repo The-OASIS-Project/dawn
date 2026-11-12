@@ -54,6 +54,7 @@
 #define CP_URL_MAX 200
 #define CP_AGENT_TEXT_MAX 3000 /* the agent's commit subjects and paths in a preview */
 #define CP_LINES_SHOWN 20      /* of each */
+#define CP_SUMMARY_SHOWN 1500  /* the agent's summary (the pull request's description) */
 #define CP_TASK_ID_LEN 8       /* the gateway's task ids: 8 hex digits */
 #define CP_LABEL_MAX (CONV_TITLE_MAX + 32)
 
@@ -89,14 +90,9 @@ static const pending_slots_t s_pending_slots = {
 
 /* Whether a preview of @p kind waits in @p session_id. */
 static bool live(uint32_t session_id, int kind) {
-   const time_t now = pending_slots_now();
-   bool found = false;
    pthread_mutex_lock(&s_pending_mutex);
-   for (int i = 0; i < CP_PENDING_MAX && !found; i++) {
-      const pending_slot_t *h = &s_pending[i].hdr;
-      found = h->active && h->kind == kind && h->origin.session_id == session_id &&
-              now - h->made_at <= s_pending_slots.ttl_sec;
-   }
+   const bool found = pending_slots_live(&s_pending_slots, session_id, kind, pending_slots_now()) !=
+                      NULL;
    pthread_mutex_unlock(&s_pending_mutex);
    return found;
 }
@@ -168,9 +164,17 @@ static void copy_whole(char *out, size_t len, const char *s) {
 /* ========== publish ========== */
 
 /* The agent's commit subjects and changed paths: its words, cleaned and framed. */
-static char *agent_lines(struct json_object *changes) {
+static char *agent_lines(struct json_object *changes, const char *summary) {
    strbuf_t sb;
-   strbuf_init_with_max(&sb, 512, CP_AGENT_TEXT_MAX);
+   strbuf_init_with_max(&sb, 512, CP_AGENT_TEXT_MAX + CP_SUMMARY_SHOWN + 64);
+   if (summary != NULL && summary[0] != '\0') {
+      /* What the pull request's description will say: public once published. */
+      char shown[CP_SUMMARY_SHOWN + 8];
+      snprintf(shown, sizeof(shown), "%.*s", CP_SUMMARY_SHOWN, summary);
+      utf8_trim_incomplete(shown);
+      strbuf_appendf(&sb, "Pull request description:\n%s%s\n", shown,
+                     strlen(summary) > CP_SUMMARY_SHOWN ? " [...]" : "");
+   }
    struct json_object *commits = json_object_object_get(changes, "commits");
    struct json_object *files = json_object_object_get(changes, "files");
    const size_t nc = json_object_is_type(commits, json_type_array)
@@ -268,11 +272,13 @@ char *coding_publish_propose(struct json_object *details,
    const bool again = had_pr; /* new commits go to the PR it has (a new one if that ended) */
    char pr_url_copy[CP_URL_MAX];
    copy_whole(pr_url_copy, sizeof(pr_url_copy), had_pr ? pr_url : "");
+   char *summary = strdup(coding_gateway_jstr(task, "summary"));
    json_object_put(ans);
 
    struct json_object *changes = NULL;
    if (coding_gateway_call(user_id, "task_changes", coding_agent_job_args(job), &changes, &err) !=
        CODING_GW_OK) {
+      free(summary);
       return coding_agent_error_free(err);
    }
    free(err);
@@ -285,6 +291,7 @@ char *coding_publish_propose(struct json_object *details,
    if (!is_head(head) || want.repo[0] == '\0' || want.branch[0] == '\0' || want.base[0] == '\0' ||
        want.commits == 0) {
       json_object_put(changes);
+      free(summary);
       return coding_agent_error(want.commits == 0
                                     ? "That job has no commits to publish."
                                     : "The gateway's record of that job can't be shown; nothing "
@@ -298,7 +305,8 @@ char *coding_publish_propose(struct json_object *details,
    const int nprot = count_protected(changes);
    want.files = nfiles;
    want.protected_paths = nprot;
-   char *agent = agent_lines(changes);
+   char *agent = agent_lines(changes, pr ? summary : NULL);
+   free(summary);
    json_object_put(changes);
    /* Read before this preview marks the turn (its own words don't count here). */
    const bool read_before = coding_agent_turn_read(origin);
@@ -356,7 +364,8 @@ char *coding_publish_propose(struct json_object *details,
    if (pr) {
       strbuf_appendf(&sb,
                      " The pull request is titled \"%s\" (the job's name); its description is "
-                     "the agent's summary.",
+                     "the agent's summary, shown below: read it to the user too, since it will "
+                     "be public.",
                      rec.title);
    }
    strbuf_appendf(&sb,
@@ -482,6 +491,17 @@ static char *close_target(struct json_object *details,
       safe_strscpy(want->name, rec.title);
       snprintf(want->label, sizeof(want->label), "coding job #%lld (\"%s\")", (long long)want->job,
                rec.title);
+      /* Ended here while its task never stopped (the gateway was away when it
+       * was cancelled): stopped first, as closing a task with no job is. */
+      struct json_object *ans = NULL;
+      char *err = NULL;
+      if (coding_gateway_call(user_id, "task_list", coding_agent_job_args(want->job), &ans, &err) ==
+          CODING_GW_OK) {
+         const char *status = coding_gateway_jstr(json_object_object_get(ans, "task"), "status");
+         *open = strcmp(status, "working") == 0 || strcmp(status, "input_required") == 0;
+      }
+      json_object_put(ans);
+      free(err);
       return NULL;
    }
    const char *task = json_object_get_string(jtask);
@@ -523,6 +543,18 @@ static char *close_target(struct json_object *details,
    return NULL;
 }
 
+/* "its 2 unpublished commits and 3 files with uncommitted changes" (either part may be absent). */
+static void lost_text(char *out, size_t len, int commits, int files) {
+   char a[64] = "", b[64] = "";
+   if (commits > 0) {
+      snprintf(a, sizeof(a), "%d unpublished commit%s", commits, commits == 1 ? "" : "s");
+   }
+   if (files > 0) {
+      snprintf(b, sizeof(b), "%d file%s with uncommitted changes", files, files == 1 ? "" : "s");
+   }
+   snprintf(out, len, "its %s%s%s", a, a[0] && b[0] ? " and " : "", b);
+}
+
 char *coding_close(struct json_object *details, int user_id, const turn_origin_t *origin) {
    cp_pending_t want = { .job = 0 };
    bool open = false;
@@ -538,8 +570,8 @@ char *coding_close(struct json_object *details, int user_id, const turn_origin_t
    struct json_object *ans = NULL;
    char *err = NULL;
    if (open) { /* no job to cancel: the user asking to close it is asking to stop it */
-      if (coding_gateway_call(user_id, "task_cancel", close_args(0, want.task), &ans, &err) !=
-          CODING_GW_OK) {
+      if (coding_gateway_call(user_id, "task_cancel", close_args(want.job, want.task), &ans,
+                              &err) != CODING_GW_OK) {
          return coding_agent_error_free(err);
       }
       open = strcmp(coding_gateway_jstr(ans, "status"), "cancelled") == 0; /* it was running */
@@ -561,16 +593,18 @@ char *coding_close(struct json_object *details, int user_id, const turn_origin_t
                want.label, open ? " (stopped first)" : "");
       return strdup(buf);
    }
-   /* Unpublished work would go: only on the user's yes to exactly that. */
+   /* Work would go (commits never published, edits never committed): only on
+    * the user's yes to exactly that.  No commits: the head confirmed is "". */
    const char *head = coding_gateway_jstr(ans, "head");
    want.commits = json_object_get_int(json_object_object_get(ans, "unpublished_commits"));
+   want.files = json_object_get_int(json_object_object_get(ans, "uncommitted"));
    copy_whole(want.branch, sizeof(want.branch), coding_gateway_jstr(ans, "branch"));
-   const bool head_ok = is_head(head);
+   const bool head_ok = want.commits > 0 ? is_head(head) : head[0] == '\0';
    if (head_ok) {
       safe_strscpy(want.head, head);
    }
    json_object_put(ans);
-   if (!head_ok || want.commits <= 0) {
+   if (!head_ok || want.commits < 0 || want.files < 0 || want.commits + want.files == 0) {
       return coding_agent_error("The gateway's answer can't be shown; nothing was closed.");
    }
    pending_stage_rc_t rc = PENDING_STAGED;
@@ -590,13 +624,15 @@ char *coding_close(struct json_object *details, int user_id, const turn_origin_t
    }
    /* A question to the user, as a prepare is: DAWN asks nothing else meanwhile. */
    turn_origin_note_prepare(session_get_command_context());
+   char lost[160];
+   lost_text(lost, sizeof(lost), want.commits, want.files);
    snprintf(buf, sizeof(buf),
-            "Closing %s%s deletes its %d unpublished commit%s on branch %s (at %.12s); nothing "
-            "else has them. Read this to the user and ask them to confirm; if they say yes in "
-            "their reply, call coding_agent with action 'confirm_close' and arguments "
-            "{\"id\": %u}.",
-            want.label, open ? " (now stopped)" : "", want.commits, want.commits == 1 ? "" : "s",
-            want.branch[0] ? want.branch : "(its branch)", want.head, (unsigned)id);
+            "Closing %s%s deletes %s on branch %s%s%.12s%s; nothing else has them. Read this to "
+            "the user and ask them to confirm; if they say yes in their reply, call coding_agent "
+            "with action 'confirm_close' and arguments {\"id\": %u}.",
+            want.label, open ? " (now stopped)" : "", lost,
+            want.branch[0] ? want.branch : "(its branch)", want.head[0] ? " (at " : "", want.head,
+            want.head[0] ? ")" : "", (unsigned)id);
    return strdup(buf);
 }
 
@@ -621,11 +657,11 @@ char *coding_close_confirm(struct json_object *details, int user_id, const turn_
    if (!closed) {
       return coding_agent_error("It changed since the user was asked; nothing was closed.");
    }
-   char buf[CP_LABEL_MAX + 160];
-   snprintf(buf, sizeof(buf),
-            "Closed %s: its %d unpublished commit%s, its copy of the repo and its branch are "
-            "gone.",
-            p.label, p.commits, p.commits == 1 ? "" : "s");
+   char lost[160];
+   char buf[CP_LABEL_MAX + sizeof(lost) + 64];
+   lost_text(lost, sizeof(lost), p.commits, p.files);
+   snprintf(buf, sizeof(buf), "Closed %s: %s, its copy of the repo and its branch are gone.",
+            p.label, lost);
    return strdup(buf);
 }
 
@@ -653,8 +689,9 @@ int coding_publish_describe(const char *value,
                           &slot) == PENDING_FOUND) {
       const cp_pending_t *p = (const cp_pending_t *)slot;
       if (close) {
-         n = snprintf(out, out_len, "close %s, deleting its %d unpublished commit%s", p->label,
-                      p->commits, p->commits == 1 ? "" : "s");
+         char lost[160];
+         lost_text(lost, sizeof(lost), p->commits, p->files);
+         n = snprintf(out, out_len, "close %s, deleting %s", p->label, lost);
       } else {
          n = snprintf(out, out_len,
                       "publish coding job #%lld (\"%s\"): push %s of %s at %.12s (%d commit%s, "

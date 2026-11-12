@@ -88,7 +88,8 @@ static const char *const k_request_fields[] = { "request_id",  "request_kind", "
 static const char *const k_end_fields[] = { "summary",         "branch", "commits",  "diffstat",
                                             "uncommitted",     "error",  "cost_usd", "protected",
                                             "protected_count", NULL };
-static const char *const k_after_fields[] = { "pushed", "pr_url", "reason", "unpublished", NULL };
+static const char *const k_after_fields[] = { "pushed",      "pr_url",      "reason",
+                                              "unpublished", "uncommitted", NULL };
 static const char *const k_scrubbed[] = { "brief", "text", "value", "input", NULL };
 
 /* The gateway's kinds DAWN keeps, and where; the rest (started, resumed,
@@ -150,7 +151,37 @@ static void recancel(int user_id, const char *ref) {
  * cancel DAWN didn't ask for (DAWN ends those itself) is a failure to the user.
  * The first time it ends the job, the end is reported into the conversation
  * the task came from (@p data: the end's facts and the agent's report). */
-static void end_job(int64_t job, int user_id, const char *kind, struct json_object *data) {
+/* Whether the end at gateway sequence @p seq is an earlier run's: the task
+ * was revised (or resumed) after it, so a later run is the job's now.  A
+ * replay after a lost cursor, or a DAWN that was down, reads old ends. */
+static bool earlier_run_end(int user_id, int64_t job, int64_t seq) {
+   char ref[CODING_AGENT_REF_MAX];
+   if (seq <= 0 || !coding_gateway_ref(job, ref, sizeof(ref))) {
+      return false;
+   }
+   struct json_object *args = json_object_new_object();
+   json_object_object_add(args, "client_ref", json_object_new_string(ref));
+   struct json_object *ans = NULL;
+   char *err = NULL;
+   bool earlier = false;
+   if (coding_gateway_call(user_id, "task_list", args, &ans, &err) == CODING_GW_OK) {
+      earlier = json_object_get_int64(json_object_object_get(ans, "run_seq")) > seq;
+   }
+   json_object_put(ans);
+   free(err);
+   return earlier;
+}
+
+static void end_job(int64_t job,
+                    int user_id,
+                    const char *kind,
+                    struct json_object *data,
+                    int64_t seq) {
+   if (earlier_run_end(user_id, job, seq)) {
+      OLOG_INFO("coding_agent: job %lld: an earlier run's end, read again; ignored",
+                (long long)job);
+      return;
+   }
    int rc;
    if (strcmp(kind, "completed") == 0) {
       rc = job_manager_set_terminal_if_active(job, user_id, "done", NULL, time(NULL), 0);
@@ -311,11 +342,21 @@ static void after_end(struct json_object *event,
                (long long)job, title ? title : rec->title);
    } else {
       const int left = json_object_get_int(json_object_object_get(data, "unpublished"));
-      snprintf(text, sizeof(text),
-               "Coding job #%lld (%s): its pull request was merged, but %d newer commit%s on its "
-               "branch %s not published. Publish them, or close the job to drop them.",
-               (long long)job, title ? title : rec->title, left, left == 1 ? "" : "s",
-               left == 1 ? "is" : "are");
+      const int dirty = json_object_get_int(json_object_object_get(data, "uncommitted"));
+      char what[160] = "";
+      if (left > 0) {
+         snprintf(what, sizeof(what), "%d newer commit%s on its branch %s not published", left,
+                  left == 1 ? "" : "s", left == 1 ? "is" : "are");
+      }
+      if (dirty > 0) {
+         const size_t n = strlen(what);
+         snprintf(what + n, sizeof(what) - n, "%s%d changed file%s %s never committed",
+                  n ? " and " : "", dirty, dirty == 1 ? "" : "s", dirty == 1 ? "was" : "were");
+      }
+      snprintf(text, sizeof(text), "Coding job #%lld (%s): its pull request was merged, but %s. %s",
+               (long long)job, title ? title : rec->title, what[0] ? what : "work was left over",
+               left > 0 ? "Publish them, or close the job to drop them."
+                        : "Close the job to drop them, or ask for them to be committed.");
    }
    free(title);
    job_report_post(rec->parent_id, user_id, text);
@@ -449,7 +490,8 @@ void coding_watch_apply(struct json_object *event) {
       notify_waiting(user_id, job, &rec, asks, repo, first);
       json_object_put(first);
    } else if (is_end(kind)) {
-      end_job(job, user_id, kind, json_object_object_get(event, "data"));
+      end_job(job, user_id, kind, json_object_object_get(event, "data"),
+              json_object_get_int64(json_object_object_get(event, "seq")));
    }
 }
 
@@ -543,7 +585,8 @@ static int reconcile_job(const job_record_t *rec) {
       coding_gateway_cancel(rec->user_id, rec->id);
    } else if (is_end(coding_gateway_jstr(task, "status"))) {
       /* Its end event is gone; the task record holds the same facts. */
-      end_job(rec->id, rec->user_id, coding_gateway_jstr(task, "status"), task);
+      end_job(rec->id, rec->user_id, coding_gateway_jstr(task, "status"), task,
+              0); /* the task's state now, not a replay */
    } else if (queued) {
       /* It started, but DAWN stopped before recording it: the start path that
        * would have is gone, so the watcher does. */
