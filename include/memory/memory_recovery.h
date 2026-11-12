@@ -70,7 +70,8 @@ void memory_recovery_run_pass(int *triggered_out, int *skipped_out);
  * in that order: the settle first, then each poll while the extraction
  * still runs.  A test then decides when the extraction it started is seen
  * running and when it ends, with no timing.  NULL restores both.  Never
- * while the worker thread runs.
+ * together with memory_recovery_start(): the worker thread reads the hook
+ * unlocked.
  */
 void memory_recovery_set_test_wait(void (*wait)(void));
 

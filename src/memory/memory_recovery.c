@@ -83,6 +83,11 @@ static pthread_mutex_t s_pass_mutex = PTHREAD_MUTEX_INITIALIZER;
  * sleeps.  NULL in the daemon. */
 static void (*s_test_wait)(void);
 
+/* A pass goes on while the worker thread is up, or while a test drives it. */
+static bool pass_may_continue(void) {
+   return s_running || s_test_wait != NULL;
+}
+
 /* =============================================================================
  * Internal helpers
  * ============================================================================= */
@@ -202,7 +207,7 @@ static void record_attempt(int64_t conv_id) {
  */
 static bool wait_for_user_extraction(int user_id) {
    int waited = 0;
-   while (memory_extraction_in_progress(user_id) && s_running) {
+   while (memory_extraction_in_progress(user_id) && pass_may_continue()) {
       if (waited >= RECOVERY_PER_CONV_WAIT_SEC) {
          return false;
       }
@@ -380,7 +385,7 @@ void memory_recovery_run_pass(int *triggered_out, int *skipped_out) {
 
    OLOG_INFO("memory_recovery: pass starting — %d stuck conversation(s) to process", list.count);
 
-   for (int i = 0; i < list.count && s_running; i++) {
+   for (int i = 0; i < list.count && pass_may_continue(); i++) {
       if (process_stuck_conv(&list.rows[i], max_attempts)) {
          triggered++;
       } else {
@@ -446,7 +451,6 @@ static void *recovery_thread_func(void *arg) {
 
 void memory_recovery_set_test_wait(void (*wait)(void)) {
    s_test_wait = wait;
-   s_running = wait != NULL;
 }
 
 int memory_recovery_start(void) {

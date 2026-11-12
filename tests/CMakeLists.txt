@@ -3123,8 +3123,9 @@ dawn_add_unit_test(test_memory_consolidation_db
 
 # Memory extraction end to end with a fake model: the real trigger, thread,
 # history loader and recovery pass on a real schema.  The model call is
-# wrapped, so no request leaves the process; the wrap reaches only objects
-# linked here.
+# wrapped, so no request leaves the process.  A wrap reaches calls from
+# other objects only: it holds while nothing in llm_interface.c, which
+# defines the function, calls it itself (each test asserts the call count).
 dawn_add_unit_test(test_memory_extraction_run
    SOURCES test_memory_extraction_run.c
            ${MEMORY_CONSOLIDATE_TEST_SOURCES}

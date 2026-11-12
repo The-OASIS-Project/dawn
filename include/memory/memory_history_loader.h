@@ -162,8 +162,12 @@ char *memory_history_strip_visuals(const char *content);
 /**
  * @brief The text a reply with visuals is saved as: @p body, then "\n",
  *        @p visual (its `<dawn-visual ...>` blocks) and "\n", the form
- *        memory_history_strip_visuals() takes back off on reload.
+ *        memory_history_strip_visuals() takes back off on reload.  The
+ *        browser reads the same form (extractVisuals in
+ *        www/js/ui/visual-render.js).
  *
+ * @param body   The reply's text; not NULL
+ * @param visual The visual blocks; not NULL
  * @return A new heap string, or NULL on allocation failure (the caller saves
  *         the bare body)
  */

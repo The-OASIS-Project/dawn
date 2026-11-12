@@ -359,8 +359,11 @@ static int64_t s_saved_meanwhile;
 
 /* A row another session saves while the model works: it stays unread. */
 static void save_meanwhile(void) {
-   s_saved_meanwhile = add(s_recovery_conv, "user",
-                           "MARK-LATE placeholder question saved during the call");
+   /* On the extraction thread: no assertion here; the test checks the id. */
+   s_saved_meanwhile = 0;
+   (void)conv_db_add_message_ex(s_recovery_conv, s_user, "user",
+                                "MARK-LATE placeholder question saved during the call",
+                                &s_saved_meanwhile);
 }
 
 /* A conversation whose stored count is in older units (above what its rows

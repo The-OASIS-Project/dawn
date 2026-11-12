@@ -641,6 +641,8 @@ static bool saved_reply_has(int64_t conv, const char *content) {
 static int64_t s_conv;
 
 void setUp(void) {
+   s_over = false;
+   s_summary = NULL;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(":memory:"));
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_create_user("alice", "h", true));
    auth_user_t u;
