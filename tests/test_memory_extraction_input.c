@@ -72,6 +72,24 @@ int conv_db_rows_outside(int64_t conv_id,
    return AUTH_DB_SUCCESS;
 }
 
+/* The history the test passes holds every row. */
+int conv_db_exchange_rows_missing(int64_t conv_id,
+                                  int user_id,
+                                  int64_t after_id,
+                                  int64_t upto_id,
+                                  const char *ids_json,
+                                  int *missing_out,
+                                  int64_t *first_out) {
+   (void)conv_id;
+   (void)user_id;
+   (void)after_id;
+   (void)upto_id;
+   (void)ids_json;
+   *missing_out = 0;
+   *first_out = 0;
+   return AUTH_DB_SUCCESS;
+}
+
 /* Every row the test names is the user's, in conversation 1699. */
 int conv_db_messages_ownership(int user_id, const char *ids_json, conv_msg_ownership_t *out) {
    (void)user_id;

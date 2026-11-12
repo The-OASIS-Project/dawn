@@ -52,6 +52,30 @@ int64_t memory_extraction_history_max_id(struct json_object *history);
 int64_t memory_extraction_history_first_id(struct json_object *history);
 
 /**
+ * @brief The history to extract conversation @p conversation_id from
+ *
+ * @p history when it holds every exchange row past @p last_msg_id up
+ * to its own highest id (conv_db_exchange_rows_missing); otherwise the
+ * conversation as stored (memory_history_load_from_db, what the queue and
+ * memory recovery read), since a session's history may lack another
+ * session's rows or a compaction's, and marking it extracted would skip them
+ * for good.  @p conversation_id 0: @p history.
+ *
+ * @param user_id         Owner of the conversation
+ * @param conversation_id Conversation the history is of; 0 returns @p history
+ * @param history         The session's history (borrowed); NULL gives NULL
+ * @param last_msg_id     The conversation's extraction cursor: rows past it
+ *                        are checked
+ * @return A new reference to the history to use, or NULL when @p history is
+ *         NULL or the check or the load fails (nothing is extracted; memory
+ *         recovery retries)
+ */
+struct json_object *memory_extraction_history_whole(int user_id,
+                                                    int64_t conversation_id,
+                                                    struct json_object *history,
+                                                    int64_t last_msg_id);
+
+/**
  * @brief The outside kind of the rows of @p history a batch from
  *        @p last_msg_id reads, as memory_extraction_build_input judges them
  *

@@ -978,15 +978,26 @@ static int trigger_extraction(int user_id,
       ctx->fallback = *fallback;
    }
 
+   /* A session's history may lack rows of its conversation (another
+    * session's, a compaction's): then the stored conversation is read, so the
+    * cursor never passes a row nothing read. */
+   struct json_object *history = memory_extraction_history_whole(user_id, conversation_id,
+                                                                 conversation_history, last_msg_id);
+   if (!history) {
+      free(ctx);
+      extraction_slot_release(user_id);
+      return 0;
+   }
+
    /* The messages to extract, verified to belong to conversation_id (see
     * memory_extraction_build_input).  NULL: refused or out of memory; either
     * way nothing is extracted and memory_recovery picks up anything eligible. */
    int batch_outside = OUTSIDE_NONE;
-   struct json_object *filtered = memory_extraction_build_input(user_id, conversation_id,
-                                                                conversation_history, last_msg_id,
-                                                                &batch_outside);
+   struct json_object *filtered = memory_extraction_build_input(user_id, conversation_id, history,
+                                                                last_msg_id, &batch_outside);
    ctx->outside = outside_combine(floor, batch_outside);
-   ctx->checked_max_id = memory_extraction_history_max_id(conversation_history);
+   ctx->checked_max_id = memory_extraction_history_max_id(history);
+   json_object_put(history);
    if (!filtered) {
       free(ctx);
       extraction_slot_release(user_id);
@@ -1001,8 +1012,8 @@ static int trigger_extraction(int user_id,
       /* The rows passed may still have read outside text (DAWN's posts): the
        * floor takes it with the cursor. */
       const int outside = ctx->outside;
+      const int64_t checked_id = ctx->checked_max_id;
       free(ctx);
-      const int64_t checked_id = memory_extraction_history_max_id(conversation_history);
       if (conversation_id > 0 && checked_id > last_msg_id &&
           memory_db_set_last_extracted(conversation_id, message_count, checked_id, outside) !=
               MEMORY_DB_SUCCESS) {
