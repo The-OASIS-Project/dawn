@@ -1286,6 +1286,12 @@
                   DawnCodingEvents.handlePending(msg.payload);
                }
                break;
+            case 'coding_view_response':
+               // A coding job's work for the changes viewer (to this tab only).
+               if (typeof DawnCodingViewer !== 'undefined') {
+                  DawnCodingViewer.handleResponse(msg.payload);
+               }
+               break;
             case 'coding_grants_response':
                // The coding agent's standing approvals (the jobs panel's list).
                if (typeof DawnCodingGrants !== 'undefined') {

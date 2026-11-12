@@ -118,6 +118,21 @@
                'This job runs in ' + info.agent + '; DAWN’s model settings don’t apply.'
             );
             view.appendChild(note);
+            if (typeof DawnCodingViewer !== 'undefined') {
+               const btn = elem(
+                  'button',
+                  'coding-card-btn secondary llm-agent-changes',
+                  'View changes'
+               );
+               btn.type = 'button';
+               btn.dataset.jobId = String(attachedJob);
+               btn.dataset.action = 'changes';
+               const job = attachedJob;
+               btn.addEventListener('click', function () {
+                  DawnCodingViewer.open(job, '', btn);
+               });
+               view.appendChild(btn);
+            }
             grid.appendChild(view);
          }
       }

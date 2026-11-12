@@ -42,6 +42,7 @@
 #include "core/strbuf.h"
 #include "core/turn_origin.h"
 #include "dawn_error.h"
+#include "tools/coding_agent_card.h"
 #include "tools/coding_agent_gateway.h"
 #include "tools/coding_agent_internal.h"
 #include "tools/coding_agent_report.h"
@@ -499,29 +500,26 @@ static char *handle_changes(struct json_object *details, int user_id) {
    return out ? out : coding_agent_error("The listing didn't fit in memory.");
 }
 
-static char *handle_file(struct json_object *details, int user_id) {
-   const int64_t job = coding_agent_details_job(details);
-   job_record_t rec;
-   char *bad = coding_agent_check_job(job, user_id, &rec);
-   if (bad != NULL) {
-      return bad;
-   }
-   const char *path = coding_gateway_jstr(details, "path");
-   const char *view = coding_gateway_jstr(details, "view");
-   if (view[0] == '\0') {
-      view = "diff";
-   }
-   if (path[0] == '\0' || strlen(path) > CA_PATH_MAX) {
-      return coding_agent_error(
-          "Name the file: {\"job\": N, \"path\": \"<a path changes listed>\"}.");
+/* task_file's arguments for @p path as changes listed it (a rename "a -> b":
+ * the new name, or the old one for old; its diff names both, so git shows the
+ * rename and the edit) in @p view; NULL with the refusal in *@p refusal. */
+static struct json_object *file_args(int64_t job,
+                                     const char *path,
+                                     const char *view,
+                                     const char **refusal) {
+   *refusal = "Name the file: {\"job\": N, \"path\": \"<a path changes listed>\"}.";
+   if (path[0] == '\0' || strlen(path) > 2 * CA_PATH_MAX + strlen(CA_RENAME_SEP)) {
+      return NULL;
    }
    if (strcmp(view, "diff") != 0 && strcmp(view, "new") != 0 && strcmp(view, "old") != 0) {
-      return coding_agent_error(
-          "view is diff (the default), new (the file after) or old (before).");
+      *refusal = "view is diff (the default), new (the file after) or old (before).";
+      return NULL;
    }
-   /* A rename as changes listed it: the new name, or the old one for old; its
-    * diff names both, so git shows the rename and the edit. */
    const char *sep = strstr(path, CA_RENAME_SEP);
+   const size_t old_len = sep ? (size_t)(sep - path) : 0;
+   if (old_len > CA_PATH_MAX || strlen(sep ? sep + strlen(CA_RENAME_SEP) : path) > CA_PATH_MAX) {
+      return NULL; /* each path of a rename within the limit */
+   }
    char old_name[CA_PATH_MAX + 1], name[CA_PATH_MAX + 1];
    snprintf(old_name, sizeof(old_name), "%.*s", sep ? (int)(sep - path) : 0, path);
    snprintf(name, sizeof(name), "%s",
@@ -529,18 +527,71 @@ static char *handle_file(struct json_object *details, int user_id) {
             : strcmp(view, "old") == 0 ? old_name
                                        : sep + strlen(CA_RENAME_SEP));
    if (name[0] == '\0' || (sep != NULL && old_name[0] == '\0')) {
-      return coding_agent_error(
-          "Name the file: {\"job\": N, \"path\": \"<a path changes listed>\"}.");
+      return NULL;
    }
    struct json_object *args = coding_agent_job_args(job);
    if (args == NULL) {
-      return coding_agent_error("Couldn't read the coding job.");
+      *refusal = "Couldn't read the coding job.";
+      return NULL;
    }
    json_object_object_add(args, "path", json_object_new_string(name));
    if (sep != NULL && strcmp(view, "diff") == 0) {
       json_object_object_add(args, "old_path", json_object_new_string(old_name));
    }
    json_object_object_add(args, "view", json_object_new_string(view));
+   return args;
+}
+
+struct json_object *coding_view_fetch(int user_id,
+                                      int64_t job,
+                                      bool file,
+                                      const char *path,
+                                      const char *view,
+                                      char **err_out) {
+   *err_out = NULL;
+   job_record_t rec;
+   char *bad = coding_agent_check_job(job, user_id, &rec);
+   if (bad != NULL) {
+      *err_out = bad;
+      return NULL;
+   }
+   struct json_object *args = coding_agent_job_args(job);
+   if (file) {
+      json_object_put(args);
+      const char *refusal = NULL;
+      args = file_args(job, path, view, &refusal);
+      if (args == NULL) {
+         *err_out = coding_agent_error(refusal);
+         return NULL;
+      }
+   }
+   struct json_object *ans = NULL;
+   char *err = NULL;
+   if (coding_gateway_call(user_id, file ? "task_file" : "task_changes", args, &ans, &err) !=
+       CODING_GW_OK) {
+      *err_out = coding_agent_error_free(err);
+      return NULL;
+   }
+   free(err);
+   return ans;
+}
+
+static char *handle_file(struct json_object *details, int user_id) {
+   const int64_t job = coding_agent_details_job(details);
+   job_record_t rec;
+   char *bad = coding_agent_check_job(job, user_id, &rec);
+   if (bad != NULL) {
+      return bad;
+   }
+   const char *view = coding_gateway_jstr(details, "view");
+   if (view[0] == '\0') {
+      view = "diff";
+   }
+   const char *refusal = NULL;
+   struct json_object *args = file_args(job, coding_gateway_jstr(details, "path"), view, &refusal);
+   if (args == NULL) {
+      return coding_agent_error(refusal);
+   }
    struct json_object *ans = NULL;
    char *err = NULL;
    if (coding_gateway_call(user_id, "task_file", args, &ans, &err) != CODING_GW_OK) {

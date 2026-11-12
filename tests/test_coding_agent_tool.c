@@ -36,6 +36,7 @@
 #include "core/session_manager.h"
 #include "core/turn_origin.h"
 #include "dawn_error.h"
+#include "tools/coding_agent_card.h"
 #include "tools/coding_agent_gateway.h"
 #include "tools/coding_agent_internal.h"
 #include "tools/coding_agent_tool.h"
@@ -1719,6 +1720,40 @@ static void test_close_a_task_with_no_job(void) {
    free(r);
 }
 
+/* The WebUI viewer's fetch: the user's own coding job only; a file as changes
+ * listed it, a rename's diff naming both paths; the gateway's answer as is. */
+static void test_view_fetch(void) {
+   coding_job();
+   char *err = NULL;
+   TEST_ASSERT_NULL(coding_view_fetch(6, 42, false, "", "diff", &err)); /* not theirs */
+   TEST_ASSERT_TRUE(tool_result_is_error(err));
+   free(err);
+   struct json_object *ans = coding_view_fetch(5, 42, false, "", "diff", &err);
+   TEST_ASSERT_NOT_NULL(ans);
+   TEST_ASSERT_NULL(err);
+   TEST_ASSERT_NOT_NULL(json_object_object_get(ans, "files"));
+   json_object_put(ans);
+   ans = coding_view_fetch(5, 42, true, "old.c -> src/a.c", "diff", &err);
+   TEST_ASSERT_NOT_NULL(ans);
+   json_object_put(ans);
+   const int c = last_call("task_file");
+   TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"path\": \"src\\/a.c\""));
+   TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"old_path\": \"old.c\""));
+   TEST_ASSERT_NULL(coding_view_fetch(5, 42, true, "", "diff", &err)); /* no path */
+   free(err);
+   TEST_ASSERT_NULL(coding_view_fetch(5, 42, true, "a.c", "blame", &err)); /* no such view */
+   free(err);
+   /* A rename's two paths are each within the limit, not together. */
+   char longer[1600];
+   memset(longer, 'a', 700);
+   memcpy(longer + 700, " -> ", 4);
+   memset(longer + 704, 'b', 700);
+   longer[1404] = '\0';
+   ans = coding_view_fetch(5, 42, true, longer, "diff", &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(ans, err);
+   json_object_put(ans);
+}
+
 /* A pull request's address is shown only in GitHub's own form. */
 static void test_pr_url_check(void) {
    TEST_ASSERT_TRUE(coding_publish_pr_url_ok("https://github.com/o-1/my.repo_x/pull/12"));
@@ -1782,6 +1817,7 @@ int main(void) {
    RUN_TEST(test_pr_url_check);
    RUN_TEST(test_publish_again_and_closed_revise);
    RUN_TEST(test_close_a_task_with_no_job);
+   RUN_TEST(test_view_fetch);
    free(g_session);
    return UNITY_END();
 }

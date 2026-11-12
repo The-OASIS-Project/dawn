@@ -317,6 +317,18 @@ One lookup per user runs at a time; asks that arrive meanwhile are merged into t
 { "type": "coding_pending", "payload": { "jobs": [1977, 1983] } }
 ```
 
+#### `coding_view`
+The changes viewer: a coding job's work, read from the agent gateway's mirror (never
+shown to the model). `what` is `changes` (the changed files and commits) or `file`
+(one file: `path` exactly as `changes` listed it, `"old -> new"` for a rename;
+`view` `diff`, the default, or `new`). The user's own coding job only. One request
+per user at a time; a newer one replaces one still waiting. Answered with
+`coding_view_response`, to the asking tab only; `nonce` (optional, up to 39
+characters) is echoed so the tab renders only its latest.
+```json
+{ "type": "coding_view", "payload": { "job": 1987, "what": "file", "path": "src/a.c", "view": "diff", "nonce": "v3" } }
+```
+
 #### `coding_grants`
 The user's standing approvals for the coding agent (hosts and tools allowed for every
 task on a repo, or every repo). Answered with `coding_grants_response`.
@@ -2139,6 +2151,20 @@ run reported, absent before the first run (show "default"). A coding job's work 
 in its agent, not on the conversation's model, so a client shows these in place of its
 model controls and doesn't send text into the job's conversation (follow-up work goes
 through the assistant: "follow up on job 1977: ...").
+
+#### `coding_view_response`
+`ok` with `result`, the gateway's answer as is, or `error`. For `changes`: `head`,
+`base`, `task_id` (the job's branch is `refs/agent/<task_id>` in the gateway's
+mirror), `files` ({`path`, `added`, `removed`, `protected`}; `added`/`removed` null
+for a binary file; protected first, at most 2000) with `files_total`, and `commits`
+({`hash`, `subject`}, at most 100). For `file`: `path`, `view`, and `text` (a unified
+diff, or the file), or `too_large` (bytes), `binary` or `missing`. Paths, subjects
+and text are the agent's: show them as text, and show invisible and
+direction-changing characters (bidi controls, zero-width characters) visibly, since
+this is where the user checks the work before publishing it.
+```json
+{ "type": "coding_view_response", "payload": { "job": 1987, "what": "file", "nonce": "v3", "ok": true, "result": { "path": "src/a.c", "view": "diff", "text": "@@ -1 +1 @@\n-a\n+b\n" } } }
+```
 
 #### `coding_grants_response`
 To every tab of the user. `grants` is absent (with `error`) when the gateway didn't

@@ -436,3 +436,184 @@ void webui_coding_handle_grant_revoke(ws_connection_t *conn, json_object *payloa
    }
    grants_start(conn, id);
 }
+
+/* =============================================================================
+ * coding_view {job, what: changes|file, path?, view?, nonce}: the changes viewer
+ *
+ * A job's work from the gateway's mirror, answered to the asking tab only (a
+ * file reply can be megabytes once serialized).  One request per user at a
+ * time; a newer one replaces the one still waiting, so clicking through files
+ * never gets a refusal.  Logged by job and kind only: paths are the agent's.
+ * ============================================================================= */
+
+#define WC_VIEW_PATH_MAX 2100 /* a rename's two paths and its separator */
+
+typedef struct {
+   int64_t job;
+   bool file;
+   bool diff; /* else new */
+   uint32_t session_id;
+   char path[WC_VIEW_PATH_MAX];
+   char nonce[WC_NONCE_MAX];
+} wc_view_req_t;
+
+static struct {
+   int user_id; /* 0: free */
+   bool waiting;
+   wc_view_req_t next;
+} s_viewers[WC_USERS_MAX];
+static pthread_mutex_t s_viewers_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* @p json to session @p session_id while it is still @p user_id's tab. */
+static void send_to_session(uint32_t session_id, int user_id, struct json_object *frame) {
+   const char *text = json_object_to_json_string_ext(frame, JSON_C_TO_STRING_PLAIN);
+   char *json = text ? strdup(text) : NULL;
+   json_object_put(frame);
+   session_t *session = json ? session_get(session_id) : NULL; /* NULL once gone */
+   if (session == NULL) {
+      free(json);
+      return;
+   }
+   pthread_mutex_lock(&session->metrics_mutex);
+   const int owner = session->metrics.user_id;
+   pthread_mutex_unlock(&session->metrics_mutex);
+   if (owner == user_id) {
+      webui_send_session_json_take(session, json);
+   } else {
+      free(json); /* that tab logged in as someone else since */
+   }
+   session_release(session);
+}
+
+static void view_reply(int user_id,
+                       const wc_view_req_t *r,
+                       struct json_object *result,
+                       const char *error) {
+   struct json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "job", json_object_new_int64(r->job));
+   json_object_object_add(payload, "what", json_object_new_string(r->file ? "file" : "changes"));
+   json_object_object_add(payload, "nonce", json_object_new_string(r->nonce));
+   json_object_object_add(payload, "ok", json_object_new_boolean(result != NULL));
+   if (result != NULL) {
+      json_object_object_add(payload, "result", result);
+   } else {
+      json_object_object_add(payload, "error", json_object_new_string(error));
+   }
+   struct json_object *frame = json_object_new_object();
+   json_object_object_add(frame, "type", json_object_new_string("coding_view_response"));
+   json_object_object_add(frame, "payload", payload);
+   send_to_session(r->session_id, user_id, frame);
+}
+
+static void view_run(void *arg) {
+   const int slot = (int)(intptr_t)arg;
+   for (;;) {
+      pthread_mutex_lock(&s_viewers_mutex);
+      const int user_id = s_viewers[slot].user_id;
+      const bool waiting = s_viewers[slot].waiting;
+      const wc_view_req_t r = s_viewers[slot].next;
+      s_viewers[slot].waiting = false;
+      if (!waiting) {
+         s_viewers[slot].user_id = 0; /* nothing more asked: the slot is free */
+      }
+      pthread_mutex_unlock(&s_viewers_mutex);
+      if (!waiting || coding_gateway_stopping()) {
+         if (waiting) {
+            pthread_mutex_lock(&s_viewers_mutex);
+            s_viewers[slot].user_id = 0;
+            pthread_mutex_unlock(&s_viewers_mutex);
+         }
+         return;
+      }
+      char *err = NULL;
+      struct json_object *result = coding_view_fetch(user_id, r.job, r.file, r.path,
+                                                     r.diff ? "diff" : "new", &err);
+      const char *text = err ? err : "The coding-agent gateway didn't answer.";
+      if (err != NULL && tool_result_is_error(err)) {
+         text += strlen(TOOL_RESULT_ERROR_MARK);
+      }
+      OLOG_INFO("coding_agent: viewer %s for job %" PRId64 " by user %d: %s",
+                r.file ? "file" : "changes", r.job, user_id, result ? "sent" : "refused");
+      if (!coding_gateway_stopping()) {
+         view_reply(user_id, &r, result, text);
+      } else {
+         json_object_put(result);
+      }
+      free(err);
+   }
+}
+
+void webui_coding_handle_view(ws_connection_t *conn, json_object *payload) {
+   if (!conn || !conn->authenticated || conn->is_satellite || conn->auth_user_id <= 0) {
+      return;
+   }
+   session_t *s = conn_get_session(conn);
+   if (s == NULL) {
+      return; /* nowhere to answer */
+   }
+   const int user_id = conn->auth_user_id;
+   struct json_object *o = NULL;
+   wc_view_req_t r = { .session_id = s->session_id };
+   r.job = json_object_object_get_ex(payload, "job", &o) ? json_object_get_int64(o) : 0;
+   const char *nonce = json_object_object_get_ex(payload, "nonce", &o) ? json_object_get_string(o)
+                                                                       : "";
+   snprintf(r.nonce, sizeof(r.nonce), "%s", nonce && strlen(nonce) < WC_NONCE_MAX ? nonce : "");
+   /* The client's words are matched, never passed on. */
+   const char *what = json_object_object_get_ex(payload, "what", &o) ? json_object_get_string(o)
+                                                                     : "";
+   const char *view = json_object_object_get_ex(payload, "view", &o) ? json_object_get_string(o)
+                                                                     : "diff";
+   const char *path = json_object_object_get_ex(payload, "path", &o) ? json_object_get_string(o)
+                                                                     : "";
+   r.file = what && strcmp(what, "file") == 0;
+   r.diff = !view || strcmp(view, "new") != 0;
+   const bool known = what && (r.file || strcmp(what, "changes") == 0) &&
+                      (!view || strcmp(view, "diff") == 0 || strcmp(view, "new") == 0);
+   if (!known || r.job <= 0 || !path || strlen(path) >= sizeof(r.path) ||
+       (r.file && path[0] == '\0')) {
+      view_reply(user_id, &r, NULL, "Malformed request.");
+      return;
+   }
+   snprintf(r.path, sizeof(r.path), "%s", path);
+   if (!users_coding_job(user_id, r.job)) {
+      view_reply(user_id, &r, NULL, "No coding job with that number.");
+      return;
+   }
+   pthread_mutex_lock(&s_viewers_mutex);
+   int slot = -1, free_slot = -1;
+   for (int i = 0; i < WC_USERS_MAX && slot < 0; i++) {
+      if (s_viewers[i].user_id == user_id) {
+         slot = i;
+      } else if (s_viewers[i].user_id == 0 && free_slot < 0) {
+         free_slot = i;
+      }
+   }
+   const bool start = slot < 0 && free_slot >= 0;
+   if (start) {
+      slot = free_slot;
+      s_viewers[slot].user_id = user_id;
+   }
+   wc_view_req_t replaced = { .job = 0 };
+   if (slot >= 0) {
+      if (s_viewers[slot].waiting && s_viewers[slot].next.session_id != r.session_id) {
+         replaced = s_viewers[slot].next; /* another tab's: it hears why, not silence */
+      }
+      s_viewers[slot].next = r; /* replaces one still waiting: only the newest matters */
+      s_viewers[slot].waiting = true;
+   }
+   pthread_mutex_unlock(&s_viewers_mutex);
+   if (replaced.job > 0) {
+      view_reply(user_id, &replaced, NULL, "Another tab asked meanwhile; try again.");
+   }
+   if (slot < 0) {
+      view_reply(user_id, &r, NULL, "Too many at once; try again in a moment.");
+      return;
+   }
+   if (start && coding_gateway_run_async(view_run, (void *)(intptr_t)slot) != SUCCESS) {
+      pthread_mutex_lock(&s_viewers_mutex);
+      s_viewers[slot].user_id = 0;
+      s_viewers[slot].waiting = false;
+      pthread_mutex_unlock(&s_viewers_mutex);
+      view_reply(user_id, &r, NULL, "Try again in a moment.");
+   }
+}

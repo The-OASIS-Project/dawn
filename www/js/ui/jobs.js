@@ -322,6 +322,20 @@
             true /* attach — this is the job's own conversation */
          )
       );
+      if (job.kind === 'coding' && typeof DawnCodingViewer !== 'undefined') {
+         const changes = elem('button', 'jobs-open-btn', 'View changes');
+         changes.type = 'button';
+         changes.setAttribute(
+            'aria-label',
+            'Changes made by coding job: ' + (job.title || 'untitled')
+         );
+         changes.dataset.jobId = String(job.conversation_id);
+         changes.dataset.action = 'changes';
+         changes.addEventListener('click', function () {
+            DawnCodingViewer.open(job.conversation_id, job.title || '', changes);
+         });
+         actions.appendChild(changes);
+      }
       if (isActiveStatus(job.status)) {
          actions.appendChild(buildActionButton(job, 'cancel', 'Cancel'));
       } else if (isResumable(job.status)) {

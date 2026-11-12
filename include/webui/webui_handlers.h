@@ -197,6 +197,9 @@ void webui_jobs_handle_action(ws_connection_t *conn, struct json_object *payload
 /** coding_pending {jobs}: what those coding jobs wait on (webui_coding.c). */
 void webui_coding_handle_pending(ws_connection_t *conn, struct json_object *payload);
 
+/** coding_view {job, what, path?, view?, nonce}: the changes viewer (webui_coding.c). */
+void webui_coding_handle_view(ws_connection_t *conn, json_object *payload);
+
 /** coding_grants {}: the user's standing approvals (webui_coding.c). */
 void webui_coding_handle_grants(ws_connection_t *conn, json_object *payload);
 

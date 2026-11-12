@@ -1670,6 +1670,11 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
       if (!conn_require_auth(conn))
          return;
       webui_coding_handle_reply(conn, payload);
+   } else if (strcmp(type, "coding_view") == 0) {
+      /* The changes viewer; the job's owner is checked inside. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_view(conn, payload);
    } else if (strcmp(type, "coding_grants") == 0) {
       if (!conn_require_auth(conn))
          return;

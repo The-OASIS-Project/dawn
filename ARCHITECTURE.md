@@ -419,9 +419,12 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │  Coding card     — transient, one per WebUI card ask   │
 │                    (coding_pending) or click           │
 │                    (coding_reply, one per job at a     │
-│                    time): asks the gateway, answers    │
-│                    the user's tabs; waited for by the  │
-│                    tool's stop                         │
+│                    time), grants list, or changes      │
+│                    viewer request (coding_view, one    │
+│                    per user, newest wins): asks the    │
+│                    gateway, answers the user's tabs    │
+│                    (a view: the asking tab only);      │
+│                    waited for by the tool's stop       │
 │  Email fan-out   — transient, one per enabled account  │
 │                    (≤16) for an all-accounts email     │
 │                    search from the tool, joined before │

@@ -360,6 +360,12 @@
    text-align: center;
 }
 
+#llm-agent-view .llm-agent-changes {
+   grid-column: 1 / -1;
+   justify-self: center;
+   margin-top: 0.25rem;
+}
+
 #text-input.agent-locked {
    cursor: not-allowed;
 }

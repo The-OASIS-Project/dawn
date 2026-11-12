@@ -58,6 +58,10 @@ SANDBOX_PLACEHOLDERS = [".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".pro
 SUBJECT_CAP = 200
 PROTECTED_CAP = 20        # protected paths named in a completed event
 FILE_CAP = 512 * 1024     # one file's content or diff in a viewer reply
+# What one reply may take once encoded: the text is JSON in the tool result,
+# which is JSON again in the MCP reply, and DAWN reads at most 1 MiB of it.
+REPLY_CAP = 900 * 1024
+FILES_CAP = 2000          # changed files in one changes listing (protected first)
 TREE_CAP = 2000           # entries in one folder listing
 COMMITS_CAP = 100
 CLAUDE_MD_CAP = 64 * 1024
@@ -307,11 +311,14 @@ class Repos:
                                         for p in path.split(" -> "))})
          i += 1
       files.sort(key=lambda f: not f["protected"])  # protected first: never cut off a listing
+      total = len(files)
+      files = files[:FILES_CAP]
       log = await self.gw("-C", m, "log", "--format=%H%x00%s", f"-{COMMITS_CAP}", f"{mb}..{head}")
       commits = [dict(zip(("hash", "subject"), c.split("\0", 1))) for c in log.splitlines()]
       for c in commits:
          c["subject"] = c.get("subject", "")[:SUBJECT_CAP]
-      return {"head": head, "base": mb, "files": files, "commits": commits}
+      return {"head": head, "base": mb, "files": files, "files_total": total,
+              "commits": commits}
 
    async def file(self, name: str, task_id: str, base: str, path: str, view: str,
                   old_path: str | None = None) -> dict:
@@ -343,7 +350,12 @@ class Repos:
          return {"path": p, "view": view, "too_large": len(out)}
       if b"\0" in out:
          return {"path": p, "view": view, "binary": True}
-      return {"path": p, "view": view, "text": out.decode(errors="replace")}
+      text = out.decode(errors="replace")
+      # As sent: the text JSON-encoded twice (non-ASCII as itself), in bytes.
+      encoded = json.dumps(json.dumps(text, ensure_ascii=False), ensure_ascii=False)
+      if len(encoded.encode()) > REPLY_CAP:  # a lockfile's escapes double it
+         return {"path": p, "view": view, "too_large": len(out)}
+      return {"path": p, "view": view, "text": text}
 
    async def size_of(self, m: str, rev: str) -> int:
       """Size of a blob, or 0 if the path isn't there."""

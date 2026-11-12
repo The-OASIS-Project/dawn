@@ -1126,12 +1126,26 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    git("commit", "-qm", "big", cwd=wt)
    asyncio.run(repos.collect("r", "aaaa0001", "agent/aaaa0001-x", "main"))
    assert asyncio.run(repos.file("r", "aaaa0001", "main", "big.txt", "diff"))["too_large"]
+   # Under the byte cap, but too large once its quotes are escaped twice (a lockfile).
+   lock = tmp_path / "home/work/aaaa0001/lock.json"
+   lock.write_text('{"a":"b"}\n' * 40_000)
+   git("add", "lock.json", cwd=wt)
+   git("commit", "-qm", "lock", cwd=wt)
+   asyncio.run(repos.collect("r", "aaaa0001", "agent/aaaa0001-x", "main"))
+   assert asyncio.run(repos.file("r", "aaaa0001", "main", "lock.json", "new"))["too_large"]
+   import agent_gateway.repos as repos_mod
+   cap, repos_mod.FILES_CAP = repos_mod.FILES_CAP, 1  # cut to one: the protected file stays
+   try:
+      ch = asyncio.run(repos.changes("r", "aaaa0001", "main"))
+   finally:
+      repos_mod.FILES_CAP = cap
+   assert ch["files_total"] >= 3 and [f["path"] for f in ch["files"]] == ["g"]
    # Work only the mirror has: none of it published, then part, then all.
    mirror_git = lambda *a: git("-C", str(tmp_path / "mirrors/r.git"), *a)  # noqa: E731
    first = mirror_git("rev-list", "--reverse", "refs/agent/aaaa0001", "^refs/heads/main")
    first = first.splitlines()[0]
    unpub = lambda h: asyncio.run(repos.unpublished("r", "aaaa0001", "main", h))  # noqa: E731
-   assert unpub(None) == 3 and unpub(first) == 2
+   assert unpub(None) == 4 and unpub(first) == 3
    assert unpub(mirror_git("rev-parse", "refs/agent/aaaa0001")) == 0
    # The agent drops its commits: the earlier collected work must not linger.
    git("reset", "-q", "--hard", "origin/main", cwd=wt)

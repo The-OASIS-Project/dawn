@@ -225,7 +225,8 @@ def build(runner, cfg) -> MCPServer:
       """The task's work so far: changed files with +/- counts, and its commits."""
       t = task_of(dawn_user_id, task_id, client_ref)
       closed_check(t)
-      return await runner.repos.changes(t["repo"], t["id"], t["base"])
+      res = await runner.repos.changes(t["repo"], t["id"], t["base"])
+      return {**res, "task_id": t["id"]}  # names refs/agent/<id> for looking locally
 
    @tool
    async def task_file(dawn_user_id: int, path: str, view: str = "diff",

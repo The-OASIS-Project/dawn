@@ -24,6 +24,7 @@
 #define CODING_AGENT_CARD_H
 
 #include <json-c/json.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -79,6 +80,22 @@ struct json_object *coding_requests_grant_list(int user_id, char **err_out);
  * @return The result (TOOL_RESULT_ERROR_MARK-prefixed on refusal); caller frees.
  */
 char *coding_requests_grant_revoke(int user_id, int64_t grant);
+
+/**
+ * @brief A coding job's work for the WebUI's viewer, from the gateway's mirror:
+ *        task_changes' answer, or (@p file) task_file's for @p path as changes
+ *        listed it ("a -> b" for a rename) in @p view ("diff" or "new").  The
+ *        user's own coding job only.  Blocks on the gateway: call off the lws
+ *        thread.  None of it reaches the model.
+ * @return The gateway's object (caller puts), or NULL with the error result
+ *         (TOOL_RESULT_ERROR_MARK-prefixed) in *err_out.
+ */
+struct json_object *coding_view_fetch(int user_id,
+                                      int64_t job,
+                                      bool file,
+                                      const char *path,
+                                      const char *view,
+                                      char **err_out);
 
 #ifdef __cplusplus
 }
