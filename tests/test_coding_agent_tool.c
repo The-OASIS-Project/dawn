@@ -406,6 +406,17 @@ bool turn_origin_capture(turn_origin_t *out) {
    return true;
 }
 
+/* The posts the turn g_told_turn was told: message g_told_msg only. */
+static uint64_t g_told_turn;
+static int64_t g_told_msg;
+bool session_posts_told_by_turn(struct session *session,
+                                uint64_t turn_token,
+                                int64_t conv_id,
+                                int64_t msg_id) {
+   (void)session, (void)conv_id;
+   return turn_token != 0 && turn_token == g_told_turn && msg_id == g_told_msg;
+}
+
 /* DAWN's own staging: the session is idle unless a test says otherwise. */
 static bool g_session_busy;
 bool turn_origin_unasked(struct session *session, turn_origin_t *out) {
@@ -1347,6 +1358,29 @@ static void test_no_approve_in_a_turn_that_read_the_agent(void) {
    free(r);
 }
 
+/* A report with a take told to the turn counts as reading the agent: the yes
+ * waits for the next turn, and the approval is still there for it. */
+static void test_no_approve_in_a_turn_told_a_take(void) {
+   coding_job();
+   g_pending = "[" HOST_REQ "]";
+   char *r = call("approve", "{\"job\":42}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(r));
+   free(r);
+   coding_agent_note_take(7, 777);
+   g_turn++;
+   g_told_turn = g_turn, g_told_msg = 777; /* this turn's context carried the report */
+   r = call("confirm_approve", args);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "read the coding agent's report"), r);
+   free(r);
+   g_turn++; /* the next turn wasn't told it */
+   r = call("confirm_approve", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
+   free(r);
+   g_told_turn = 0, g_told_msg = 0;
+}
+
 /* status shows a question's text and what can be done. */
 static void test_status_shows_the_question(void) {
    coding_job();
@@ -1810,6 +1844,7 @@ int main(void) {
    RUN_TEST(test_reply_says_what_comes_next);
    RUN_TEST(test_unasked_approval);
    RUN_TEST(test_no_approve_in_a_turn_that_read_the_agent);
+   RUN_TEST(test_no_approve_in_a_turn_told_a_take);
    RUN_TEST(test_status_shows_recent_steps);
    RUN_TEST(test_needs_the_gateway_grant);
    RUN_TEST(test_cancel_hook_ends_the_row_and_asks_the_gateway);

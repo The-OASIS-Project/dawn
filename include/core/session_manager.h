@@ -620,8 +620,10 @@ typedef struct session {
    // What DAWN posted into the conversation (a job's report) that this session
    // has told its turns: posts in posts_told_conv up to posts_told_id
    // (session_posts_take).  posts_told_by is the turn that told the last
-   // ones (taken back with it: posts_told_prev).  Guarded by history_mutex.
+   // ones, those after posts_told_from (taken back with it: posts_told_prev).
+   // Guarded by history_mutex.
    int64_t posts_told_conv;
+   int64_t posts_told_from;
    int64_t posts_told_id;
    int64_t posts_told_prev;
    uint64_t posts_told_by;

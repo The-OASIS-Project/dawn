@@ -1629,9 +1629,10 @@ void turn_origin_note_prepare(session_t *session) {
    }
    pthread_mutex_lock(&session->history_mutex);
    /* Previews older than the window can't be answered any more: forget them;
-    * any younger one still counts. */
+    * any younger one still counts (one made the window's length ago can still
+    * be confirmed in this turn). */
    if (!session->prepared_any ||
-       session->turn_number - session->last_prepare_turn >= TURN_ORIGIN_UNASKED_QUIET_TURNS) {
+       session->turn_number - session->last_prepare_turn > TURN_ORIGIN_UNASKED_QUIET_TURNS) {
       session->prepares_open = 0;
    }
    session->last_prepare_turn = session->turn_number;

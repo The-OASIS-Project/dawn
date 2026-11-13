@@ -23,6 +23,9 @@
 #ifndef SESSION_POSTS_H
 #define SESSION_POSTS_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -48,6 +51,15 @@ struct session;
  * @return The text (caller frees), or NULL.
  */
 char *session_posts_take(struct session *session, int user_id);
+
+/**
+ * @brief Whether the turn @p turn_token was told post @p msg_id of conversation
+ *        @p conv_id (session_posts_take).  Takes history_mutex.
+ */
+bool session_posts_told_by_turn(struct session *session,
+                                uint64_t turn_token,
+                                int64_t conv_id,
+                                int64_t msg_id);
 
 /**
  * @brief Caller holds history_mutex.  The running turn is taken back: what it

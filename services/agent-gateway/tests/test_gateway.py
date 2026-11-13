@@ -1455,3 +1455,8 @@ def test_read_tools_never_reach_hidden_directories():
    assert ok("Glob", {"pattern": f"{wt}/src/*.c"})
    assert not ok("Grep", {"pattern": "x", "path": "../bbbb0002"})   # relative: leaves the clone
    assert not ok("Read", {"file_path": "~/work/bbbb0002/s"})
+   assert not ok("Glob", {"pattern": "../bbbb0002/*.c"})            # leaves its search path
+   assert not ok("Glob", {"pattern": "src/../../bbbb0002/*"})
+   assert not ok("Glob", {"pattern": "~/work/*"})
+   assert not ok("Glob", {"pattern": "{..,src}/bbbb0002/*"})        # .. inside braces
+   assert ok("Glob", {"pattern": "src/**/*.c", "path": f"{wt}/src"})

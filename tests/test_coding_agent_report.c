@@ -43,6 +43,7 @@ static _Atomic int64_t g_parent = 7;
 static bool g_injection;
 static const char *g_take = "It fixed it and the tests pass.";
 static atomic_int g_posts;
+static _Atomic int64_t g_noted_take; /* the last post noted as carrying a take */
 static atomic_int g_takes;
 static char g_post[POST_MAX];
 static char g_ask[ASK_MAX];
@@ -100,12 +101,16 @@ char *job_report_take(struct session *s, const char *system_prompt, const char *
    atomic_fetch_add(&g_takes, 1);
    return g_take ? strdup(g_take) : NULL;
 }
-int job_report_post(int64_t parent_conv, int user_id, const char *text) {
+int job_report_post_ex(int64_t parent_conv, int user_id, const char *text, int64_t *msg_id_out) {
    (void)user_id;
    atomic_store(&g_posted_to, parent_conv);
    snprintf(g_post, sizeof(g_post), "%s", text);
-   atomic_fetch_add(&g_posts, 1);
+   *msg_id_out = 900 + atomic_fetch_add(&g_posts, 1);
    return SUCCESS;
+}
+void coding_agent_note_take(int64_t conv_id, int64_t msg_id) {
+   atomic_store(&g_noted_take, msg_id);
+   (void)conv_id;
 }
 bool memory_filter_check_injection_commands(const char *text) {
    (void)text;
@@ -165,6 +170,7 @@ void setUp(void) {
    g_post[0] = g_ask[0] = '\0';
    atomic_store(&g_takes, 0);
    atomic_store(&g_posted_to, 0);
+   atomic_store(&g_noted_take, 0);
 }
 
 void tearDown(void) {
@@ -174,6 +180,10 @@ void tearDown(void) {
  * agent's words in a frame and only the facts the gateway sent. */
 static void test_completed_posts_the_take(void) {
    report("completed", k_done, 1);
+   for (int i = 0; i < 200 && atomic_load(&g_noted_take) == 0; i++) {
+      usleep(10 * 1000); /* noted just after the post */
+   }
+   TEST_ASSERT_NOT_EQUAL(0, atomic_load(&g_noted_take)); /* a turn told it reads the agent */
    TEST_ASSERT_NOT_NULL(strstr(g_post, "Coding job #42 (fix the oracle) finished."));
    TEST_ASSERT_NOT_NULL(strstr(g_post, "the tests pass"));
    TEST_ASSERT_NOT_NULL(strstr(g_ask, "Fix the calendar fuzzer oracle."));
@@ -224,6 +234,7 @@ static void test_no_take_posts_the_fixed_line(void) {
    g_take = NULL;
    report("completed", k_done, 1);
    TEST_ASSERT_NOT_NULL(strstr(g_post, "is done. Ask me for what it did"));
+   TEST_ASSERT_EQUAL_INT64(0, atomic_load(&g_noted_take)); /* DAWN's own words only */
 }
 
 /* A report the injection filter flags never reaches a take. */

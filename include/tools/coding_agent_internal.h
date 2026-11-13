@@ -60,7 +60,12 @@ char *coding_agent_error_free(char *text);
  *  confirm in it would rest on them). */
 void coding_agent_mark_read(void);
 
-/** Whether the turn @p o returned the agent's words (coding_agent_mark_read). */
+/** A report posted as message @p msg_id of @p conv_id carries a take on the
+ *  agent's words: the turn it is told to reads them (coding_agent_turn_read). */
+void coding_agent_note_take(int64_t conv_id, int64_t msg_id);
+
+/** Whether the turn @p o returned the agent's words (coding_agent_mark_read), or
+ *  was told a report with a take on them. */
 bool coding_agent_turn_read(const turn_origin_t *o);
 
 /** The job a call names ({"job": N}); 0 when none. */

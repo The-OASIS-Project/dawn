@@ -65,12 +65,14 @@ GLOB_CHARS = re.compile(r"[*?\[{]")
 
 
 def read_paths(tool: str, tool_input: dict) -> list[str]:
-   """Every path a read tool call names.  An absolute Glob pattern is a path
-   too: its part before the first wildcard is where the search starts."""
+   """Every path a read tool call names.  A Glob pattern that leaves where it
+   searches (absolute, `~`, or with a `..` step) is a path too: its part before
+   the first wildcard is where the search starts.  A plain relative pattern
+   stays inside its search path, checked above."""
    paths = [str(tool_input.get(k) or "") for k in ("file_path", "notebook_path", "path")]
    pattern = str(tool_input.get("pattern") or "")
-   if tool == "Glob" and pattern.startswith("/"):
-      paths.append(os.path.dirname(GLOB_CHARS.split(pattern, 1)[0]) or "/")
+   if tool == "Glob" and (pattern.startswith(("/", "~")) or ".." in re.split(r"[/{},]", pattern)):
+      paths.append(os.path.dirname(GLOB_CHARS.split(pattern, 1)[0]) or pattern[:1])
    return [p for p in paths if p]
 
 

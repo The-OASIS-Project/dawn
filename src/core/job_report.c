@@ -76,6 +76,10 @@ char *job_report_take(struct session *s, const char *system_prompt, const char *
 }
 
 int job_report_post(int64_t parent_conv, int user_id, const char *text) {
+   return job_report_post_ex(parent_conv, user_id, text, NULL);
+}
+
+int job_report_post_ex(int64_t parent_conv, int user_id, const char *text, int64_t *msg_id_out) {
    int64_t msg_id = 0;
    /* no-blocks: DAWN's report on a finished job (a take written in a turn with no
     * tools, or a fixed line), not a turn to replay; unprompted, so memory extraction
@@ -86,5 +90,8 @@ int job_report_post(int64_t parent_conv, int user_id, const char *text) {
       return FAILURE;
    }
    webui_broadcast_conversation_messages_appended(user_id, parent_conv);
+   if (msg_id_out != NULL) {
+      *msg_id_out = msg_id;
+   }
    return SUCCESS;
 }

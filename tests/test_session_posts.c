@@ -187,6 +187,19 @@ static void test_untold_on_take_back(void) {
    TEST_ASSERT_NULL(session_posts_take(&g_session, 1));
 }
 
+/* Which turn was told which post: this turn's, in its range; not the turn
+ * after, and not once taken back. */
+static void test_told_by_turn(void) {
+   post(15, "Coding job #5 finished. It did it.");
+   free(session_posts_take(&g_session, 1));
+   TEST_ASSERT_TRUE(session_posts_told_by_turn(&g_session, 1, 7, 15));
+   TEST_ASSERT_FALSE(session_posts_told_by_turn(&g_session, 1, 7, 10)); /* before the range */
+   TEST_ASSERT_FALSE(session_posts_told_by_turn(&g_session, 1, 8, 15)); /* another conversation */
+   TEST_ASSERT_FALSE(session_posts_told_by_turn(&g_session, 2, 7, 15)); /* another turn */
+   session_posts_untell_locked(&g_session);
+   TEST_ASSERT_FALSE(session_posts_told_by_turn(&g_session, 1, 7, 15));
+}
+
 /* A post the history already holds isn't told again. */
 static void test_held_post_not_told(void) {
    post(15, "first");
@@ -275,6 +288,7 @@ int main(void) {
    RUN_TEST(test_told_from_the_previous_question);
    RUN_TEST(test_told_once);
    RUN_TEST(test_untold_on_take_back);
+   RUN_TEST(test_told_by_turn);
    RUN_TEST(test_held_post_not_told);
    RUN_TEST(test_newest_told_past_the_cap);
    RUN_TEST(test_one_line_per_post);

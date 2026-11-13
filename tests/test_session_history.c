@@ -1123,6 +1123,27 @@ void test_unasked_origin(void) {
    turn_origin_note_answered(s, newer);
    session_turn_end(s);
    TEST_ASSERT_FALSE(turn_origin_unasked(s, &o));
+
+   /* A preview made the window's length before a new one is still open when
+    * the new one is made: confirming the old one leaves the new one holding. */
+   for (int i = 0; i < TURN_ORIGIN_UNASKED_QUIET_TURNS + 1; i++) {
+      session_turn_begin(s, 0, 1);
+      session_turn_end(s);
+   }
+   TEST_ASSERT_TRUE(turn_origin_unasked(s, &o));
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_prepare(s);
+   const uint32_t old = s->turn_number;
+   session_turn_end(s);
+   for (int i = 0; i < TURN_ORIGIN_UNASKED_QUIET_TURNS - 1; i++) {
+      session_turn_begin(s, 0, 1);
+      session_turn_end(s);
+   }
+   session_turn_begin(s, 0, 1); /* the old preview's last confirmable turn */
+   turn_origin_note_prepare(s);
+   turn_origin_note_answered(s, old);
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(turn_origin_unasked(s, &o));
 }
 
 void test_notice_is_one_line(void) {

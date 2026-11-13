@@ -39,6 +39,7 @@
 #include "core/conv_event.h"
 #include "core/job_manager.h"
 #include "core/session_manager.h"
+#include "core/session_posts.h"
 #include "core/strbuf.h"
 #include "core/turn_origin.h"
 #include "dawn_error.h"
@@ -60,6 +61,7 @@
 #define CA_VALUE_MAX 200            /* a pending request's value in status */
 #define CA_QUESTION_MAX 1500        /* a question the agent asks, in status */
 #define CA_MARKS_MAX 16             /* sessions whose current turn read the agent's words */
+#define CA_TAKES_MAX 8              /* reports posted with a take on the agent's words */
 #define CA_CHANGES_MAX (256 * 1024) /* a changes listing (a long one is viewed, then read) */
 #define CA_PATH_MAX 1024
 /* One file or diff: the gateway caps it at 512 KB of git's bytes, and its decode
@@ -77,6 +79,15 @@ static struct {
    uint64_t turn_token;
 } s_marks[CA_MARKS_MAX];
 static int s_marks_next;
+/* Reports posted with a take, the newest per conversation (an older one not
+ * yet told is told with it): a turn they are told to reads the agent's words.
+ * Guarded by s_marks_mutex. */
+typedef struct {
+   int64_t conv_id;
+   int64_t msg_id;
+} ca_take_t;
+static ca_take_t s_takes[CA_TAKES_MAX];
+static int s_takes_next;
 
 /* ========== Helpers ========== */
 
@@ -165,13 +176,41 @@ void coding_agent_mark_read(void) {
    pthread_mutex_unlock(&s_marks_mutex);
 }
 
+void coding_agent_note_take(int64_t conv_id, int64_t msg_id) {
+   pthread_mutex_lock(&s_marks_mutex);
+   int slot = -1;
+   for (int i = 0; i < CA_TAKES_MAX && slot < 0; i++) {
+      if (s_takes[i].conv_id == conv_id) {
+         slot = i;
+      }
+   }
+   if (slot < 0) {
+      slot = s_takes_next;
+      s_takes_next = (s_takes_next + 1) % CA_TAKES_MAX;
+   }
+   s_takes[slot].conv_id = conv_id;
+   s_takes[slot].msg_id = msg_id;
+   pthread_mutex_unlock(&s_marks_mutex);
+}
+
 bool coding_agent_turn_read(const turn_origin_t *o) {
    bool read = false;
    pthread_mutex_lock(&s_marks_mutex);
    for (int i = 0; i < CA_MARKS_MAX && !read; i++) {
       read = s_marks[i].session_id == o->session_id && s_marks[i].turn_token == o->turn_token;
    }
+   ca_take_t takes[CA_TAKES_MAX];
+   memcpy(takes, s_takes, sizeof(takes));
    pthread_mutex_unlock(&s_marks_mutex);
+   /* Or a report with a take was told to this turn (its words came in its context). */
+   session_t *s = session_get_command_context();
+   if (s == NULL || s->session_id != o->session_id) {
+      return read;
+   }
+   for (int i = 0; i < CA_TAKES_MAX && !read; i++) {
+      read = takes[i].msg_id > 0 &&
+             session_posts_told_by_turn(s, o->turn_token, takes[i].conv_id, takes[i].msg_id);
+   }
    return read;
 }
 

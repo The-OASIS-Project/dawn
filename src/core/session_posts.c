@@ -146,6 +146,7 @@ char *session_posts_take(session_t *session, int user_id) {
          /* Told by this turn: taken back with it (session_posts_untell_locked). */
          session->posts_told_prev = session->posts_told_conv == conv ? session->posts_told_id : 0;
          session->posts_told_conv = conv;
+         session->posts_told_from = after;
          session->posts_told_id = newest;
          session->posts_told_by = session->turn_active ? session->turn_owner_token : 0;
       }
@@ -157,6 +158,20 @@ char *session_posts_take(session_t *session, int user_id) {
       return NULL;
    }
    return strbuf_steal(&sb);
+}
+
+bool session_posts_told_by_turn(session_t *session,
+                                uint64_t turn_token,
+                                int64_t conv_id,
+                                int64_t msg_id) {
+   if (!session || turn_token == 0) {
+      return false;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   const bool told = session->posts_told_by == turn_token && session->posts_told_conv == conv_id &&
+                     msg_id > session->posts_told_from && msg_id <= session->posts_told_id;
+   pthread_mutex_unlock(&session->history_mutex);
+   return told;
 }
 
 void session_posts_untell_locked(session_t *session) {

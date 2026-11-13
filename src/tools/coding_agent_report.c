@@ -45,6 +45,7 @@
 #include "logging.h"
 #include "prompts.h"
 #include "tools/coding_agent_gateway.h"
+#include "tools/coding_agent_internal.h"
 #include "tools/tool_registry.h"
 #include "utils/string_utils.h"
 
@@ -323,8 +324,11 @@ static void *report_thread(void *arg) {
          fixed_line(line, sizeof(line), w, title ? title : rec.title);
          strbuf_append(&post, line);
       }
-      if (!strbuf_oom(&post)) {
-         job_report_post(rec.parent_id, w->user_id, strbuf_str(&post));
+      int64_t msg_id = 0;
+      if (!strbuf_oom(&post) &&
+          job_report_post_ex(rec.parent_id, w->user_id, strbuf_str(&post), &msg_id) == SUCCESS &&
+          take != NULL) {
+         coding_agent_note_take(rec.parent_id, msg_id);
       }
       strbuf_free(&post);
       free(title);
