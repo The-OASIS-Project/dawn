@@ -56,7 +56,8 @@
 #define CP_LINES_SHOWN 20      /* of each */
 #define CP_SUMMARY_SHOWN 1500  /* the agent's summary (the pull request's description) */
 #define CP_TASK_ID_LEN 8       /* the gateway's task ids: 8 hex digits */
-#define CP_LABEL_MAX (CONV_TITLE_MAX + 32)
+/* 'coding job #N ("name")': the name plus 12 + 20 digits + 4 + NUL. */
+#define CP_LABEL_MAX (CONV_TITLE_MAX + 40)
 
 typedef struct {
    pending_slot_t hdr;
@@ -490,7 +491,7 @@ static char *close_target(struct json_object *details,
       }
       safe_strscpy(want->name, rec.title);
       snprintf(want->label, sizeof(want->label), "coding job #%lld (\"%s\")", (long long)want->job,
-               rec.title);
+               want->name);
       /* Ended here while its task never stopped (the gateway was away when it
        * was cancelled): stopped first, as closing a task with no job is. */
       struct json_object *ans = NULL;
