@@ -699,7 +699,9 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
           * local type, and the follow-up ran on llama.cpp).  The existing provider inference
           * above only corrects the PROVIDER and is gated on !provider_explicitly_set, so it
           * misses this.  Force type=cloud on either cloud signal:
-          *   (a) the effective model name matches a bare cloud prefix — local models are gguf
+          *   (a) a model named this request matches a bare cloud prefix (a request that
+          *       names none, a reasoning change say, leaves a local session local whatever
+          *       its model is called) — local models are gguf
           *       paths that match none, so this never misfires on a local pick; or
           *   (b) the client explicitly set a cloud provider this request (covers OpenRouter,
           *       whose "vendor/model" slug matches no prefix) — an active cloud selection.
@@ -713,7 +715,7 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          bool provider_is_cloud = provider_explicitly_set &&
                                   config.cloud_provider != CLOUD_PROVIDER_NONE;
          if (!type_explicitly_set && config.type != LLM_CLOUD &&
-             (model_is_cloud || provider_is_cloud)) {
+             ((model_set && model_is_cloud) || provider_is_cloud)) {
             config.type = LLM_CLOUD;
             has_changes = true;
             OLOG_INFO("WebUI: Corrected stale local type to cloud for model '%s'", config.model);
@@ -769,6 +771,15 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          struct json_object *restore_obj;
          if (json_object_object_get_ex(payload, "from_restore", &restore_obj)) {
             from_restore = json_object_get_boolean(restore_obj);
+         }
+
+         /* A change made for one conversation is not saved to another: the user may
+          * have opened a different one before this request arrived. */
+         struct json_object *for_conv_obj;
+         if (!from_restore &&
+             json_object_object_get_ex(payload, "conversation_id", &for_conv_obj) &&
+             json_object_get_int64(for_conv_obj) != conn->active_conversation_id) {
+            from_restore = true;
          }
 
          /* Apply config if changes were made.  The reasoning pick is stored as

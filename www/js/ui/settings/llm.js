@@ -92,8 +92,9 @@
 
    // Local provider detection timeout
    let detectLocalProviderTimeout = null;
-   // The local list being fetched follows the user's own switch to local.
-   let userSwitchedToLocal = false;
+   // The local list being fetched follows the user's own switch to local, made in
+   // this conversation (0: one not saved yet); null when it doesn't.
+   let localSwitchConv = null;
    // A model the user picked that the server hasn't answered yet.
    let pendingModelPick = null;
    const DETECT_TIMEOUT_MS = 10000; // 10 seconds
@@ -142,6 +143,15 @@
    /**
     * Initialize LLM quick controls event listeners
     */
+   function activeConversationId() {
+      return (
+         (typeof DawnHistory !== 'undefined' &&
+            DawnHistory.getActiveConversationId &&
+            DawnHistory.getActiveConversationId()) ||
+         0
+      );
+   }
+
    function wsConnected() {
       return typeof DawnWS !== 'undefined' && DawnWS.isConnected();
    }
@@ -158,7 +168,7 @@
 
             // Request local models when switching to local mode
             if (newType === 'local') {
-               userSwitchedToLocal = wsConnected();
+               localSwitchConv = wsConnected() ? activeConversationId() : null;
                requestLocalModels();
             } else {
                // Switching to cloud (direct providers): restore provider dropdown and update model
@@ -755,8 +765,8 @@
          detectLocalProviderTimeout = null;
       }
 
-      const switched = userSwitchedToLocal;
-      userSwitchedToLocal = false;
+      const switchConv = localSwitchConv;
+      localSwitchConv = null;
 
       localModelList = payload.models || [];
       DawnReasoning.setLocalCapabilities(localModelList);
@@ -838,16 +848,15 @@
          modelSelect.value = pendingModelPick;
       } else {
          modelSelect.value = current;
-         // Update the session only if changed, to avoid a feedback loop.  After the
-         // user's own switch to local this is their choice and is saved with the
-         // conversation; otherwise it is detection (from_restore: not saved).
-         if (llmRuntimeState.model !== current) {
+         // After the user's own switch to local this is their choice: always sent, and
+         // saved with the conversation they made it in.  Otherwise it is detection
+         // (from_restore: not saved), sent only if changed to avoid a feedback loop.
+         if (switchConv !== null) {
             llmRuntimeState.model = current;
-            setSessionLlm(
-               switched
-                  ? { type: 'local', model: current }
-                  : { type: 'local', model: current, from_restore: true }
-            );
+            setSessionLlm({ type: 'local', model: current, conversation_id: switchConv });
+         } else if (llmRuntimeState.model !== current) {
+            llmRuntimeState.model = current;
+            setSessionLlm({ type: 'local', model: current, from_restore: true });
          }
       }
       modelSelect.disabled = false;

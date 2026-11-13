@@ -502,6 +502,9 @@ Configure LLM settings for this session only (does not affect other clients).
 - `from_restore`: `true` applies the settings to the session without saving them to the
   active conversation (a loaded conversation's own settings, or a model the client
   detected rather than the user picked).
+- `conversation_id`: optional; the conversation the change was made in (`0`: one not
+  saved yet). When it isn't the connection's active conversation, the settings apply to
+  the session but are not saved, as with `from_restore`.
 - Response: `set_session_llm_response`
 
 #### `get_system_prompt`
