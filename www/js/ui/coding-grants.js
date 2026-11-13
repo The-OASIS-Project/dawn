@@ -117,6 +117,21 @@
       /* An answer without a list (busy, or the gateway away) keeps the one shown. */
       if (Array.isArray(payload.grants) || !last || !Array.isArray(last.grants)) last = payload;
       const own = !!payload.revoked && payload.revoked === revoking;
+      /* This tab's revoke went through but the list couldn't be refreshed:
+       * the revoked one is gone all the same. */
+      if (
+         own &&
+         payload.ok &&
+         !Array.isArray(payload.grants) &&
+         last &&
+         Array.isArray(last.grants)
+      ) {
+         last = Object.assign({}, last, {
+            grants: last.grants.filter(function (g) {
+               return g.id !== payload.revoked;
+            }),
+         });
+      }
       if (own || (payload.error && revoking)) {
          revoking = 0; /* answered, or the request never reached the gateway */
       }
