@@ -92,6 +92,10 @@
 
    // Local provider detection timeout
    let detectLocalProviderTimeout = null;
+   // The local list being fetched follows the user's own switch to local.
+   let userSwitchedToLocal = false;
+   // A model the user picked that the server hasn't answered yet.
+   let pendingModelPick = null;
    const DETECT_TIMEOUT_MS = 10000; // 10 seconds
 
    /**
@@ -138,6 +142,10 @@
    /**
     * Initialize LLM quick controls event listeners
     */
+   function wsConnected() {
+      return typeof DawnWS !== 'undefined' && DawnWS.isConnected();
+   }
+
    function initLlmControls() {
       const typeSelect = document.getElementById('llm-type-select');
       const providerSelect = document.getElementById('llm-provider-select');
@@ -150,6 +158,7 @@
 
             // Request local models when switching to local mode
             if (newType === 'local') {
+               userSwitchedToLocal = wsConnected();
                requestLocalModels();
             } else {
                // Switching to cloud (direct providers): restore provider dropdown and update model
@@ -205,7 +214,14 @@
       if (modelSelect) {
          modelSelect.addEventListener('change', () => {
             if (modelSelect.value) {
-               setSessionLlm({ model: modelSelect.value });
+               if (wsConnected()) pendingModelPick = modelSelect.value;
+               // A local model is named with its type: its name may look like a
+               // cloud model's (Ollama's gpt-oss).
+               setSessionLlm(
+                  typeSelect && typeSelect.value === 'local'
+                     ? { type: 'local', model: modelSelect.value }
+                     : { model: modelSelect.value }
+               );
                /* Show the new model's options now; the server's reply carries
                 * the settled values. */
                renderReasoning(
@@ -739,6 +755,9 @@
          detectLocalProviderTimeout = null;
       }
 
+      const switched = userSwitchedToLocal;
+      userSwitchedToLocal = false;
+
       localModelList = payload.models || [];
       DawnReasoning.setLocalCapabilities(localModelList);
       localProviderType = payload.provider || 'Unknown';
@@ -809,14 +828,26 @@
          modelSelect.appendChild(opt);
       });
 
-      // Select current model and update session (only if changed to avoid feedback loop).
-      // from_restore: same rationale as the llama.cpp branch above — auto-detection
-      // sync, not a user-initiated change, must not cascade to the conv DB row.
-      if (payload.current_model) {
-         modelSelect.value = payload.current_model;
-         if (llmRuntimeState.model !== payload.current_model) {
-            llmRuntimeState.model = payload.current_model;
-            setSessionLlm({ model: payload.current_model, from_restore: true });
+      // The session's model when this endpoint has it, else the first listed: a name
+      // the endpoint doesn't have fails the next turn.
+      const current = localModelList.some((m) => m.name === payload.current_model)
+         ? payload.current_model
+         : localModelList[0].name;
+      if (pendingModelPick) {
+         // This list was built before the server saw the user's pick: keep the pick.
+         modelSelect.value = pendingModelPick;
+      } else {
+         modelSelect.value = current;
+         // Update the session only if changed, to avoid a feedback loop.  After the
+         // user's own switch to local this is their choice and is saved with the
+         // conversation; otherwise it is detection (from_restore: not saved).
+         if (llmRuntimeState.model !== current) {
+            llmRuntimeState.model = current;
+            setSessionLlm(
+               switched
+                  ? { type: 'local', model: current }
+                  : { type: 'local', model: current, from_restore: true }
+            );
          }
       }
       modelSelect.disabled = false;
@@ -1150,6 +1181,7 @@
     * @param {Object} payload - Response payload
     */
    function handleSetSessionLlmResponse(payload) {
+      pendingModelPick = null;
       // Clear loading state
       const llmGrid = document.getElementById('llm-controls-grid');
       if (llmGrid) {

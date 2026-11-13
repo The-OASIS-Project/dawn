@@ -627,6 +627,7 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          }
 
          /* Parse model */
+         bool model_set = false; /* this request named an accepted model */
          struct json_object *model_obj;
          if (json_object_object_get_ex(payload, "model", &model_obj)) {
             const char *new_model = json_object_get_string(model_obj);
@@ -634,6 +635,7 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
                /* Validate model name to prevent injection attacks */
                if (llm_local_is_valid_model_name(new_model)) {
                   has_changes = true;
+                  model_set = true;
                   safe_strscpy(config.model, new_model);
                   /* "requested", not "set": under the OpenRouter gateway a bare
                    * (non vendor/model) id is dropped below and the resolver
@@ -647,7 +649,10 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
                    * Only infer if the inferred provider has an API key available.
                    * OpenRouter IDs are "vendor/model" slugs and match none of the bare
                    * prefixes below, so an OpenRouter session's model is left untouched. */
-                  if (!provider_explicitly_set) {
+                  /* Not on an explicit local pick: a local model may share a
+                   * cloud prefix (Ollama's gpt-oss). */
+                  bool local_pick = type_explicitly_set && config.type == LLM_LOCAL;
+                  if (!provider_explicitly_set && !local_pick) {
                      if ((strncmp(new_model, "gpt-", 4) == 0 || strncmp(new_model, "o1-", 3) == 0 ||
                           strncmp(new_model, "o3-", 3) == 0) &&
                          llm_has_openai_key()) {
@@ -667,6 +672,25 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
             }
          }
 
+         bool model_is_cloud = strncmp(config.model, "gpt-", 4) == 0 ||
+                               strncmp(config.model, "o1-", 3) == 0 ||
+                               strncmp(config.model, "o3-", 3) == 0 ||
+                               strncmp(config.model, "claude-", 7) == 0 ||
+                               strncmp(config.model, "gemini-", 7) == 0;
+
+         /* An explicit switch to local that names no model drops the one carried over
+          * from a cloud session (any name, an OpenRouter slug included) or a bare cloud
+          * name: the local endpoint would be asked for a model it doesn't have.  Empty
+          * means the configured local model; a client that lists the endpoint's models
+          * names one in a follow-up.  A model named with the switch is kept: a local
+          * model may share a cloud prefix (Ollama's gpt-oss). */
+         if (type_explicitly_set && config.type == LLM_LOCAL && !model_set &&
+             config.model[0] != '\0' && (old_type != LLM_LOCAL || model_is_cloud)) {
+            OLOG_INFO("WebUI: Dropped cloud model '%s' on the switch to local", config.model);
+            config.model[0] = '\0';
+            model_is_cloud = false;
+         }
+
          /* Reconcile type with the selected cloud model/provider (frontend-bug guard).
           * `type` and `model`/`provider` are independent fields; a client that switches to a
           * cloud model/provider but OMITS type='cloud' leaves the session's prior LOCAL type
@@ -683,16 +707,9 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
           * silently substituting local.
           *
           * Gated on !type_explicitly_set: this only reconciles the case where the client
-          * OMITS type. A client that explicitly sends type='local' this request means it —
-          * the carried-over cloud model name is just stale (the client updates the model in
-          * a follow-up set_session_llm once the local list arrives). Firing here on an
-          * explicit local pick reverts it straight back to cloud, which the WebUI's async
-          * flow (send {type:local}, THEN fetch models) can never recover from. */
-         bool model_is_cloud = strncmp(config.model, "gpt-", 4) == 0 ||
-                               strncmp(config.model, "o1-", 3) == 0 ||
-                               strncmp(config.model, "o3-", 3) == 0 ||
-                               strncmp(config.model, "claude-", 7) == 0 ||
-                               strncmp(config.model, "gemini-", 7) == 0;
+          * OMITS type. A client that explicitly sends type='local' this request means it,
+          * and the cloud model name was dropped above. Firing here on an explicit local
+          * pick would revert it straight back to cloud. */
          bool provider_is_cloud = provider_explicitly_set &&
                                   config.cloud_provider != CLOUD_PROVIDER_NONE;
          if (!type_explicitly_set && config.type != LLM_CLOUD &&
