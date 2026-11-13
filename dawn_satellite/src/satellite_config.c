@@ -182,9 +182,16 @@ void satellite_config_init_defaults(satellite_config_t *config) {
    safe_strcpy(config->wake_word.word, "friday", CONFIG_NAME_SIZE);
    config->wake_word.sensitivity = 0.5f;
 
-   /* ASR defaults - Vosk is the default for Tier 1 satellites (streaming, near-instant) */
+   /* ASR defaults: the engine this binary was built with (Whisper when present, as in the
+    * .deb's satellite.toml), so a config without [asr] never names a missing engine */
+#ifdef HAVE_ASR_WHISPER
+   safe_strcpy(config->asr.engine, "whisper", sizeof(config->asr.engine));
+   safe_strcpy(config->asr.model_path, "models/whisper.cpp/ggml-tiny.en-q5_1.bin",
+               CONFIG_PATH_SIZE);
+#else
    safe_strcpy(config->asr.engine, "vosk", sizeof(config->asr.engine));
    safe_strcpy(config->asr.model_path, "models/vosk-model-small-en-us-0.15", CONFIG_PATH_SIZE);
+#endif
    safe_strcpy(config->asr.language, "en", sizeof(config->asr.language));
    config->asr.n_threads = 2;          /* Pi Zero 2 W has 4 cores */
    config->asr.max_audio_seconds = 15; /* 960KB buffer, not 3.84MB */

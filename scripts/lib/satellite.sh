@@ -26,6 +26,9 @@ SATELLITE_APT_PACKAGES=(
    libjson-c-dev
    libspdlog-dev
    libopus-dev
+   # OTA: signed-image HTTPS pull + Ed25519 verify (same as the build containers)
+   libcurl4-openssl-dev
+   libsodium-dev
    # Utility — needed by libvosk unzip step
    unzip
    wget

@@ -34,7 +34,7 @@ MAINTAINER="${DEB_MAINTAINER:-The OASIS Project <noreply@users.noreply.github.co
 # GUI).  build-pi.sh reconfigures the cmake flags and the make is incremental,
 # so this is cheap when already full-built.
 echo "==> ensuring a full (VAD+ASR+TTS+SDL) build via build-pi.sh…"
-SAT_BUILD=full "$SCRIPT_DIR/build-pi.sh"
+SAT_BUILD=full SAT_ASR=whisper "$SCRIPT_DIR/build-pi.sh"
 
 echo "==> packaging dawn-satellite $VERSION ($ARCH) in $BASE_IMAGE_TAG…"
 
@@ -84,6 +84,31 @@ docker run --rm --platform linux/arm64 \
    # config (conffiles), env file, ld path, unit, logrotate
    cfg="$svc/satellite.toml"; [ -f "$cfg" ] || cfg="dawn_satellite/config/satellite.toml"
    install -m 644 "$cfg" "$stage/etc/dawn-satellite/satellite.toml"
+
+   # espeak-ng phoneme data for Piper TTS.  The bundled libespeak-ng is the
+   # rhasspy fork, so ship the data it was built with (installed under /usr in
+   # the build image), at a private path that cannot clash with the
+   # espeak-ng-data package, and point the packaged config at it.
+   espeak_src=/usr/share/espeak-ng-data
+   espeak_dst=/usr/share/dawn-satellite/espeak-ng-data
+   [ -f "$espeak_src/phontab" ] || { echo "missing $espeak_src (espeak-ng fork data)"; exit 1; }
+   mkdir -p "$stage$(dirname "$espeak_dst")"
+   cp -r "$espeak_src" "$stage$espeak_dst"
+   sed -i "s|^espeak_data = .*|espeak_data = \"$espeak_dst\"|" "$stage/etc/dawn-satellite/satellite.toml"
+   grep -qx "espeak_data = \"$espeak_dst\"" "$stage/etc/dawn-satellite/satellite.toml" ||
+      { echo "failed to set espeak_data in the packaged satellite.toml"; exit 1; }
+
+   # The packaged binary is built with Whisper only, while the template keeps
+   # Vosk (what a default source build has), so set the packaged config to the
+   # Whisper model dawn-satellite-fetch-models fetches by default.
+   asr_model=models/whisper.cpp/ggml-tiny.en-q5_1.bin
+   sed -i -e "s|^engine = \"vosk\"|engine = \"whisper\"|" \
+      -e "s|^model_path = \"models/vosk-model-small-en-us-0.15\"|model_path = \"$asr_model\"|" \
+      "$stage/etc/dawn-satellite/satellite.toml"
+   grep -qx "engine = \"whisper\"" "$stage/etc/dawn-satellite/satellite.toml" &&
+      grep -qx "model_path = \"$asr_model\"" "$stage/etc/dawn-satellite/satellite.toml" ||
+      { echo "failed to set the Whisper [asr] in the packaged satellite.toml"; exit 1; }
+
    install -m 644 "$svc/dawn-satellite.conf" "$stage/etc/dawn-satellite/dawn-satellite.conf"
    echo "/usr/lib/dawn-satellite" > "$stage/etc/ld.so.conf.d/dawn-satellite.conf"
    install -m 644 "$svc/dawn-satellite.service" "$stage/lib/systemd/system/dawn-satellite.service"

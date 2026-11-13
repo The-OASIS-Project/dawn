@@ -9,9 +9,10 @@
 # Always fetches:  Silero VAD + the Piper "Alba" TTS voice (committed in the
 #                  DAWN repo; see their *_LICENSE files there).
 # ASR engine (match [asr] engine in /etc/dawn-satellite/satellite.toml):
-#   --asr vosk             Vosk small streaming model (DEFAULT; matches the shipped config)
-#   --asr whisper          Whisper batch model
-#   --whisper-model SIZE   tiny|base|small|medium (default base; only with --asr whisper)
+#   --asr whisper          Whisper batch model (DEFAULT; matches the shipped config
+#                          and the packaged binary, which is built with Whisper)
+#   --asr vosk             Vosk small streaming model (needs a Vosk build)
+#   --whisper-model SIZE   tiny-q5_1 (default), tiny, base-q5_1, base, small, medium
 #   --accept               skip the license prompt
 #
 #   dawn-satellite-fetch-models [--asr vosk|whisper] [--whisper-model SIZE] [--accept]
@@ -28,8 +29,8 @@ DAWN_RAW_BASE="${DAWN_RAW_BASE:-https://github.com/The-OASIS-Project/dawn/raw/${
 HF_WHISPER_BASE="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 VOSK_BASE="https://alphacephei.com/vosk/models"
 
-ASR="vosk"
-WHISPER_MODEL="base"
+ASR="whisper"
+WHISPER_MODEL="tiny-q5_1"
 ACCEPT=0
 
 die() {
@@ -52,8 +53,8 @@ done
 
 case "$ASR" in vosk | whisper) ;; *) die "--asr must be vosk or whisper" ;; esac
 case "$WHISPER_MODEL" in
-   tiny | base | small | medium) ;;
-   *) die "--whisper-model must be tiny|base|small|medium" ;;
+   tiny | base | small | medium | tiny-q5_1 | base-q5_1) ;;
+   *) die "--whisper-model must be tiny-q5_1|tiny|base-q5_1|base|small|medium" ;;
 esac
 
 [ "$(id -u)" -eq 0 ] || die "must run as root (writes $MODELS_DIR)"
@@ -98,9 +99,13 @@ get "$DAWN_RAW_BASE/en_GB-alba-medium.onnx.json" "$MODELS_DIR/en_GB-alba-medium.
 
 # ASR engine.
 if [ "$ASR" = whisper ]; then
-   # Path mirrors the satellite config's models/whisper.cpp/ggml-<size>.en.bin.
-   get "$HF_WHISPER_BASE/ggml-${WHISPER_MODEL}.en.bin" \
-      "$MODELS_DIR/whisper.cpp/ggml-${WHISPER_MODEL}.en.bin"
+   # Upstream's names, as in the satellite config: tiny -> ggml-tiny.en.bin,
+   # tiny-q5_1 -> ggml-tiny.en-q5_1.bin.
+   case "$WHISPER_MODEL" in
+      *-*) wfile="ggml-${WHISPER_MODEL%%-*}.en-${WHISPER_MODEL#*-}.bin" ;;
+      *) wfile="ggml-${WHISPER_MODEL}.en.bin" ;;
+   esac
+   get "$HF_WHISPER_BASE/$wfile" "$MODELS_DIR/whisper.cpp/$wfile"
 else
    vosk="vosk-model-small-en-us-0.15"
    if [ -d "$MODELS_DIR/$vosk" ]; then
