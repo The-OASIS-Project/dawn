@@ -183,6 +183,11 @@ class Runner:
       # (or skips) a task another holds, as each awaits partway.
       self.busy: set[str] = set()
       self.background: set[asyncio.Task] = set()
+      # Set once the server has stopped by itself or on Ctrl+C, before the
+      # runs are cancelled: a run ending then must not resume another task (it
+      # would take that task's notes into a run the shutdown destroys).
+      # SIGTERM ends the process inside serve(), cancelling nothing.
+      self.stopping = False
 
    def soon(self, coro) -> None:
       """Run `coro` after the current step; the task is kept until it ends."""
@@ -275,7 +280,7 @@ class Runner:
       """Resume the session with everything the agent hasn't been told yet.
       With no room, the task waits as input_required until a run ends."""
       task = self.store.task(task_id)
-      if task_id in self.running or task["status"] not in st.OPEN:
+      if self.stopping or task_id in self.running or task["status"] not in st.OPEN:
          return False
       if not self.store.has_notes(task_id) or self.store.pending_requests(task_id):
          return False
@@ -551,7 +556,11 @@ class Runner:
       except asyncio.CancelledError:
          if not costed:
             self.record_cost(task_id, result)
-         self.finish_cancelled(task_id)
+         # A stop the user asked for is marked before the run is cancelled
+         # (cancel()); otherwise the gateway is being stopped with its tasks
+         # cancelled (Ctrl+C), and the task stays WORKING so recover() picks it
+         # up after the restart, as after SIGTERM, which ends the process
+         # without cancelling anything.
          raise
       except Exception as e:  # the SDK raises on CLI failures; collect() on git ones
          log.exception("task %s run failed", task_id)

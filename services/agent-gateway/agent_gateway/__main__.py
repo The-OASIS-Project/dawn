@@ -49,6 +49,7 @@ async def main() -> None:
    srv = uvicorn.Server(uvicorn.Config(server.app(runner, cfg), host=cfg.host, port=cfg.port,
                                        log_level="warning"))
    await srv.serve()
+   runner.stopping = True  # the runs are cancelled next, as the loop closes (not on SIGTERM)
 
 
 if __name__ == "__main__":

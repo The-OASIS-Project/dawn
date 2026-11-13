@@ -362,6 +362,66 @@ def test_recover_parks_cut_off_runs(store):
    assert store.task("t3")["status"] == st.FAILED       # never had a session
 
 
+def test_gateway_stop_leaves_a_run_to_recover(store, monkeypatch):
+   """A run cut off by the gateway stopping (not by the user) isn't cancelled:
+   it is parked after the restart like any cut-off run."""
+   from agent_gateway import runner as rmod
+
+   class Client:
+      def __init__(self, options):
+         pass
+
+      async def __aenter__(self):
+         return self
+
+      async def __aexit__(self, *a):
+         return False
+
+      async def query(self, prompt):
+         pass
+
+      async def receive_response(self):
+         await asyncio.sleep(10)
+         yield None
+
+   monkeypatch.setattr(rmod, "ClaudeSDKClient", Client)
+
+   class R(Runner):
+      async def options(self, task):
+         return None
+
+   r = R(Config(token="x" * 32, repos={"r": {"url": "u", "base": "main"}}), store, FakeRepos())
+   add_task(store)
+   store.update_task("t1", status=st.WORKING, session_id="s1")
+
+   async def go():
+      run = asyncio.get_running_loop().create_task(r.run("t1", "go"))
+      await asyncio.sleep(0.05)
+      run.cancel()  # what asyncio.run() does to the gateway's tasks after Ctrl+C
+      with pytest.raises(asyncio.CancelledError):
+         await run
+
+   asyncio.run(go())
+   assert store.task("t1")["status"] == st.WORKING
+   assert "cancelled" not in [e["kind"] for e in store.events_after(0)]
+   launched = []
+   r.launch = lambda task_id, prompt: launched.append((task_id, prompt))
+   asyncio.run(r.recover())
+   assert launched and launched[0][0] == "t1" and "restarted mid-run" in launched[0][1]
+
+
+def test_nothing_resumes_while_the_gateway_stops(store):
+   """A run ending during shutdown resumes no waiting task: its notes (the
+   user's reply) stay for the restart."""
+   r = runner(store)
+   add_task(store)
+   store.update_task("t1", status=st.INPUT_REQUIRED)
+   store.add_note("t1", "the user's answer")
+   r.stopping = True
+   asyncio.run(r.retry_blocked())
+   assert r.resumed == [] and store.has_notes("t1")
+
+
 def test_spent_budget_fails_instead_of_resuming(store):
    r = runner(store)
    add_task(store)
