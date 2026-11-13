@@ -24,13 +24,17 @@
  * Responses request builders and compared byte for byte.
  */
 
+#define AUTH_DB_INTERNAL_ALLOWED
+
 #include <json-c/json.h>
 #include <pthread.h>
+#include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_conv_prefix.h"
+#include "auth/auth_db_internal.h"
 #include "auth/auth_db_messages.h"
 #include "config/dawn_config.h"
 #include "core/llm_response_finalize.h"
@@ -48,7 +52,9 @@
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
 #include "llm/llm_openai_responses_input.h"
+#include "llm/llm_tool_history.h"
 #include "llm/llm_tool_images.h"
+#include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "memory/memory_history_loader.h"
 #include "unity.h"
@@ -65,6 +71,8 @@ typedef struct {
    const char *reply;     /* the final answer; NULL = the call fails */
    bool thinking;         /* the answer comes with signed reasoning */
    const char *tool_call; /* a tool exchange runs first: the call's id */
+   bool openai;           /* ... on an OpenAI path (the history in OpenAI shape) */
+   const char *visual;    /* a visual the turn rendered (render_visual's pending_visual) */
    bool cancel_after;     /* the user's stop lands once the answer is complete */
    bool cancel_during;    /* the stop lands mid-stream: no answer */
 } script_t;
@@ -82,33 +90,44 @@ static struct json_object *signed_blocks(const char *text) {
    return blocks;
 }
 
-/* A tool exchange as the tool loop appends it on a Claude path (the call's
- * blocks rendered, a tool_result message) and saves it (each appended message's
- * rows, through the turn's persist hook). */
-static void run_tool_exchange(struct json_object *history, const char *call_id) {
+/* A tool exchange as the tool loop appends it (llm_tool_history.h): on a
+ * Claude path the call's blocks rendered and one tool_result message, on an
+ * OpenAI path the call with its tool_calls and a role:tool message.  Saved as
+ * the loop saves it: each appended message's rows, through the turn's
+ * persist hook. */
+static void run_tool_exchange(struct json_object *history, const char *call_id, bool openai) {
    const int before = (int)json_object_array_length(history);
-   struct json_object *blocks = llm_turn_blocks_new();
-   llm_turn_blocks_add_reasoning(blocks, CARRIER, LLM_FORMAT_ANTHROPIC, MODEL,
-                                 json_tokener_parse("{\"type\":\"thinking\",\"thinking\":"
-                                                    "\"A tool.\",\"signature\":\"TSIG\"}"));
-   llm_turn_blocks_add_text(blocks, "Checking.");
-   llm_turn_blocks_add_tool_call(blocks, call_id, "weather", "{\"city\":\"Paris\"}");
-   struct json_object *call = json_object_new_object();
-   json_object_object_add(call, "role", json_object_new_string("assistant"));
-   json_object_object_add(call, "content", llm_turn_blocks_render_claude(blocks, CARRIER));
-   json_object_object_add(call, LLM_TURN_BLOCKS_KEY, blocks);
-   session_history_append(history, call);
-
-   struct json_object *result = json_object_new_object();
-   json_object_object_add(result, "type", json_object_new_string("tool_result"));
-   json_object_object_add(result, "tool_use_id", json_object_new_string(call_id));
-   json_object_object_add(result, "content", json_object_new_string("Sunny, 21C"));
-   struct json_object *parts = json_object_new_array();
-   json_object_array_add(parts, result);
-   struct json_object *results = json_object_new_object();
-   json_object_object_add(results, "role", json_object_new_string("user"));
-   json_object_object_add(results, "content", parts);
-   session_history_append(history, results);
+   llm_tool_response_t response;
+   memset(&response, 0, sizeof(response));
+   response.text = "Checking.";
+   response.tool_calls.count = 1;
+   tool_call_t *tc = &response.tool_calls.calls[0];
+   snprintf(tc->id, sizeof(tc->id), "%s", call_id);
+   snprintf(tc->name, sizeof(tc->name), "weather");
+   snprintf(tc->arguments, sizeof(tc->arguments), "{\"city\":\"Paris\"}");
+   response.has_tool_calls = true;
+   if (!openai) {
+      response.blocks = llm_turn_blocks_new();
+      llm_turn_blocks_add_reasoning(response.blocks, CARRIER, LLM_FORMAT_ANTHROPIC, MODEL,
+                                    json_tokener_parse("{\"type\":\"thinking\",\"thinking\":"
+                                                       "\"A tool.\",\"signature\":\"TSIG\"}"));
+      llm_turn_blocks_add_text(response.blocks, "Checking.");
+      llm_turn_blocks_add_tool_call(response.blocks, call_id, "weather", "{\"city\":\"Paris\"}");
+   }
+   tool_result_list_t *results = calloc(1, sizeof(*results));
+   TEST_ASSERT_NOT_NULL(results);
+   results->count = 1;
+   snprintf(results->results[0].tool_call_id, sizeof(results->results[0].tool_call_id), "%s",
+            call_id);
+   snprintf(results->results[0].result, sizeof(results->results[0].result), "Sunny, 21C");
+   results->results[0].success = true;
+   if (openai) {
+      llm_tool_history_append_openai(history, &response, results);
+   } else {
+      llm_tool_history_append_claude(history, &response, results, CARRIER);
+   }
+   json_object_put(response.blocks);
+   free(results);
 
    struct json_object *rows = json_object_new_array();
    for (int i = before; i < (int)json_object_array_length(history); i++) {
@@ -118,12 +137,12 @@ static void run_tool_exchange(struct json_object *history, const char *call_id) 
       struct json_object *m = json_object_array_get_idx(rows, i);
       struct json_object *v = NULL;
 #define FIELD(k) (json_object_object_get_ex(m, (k), &v) ? json_object_get_string(v) : NULL)
-      struct json_object *tc = NULL;
+      struct json_object *tc_obj = NULL;
       const session_tool_row_t row = {
          .role = FIELD("role"),
          .content = FIELD("content"),
-         .tool_calls = json_object_object_get_ex(m, "tool_calls", &tc)
-                           ? json_object_to_json_string(tc)
+         .tool_calls = json_object_object_get_ex(m, "tool_calls", &tc_obj)
+                           ? json_object_to_json_string(tc_obj)
                            : NULL,
          .tool_call_id = FIELD("tool_call_id"),
          .llm_blocks = FIELD(LLM_HISTORY_ROW_STORED_KEY),
@@ -141,7 +160,14 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
                                                 const llm_resolved_config_t *config) {
    (void)input_text, (void)chunk_callback, (void)callback_userdata, (void)config;
    if (s_script.tool_call) {
-      run_tool_exchange(conversation_history, s_script.tool_call);
+      run_tool_exchange(conversation_history, s_script.tool_call, s_script.openai);
+   }
+   if (s_script.visual) {
+      /* What the render_visual tool leaves for the final answer's save. */
+      pthread_mutex_lock(&s->tools_mutex);
+      free(s->pending_visual);
+      s->pending_visual = strdup(s_script.visual);
+      pthread_mutex_unlock(&s->tools_mutex);
    }
    if (s_script.cancel_during) {
       atomic_store(&s->cancel_requested, true);
@@ -184,6 +210,9 @@ int session_dispatch_user_turn_ex(session_t *session,
    char ctx[64];
    snprintf(ctx, sizeof(ctx), "[system_time] %s\n", s_time);
    cp.context_head = strdup(ctx);
+   /* As session_manager.c's dispatch_with_note: a history past its window is
+    * compacted at the seam, before the turn's prompt is applied. */
+   session_compaction_prepare(session, 0);
    session_prefix_apply_turn(session, &cp, turn_note);
    composed_prompt_free(&cp);
    return SUCCESS;
@@ -387,18 +416,13 @@ local_provider_t llm_local_get_provider(void) {
 int is_vision_enabled_for_current_llm(void) {
    return 1;
 }
-bool llm_tool_images_request_limit(llm_type_t type,
-                                   cloud_provider_t provider,
-                                   const char *model,
-                                   llm_image_limit_t *out) {
-   (void)type, (void)provider, (void)model;
-   out->count = 600;
-   out->bytes = 24000000;
-   return true;
-}
 int llm_context_estimate_tokens(struct json_object *history) {
    return llm_compaction_estimate_range(history, 0, (int)json_object_array_length(history));
 }
+/* A compaction: the history reaches its threshold, and the summary written. */
+static bool s_over;
+static const char *s_summary;
+
 bool llm_context_over_threshold(uint32_t session_id,
                                 struct json_object *history,
                                 int extra_tokens,
@@ -408,7 +432,7 @@ bool llm_context_over_threshold(uint32_t session_id,
                                 float threshold) {
    (void)session_id, (void)history, (void)extra_tokens, (void)type, (void)provider;
    (void)model, (void)threshold;
-   return false;
+   return s_over;
 }
 void llm_context_note_compacted(uint32_t session_id, int tokens) {
    (void)session_id, (void)tokens;
@@ -422,8 +446,9 @@ char *llm_context_summarize(struct json_object *to_summarize,
                             const atomic_bool *cancel,
                             llm_compaction_level_t *level_out) {
    (void)to_summarize, (void)kept_tokens, (void)window_tokens, (void)cal, (void)tag;
-   (void)config, (void)cancel, (void)level_out;
-   return NULL;
+   (void)config, (void)cancel;
+   *level_out = LLM_COMPACT_NORMAL;
+   return s_summary ? strdup(s_summary) : NULL;
 }
 int llm_context_get_size(llm_type_t type, cloud_provider_t provider, const char *model) {
    (void)type, (void)provider, (void)model;
@@ -457,15 +482,27 @@ static int64_t persist_tool_row(void *userdata, const session_tool_row_t *row) {
    return id;
 }
 
-/* The final answer saved as webui_persist_final_answer saves it: its blocks
- * with the row, the row's id on the history. */
+/* The final answer saved as webui_persist_final_answer (webui_broadcasts.c)
+ * saves it: its blocks with the row, a rendered visual taken from the session
+ * and joined after the body (memory_history_join_visual), the row's id on the
+ * history.  Its reasoning column, retention and fan-out are left out: a reload
+ * reads none of them. */
 static void persist_reply(int64_t conv, const char *body) {
    struct json_object *blocks = session_take_reply_blocks(s);
    char *stored = llm_turn_blocks_answer_stored(blocks);
    json_object_put(blocks);
-   const conv_message_row_t row = { .role = "assistant", .content = body, .llm_blocks = stored };
+   pthread_mutex_lock(&s->tools_mutex);
+   char *visual = s->pending_visual;
+   s->pending_visual = NULL;
+   pthread_mutex_unlock(&s->tools_mutex);
+   char *combined = (visual && visual[0]) ? memory_history_join_visual(body, visual) : NULL;
+   const conv_message_row_t row = { .role = "assistant",
+                                    .content = combined ? combined : body,
+                                    .llm_blocks = stored };
    int64_t id = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &id));
+   free(combined);
+   free(visual);
    free(stored);
    session_stamp_last_message_id(s, "assistant", id);
 }
@@ -584,11 +621,28 @@ static void assert_live_is_reload(int64_t conv, const char *carries) {
    json_object_put(reloaded);
 }
 
+/* Whether the conversation's last assistant row is saved as @p content. */
+static bool saved_reply_has(int64_t conv, const char *content) {
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_prepare_v2(s_db.db,
+                                            "SELECT content FROM messages WHERE conversation_id = "
+                                            "?1 AND role = 'assistant' ORDER BY id DESC LIMIT 1",
+                                            -1, &st, NULL));
+   sqlite3_bind_int64(st, 1, conv);
+   const bool same = sqlite3_step(st) == SQLITE_ROW &&
+                     strcmp((const char *)sqlite3_column_text(st, 0), content) == 0;
+   sqlite3_finalize(st);
+   return same;
+}
+
 /* ---- setup ---- */
 
 static int64_t s_conv;
 
 void setUp(void) {
+   s_over = false;
+   s_summary = NULL;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(":memory:"));
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_create_user("alice", "h", true));
    auth_user_t u;
@@ -616,6 +670,7 @@ void setUp(void) {
 }
 
 void tearDown(void) {
+   free(s->pending_visual);
    free(s->cancelled_final_response);
    session_final_answer_clear(s);
    session_compaction_teardown(s);
@@ -722,6 +777,59 @@ static void test_a_re_engagement(void) {
    assert_live_is_reload(s_conv, "A2");
 }
 
+/* A tool exchange on an OpenAI path: the call with its tool_calls and a
+ * role:tool result in the history, as the reload rebuilds them. */
+static void test_an_openai_tool_exchange(void) {
+   run_turn(s_conv, "Q1",
+            (script_t){ .reply = "It's sunny.", .tool_call = "call_1", .openai = true });
+   bool tool_row = false;
+   for (size_t i = 0; i < json_object_array_length(s->conversation_history); i++) {
+      struct json_object *role = NULL;
+      tool_row |= json_object_object_get_ex(json_object_array_get_idx(s->conversation_history, i),
+                                            "role", &role) &&
+                  strcmp(json_object_get_string(role), "tool") == 0;
+   }
+   TEST_ASSERT_TRUE(tool_row); /* the history holds it in OpenAI shape */
+   assert_live_is_reload(s_conv, "call_1");
+   run_turn(s_conv, "Q2", (script_t){ .reply = "A2", .tool_call = "call_2", .openai = true });
+   assert_live_is_reload(s_conv, "call_2");
+}
+
+#define VISUAL "<dawn-visual title=\"Chart\"><svg></svg></dawn-visual>"
+
+/* A reply with a rendered visual: saved with the visual after its body, kept
+ * in the history without it; a reload takes the visual off again. */
+static void test_a_reply_with_a_rendered_visual(void) {
+   run_turn(s_conv, "Q1",
+            (script_t){ .reply = "Here it is.", .tool_call = "toolu_v", .visual = VISUAL });
+   assert_live_is_reload(s_conv, "Here it is.");
+   struct json_object *reloaded = reload(s_conv);
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(reloaded), "dawn-visual"));
+   json_object_put(reloaded);
+   TEST_ASSERT_TRUE(saved_reply_has(s_conv, "Here it is.\n" VISUAL "\n"));
+   run_turn(s_conv, "Q2", (script_t){ .reply = "A2" });
+   assert_live_is_reload(s_conv, "A2");
+}
+
+/* A compaction at the next turn's seam, after a tool exchange: the summary
+ * leads the first kept question, live and on reload. */
+static void test_a_compaction_at_the_seam(void) {
+   run_turn(s_conv, "Q1", (script_t){ .reply = "A1" });
+   run_turn(s_conv, "Q2", (script_t){ .reply = "A2", .thinking = true, .tool_call = "toolu_1" });
+   run_turn(s_conv, "Q3", (script_t){ .reply = "A3" });
+   run_turn(s_conv, "Q4", (script_t){ .reply = "A4" });
+   run_turn(s_conv, "Q5", (script_t){ .reply = "A5" });
+   s_over = true;
+   s_summary = "They talked about Q1 and Q2.";
+   run_turn(s_conv, "Q6", (script_t){ .reply = "A6" });
+   s_over = false;
+   s_summary = NULL;
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(s->conversation_history), "\"Q1\""));
+   assert_live_is_reload(s_conv, "They talked about Q1 and Q2.");
+   run_turn(s_conv, "Q7", (script_t){ .reply = "A7" });
+   assert_live_is_reload(s_conv, "A7");
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_plain_turns);
@@ -732,5 +840,8 @@ int main(void) {
    RUN_TEST(test_a_reasoned_reply_stopped_after_it_completed);
    RUN_TEST(test_a_reply_stopped_mid_stream);
    RUN_TEST(test_a_re_engagement);
+   RUN_TEST(test_an_openai_tool_exchange);
+   RUN_TEST(test_a_reply_with_a_rendered_visual);
+   RUN_TEST(test_a_compaction_at_the_seam);
    return UNITY_END();
 }

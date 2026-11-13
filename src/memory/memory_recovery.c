@@ -79,6 +79,15 @@ static pthread_mutex_t s_state_mutex = PTHREAD_MUTEX_INITIALIZER;
  * Acquired at run_pass entry, released at exit. */
 static pthread_mutex_t s_pass_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Tests only (memory_recovery_set_test_wait): called in place of the pass's
+ * sleeps.  NULL in the daemon. */
+static void (*s_test_wait)(void);
+
+/* A pass goes on while the worker thread is up, or while a test drives it. */
+static bool pass_may_continue(void) {
+   return s_running || s_test_wait != NULL;
+}
+
 /* =============================================================================
  * Internal helpers
  * ============================================================================= */
@@ -198,13 +207,17 @@ static void record_attempt(int64_t conv_id) {
  */
 static bool wait_for_user_extraction(int user_id) {
    int waited = 0;
-   while (memory_extraction_in_progress(user_id) && s_running) {
+   while (memory_extraction_in_progress(user_id) && pass_may_continue()) {
       if (waited >= RECOVERY_PER_CONV_WAIT_SEC) {
          return false;
       }
-      /* s_pass_mutex only serializes recovery passes, never a hot path */
-      // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
-      sleep(RECOVERY_POLL_INTERVAL_SEC);
+      if (s_test_wait) {
+         s_test_wait();
+      } else {
+         /* s_pass_mutex only serializes recovery passes, never a hot path */
+         // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+         sleep(RECOVERY_POLL_INTERVAL_SEC);
+      }
       waited += RECOVERY_POLL_INTERVAL_SEC;
    }
    return true;
@@ -278,7 +291,11 @@ static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
    }
 
    /* Wait briefly to confirm extraction actually started (vs. a no-op skip). */
-   usleep(RECOVERY_TRIGGER_SETTLE_MS * 1000);
+   if (s_test_wait) {
+      s_test_wait();
+   } else {
+      usleep(RECOVERY_TRIGGER_SETTLE_MS * 1000);
+   }
    if (!memory_extraction_in_progress(row->user_id)) {
       /* No-op skip — extraction was disabled, conv too short, or capacity hit.
        * Attempts already counted; future passes will hit the cap and stop. */
@@ -368,7 +385,7 @@ void memory_recovery_run_pass(int *triggered_out, int *skipped_out) {
 
    OLOG_INFO("memory_recovery: pass starting — %d stuck conversation(s) to process", list.count);
 
-   for (int i = 0; i < list.count && s_running; i++) {
+   for (int i = 0; i < list.count && pass_may_continue(); i++) {
       if (process_stuck_conv(&list.rows[i], max_attempts)) {
          triggered++;
       } else {
@@ -430,6 +447,10 @@ static void *recovery_thread_func(void *arg) {
 
    OLOG_INFO("memory_recovery: thread stopped");
    return NULL;
+}
+
+void memory_recovery_set_test_wait(void (*wait)(void)) {
+   s_test_wait = wait;
 }
 
 int memory_recovery_start(void) {

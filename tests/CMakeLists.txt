@@ -865,6 +865,9 @@ dawn_add_unit_test(test_session_prefix
 # conversation builds, as the Claude and Responses builders render them.
 dawn_add_unit_test(test_history_reload
    SOURCES test_history_reload.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
+           ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tool_images.c
            ${SRC_ROOT}/src/core/text_input_dispatch.c
            ${SRC_ROOT}/src/core/session_manager_llm.c
            ${SRC_ROOT}/src/core/session_history.c
@@ -2695,6 +2698,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
            ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
            ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
            ${SRC_ROOT}/src/llm/llm_tool_view.c
@@ -2825,6 +2829,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
            ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
            ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
            ${SRC_ROOT}/src/llm/llm_tool_view.c
@@ -2950,6 +2955,7 @@ dawn_add_unit_test(test_memory_supersede_kinds
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
            ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
            ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
            ${SRC_ROOT}/src/llm/llm_tool_view.c
@@ -3078,6 +3084,7 @@ set(MEMORY_CONSOLIDATE_TEST_SOURCES
     ${SRC_ROOT}/src/llm/llm_pricing.c
     ${SRC_ROOT}/src/llm/llm_command_parser.c
     ${SRC_ROOT}/src/llm/llm_tool_loop.c
+    ${SRC_ROOT}/src/llm/llm_tool_history.c
     ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
     ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
     ${SRC_ROOT}/src/llm/llm_tool_view.c
@@ -3113,6 +3120,22 @@ dawn_add_unit_test(test_memory_consolidation_db
    LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
            unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)
+
+# Memory extraction end to end with a fake model: the real trigger, thread,
+# history loader and recovery pass on a real schema.  The model call is
+# wrapped, so no request leaves the process.  A wrap reaches calls from
+# other objects only: it holds while nothing in llm_interface.c, which
+# defines the function, calls it itself (each test asserts the call count).
+dawn_add_unit_test(test_memory_extraction_run
+   SOURCES test_memory_extraction_run.c
+           ${MEMORY_CONSOLIDATE_TEST_SOURCES}
+           ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/memory/memory_recovery.c
+   LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
+           unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
+   LABEL   ci)
+target_link_options(test_memory_extraction_run PRIVATE
+                    -Wl,--wrap=llm_chat_completion_with_config)
 
 # The memory batches frames: the batch object, keyset pages, one "Not found"
 # for missing and foreign ids, the undo and keep replies.  Its handlers take a
@@ -3233,6 +3256,7 @@ add_dependencies(test_memory_remember models_toml_builtin)
 add_dependencies(test_memory_supersede_kinds models_toml_builtin)
 add_dependencies(test_memory_consolidate models_toml_builtin)
 add_dependencies(test_memory_consolidation_db models_toml_builtin)
+add_dependencies(test_memory_extraction_run models_toml_builtin)
 if(ENABLE_WEBUI)
    add_dependencies(test_webui_memory_batches models_toml_builtin)
 endif()
