@@ -701,6 +701,29 @@ into a code graph. Three pieces are required:
 
 Full usage — import vs. link-local, branch tracking, refresh/rebuild, permissions/sandbox, and sharing with a coding assistant — is in **[docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md)**.
 
+### Coding Agents (Claude Code)
+
+Let DAWN hand coding work to Claude Code: it works in its own clone of the repo, as a separate
+sandboxed user, and DAWN follows it, puts its questions to you, shows its changes, and publishes
+the branch as a pull request when you say so. DAWN never starts the agent itself; a small gateway
+service you run does. Three pieces are required:
+
+1. **Build flags** — `DAWN_ENABLE_MCP_BRIDGE_TOOL=ON` with the WebUI on (`DAWN_ENABLE_CODING_AGENT_TOOL`
+   is on by default). The `default`, `full` and `debug` presets have both; the `server` preset (and
+   so the `.deb` package) doesn't include the MCP bridge yet.
+2. **The gateway** — install it from **[services/agent-gateway/README.md](services/agent-gateway/README.md#install)**:
+   `sudo apt install bubblewrap socat`, then `cd services/agent-gateway && sudo UV=$(command -v uv) ./install.sh`.
+   Give the `dawn-agent` user a Claude login or an API key, list the repos it may work in under
+   `[[repos]]` in `/usr/local/etc/agent-gateway/agent-gateway.toml`, and restart it.
+3. **Runtime config** — the gateway's `[[mcp.server]]` block in `dawn.toml` (`transport = "http"`,
+   `role = "agent_gateway"`, see the commented example in [dawn.toml.example](dawn.toml.example)), its
+   token in `secrets.toml` under `[secrets.mcp]`, then restart DAWN.
+
+Publishing pull requests is optional: it needs a fine-grained GitHub token in the gateway's
+environment (Contents and Pull requests read/write, Workflows left at no access); without one,
+DAWN can still delegate, review and close tasks. Then just ask: "Friday, have Claude add a test
+for the calendar parser in dawn."
+
 ### JavaScript-Heavy Sites (FlareSolverr)
 
 For fetching content from sites that block simple requests, DAWN supports [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) as a headless browser proxy.
