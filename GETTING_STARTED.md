@@ -709,8 +709,8 @@ the branch as a pull request when you say so. DAWN never starts the agent itself
 service you run does. Three pieces are required:
 
 1. **Build flags** — `DAWN_ENABLE_MCP_BRIDGE_TOOL=ON` with the WebUI on (`DAWN_ENABLE_CODING_AGENT_TOOL`
-   is on by default). The `default`, `full` and `debug` presets have both; the `server` preset (and
-   so the `.deb` package) doesn't include the MCP bridge yet.
+   is on by default). The `default`, `full`, `debug` and `server` presets have both, and so does
+   the `.deb` package.
 2. **The gateway** — install it from **[services/agent-gateway/README.md](services/agent-gateway/README.md#install)**:
    `sudo apt install bubblewrap socat`, then `cd services/agent-gateway && sudo UV=$(command -v uv) ./install.sh`.
    Give the `dawn-agent` user a Claude login or an API key, list the repos it may work in under
