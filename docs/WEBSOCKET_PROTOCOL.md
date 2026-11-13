@@ -493,6 +493,15 @@ Configure LLM settings for this session only (does not affect other clients).
 - `type`: `"local"`, `"cloud"`, or `"reset"` (revert to defaults)
 - `thinking_mode`: `"disabled"`, `"auto"`, or `"enabled"`
 - `reasoning_effort`: `"low"`, `"medium"`, or `"high"`
+- `type: "local"` with no `model` clears a model the session carried over from a cloud
+  session, or a bare cloud model name. The session then runs the configured local model
+  until one is named.
+- When setting a local model, send `type: "local"` with `model`. Without the type, a name
+  that starts like a cloud model's (Ollama's `gpt-oss`) is taken for a cloud model and the
+  session moves to cloud.
+- `from_restore`: `true` applies the settings to the session without saving them to the
+  active conversation (a loaded conversation's own settings, or a model the client
+  detected rather than the user picked).
 - Response: `set_session_llm_response`
 
 #### `get_system_prompt`
@@ -737,6 +746,9 @@ Load a saved conversation into the current session.
 }
 ```
 Response: `load_conversation_response`
+
+The response's `llm_settings.model` is `""` when the conversation stores no model and is
+not on the default type and provider: it runs that type's or provider's own default.
 
 A user row that asked about an attached email carries `email_ref` (an object:
 `account_id`, `message_id`, `from`, `subject`; see Email, Email in chat). Rows without one
