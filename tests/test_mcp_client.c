@@ -347,9 +347,10 @@ static void test_handshake_connects(void) {
    TEST_ASSERT_EQUAL_INT(SUCCESS, mcp_client_connect(c));
    TEST_ASSERT_EQUAL_INT(MCP_STATE_CONNECTED, mcp_client_state(c));
 
-   const char *tools = mcp_client_tools_json(c);
+   char *tools = mcp_client_tools_json_dup(c);
    TEST_ASSERT_NOT_NULL(tools);
    TEST_ASSERT_NOT_NULL(strstr(tools, "echo"));
+   free(tools);
 
    mcp_client_destroy(c);
 }

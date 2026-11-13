@@ -1323,8 +1323,11 @@ int conv_db_create_continuation(int user_id,
 #define JOB_SPAWN_MODE_MAX 16  /**< "detached" (v1) */
 #define JOB_ON_COMPLETE_MAX 24 /**< "reinvoke_parent" (Phase 3) */
 #define JOB_KIND_MAX 16        /**< "research" discriminator; "" = ordinary job */
-#define JOB_DELIVER_TO_MAX 64  /**< messaging channel display_name */
-#define JOB_ERROR_MAX 256      /**< truncated failure reason */
+/* Stored job_kind values (append only). */
+#define JOB_KIND_RESEARCH "research" /**< a deep-research run (research_worker) */
+#define JOB_KIND_CODING "coding"     /**< a task an agent gateway runs; no DAWN worker */
+#define JOB_DELIVER_TO_MAX 64        /**< messaging channel display_name */
+#define JOB_ERROR_MAX 256            /**< truncated failure reason */
 
 /**
  * @brief A background job's lifecycle row (subset of `conversations` columns).
@@ -1430,6 +1433,21 @@ int conv_db_job_set_terminal(int64_t conv_id,
                              time_t finished_at);
 
 /**
+ * @brief System-caller: conv_db_job_set_terminal() only while the job is
+ *        still queued or running.
+ *
+ * For a job whose end can be reported more than once (a coding task's
+ * events replayed after a restart): the first report wins, later ones change
+ * nothing.
+ * @return AUTH_DB_SUCCESS (now terminal), AUTH_DB_NOT_FOUND (already terminal,
+ *         or no such job), AUTH_DB_INVALID or AUTH_DB_FAILURE.
+ */
+int conv_db_job_set_terminal_if_active(int64_t conv_id,
+                                       const char *status,
+                                       const char *error_or_null,
+                                       time_t finished_at);
+
+/**
  * @brief System-caller: set on_complete_fired=1 (idempotency / follow-up guard).
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
  */
@@ -1504,6 +1522,13 @@ int conv_db_job_pending_reinvoke_for_parent(int64_t parent_id,
 int conv_db_job_scan_active(job_record_t *out, int max, int *count_out);
 
 /**
+ * @brief System-caller: the jobs of one kind still running/queued, oldest
+ *        first.
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID or AUTH_DB_FAILURE.
+ */
+int conv_db_job_scan_active_kind(const char *kind, job_record_t *out, int max, int *count_out);
+
+/**
  * @brief System-caller: mark several jobs' on_complete_fired=1 in one transaction.
  *
  * Used by the reinvoke worker to claim a coalesced group atomically alongside
@@ -1546,6 +1571,18 @@ int conv_db_job_bump_reinvoke(int64_t conv_id, int *new_count_out);
  *         or AUTH_DB_FAILURE.
  */
 int conv_db_job_reset_for_resume(int64_t conv_id, int user_id, bool allow_cancelled);
+
+/**
+ * @brief Reopen a finished coding job for more work (its agent's session resumes).
+ *
+ * A claim, like conv_db_job_reset_for_resume: one UPDATE takes a coding job of
+ * @p user_id from 'done' or 'failed' to 'queued' (never a cancelled one), clears
+ * job_error, finished_at and on_complete_fired (so its next end is reported),
+ * and sets job_goal to @p goal (what the next end is judged against).
+ * @return AUTH_DB_SUCCESS (claimed), AUTH_DB_NOT_FOUND (absent, not the user's,
+ *         not a coding job, or not done/failed), AUTH_DB_INVALID or AUTH_DB_FAILURE.
+ */
+int conv_db_job_reopen_coding(int64_t conv_id, int user_id, const char *goal);
 
 /**
  * @brief Ownership-scoped: a user's ACTIVE (queued/running) jobs, oldest first.

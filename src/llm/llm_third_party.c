@@ -42,6 +42,8 @@ static const struct {
    { TOOL_FRAME_WEB, THIRD_PARTY_WHAT_WEB, OUTSIDE_WEB },
    { TOOL_FRAME_DOCUMENT, THIRD_PARTY_WHAT_DOCUMENT, OUTSIDE_DOCUMENT },
    { TOOL_FRAME_CALENDAR, THIRD_PARTY_WHAT_CALENDAR, OUTSIDE_CALENDAR },
+   /* A coding agent's words, from the agent gateway over MCP. */
+   { TOOL_FRAME_AGENT, THIRD_PARTY_WHAT_AGENT, OUTSIDE_MCP },
 };
 
 char *llm_third_party_frame(const char *name, const char *tag, const char *body) {

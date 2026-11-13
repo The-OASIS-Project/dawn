@@ -1,0 +1,5 @@
+# Git config for the commands the gateway runs as the agent user (cloning a
+# task's repo from the gateway's mirror, which the agent user doesn't own).
+# Root-owned; the agent's own git inside its sandbox doesn't read it.
+[safe]
+	directory = *

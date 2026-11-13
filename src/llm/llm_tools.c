@@ -1535,6 +1535,11 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
    const int rc = run_resolved_call(call, meta, effective_device, action, value_buf, result);
    tl_tool_depth--;
    tool_call_policy_leave(outer);
+   if (kind == TOOL_KIND_PREPARE && result->success && !result->is_error) {
+      /* A preview the user may be answering: DAWN stages nothing unasked on it
+       * (turn_origin_unasked).  A refused one showed them nothing. */
+      turn_origin_note_prepare(session_get_command_context());
+   }
    result->third_party_forced = tl_third_party != NULL;
    result->third_party = tl_third_party ? tl_third_party : tool_third_party_frame(meta, action);
    tl_third_party = NULL;

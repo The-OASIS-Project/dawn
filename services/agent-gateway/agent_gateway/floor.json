@@ -1,0 +1,47 @@
+{
+  "disableAllHooks": true,
+  "enableAllProjectMcpServers": false,
+  "attribution": false,
+  "cleanupPeriodDays": 365,
+  "permissions": {
+    "disableBypassPermissionsMode": "disable",
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(git push)",
+      "WebFetch",
+      "WebSearch",
+      "Read(//var/lib/dawn/**)",
+      "Read(//var/lib/dawn-gateway/**)",
+      "Read(//usr/local/etc/agent-gateway/**)",
+      "Read(//home/**)",
+      "Read(~/.claude/.credentials.json)",
+      "Read(~/.claude.json)",
+      "Read(~/.config/**)",
+      "Read(~/.cache/repo/**)",
+      "Read(~/.claude/projects/**)",
+      "Read(~/.claude/file-history/**)",
+      "Read(~/.claude/todos/**)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "autoAllowBashIfSandboxed": true,
+    "network": {
+      "allowedDomains": [
+        "api.anthropic.com"
+      ]
+    },
+    "filesystem": {
+      "denyRead": [
+        "~/.claude/.credentials.json",
+        "~/.claude.json",
+        "~/.config",
+        "~/.claude/projects",
+        "~/.claude/file-history",
+        "~/.claude/todos"
+      ]
+    }
+  }
+}

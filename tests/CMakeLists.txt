@@ -151,6 +151,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v112.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v113.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v114.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v115.c
     ${SRC_ROOT}/src/core/tz.c
     ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
@@ -247,6 +248,16 @@ dawn_add_unit_test(test_mcp_transport
    LIBS    dawn_common unity ${CURL_LIBRARIES} pthread
    LABEL   ci)
 
+# MCP stateless streamable-HTTP transport — against an in-test loopback server
+# that answers each POST as the test asks, so it is CI-safe.
+dawn_add_unit_test(test_mcp_transport_http
+   SOURCES test_mcp_transport_http.c
+           ${SRC_ROOT}/src/tools/mcp_transport_http.c
+           ${SRC_ROOT}/src/tools/mcp_client.c
+           ${SRC_ROOT}/src/tools/mcp_result.c
+   LIBS    dawn_common unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES} pthread
+   LABEL   ci)
+
 # MCP JSON-RPC client — exercised against an in-test auto-responding mock MCP
 # server (HTTP+SSE, no external network), so it is CI-safe.
 dawn_add_unit_test(test_mcp_client
@@ -328,6 +339,7 @@ dawn_add_unit_test(test_mcp_bridge
            ${SRC_ROOT}/src/tools/mcp_bridge_schema.c
            ${SRC_ROOT}/src/tools/mcp_client.c
            ${SRC_ROOT}/src/tools/mcp_result.c
+           ${SRC_ROOT}/src/tools/mcp_transport_http.c
            ${SRC_ROOT}/src/tools/mcp_transport_http_sse.c
            ${SRC_ROOT}/src/llm/sse_parser.c
            ${SRC_ROOT}/src/auth/auth_db_mcp.c
@@ -2365,6 +2377,45 @@ dawn_add_unit_test(test_history_strip_markers
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# coding_agent tool: start order, confirm gating, cancel hook (gateway and job
+# store stubbed).
+dawn_add_unit_test(test_coding_agent_tool
+   SOURCES test_coding_agent_tool.c
+           ${SRC_ROOT}/src/tools/coding_agent_tool.c
+           ${SRC_ROOT}/src/tools/coding_agent_delegate.c
+           ${SRC_ROOT}/src/tools/coding_agent_requests.c
+           ${SRC_ROOT}/src/tools/coding_agent_publish.c
+           ${SRC_ROOT}/src/tools/coding_agent_gateway.c
+           ${SRC_ROOT}/src/core/pending_slots.c
+           ${SRC_ROOT}/src/tools/tool_pending.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# coding-agent report-back: what is posted, what the no-tools take is asked.
+dawn_add_unit_test(test_coding_agent_report
+   SOURCES test_coding_agent_report.c
+           ${SRC_ROOT}/src/tools/coding_agent_report.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# What DAWN posted into a conversation, told to the next turn.
+dawn_add_unit_test(test_session_posts
+   SOURCES test_session_posts.c
+           ${SRC_ROOT}/src/core/session_posts.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# coding-agent watcher: gateway events onto jobs, start-up check, cursor.
+dawn_add_unit_test(test_coding_agent_watch
+   SOURCES test_coding_agent_watch.c
+           ${SRC_ROOT}/src/tools/coding_agent_watch.c
+           ${SRC_ROOT}/src/core/event_payload.c
+   LIBS    dawn_common unity pthread m ${JSONC_LIBRARIES}
    LABEL   ci)
 
 # Background-job session pool.

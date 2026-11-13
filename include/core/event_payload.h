@@ -131,6 +131,31 @@ char *event_payload_complete(const char *disposition,
                              const char *error_or_null,
                              int64_t final_message_id);
 
+struct json_object;
+
+/** An agent event's longest kept string, in bytes. */
+#define EVENT_AGENT_TEXT_CAP 4096
+
+/**
+ * @brief Build a payload from one agent-gateway event:
+ *        {"gw": <its kind>, "gw_seq": <its number>, "gw_ts": <when, epoch s>,
+ *         <the named fields>}.
+ *
+ * Copies only @p fields (NULL-terminated) from @p data: numbers and lists of
+ * numbers as they are, strings cut at EVENT_AGENT_TEXT_CAP bytes on a whole
+ * character, lists of strings one per line.  In @p scrubbed fields (may be
+ * NULL), runs that look like credentials become EVENT_REDACTED_MARKER.  The
+ * text is the agent's (outside text): consumers render it as text, never
+ * markup or instructions.
+ * @return malloc'd JSON, or NULL on OOM. Caller frees.
+ */
+char *event_payload_agent(const char *gw_kind,
+                          int64_t gw_seq,
+                          int64_t gw_ts,
+                          struct json_object *data,
+                          const char *const *fields,
+                          const char *const *scrubbed);
+
 /**
  * @brief Build a `spawn` payload: {"conv_id":N,"title":"…"}.
  * @return malloc'd JSON, or NULL on OOM. Caller frees.

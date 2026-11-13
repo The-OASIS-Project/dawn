@@ -47,6 +47,12 @@
 #include "toml.h"
 #include "unity.h"
 
+/* A preview staged in a session is noted there (the session unit; not under test). */
+struct session;
+void turn_origin_note_prepare(struct session *session) {
+   (void)session;
+}
+
 /* A Claude request's carrier: its endpoint and key tag (llm_request_carrier). */
 #define TEST_CLAUDE_CARRIER "api.anthropic.com#0123456789abcdef"
 

@@ -21,6 +21,8 @@
  * DAWN Configuration Parser - TOML file parsing implementation
  */
 
+#define _GNU_SOURCE /* explicit_bzero */
+
 #include "config/config_parser.h"
 
 #include <fcntl.h>
@@ -2138,6 +2140,7 @@ static void parse_mcp_server(toml_table_t *table, mcp_server_config_t *server) {
                                              "tls_verify",
                                              "auth_bearer_env",
                                              "auth_bearer_token_secret",
+                                             "role",
                                              NULL };
    warn_unknown_keys(table, "mcp.server", known_keys);
 
@@ -2151,6 +2154,7 @@ static void parse_mcp_server(toml_table_t *table, mcp_server_config_t *server) {
    PARSE_BOOL(table, "tls_verify", server->tls_verify);
    PARSE_STRING(table, "auth_bearer_env", server->auth_bearer_env);
    PARSE_STRING(table, "auth_bearer_token_secret", server->auth_bearer_token_secret);
+   PARSE_STRING(table, "role", server->role);
 }
 
 static void parse_mcp(toml_table_t *table, mcp_config_t *config) {
@@ -2385,6 +2389,42 @@ int config_parse_secrets(const char *path, secrets_config_t *secrets) {
          PARSE_STRING(schwab, "client_id", secrets->schwab_client_id);
          PARSE_STRING(schwab, "client_secret", secrets->schwab_client_secret);
          PARSE_STRING(schwab, "redirect_url", secrets->schwab_redirect_url);
+      }
+
+      /* [secrets.mcp]: bearer tokens for MCP servers, by the name a server's
+       * auth_bearer_token_secret gives. */
+      toml_table_t *mcp = toml_table_in(secrets_section, "mcp");
+      for (int i = 0; mcp != NULL; i++) {
+         const char *name = toml_key_in(mcp, i);
+         if (name == NULL) {
+            break;
+         }
+         if (secrets->mcp_count >= MCP_SECRETS_MAX) {
+            OLOG_WARNING("secrets: more than %d [secrets.mcp] tokens; the rest are ignored",
+                         MCP_SECRETS_MAX);
+            break;
+         }
+         toml_datum_t d = toml_string_in(mcp, name);
+         if (!d.ok || name[0] == '\0' || strlen(name) >= MCP_SECRET_NAME_MAX ||
+             strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") !=
+                 strlen(name)) {
+            OLOG_WARNING("secrets: [secrets.mcp] '%s' must be a string named with letters, digits, "
+                         "_ or -; ignored",
+                         name);
+            if (d.ok) {
+               explicit_bzero(d.u.s, strlen(d.u.s));
+               free(d.u.s);
+            }
+            continue;
+         }
+         mcp_secret_t *e = &secrets->mcp[secrets->mcp_count++];
+         safe_strscpy(e->name, name);
+         if (safe_strscpy(e->token, d.u.s) >= sizeof(e->token)) {
+            OLOG_WARNING("secrets: [secrets.mcp] '%s' is longer than %zu bytes; cut short", name,
+                         sizeof(e->token) - 1);
+         }
+         explicit_bzero(d.u.s, strlen(d.u.s));
+         free(d.u.s);
       }
 
       PARSE_STRING(secrets_section, "service_token", secrets->service_token);

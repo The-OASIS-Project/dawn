@@ -86,7 +86,9 @@ typedef struct {
                                   NULL = none */
    bool unprompted;          /**< ordinary assistant row DAWN wrote on its own, not as a
                               reply to the user (a delivered briefing or message, a
-                              completion note): shown and replayed, never extracted.
+                              completion note): shown, never extracted, and not
+                              replayed: the next turn is told it in its context
+                              (conv_db_posted_after()).
                               Recorded in message_unprompted; extraction finds it by row
                               id, so a post must reach a history only from the
                               database, never appended live without its id */
@@ -166,7 +168,9 @@ typedef int (*conversation_llm_row_cb)(const conversation_llm_row_t *row, void *
  *
  * Only rows with id > @p after_id (0 = all), in id order, and only when the
  * conversation belongs to @p user_id. Blocks past CONV_LLM_BLOCKS_LOAD_BUDGET
- * (counted from the newest row back) are left out.
+ * (counted from the newest row back) are left out.  So are the rows DAWN
+ * posted (unprompted): a turn tells them in its context
+ * (conv_db_posted_after()), which replays with its question.
  *
  * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID or AUTH_DB_FAILURE.
  */
@@ -175,6 +179,34 @@ int conv_db_get_messages_for_llm(int64_t conv_id,
                                  int64_t after_id,
                                  conversation_llm_row_cb callback,
                                  void *ctx);
+
+/** A row DAWN posted into a conversation (conv_db_posted_after()). */
+typedef struct {
+   int64_t id;
+   char *content; /**< owned; conv_db_posted_free() */
+} conv_posted_row_t;
+
+/**
+ * @brief The rows DAWN posted into @p conv_id (unprompted: a job's report or
+ *        notice, a channel post) after row @p after_id: the newest @p max,
+ *        oldest first.
+ *
+ * Only when the conversation belongs to @p user_id.  Each content is its first
+ * @p text_max characters; *@p more_out says whether earlier ones were left out.
+ * @return AUTH_DB_SUCCESS (rows to free with conv_db_posted_free()),
+ *         AUTH_DB_INVALID or AUTH_DB_FAILURE (nothing to free).
+ */
+int conv_db_posted_after(int64_t conv_id,
+                         int user_id,
+                         int64_t after_id,
+                         int text_max,
+                         conv_posted_row_t *rows,
+                         int max,
+                         int *count_out,
+                         bool *more_out);
+
+/** Free the contents conv_db_posted_after() filled in. */
+void conv_db_posted_free(conv_posted_row_t *rows, int n);
 
 /**
  * @brief Bind the images @p conv_id's rows name: the user's unbound captures

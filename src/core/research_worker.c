@@ -38,15 +38,10 @@
 #include "auth/auth_db_messages.h"
 #include "core/job_dispatch.h" /* job_provider_from_default */
 #include "core/job_manager.h"
+#include "core/job_report.h"
 #include "core/session_manager.h"
 #include "logging.h"
 #include "tools/research_run.h"
-
-/* Defined in webui_broadcasts.c (webui_absent.c without the WebUI).  Declared here rather than
- * pulling in the heavy webui_server.h — the job_worker.c → webui_server.h include is tracked debt
- * we don't want to grow. Signals an open WebUI chat that a conversation has new messages →
- * refetch+render. */
-void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id);
 
 /* Work item handed to the detached worker thread. */
 typedef struct {
@@ -118,18 +113,11 @@ static void research_deliver_to_parent(int64_t job_conv, int user_id, const char
                run.brief);
    }
 
-   int64_t msg_id = 0;
-   /* no-blocks: DAWN's own completion note, not a model turn; unprompted, so memory
+   /* DAWN's own completion note, not a model turn: unprompted, so memory
     * extraction leaves it out. */
-   const conv_message_row_t row = { .role = "assistant", .content = msg, .unprompted = true };
-   if (conv_db_add_row(rec.parent_id, user_id, &row, &msg_id) != AUTH_DB_SUCCESS) {
-      OLOG_WARNING("research_worker: failed to post completion to parent conv %lld",
-                   (long long)rec.parent_id);
-      return;
+   if (job_report_post(rec.parent_id, user_id, msg) == SUCCESS) {
+      OLOG_INFO("research_worker: posted completion to parent conv %lld", (long long)rec.parent_id);
    }
-   webui_broadcast_conversation_messages_appended(user_id, rec.parent_id);
-   OLOG_INFO("research_worker: posted completion to parent conv %lld (msg %lld)",
-             (long long)rec.parent_id, (long long)msg_id);
 }
 
 static void research_worker_run(research_work_t *work) {

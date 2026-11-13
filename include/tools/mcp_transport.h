@@ -17,8 +17,8 @@
  * the project author(s).
  *
  * Transport abstraction for the DAWN MCP bridge: a bidirectional JSON-RPC
- * message pipe to one MCP server, hiding the wire mechanics (HTTP+SSE in
- * Phase 1; WebSocket/stdio later) behind a small vtable.
+ * message pipe to one MCP server, hiding the wire mechanics (HTTP+SSE, or
+ * stateless HTTP POSTs) behind a small vtable.
  */
 
 #ifndef MCP_TRANSPORT_H
@@ -32,12 +32,17 @@
  * @brief Transport vtable for the MCP bridge.
  *
  * Ownership / threading contract:
- *  - A transport runs ONE reader thread that delivers inbound messages and
- *    connection-state changes via callbacks. Callbacks run ON that reader
- *    thread; they MUST NOT block or re-enter stop()/destroy().
- *  - send() is thread-safe and blocks on a short outbound HTTP request.
- *  - A transport is a "dumb pipe": it does NOT auto-reconnect. On stream drop
- *    it reports MCP_TRANSPORT_DISCONNECTED and the reader thread exits.
+ *  - A streaming transport runs ONE reader thread that delivers inbound
+ *    messages and state changes via callbacks, on that thread. A stateless
+ *    transport has no reader: it reports CONNECTED from start() and delivers
+ *    each reply from send(), on the caller's thread. Either way callbacks
+ *    MUST NOT block or re-enter stop()/destroy(), and callers MUST NOT hold a
+ *    lock across start()/send() that the callbacks take.
+ *  - send() is thread-safe. It may block for as long as the server holds the
+ *    request (a long-poll); stop() makes it return within about a second.
+ *  - A transport is a "dumb pipe": it does NOT auto-reconnect. A streaming
+ *    transport reports MCP_TRANSPORT_DISCONNECTED when its stream drops; a
+ *    stateless one never does (a failed request fails only that request).
  *    Reconnect policy (backoff, failure counting) lives in mcp_client, which
  *    drives stop() + start() again -- keeping reconnect logic in one place.
  */
@@ -67,10 +72,10 @@ typedef void (*mcp_transport_on_state_fn)(void *user, mcp_transport_event_t ev);
 
 /** Transport configuration. The concrete factory copies all strings. */
 typedef struct {
-   const char *url;                        /**< SSE GET endpoint URL (required). */
+   const char *url;                        /**< Server endpoint URL (required). */
    const char *bearer_token;               /**< NULL = no auth. Copied; zeroed on destroy. */
    bool tls_verify;                        /**< false is valid only under upstream dev_mode. */
-   long connect_timeout_seconds;           /**< 0 = libcurl default. */
+   long connect_timeout_seconds;           /**< SSE: connect; stateless: each whole POST. */
    long idle_close_seconds;                /**< Reserved for client idle policy (eff-11). */
    mcp_transport_on_message_fn on_message; /**< Required. */
    mcp_transport_on_state_fn on_state;     /**< Optional (may be NULL). */

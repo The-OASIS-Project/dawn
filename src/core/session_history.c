@@ -34,8 +34,10 @@
 #include "core/focus/focus_handles.h"
 #include "core/session_compaction.h"
 #include "core/session_manager.h"
+#include "core/session_posts.h"
 #include "core/session_prefix.h"
 #include "core/tool_result_store.h"
+#include "core/turn_queue.h"
 #include "dawn_error.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_context_text.h"
@@ -379,6 +381,7 @@ int session_rollback_turn(session_t *session) {
             session->notices[i].sent = false;
          }
       }
+      session_posts_untell_locked(session);
    } else if (session->turn_user_msg) {
       OLOG_WARNING("Session %u: the turn's question is no longer in its history; nothing "
                    "taken back",
@@ -1590,6 +1593,72 @@ bool turn_origin_capture(turn_origin_t *out) {
    out->from_visual = from_visual;
    out->third_party = third_party;
    return true;
+}
+
+bool turn_origin_unasked(session_t *session, turn_origin_t *out) {
+   if (!out) {
+      return false;
+   }
+   *out = (turn_origin_t){ 0 };
+   if (!session) {
+      return false;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   /* A preview's answer can come in any of the turns after it up to the quiet
+    * count; once they have all run, the next message can't be one. */
+   bool quiet = true;
+   for (int i = 0; i < SESSION_PREPARE_TURNS; i++) {
+      if (session->prepares[i].open > 0 &&
+          session->turn_number - session->prepares[i].turn < TURN_ORIGIN_UNASKED_QUIET_TURNS) {
+         quiet = false;
+      }
+   }
+   const bool idle = !session->turn_active;
+   const uint32_t number = session->turn_number;
+   pthread_mutex_unlock(&session->history_mutex);
+   /* A message already on its way counts as busy: it was written before
+    * anything DAWN posts now. */
+   if (!idle || !quiet || atomic_load(&session->turn_in_flight) > 0 ||
+       turn_queue_busy(session->session_id)) {
+      return false;
+   }
+   out->session_id = session->session_id;
+   out->turn_token = atomic_fetch_add(&s_turn_tokens, 1) + 1; /* no turn owns it */
+   out->turn_number = number;
+   return true;
+}
+
+_Static_assert(SESSION_PREPARE_TURNS == TURN_ORIGIN_UNASKED_QUIET_TURNS + 1,
+               "a session counts previews over the confirm window and its own turn");
+
+void turn_origin_note_prepare(session_t *session) {
+   if (!session) {
+      return;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   /* This turn's slot; one left by a turn the window's length ago is reused,
+    * since that turn's previews can't be answered after this one. */
+   const uint32_t turn = session->turn_number;
+   const int i = (int)(turn % SESSION_PREPARE_TURNS);
+   if (session->prepares[i].turn != turn) {
+      session->prepares[i].turn = turn;
+      session->prepares[i].open = 0;
+   }
+   session->prepares[i].open++;
+   pthread_mutex_unlock(&session->history_mutex);
+}
+
+void turn_origin_note_answered(session_t *session, uint32_t made_turn) {
+   if (!session) {
+      return;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   /* Only its own turn's count: the others expire on their own. */
+   const int i = (int)(made_turn % SESSION_PREPARE_TURNS);
+   if (session->prepares[i].turn == made_turn && session->prepares[i].open > 0) {
+      session->prepares[i].open--;
+   }
+   pthread_mutex_unlock(&session->history_mutex);
 }
 
 /* Caller holds history_mutex.  The running turn's pending slot for @p role. */

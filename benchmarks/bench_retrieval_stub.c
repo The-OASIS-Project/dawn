@@ -696,3 +696,8 @@ void tool_result_store_set_read_budget(struct session *session, size_t chars) {
    (void)session;
    (void)chars;
 }
+
+/* A preview staged in a session is noted there (the session unit isn't linked). */
+void turn_origin_note_prepare(struct session *session) {
+   (void)session;
+}

@@ -308,6 +308,57 @@ other users' job ids. Always answered with `job_action_response`.
   existing transcript. Counts as a spawn against the job caps. Refused for
   `done` (it has an answer), `cancelled` (stopped deliberately), and `running`.
 
+#### `coding_pending`
+What coding jobs wait on (built with the coding agent only). Asks the agent gateway,
+so the answer, `coding_pending_response`, comes a little later and goes to every tab
+of the user. Jobs that aren't the user's coding jobs are left out of it. At most 16 ids.
+One lookup per user runs at a time; asks that arrive meanwhile are merged into the next.
+```json
+{ "type": "coding_pending", "payload": { "jobs": [1977, 1983] } }
+```
+
+#### `coding_view`
+The changes viewer: a coding job's work, read from the agent gateway's mirror (never
+shown to the model). `what` is `changes` (the changed files and commits) or `file`
+(one file: `path` exactly as `changes` listed it, `"old -> new"` for a rename;
+`view` `diff`, the default, or `new`). The user's own coding job only. One request
+per user at a time; a newer one replaces one still waiting. Answered with
+`coding_view_response`, to the asking tab only; `nonce` (optional, up to 39
+characters) is echoed so the tab renders only its latest.
+```json
+{ "type": "coding_view", "payload": { "job": 1987, "what": "file", "path": "src/a.c", "view": "diff", "nonce": "v3" } }
+```
+
+#### `coding_grants`
+The user's standing approvals for the coding agent (hosts and tools allowed for every
+task on a repo, or every repo). Answered with `coding_grants_response`.
+```json
+{ "type": "coding_grants", "payload": {} }
+```
+
+#### `coding_grant_revoke`
+Remove one standing approval; the gateway removes only the user's own. Answered with
+`coding_grants_response` carrying the result and the list as it now stands.
+```json
+{ "type": "coding_grant_revoke", "payload": { "id": 3 } }
+```
+
+#### `coding_reply`
+The user's answer to one open request of a coding job, from a card. `decision` is
+`allow` (this task), `allow_repo` (every task on the job's repo), `deny`, or `answer`
+(with `answer`, the user's words, at most 2000 characters, for a question). For
+`allow`/`allow_repo` send `line`, the line the card showed. The server checks the
+click against the live request: the job is the user's coding job and the request is
+still open; Allow only when DAWN can show what it asks and `line` still matches;
+`allow_repo` only when the repo can be named; answers only for questions (at most
+2000 bytes), decisions only for hosts and tools (`deny` on a question declines it).
+One reply per job at a time. `nonce` (optional, up to 39 characters) is echoed back,
+so the tab that clicked can tell its answer from another tab's. Answered with
+`coding_reply_response`, to every tab of the user.
+```json
+{ "type": "coding_reply", "payload": { "job": 1977, "request_id": 12, "decision": "allow", "line": "reach the host `downloads.arduino.cc`" } }
+```
+
 ### Configuration (Admin Only)
 
 #### `get_config`
@@ -2074,7 +2125,8 @@ All three carry the same job object:
    "deliver_to": "telegram-main", "error": "..."
 }
 ```
-`deliver_to` and `error` are **omitted when empty**. `status` ∈ `queued` |
+`deliver_to` and `error` are **omitted when empty**. `kind` is present (`"coding"`)
+only on a coding job, whose open requests `coding_pending` fetches. `status` ∈ `queued` |
 `running` | `done` | `failed` | `interrupted` | `cancelled`; the first two are the
 active states — treat anything else as terminal so an unrecognized future status
 cannot pin a row in a client's active set forever.
@@ -2102,6 +2154,85 @@ clients treat terminal as a sink — that is what stops a stale frame from
 resurrecting a finished job — this flag is what tells them to release the mark. A
 tab that did not initiate the resume sees only this frame, so the signal has to be
 in the data rather than in frame ordering.
+
+#### `coding_pending_response`
+```json
+{
+   "type": "coding_pending_response",
+   "payload": {
+      "jobs": [
+         {
+            "job": 1977,
+            "agent": "Claude Code",
+            "model": "claude-sonnet-5",
+            "requests": [
+               { "request_id": 12, "kind": "permission", "line": "reach the host `downloads.arduino.cc`", "repo": "dawn" },
+               { "request_id": 13, "kind": "question", "line": "", "question": "Which branch?\nOptions: main / dev" }
+            ]
+         }
+      ]
+   }
+}
+```
+`line` is DAWN's checked wording (empty when DAWN can't show what is asked: offer Deny
+only); `repo` is present when allowing on the repo can be offered; `question` is the
+agent's question, its own words (show it as text, as theirs). A job with nothing
+open has `requests: []`. `agent` names what runs the job; `model` is the model its last
+run reported, absent before the first run (show "default"). A coding job's work happens
+in its agent, not on the conversation's model, so a client shows these in place of its
+model controls and doesn't send text into the job's conversation (follow-up work goes
+through the assistant: "follow up on job 1977: ...").
+
+#### `coding_view_response`
+`ok` with `result`, the gateway's answer as is, or `error`. For `changes`: `head`,
+`base`, `task_id` (the job's branch is `refs/agent/<task_id>` in the gateway's
+mirror), `files` ({`path`, `added`, `removed`, `protected`}; `added`/`removed` null
+for a binary file; protected first, at most 2000) with `files_total`, and `commits`
+({`hash`, `subject`}, at most 100). For `file`: `path`, `view`, and `text` (a unified
+diff, or the file), or `too_large` (bytes), `binary` or `missing`. Paths, subjects
+and text are the agent's: show them as text, and show invisible and
+direction-changing characters (bidi controls, zero-width characters) visibly, since
+this is where the user checks the work before publishing it.
+```json
+{ "type": "coding_view_response", "payload": { "job": 1987, "what": "file", "nonce": "v3", "ok": true, "result": { "path": "src/a.c", "view": "diff", "text": "@@ -1 +1 @@\n-a\n+b\n" } } }
+```
+
+#### `coding_grants_response`
+To every tab of the user. `grants` is absent (with `error`) when the gateway didn't
+answer; after a revoke, `revoked`, `ok` and `message` say how it went. Each grant:
+`kind` (`domain` or `tool`), `value` (as stored, control characters dropped, clipped:
+show as text), `checked` (false: DAWN can't read it as a host or tool name; still
+listed so it can be revoked), `repo` (absent: every repo).
+```json
+{
+   "type": "coding_grants_response",
+   "payload": {
+      "revoked": 4, "ok": true, "message": "Removed standing approval 4 (...).",
+      "grants": [ { "id": 3, "kind": "domain", "value": "pypi.org", "checked": true, "repo": "dawn" } ]
+   }
+}
+```
+
+#### `coding_reply_response`
+```json
+{
+   "type": "coding_reply_response",
+   "payload": { "job": 1977, "request_id": 12, "nonce": "c1x2y3-4", "ok": true, "message": "Allowed: coding job #1977 (...) may now reach the host `downloads.arduino.cc`, for this task only. The agent picks up again." }
+}
+```
+
+#### Coding job events
+A coding job's conversation carries `agent_step` (`gw`: `tool` with `tool`, `brief`;
+`progress` with `text`), `agent_request` (`gw`: `request` with `request_id`,
+`request_kind`, `line` (DAWN's checked wording, empty when it can't show it),
+`value`, `tool`, `input`; `reply` with `request_id`, `decision`; `blocked`;
+`input_required` with `request_ids`; after the job finished, `published` with
+`pushed`, `pr_url`; `merged` with `pr_url`, `unpublished` (newer commits not
+published); `closed` with `reason`: `user` or `merged`) and `agent_end` (`gw`:
+`completed`, `failed`, `cancelled`, with `summary`, `branch`, `commits`, `diffstat`,
+`uncommitted`, `protected`, `protected_count`, `error`, `cost_usd`; lists arrive
+joined by newlines). All of it is the agent's text except `line`: render it as text
+only (show `pr_url` only in GitHub's form, `https://github.com/<o>/<r>/pull/<n>`).
 
 #### `job_action_response`
 Result of a `job_action`. Sent on every outcome including refusal, so a client can

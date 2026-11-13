@@ -1281,7 +1281,9 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
  * still fire and the pool slot stays held until the turn ends.  Each child's
  * own images go with it, the same way the parent's do.  Batched +
  * progress-guarded so a long-lived chat that spawned many jobs is fully covered
- * without an unbounded stack or a re-fetch loop. */
+ * without an unbounded stack or a re-fetch loop.  A coding child's task runs in
+ * its agent gateway: the cancel there is asked for, and the gateway's late
+ * events find no row. */
 static int cascade_delete_child_jobs(ws_connection_t *conn, int64_t parent_id) {
    int total = 0;
    for (;;) {

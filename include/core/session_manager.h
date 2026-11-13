@@ -40,6 +40,10 @@
 #include "dawn_error.h"
 #include "llm/llm_interface.h"  // For session_llm_config_t
 
+/* Turns whose previews a session keeps counting: the confirm window and the
+ * turn itself (TURN_ORIGIN_UNASKED_QUIET_TURNS + 1, asserted where used). */
+#define SESSION_PREPARE_TURNS 4
+
 #define SESSION_PROVIDER_MAX 16
 #define SESSION_MAX_PROVIDERS 5 /* local + each cloud provider */
 
@@ -617,6 +621,24 @@ typedef struct session {
    // Guarded by history_mutex.
    session_notice_t notices[SESSION_NOTICES_MAX];
    int notice_count;
+   // What DAWN posted into the conversation (a job's report) that this session
+   // has told its turns: posts in posts_told_conv up to posts_told_id
+   // (session_posts_take).  posts_told_by is the turn that told the last
+   // ones, those after posts_told_from (taken back with it: posts_told_prev).
+   // Guarded by history_mutex.
+   int64_t posts_told_conv;
+   int64_t posts_told_from;
+   int64_t posts_told_id;
+   int64_t posts_told_prev;
+   uint64_t posts_told_by;
+   // Previews not answered yet, counted by the turn they were shown in (slot
+   // turn % SESSION_PREPARE_TURNS, valid while .turn matches): DAWN stages
+   // nothing unasked while one may still be answered (turn_origin_note_prepare).
+   // Guarded by history_mutex.
+   struct {
+      uint32_t turn;
+      int open;
+   } prepares[SESSION_PREPARE_TURNS];
    // Facts "remember"ed during a turn whose conversation wasn't known yet; their
    // source is recorded once it is (see session_fact_source_t).  Guarded by
    // history_mutex.

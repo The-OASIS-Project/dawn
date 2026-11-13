@@ -126,6 +126,10 @@ static json_object *job_to_json(const job_record_t *r) {
    if (error[0]) {
       json_object_object_add(j, "error", json_object_new_string(error));
    }
+   /* A coding job's card asks the gateway what it waits on (coding_pending). */
+   if (strcmp(r->job_kind, JOB_KIND_CODING) == 0) {
+      json_object_object_add(j, "kind", json_object_new_string(JOB_KIND_CODING));
+   }
    return j;
 }
 

@@ -1283,6 +1283,30 @@
                   DawnJobs.handleHistoryPage(msg.payload);
                }
                break;
+            case 'coding_pending_response':
+               // What the user's coding jobs wait on (the card's requests).
+               if (typeof DawnCodingEvents !== 'undefined') {
+                  DawnCodingEvents.handlePending(msg.payload);
+               }
+               break;
+            case 'coding_view_response':
+               // A coding job's work for the changes viewer (to this tab only).
+               if (typeof DawnCodingViewer !== 'undefined') {
+                  DawnCodingViewer.handleResponse(msg.payload);
+               }
+               break;
+            case 'coding_grants_response':
+               // The coding agent's standing approvals (the jobs panel's list).
+               if (typeof DawnCodingGrants !== 'undefined') {
+                  DawnCodingGrants.handleResponse(msg.payload);
+               }
+               break;
+            case 'coding_reply_response':
+               // The result of a click on a coding job's card.
+               if (typeof DawnCodingEvents !== 'undefined') {
+                  DawnCodingEvents.handleReplyResponse(msg.payload);
+               }
+               break;
             case 'job_action_response':
                // Result of a cancel/resume. Always sent, including on refusal,
                // so a panel can tell "refused" from "still working".
@@ -2187,6 +2211,11 @@
       const modeEl = document.getElementById('llm-mini-mode');
       const modelEl = document.getElementById('llm-mini-model');
       if (!modeEl || !modelEl) return;
+      const agent = typeof DawnCodingEvents !== 'undefined' ? DawnCodingEvents.agentMini() : null;
+      if (agent) {
+         [modeEl.textContent, modelEl.textContent] = agent; // a coding job's view
+         return;
+      }
 
       const typeSelect = document.getElementById('llm-type-select');
       const modelSelect = document.getElementById('llm-model-select');

@@ -215,14 +215,18 @@ typedef struct {
 } tool_action_kind_entry_t;
 
 /* Frames for third-party text in a tool's result (llm/llm_third_party.h).
- * A new frame goes in TOOL_FRAMES_ALL too: test_llm_tools_finish checks each
- * one is written, found again, defused by the neutralizer and stored. */
+ * A new frame goes in TOOL_FRAMES_ALL too, and gets its line in
+ * llm_third_party.c, the neutralizer's word lists (llm_context_text.c) and a
+ * stored id (TOOL_RESULTS_FRAME_*): test_llm_tools_finish and
+ * test_tool_result_store check each one is written, found again, defused by
+ * the neutralizer and stored. */
 #define TOOL_FRAME_EMAIL "EMAIL CONTENT"
 #define TOOL_FRAME_WEB "WEB CONTENT"
 #define TOOL_FRAME_DOCUMENT "DOCUMENT CONTENT"
 #define TOOL_FRAME_CALENDAR "CALENDAR CONTENT"
+#define TOOL_FRAME_AGENT "AGENT CONTENT"
 #define TOOL_FRAMES_ALL \
-   { TOOL_FRAME_EMAIL, TOOL_FRAME_WEB, TOOL_FRAME_DOCUMENT, TOOL_FRAME_CALENDAR }
+   { TOOL_FRAME_EMAIL, TOOL_FRAME_WEB, TOOL_FRAME_DOCUMENT, TOOL_FRAME_CALENDAR, TOOL_FRAME_AGENT }
 
 /** Entries in an action_kinds table: .action_kind_count = TOOL_KIND_COUNT(t) */
 #define TOOL_KIND_COUNT(table) ((int)(sizeof(table) / sizeof((table)[0])))
@@ -319,6 +323,16 @@ typedef int (*tool_init_fn)(void);
  * @return 0 on success, non-zero on error
  */
 typedef int (*tool_start_fn)(void);
+
+/**
+ * @brief Tool stop function type
+ *
+ * Called early in shutdown, after the WebUI stops taking requests and before
+ * background jobs, the database and MQTT are torn down: stop here what start() started (threads
+ * that call into them), and wait for it.  Cleanup comes later.  Must be safe when start() never ran
+ * (a shutdown during startup).
+ */
+typedef void (*tool_stop_fn)(void);
 
 /**
  * @brief Tool cleanup function type
@@ -579,6 +593,7 @@ typedef struct {
    /* Lifecycle (optional - NULL if not needed) */
    tool_init_fn init;       /**< Called after config parse */
    tool_start_fn start;     /**< Called once the daemon has finished starting */
+   tool_stop_fn stop;       /**< Called early in shutdown; stops what start started */
    tool_cleanup_fn cleanup; /**< Called at shutdown */
 
    /* Callback (required) */
@@ -645,6 +660,13 @@ int tool_registry_init_tools(void);
  * @return 0 on success, non-zero if any tool start fails
  */
 int tool_registry_start_tools(void);
+
+/**
+ * @brief Stop every tool that has a stop function, in reverse registration order.
+ *
+ * Call once, early in shutdown, before job_manager_shutdown() and the database.
+ */
+void tool_registry_stop_tools(void);
 
 /**
  * @brief Lock the registry to prevent further registrations

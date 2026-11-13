@@ -228,6 +228,16 @@ static const tool_metadata_t mock_tool_array_first = {
    .default_remote = true,
 };
 
+/* Stop hooks record their order. */
+static char s_stopped[8];
+static int s_stopped_n;
+static void stop_a(void) {
+   s_stopped[s_stopped_n++] = 'a';
+}
+static void stop_b(void) {
+   s_stopped[s_stopped_n++] = 'b';
+}
+
 /* ============================================================================
  * setUp / tearDown — fresh registry for each test
  * ============================================================================ */
@@ -243,6 +253,27 @@ void tearDown(void) {
 /* ============================================================================
  * Tests
  * ============================================================================ */
+
+/* Stop runs for tools that have one, last registered first. */
+static void test_stop_tools_in_reverse_order(void) {
+   tool_metadata_t a = mock_tool;
+   a.name = "stop_a";
+   a.stop = stop_a;
+   tool_metadata_t b = mock_tool;
+   b.name = "stop_b";
+   b.stop = stop_b;
+   tool_metadata_t none = mock_tool;
+   none.name = "no_stop";
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_register(&a));
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_register(&none));
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_register(&b));
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_init_tools());
+   s_stopped_n = 0;
+   tool_registry_stop_tools();
+   TEST_ASSERT_EQUAL_INT(2, s_stopped_n);
+   TEST_ASSERT_EQUAL_CHAR('b', s_stopped[0]);
+   TEST_ASSERT_EQUAL_CHAR('a', s_stopped[1]);
+}
 
 static void test_init_returns_success(void) {
    /* setUp already called init, verify available flag */
@@ -768,6 +799,7 @@ static void test_results_own(void) {
 int main(void) {
    UNITY_BEGIN();
 
+   RUN_TEST(test_stop_tools_in_reverse_order);
    RUN_TEST(test_init_returns_success);
    RUN_TEST(test_kind_lookup_and_default);
    RUN_TEST(test_kind_classify_call);

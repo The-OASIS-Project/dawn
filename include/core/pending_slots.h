@@ -65,11 +65,14 @@ typedef struct {
    void *base;
    size_t stride;
    int count;
-   int ttl_sec; /* an item older than this has expired */
+   int ttl_sec;     /* an item older than this has expired */
+   int later_turns; /* 0: confirmed in the user's next turn; N: in any of the next N */
 } pending_slots_t;
 
 /** A pending_slots_t over the array @p arr (whose element type passed
- *  PENDING_ITEM_CHECK, and which passed PENDING_ARRAY_CHECK). */
+ *  PENDING_ITEM_CHECK, and which passed PENDING_ARRAY_CHECK).  Its items are
+ *  confirmed only in the user's next turn; for one whose preview the user may
+ *  ask about first, set .later_turns to how many turns it stays open. */
 #define PENDING_SLOTS_TABLE(arr, ttl)                                                            \
    {                                                                                             \
       .base = (arr), .stride = sizeof((arr)[0]), .count = (int)(sizeof(arr) / sizeof((arr)[0])), \
@@ -173,6 +176,16 @@ void pending_slots_drop(const pending_slots_t *slots,
 
 /** Clear one slot and the struct it heads. */
 void pending_slots_clear(const pending_slots_t *slots, pending_slot_t *slot);
+
+/**
+ * @brief A live item (not expired) staged in session @p session_id, of @p kind
+ *        (any kind when @p kind < 0), or NULL.  The caller holds the table's
+ *        mutex while it uses the result.
+ */
+pending_slot_t *pending_slots_live(const pending_slots_t *slots,
+                                   uint32_t session_id,
+                                   int kind,
+                                   time_t now);
 
 /** Seconds @p slot has left before the table's TTL expires it, at @p now. */
 int pending_slots_valid_for(const pending_slots_t *slots, const pending_slot_t *slot, time_t now);

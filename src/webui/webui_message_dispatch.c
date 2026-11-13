@@ -1659,6 +1659,32 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
             limit = json_object_get_int(o);
       }
       webui_jobs_send_history(conn, before_created_at, before_id, limit);
+#ifdef DAWN_ENABLE_CODING_AGENT_TOOL
+   } else if (strcmp(type, "coding_pending") == 0) {
+      /* What the user's coding jobs wait on.  Ownership is checked per job inside. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_pending(conn, payload);
+   } else if (strcmp(type, "coding_reply") == 0) {
+      /* The card's answer; checked against the live request inside. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_reply(conn, payload);
+   } else if (strcmp(type, "coding_view") == 0) {
+      /* The changes viewer; the job's owner is checked inside. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_view(conn, payload);
+   } else if (strcmp(type, "coding_grants") == 0) {
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_grants(conn, payload);
+   } else if (strcmp(type, "coding_grant_revoke") == 0) {
+      /* The gateway removes only the user's own. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_grant_revoke(conn, payload);
+#endif
    } else if (strcmp(type, "job_action") == 0) {
       /* cancel | resume.  Ownership is checked inside, against conn->auth_user_id. */
       if (!conn_require_auth(conn))

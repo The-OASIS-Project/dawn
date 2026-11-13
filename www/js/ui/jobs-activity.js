@@ -250,10 +250,28 @@ window.DawnJobsActivity = (function () {
 
    function renderGlobalPill() {
       var n = total();
-      renderPill(document.getElementById('global-jobs-pill'), n, plural(n));
+      var pill = document.getElementById('global-jobs-pill');
+      // A coding job waiting on the user says so on the pill.
+      var need = typeof DawnCodingEvents !== 'undefined' ? DawnCodingEvents.waitingCount() : 0;
+      renderPill(
+         pill,
+         n,
+         plural(n) + (need > 0 ? ', ' + need + ' need' + (need === 1 ? 's' : '') + ' you' : '')
+      );
+      if (pill) pill.classList.toggle('needs-you', need > 0);
    }
 
    function renderAll() {
+      // What the active coding jobs wait on (asked once per change of the set),
+      // first: a job gone from the set takes its requests with it before the
+      // global pill counts them.
+      if (typeof DawnCodingEvents !== 'undefined') {
+         DawnCodingEvents.track(
+            Object.keys(jobs).map(function (k) {
+               return jobs[k];
+            })
+         );
+      }
       renderConvPill();
       renderGlobalPill();
    }
@@ -354,6 +372,13 @@ window.DawnJobsActivity = (function () {
    // --- lifecycle hooks ------------------------------------------------------
 
    function handleReconnect() {
+      // Coding jobs' cards: what they wait on may have changed while away.
+      if (typeof DawnCodingEvents !== 'undefined') {
+         DawnCodingEvents.reconnected();
+      }
+      if (typeof DawnCodingGrants !== 'undefined') {
+         DawnCodingGrants.reconnected();
+      }
       if (typeof DawnWS !== 'undefined') {
          // A snapshot request opens a fresh reconciliation window, so drop the
          // terminal memory here. It exists only to suppress rows that finished
@@ -378,6 +403,10 @@ window.DawnJobsActivity = (function () {
          activeConvIdFn = getActiveConvId;
       }
       renderAll();
+   }
+
+   if (typeof DawnCodingEvents !== 'undefined') {
+      DawnCodingEvents.onChange(renderGlobalPill);
    }
 
    return {

@@ -41,8 +41,10 @@
 #include "core/prompt_parts.h"
 #include "core/session_compaction.h"
 #include "core/session_manager.h"
+#include "core/session_posts.h"
 #include "core/session_prefix.h"
 #include "core/text_input_dispatch.h"
+#include "core/turn_queue.h"
 #include "dawn_error.h"
 #include "llm/llm_claude_format.h"
 #include "llm/llm_compaction.h"
@@ -257,6 +259,15 @@ void session_manager_for_each_session_any(void (*fn)(session_t *session, void *c
 }
 void job_manager_for_each_session(void (*fn)(session_t *session, void *ctx), void *ctx) {
    (void)fn, (void)ctx;
+}
+
+/* No turn queue, and no posts from DAWN into the conversation. */
+bool turn_queue_busy(uint32_t session_id) {
+   (void)session_id;
+   return false;
+}
+void session_posts_untell_locked(session_t *session) {
+   (void)session;
 }
 
 /* No focus handles, tool-result store, events or client frames here. */

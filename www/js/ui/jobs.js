@@ -301,6 +301,12 @@
          err.setAttribute('dir', 'auto');
          main.appendChild(err);
       }
+      /* A coding job waiting on the user: answer it here, from any conversation
+       * (the cards go full width under the row, after its actions). */
+      const asks = codingWaiting(job);
+      if (asks.length) {
+         meta.appendChild(elem('span', 'dawn-badge warning', 'Needs you'));
+      }
       row.appendChild(main);
 
       const actions = elem('div', 'jobs-row-actions');
@@ -316,12 +322,32 @@
             true /* attach — this is the job's own conversation */
          )
       );
+      if (job.kind === 'coding' && typeof DawnCodingViewer !== 'undefined') {
+         const changes = elem('button', 'jobs-open-btn', 'View changes');
+         changes.type = 'button';
+         changes.setAttribute(
+            'aria-label',
+            'Changes made by coding job: ' + (job.title || 'untitled')
+         );
+         changes.dataset.jobId = String(job.conversation_id);
+         changes.dataset.action = 'changes';
+         changes.addEventListener('click', function () {
+            DawnCodingViewer.open(job.conversation_id, job.title || '', changes);
+         });
+         actions.appendChild(changes);
+      }
       if (isActiveStatus(job.status)) {
          actions.appendChild(buildActionButton(job, 'cancel', 'Cancel'));
-      } else if (isResumable(job.status)) {
+      } else if (isResumable(job.status) && job.kind !== 'coding') {
+         /* A coding task goes on through the agent (revise), not a generic resume. */
          actions.appendChild(buildActionButton(job, 'resume', 'Resume'));
       }
       row.appendChild(actions);
+      asks.forEach(function (req) {
+         row.appendChild(
+            DawnCodingEvents.buildCard(job.conversation_id, req, 'row', job.title || 'coding job')
+         );
+      });
       return row;
    }
 
@@ -398,22 +424,54 @@
       if (!mark || !list) {
          return;
       }
-      const nodes = list.querySelectorAll('.jobs-action-btn, .jobs-open-btn');
+      const nodes = list.querySelectorAll(
+         '.jobs-action-btn, .jobs-open-btn, .coding-card-btn, .coding-answer'
+      );
       for (let i = 0; i < nodes.length; i++) {
          if (nodes[i].dataset.jobId === mark.jobId && nodes[i].dataset.action === mark.action) {
             nodes[i].focus();
             return;
          }
       }
+      /* A card's control is gone once its request is answered: its row stays. */
+      if (mark.action.indexOf('coding-') === 0) {
+         const view = list.querySelector(
+            '.jobs-open-btn[data-action="view"][data-job-id="' + mark.jobId + '"]'
+         );
+         if (view) view.focus();
+      }
+   }
+
+   /* Whether the user is writing an answer on a row's card. */
+   let redrawAfterTyping = false;
+   function typingAnswer() {
+      const a = document.activeElement;
+      return !!(
+         a &&
+         a.classList.contains('coding-answer') &&
+         el.activeList &&
+         el.activeList.contains(a)
+      );
+   }
+
+   function codingWaiting(job) {
+      return job.kind === 'coding' && typeof DawnCodingEvents !== 'undefined'
+         ? DawnCodingEvents.waiting(job.conversation_id)
+         : [];
    }
 
    function renderActive(preFetched, preComputedSig) {
       if (!el.activeList) {
          return;
       }
-      const jobs = preFetched || getActiveJobs();
+      const listed = preFetched || getActiveJobs();
+      /* Signed in the store's order (the tick's), not the display order below. */
+      activeSig = preComputedSig || activeSignature(listed);
+      /* Jobs waiting on the user first (a stable sort keeps the rest's order). */
+      const jobs = listed.slice().sort(function (a, b) {
+         return (codingWaiting(b).length > 0) - (codingWaiting(a).length > 0);
+      });
       const focusMark = captureFocus();
-      activeSig = preComputedSig || activeSignature(jobs);
       el.activeList.textContent = '';
 
       if (el.activeCount) {
@@ -477,7 +535,10 @@
        * gain. */
       const jobs = getActiveJobs();
       const sig = activeSignature(jobs);
-      if (sig !== activeSig) {
+      if (sig !== activeSig && typingAnswer()) {
+         redrawAfterTyping = true; /* caught up when the answer box is left */
+         patchElapsed(jobs);
+      } else if (sig !== activeSig) {
          renderActive(jobs, sig);
       } else {
          patchElapsed(jobs);
@@ -817,6 +878,18 @@
 
    /* ---- open / close ----------------------------------------------------- */
 
+   /* What a coding job waits on changed: redraw the open panel's active rows. */
+   if (typeof DawnCodingEvents !== 'undefined') {
+      DawnCodingEvents.onChange(function () {
+         /* Not while the user types an answer on a row: caught up on leaving it. */
+         if (isOpen && typingAnswer()) {
+            redrawAfterTyping = true;
+         } else if (isOpen) {
+            renderActive();
+         }
+      });
+   }
+
    function open() {
       if (!el.popover || isOpen) {
          /* Re-entrancy matters: open() is exported, and a second call would
@@ -856,6 +929,12 @@
       }
       if (callbacks.trapFocus) {
          focusTrapCleanup = callbacks.trapFocus(el.popover);
+      }
+      if (typeof DawnCodingEvents !== 'undefined') {
+         DawnCodingEvents.refresh();
+      }
+      if (typeof DawnCodingGrants !== 'undefined') {
+         DawnCodingGrants.refresh();
       }
       renderActive();
       requestHistory(true);
@@ -1003,6 +1082,33 @@
       el.activeCount = document.getElementById('jobs-active-count');
       el.historyCount = document.getElementById('jobs-history-count');
       el.moreBtn = document.getElementById('jobs-load-more');
+
+      /* A redraw held back while an answer was being written, done on leaving it,
+       * but not while a button in the list is being pressed: pressing Send moves
+       * focus off the answer, and a redraw before the release would drop the
+       * click.  The release catches up once the click has run. */
+      if (el.activeList) {
+         let pressing = false;
+         const catchUp = function () {
+            global.setTimeout(function () {
+               if (redrawAfterTyping && isOpen && !pressing && !typingAnswer()) {
+                  redrawAfterTyping = false;
+                  renderActive();
+               }
+            }, 0);
+         };
+         el.activeList.addEventListener('pointerdown', function () {
+            pressing = true;
+         });
+         ['pointerup', 'pointercancel'].forEach(function (type) {
+            document.addEventListener(type, function () {
+               if (!pressing) return;
+               pressing = false;
+               catchUp();
+            });
+         });
+         el.activeList.addEventListener('focusout', catchUp);
+      }
 
       if (el.btn) {
          el.btn.addEventListener('click', toggle);

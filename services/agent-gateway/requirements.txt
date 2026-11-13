@@ -1,0 +1,3 @@
+mcp==2.3.0
+claude-agent-sdk==0.2.177
+uvicorn==0.54.0

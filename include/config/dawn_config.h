@@ -1048,6 +1048,19 @@ typedef struct {
 /* =============================================================================
  * Secrets Configuration (loaded separately from secrets.toml)
  * ============================================================================= */
+#define MCP_SECRETS_MAX 16     /**< [secrets.mcp] entries (one per MCP server at most) */
+#define MCP_SECRET_NAME_MAX 64 /**< Name length; letters, digits, _ and - only */
+
+/**
+ * @brief An MCP server's bearer token from secrets.toml [secrets.mcp].
+ *
+ * Found by the name a [[mcp.server]] gives in auth_bearer_token_secret.
+ */
+typedef struct {
+   char name[MCP_SECRET_NAME_MAX]; /**< bare TOML key, checked when parsed */
+   char token[CONFIG_API_KEY_MAX]; /**< the bearer token */
+} mcp_secret_t;
+
 typedef struct {
    char openai_api_key[CONFIG_API_KEY_MAX];
    char claude_api_key[CONFIG_API_KEY_MAX];
@@ -1108,6 +1121,10 @@ typedef struct {
     * REST sends.  Required alongside slack_app_token.  Scopes required:
     * chat:write, im:history, im:read, app_mentions:read. */
    char slack_bot_token[CONFIG_API_KEY_MAX];
+
+   /* [secrets.mcp]: name = token */
+   mcp_secret_t mcp[MCP_SECRETS_MAX];
+   int mcp_count;
 } secrets_config_t;
 
 /* =============================================================================
@@ -1125,21 +1142,25 @@ typedef struct {
  * ============================================================================= */
 #define MCP_SERVERS_MAX 16
 #define MCP_SERVER_ALIAS_MAX 64
+#define MCP_SERVER_ROLE_MAX 24
+#define MCP_SERVER_ROLE_AGENT_GATEWAY "agent_gateway" /* a coding-agent gateway */
 
 typedef struct {
    char alias[MCP_SERVER_ALIAS_MAX]; /* server id, used as a tool-name prefix */
-   char url[CONFIG_PATH_MAX];        /* SSE endpoint URL */
-   char transport[16];               /* "http+sse" (Phase 1) */
+   char url[CONFIG_PATH_MAX];        /* SSE endpoint, or the POST endpoint for "http" */
+   char transport[16];               /* "http+sse" | "http" (stateless POST, JSON replies) */
    bool enabled;
    char capabilities[16]; /* "dangerous" (default) | "read_only" */
    int request_timeout_seconds;
    int idle_close_seconds;
    bool tls_verify; /* false requires [mcp] dev_mode = true */
-   /* Bearer token: env-var name is the Phase-1 source (auth_bearer_env). The
-    * secrets.toml key is reserved — resolving it needs a generic by-name secret
-    * lookup that the fixed-field secrets parser does not yet provide. */
+   /* Bearer token: from the env var named by auth_bearer_env if set, else the
+    * [secrets.mcp] entry named by auth_bearer_token_secret. */
    char auth_bearer_env[CONFIG_NAME_MAX];
    char auth_bearer_token_secret[CONFIG_NAME_MAX];
+   /* "" | "agent_gateway": the operator says this server is a coding-agent
+    * gateway, the only kind DAWN sends users' coding tasks to. */
+   char role[MCP_SERVER_ROLE_MAX];
 } mcp_server_config_t;
 
 typedef struct {

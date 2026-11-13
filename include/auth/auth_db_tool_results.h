@@ -61,6 +61,7 @@ typedef enum {
 #define TOOL_RESULTS_FRAME_WEB 2
 #define TOOL_RESULTS_FRAME_DOCUMENT 3
 #define TOOL_RESULTS_FRAME_CALENDAR 4
+#define TOOL_RESULTS_FRAME_AGENT 5
 #define TOOL_RESULTS_FRAME_MAX 15
 
 /** A result to store. */

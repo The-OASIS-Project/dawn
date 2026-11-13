@@ -38,8 +38,18 @@ See @ARCHITECTURE.md for subsystem breakdowns, data flow, and module dependencie
   and any silent, irreversible outcome (data loss, a wrong action) even when rare. Justify each fix
   or drop in one sentence: who triggers it, and how, on a default install.
 - **A burden is a bug (WWFD).** DAWN should feel like FRIDAY: usable, versatile, faster than doing it
-  yourself. A safeguard that makes a common request ask or fail every time has failed. Weigh
-  usability and security together; neither wins by default.
+  yourself. Security is a key feature, but a safeguard that makes a feature a pain to use has failed:
+  nobody, the developer included, will use it, and an unused feature protects no one. Weigh usability
+  and security together; neither wins by default. In practice:
+  - **The common path is one natural reply.** "Allow it", "yes", "send it" does the thing. A guard
+    that adds a round-trip, a dead end or a retry to the common case needs a different design.
+  - **Judge guards together, not one by one.** Before adding a guard or accepting a reviewer's, walk
+    the whole interaction with every guard in place: what the user says, what the model will
+    actually call, in what order. Each guard can be reasonable alone and the stack unusable.
+  - **A refused or failed call leaves nothing behind** that blocks the user's next step.
+  - **Guard the effect, not the step before it.** Block where something is allowed, sent or changed,
+    not a preview or a read that allows nothing.
+  - **Push back on review findings** whose fix makes the common path worse; list them instead.
 - **When a real tradeoff exists,** lay the options out honestly, say what each one actually fixes,
   and recommend the proper one even when it's more work. Never quietly pick the easy option, and
   never pick the heavy one just to look thorough.

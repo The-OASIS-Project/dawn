@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "dawn_error.h"
 #include "logging.h"
@@ -45,8 +46,10 @@
 #include "tools/mcp_transport.h"
 
 #define MCP_PENDING_MAX 64
+#define MCP_DESTROY_WAIT_MS 5000
 #define MCP_FAIL_WINDOW_SEC 60
 #define MCP_FAIL_THRESHOLD 3
+#define MCP_DISABLED_COOLDOWN_SEC 300 /* then one more connect attempt */
 #define MCP_DEFAULT_TIMEOUT_MS 30000
 #define MCP_DEFAULT_CONNECT_WAIT_MS 10000
 
@@ -93,6 +96,9 @@ struct mcp_client {
    mcp_pending_t *pending[MCP_PENDING_MAX];
    int pending_count;
    _Atomic uint64_t next_id;
+   /* Calls inside mcp_client_call(); destroy waits for them so a transport
+    * still finishing a request never touches a freed client. */
+   atomic_int calls_in_flight;
 
    /* tools/list cache. */
    char *tools_json;
@@ -485,6 +491,22 @@ static int do_request(mcp_client_t *c,
  * Handshake + lifecycle
  * -------------------------------------------------------------------------- */
 
+/* Disabled, and not yet cooled down: a server that was down gets one more
+ * attempt each cooldown rather than staying off until an operator reset. */
+static bool disabled_locked(mcp_client_t *c) {
+   if (c->state != MCP_STATE_DISABLED) {
+      return false;
+   }
+   const int64_t now = mono_now_sec();
+   if (now - c->fail_ts[2] < MCP_DISABLED_COOLDOWN_SEC) {
+      return true;
+   }
+   /* One attempt: its failure disables it again for another cooldown. */
+   c->fail_ts[1] = c->fail_ts[2] = now;
+   c->state = MCP_STATE_DISCONNECTED;
+   return false;
+}
+
 static bool record_failure_locked(mcp_client_t *c) {
    int64_t now = mono_now_sec();
    c->fail_ts[0] = c->fail_ts[1];
@@ -577,7 +599,7 @@ int mcp_client_connect(mcp_client_t *c) {
    while (c->state == MCP_STATE_CONNECTING) {
       pthread_cond_wait(&c->state_cv, &c->state_mtx); /* another thread is connecting */
    }
-   if (c->state == MCP_STATE_DISABLED) {
+   if (disabled_locked(c)) {
       pthread_mutex_unlock(&c->state_mtx);
       return MCP_ERR_DISABLED;
    }
@@ -684,28 +706,36 @@ int mcp_client_call(mcp_client_t *c,
    if (c == NULL || method == NULL) {
       return FAILURE;
    }
+   atomic_fetch_add(&c->calls_in_flight, 1);
 
    pthread_mutex_lock(&c->state_mtx);
+   const bool disabled = disabled_locked(c);
    mcp_client_state_t st = c->state;
    pthread_mutex_unlock(&c->state_mtx);
 
-   if (st == MCP_STATE_DISABLED) {
-      return MCP_ERR_DISABLED;
+   int rc = SUCCESS;
+   if (disabled) {
+      rc = MCP_ERR_DISABLED;
+   } else if (st == MCP_STATE_SHUTTING_DOWN) {
+      rc = MCP_ERR_SHUTDOWN;
+   } else if (st != MCP_STATE_CONNECTED) {
+      rc = mcp_client_connect(c); /* lazy (re)connect */
    }
-   if (st == MCP_STATE_SHUTTING_DOWN) {
-      return MCP_ERR_SHUTDOWN;
+   if (rc == SUCCESS) {
+      rc = do_request(c, method, params_json, timeout_ms, progress_cb, progress_user, result_out);
    }
-   if (st != MCP_STATE_CONNECTED) {
-      int rc = mcp_client_connect(c); /* lazy (re)connect */
-      if (rc != SUCCESS) {
-         return rc;
-      }
-   }
-   return do_request(c, method, params_json, timeout_ms, progress_cb, progress_user, result_out);
+   atomic_fetch_sub(&c->calls_in_flight, 1);
+   return rc;
 }
 
-const char *mcp_client_tools_json(mcp_client_t *c) {
-   return c != NULL ? c->tools_json : NULL;
+char *mcp_client_tools_json_dup(mcp_client_t *c) {
+   if (c == NULL) {
+      return NULL;
+   }
+   pthread_mutex_lock(&c->state_mtx);
+   char *copy = c->tools_json != NULL ? strdup(c->tools_json) : NULL;
+   pthread_mutex_unlock(&c->state_mtx);
+   return copy;
 }
 
 /* --------------------------------------------------------------------------
@@ -735,6 +765,7 @@ mcp_client_t *mcp_client_create(const mcp_client_opts_t *opts) {
    cond_init_monotonic(&c->state_cv);
    pthread_mutex_init(&c->pending_mtx, NULL);
    atomic_init(&c->next_id, 0);
+   atomic_init(&c->calls_in_flight, 0);
 
    if (c->name == NULL || c->client_name == NULL || c->client_version == NULL) {
       mcp_client_destroy(c);
@@ -767,7 +798,18 @@ void mcp_client_destroy(mcp_client_t *c) {
    }
 
    if (c->transport != NULL) {
-      mcp_client_shutdown(c); /* fail pending + stop reader thread */
+      mcp_client_shutdown(c); /* fail pending + stop the transport */
+      /* A call can still be inside the transport (a stateless transport's send
+       * runs on the caller's thread until it sees the stop, within about a
+       * second): wait it out before freeing what it uses. */
+      for (int i = 0; i < MCP_DESTROY_WAIT_MS / 10 && atomic_load(&c->calls_in_flight) > 0; i++) {
+         usleep(10000);
+      }
+      if (atomic_load(&c->calls_in_flight) > 0) {
+         OLOG_ERROR("MCP %s: %d call(s) still running at destroy; leaking the client", c->name,
+                    atomic_load(&c->calls_in_flight));
+         return;
+      }
       mcp_transport_destroy(c->transport);
    }
 

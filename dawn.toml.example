@@ -1229,7 +1229,11 @@ citation_reinforcement_boost = 0.05
 # =============================================================================
 # MCP Bridge (coding harness) — requires building with
 # -DDAWN_ENABLE_MCP_BRIDGE_TOOL=ON. DAWN is a pure MCP *client*; the operator
-# launches each MCP server (systemd/tmux/docker). Transport is HTTP+SSE only.
+# launches each MCP server (systemd/tmux/docker). Transports: "http+sse" (an SSE
+# stream, e.g. through mcp-proxy) or "http" (stateless: one POST per message,
+# JSON replies; a server that streams its replies or needs sessions uses
+# "http+sse"). With "http", request_timeout_seconds bounds each whole POST,
+# long-polls included.
 # =============================================================================
 # [mcp]
 # enabled = false                    # master switch for the bridge
@@ -1241,11 +1245,23 @@ citation_reinforcement_boost = 0.05
 # transport = "http+sse"
 # enabled = true
 # capabilities = "read_only"         # "dangerous" (default) or "read_only"
+#
+# [[mcp.server]]                     # a stateless server, e.g. the coding agents' gateway
+# alias = "agents"
+# url = "http://127.0.0.1:9760/mcp"
+# transport = "http"
+# request_timeout_seconds = 60
+# role = "agent_gateway"             # services/agent-gateway: Friday hands it coding tasks.
+#                                    # Only a server declared so gets them; none of its
+#                                    # tools are offered to the model.
+# (a bearer token is sent to another host only over https with tls_verify)
+#
+# Settings for either kind:
 # request_timeout_seconds = 30
 # idle_close_seconds = 600
 # tls_verify = true                  # false requires [mcp] dev_mode = true
-# auth_bearer_env = "CBM_TOKEN"      # env var holding the bearer token (Phase 1 source)
-# # auth_bearer_token_secret = "cbm_token"  # reserved: secrets.toml named-key (not yet wired)
+# auth_bearer_env = "CBM_TOKEN"      # an env var holding the token; when it has no value:
+# auth_bearer_token_secret = "agents"  # the token in secrets.toml [secrets.mcp], by this name
 
 # =============================================================================
 # Code Projects (coding harness) — [code_projects]

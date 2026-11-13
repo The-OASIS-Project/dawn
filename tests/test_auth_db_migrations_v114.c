@@ -187,11 +187,13 @@ static void open_seeded(int version) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_path));
    seed_v113();
    if (version > 114) {
-      char sql[128];
-      snprintf(sql, sizeof(sql),
-               "ALTER TABLE message_unprompted ADD COLUMN replayed INTEGER NOT NULL DEFAULT 0;"
-               "UPDATE schema_version SET version = %d;",
-               version);
+      /* v115's column is in the schema DAWN creates now; a database from before
+       * gained it in the v115 step. */
+      if (!auth_db_column_exists(s_db.db, "message_unprompted", "replayed")) {
+         exec_ok("ALTER TABLE message_unprompted ADD COLUMN replayed INTEGER NOT NULL DEFAULT 0;");
+      }
+      char sql[64];
+      snprintf(sql, sizeof(sql), "UPDATE schema_version SET version = %d;", version);
       exec_ok(sql);
    }
    auth_db_shutdown();
@@ -283,30 +285,27 @@ static void test_later_stamp_still_migrated(void) {
                                                            "WHERE own != 0"));
 }
 
-/* Reopening a complete database, at 114 or stamped 115, changes nothing and
+/* Reopening a complete database (at the current version) changes nothing and
  * takes no backup. */
 static void test_reopen_complete_changes_nothing(void) {
-   for (int version = 114; version <= 115; version++) {
-      if (version == 115) {
-         open_seeded(115);
-      }
-      exec_ok("UPDATE documents SET outside = 0 WHERE id = 1;"
-              "UPDATE documents SET outside = 1, own = 1 WHERE id = 3;"
-              "UPDATE document_versions SET outside = 2 WHERE id = 3;"
-              "UPDATE conversations SET outside = 0 WHERE id = 14;");
-      const int before = backups_from(version);
-      auth_db_shutdown();
-      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_path));
-      TEST_ASSERT_EQUAL_INT64(version,
-                              auth_db_query_int64(s_db.db, "SELECT version FROM schema_version"));
-      TEST_ASSERT_EQUAL_INT(before, backups_from(version));
-      TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 1));
-      TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, outside_in("documents", 3));
-      TEST_ASSERT_EQUAL_INT64(1, auth_db_query_int64(s_db.db, "SELECT own FROM documents "
-                                                              "WHERE id = 3"));
-      TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, outside_in("document_versions", 3));
-      TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("conversations", 14));
-   }
+   const int version = AUTH_DB_SCHEMA_VERSION;
+   open_seeded(version);
+   exec_ok("UPDATE documents SET outside = 0 WHERE id = 1;"
+           "UPDATE documents SET outside = 1, own = 1 WHERE id = 3;"
+           "UPDATE document_versions SET outside = 2 WHERE id = 3;"
+           "UPDATE conversations SET outside = 0 WHERE id = 14;");
+   const int before = backups_from(version);
+   auth_db_shutdown();
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(s_path));
+   TEST_ASSERT_EQUAL_INT64(version,
+                           auth_db_query_int64(s_db.db, "SELECT version FROM schema_version"));
+   TEST_ASSERT_EQUAL_INT(before, backups_from(version));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("documents", 1));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, outside_in("documents", 3));
+   TEST_ASSERT_EQUAL_INT64(1, auth_db_query_int64(s_db.db, "SELECT own FROM documents "
+                                                           "WHERE id = 3"));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_EMAIL, outside_in("document_versions", 3));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, outside_in("conversations", 14));
 }
 
 /* The documents and document_versions tables' columns, in a stable order. */

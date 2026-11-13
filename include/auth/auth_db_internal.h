@@ -68,7 +68,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 114
+#define AUTH_DB_SCHEMA_VERSION 115
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -494,6 +494,7 @@ typedef struct {
    sqlite3_stmt *stmt_msg_get_after;
    sqlite3_stmt *stmt_msg_get_llm;      /* replay read with llm_blocks (auth_db_messages.c) */
    sqlite3_stmt *stmt_msg_llm_sizes;    /* block sizes for the per-load budget */
+   sqlite3_stmt *stmt_msg_posted_after; /* DAWN's posts after a row (conv_db_posted_after) */
    sqlite3_stmt *stmt_msg_gc_blocks;    /* blocks dropped below the watermark */
    sqlite3_stmt *stmt_msg_sweep_blocks; /* the same, across conversations */
    sqlite3_stmt *stmt_msg_bind_images;  /* a row's images made permanent with it */
@@ -776,7 +777,7 @@ typedef struct {
 } auth_db_stmt_def_t;
 
 /** How many statements auth_db_messages.c's table holds (checked there). */
-#define AUTH_DB_MESSAGES_STMT_COUNT 9
+#define AUTH_DB_MESSAGES_STMT_COUNT 10
 
 /**
  * @brief Prepare each statement in @p defs, in order.
@@ -1031,10 +1032,11 @@ _Static_assert(OUTSIDE_RESEARCH == 3 && OUTSIDE_DOCUMENT == 5 && OUTSIDE_OTHER =
    "WHEN " CONV_FRAMED_SQL(m, TOOL_FRAME_EMAIL) " THEN 2 " \
    "WHEN " CONV_FRAMED_SQL(m, TOOL_FRAME_WEB) " THEN 1 " \
    "WHEN " CONV_FRAMED_SQL(m, TOOL_FRAME_DOCUMENT) " THEN 5 " \
-   "WHEN " CONV_FRAMED_SQL(m, TOOL_FRAME_CALENDAR) " THEN 9 END)"
+   "WHEN " CONV_FRAMED_SQL(m, TOOL_FRAME_CALENDAR) " THEN 9 " \
+   "WHEN " CONV_FRAMED_SQL(m, TOOL_FRAME_AGENT) " THEN 6 END)"
 /* clang-format on */
 _Static_assert(OUTSIDE_WEB == 1 && OUTSIDE_EMAIL == 2 && OUTSIDE_DOCUMENT == 5 &&
-                   OUTSIDE_CALENDAR == 9,
+                   OUTSIDE_MCP == 6 && OUTSIDE_CALENDAR == 9,
                "CONV_TOOL_FRAME_KIND_SQL writes these outside kinds");
 
 /* The SET clause marking a conversations row extracted up to now (what was
@@ -1382,6 +1384,8 @@ int auth_db_migrations_v114(sqlite3 *db);
 /** Whether any of v114's columns is missing (documents.outside, documents.own,
  *  document_versions.outside), whatever the stored version says. */
 bool auth_db_migrations_v114_pending(sqlite3 *db);
+/** v115: message_unprompted.replayed (posts stored before it keep replaying). */
+int auth_db_migrations_v115(sqlite3 *db);
 
 /**
  * @brief The v98 rebuild's room check: the bytes it needs free next to the

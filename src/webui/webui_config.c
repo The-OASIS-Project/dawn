@@ -191,6 +191,9 @@ void handle_get_config(ws_connection_t *conn) {
    /* Add secrets status (only is_set flags, never actual values) */
    json_object *secrets_status = secrets_to_json_status(config_get_secrets());
    if (secrets_status) {
+      if (!is_admin) {
+         json_object_object_del(secrets_status, "mcp"); /* which MCP tokens exist */
+      }
       json_object_object_add(payload, "secrets", secrets_status);
    }
 

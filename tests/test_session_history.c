@@ -103,6 +103,16 @@ void llm_cache_monitor_history_rewritten(uint32_t session_id) {
    (void)session_id;
    s_rewritten++;
 }
+/* No turn queued for the session (the queue isn't under test). */
+bool turn_queue_busy(uint32_t session_id) {
+   (void)session_id;
+   return false;
+}
+static int s_untold = 0; /* session_posts_untell_locked calls */
+void session_posts_untell_locked(session_t *session) {
+   (void)session;
+   s_untold++;
+}
 static int s_take_back_boundary = -1;
 struct session_prefix_turn *session_prefix_take_back_locked(session_t *session,
                                                             struct json_object *question,
@@ -1048,8 +1058,115 @@ void test_rollback_after_moving_to_own_history(void) {
    session_turn_set_conversation(s, 9, true); /* carried onto its own copy */
    session_add_turn_message(s, "assistant", "partial");
    s_rewritten = 0;
+   s_untold = 0;
    TEST_ASSERT_EQUAL_INT(2, session_rollback_turn(s));
    TEST_ASSERT_EQUAL_INT(1, s_rewritten); /* its calls cached what was taken back */
+   TEST_ASSERT_EQUAL_INT(1, s_untold);    /* the posts it told go back with it */
+}
+
+/* DAWN stages unasked only on an idle session, and not within a few turns of a
+ * preview the user was shown (they may still be answering it). */
+void test_unasked_origin(void) {
+   turn_origin_t o;
+   TEST_ASSERT_TRUE(turn_origin_unasked(s, &o));
+   TEST_ASSERT_EQUAL_UINT32(s->session_id, o.session_id);
+   TEST_ASSERT_NOT_EQUAL(0, o.turn_token);
+   const uint32_t before = o.turn_number;
+
+   session_turn_begin(s, 0, 1);
+   TEST_ASSERT_FALSE(turn_origin_unasked(s, &o)); /* a turn is running */
+   turn_origin_note_prepare(s);                   /* it showed a preview */
+   session_turn_end(s);
+   for (int i = 0; i < TURN_ORIGIN_UNASKED_QUIET_TURNS; i++) {
+      TEST_ASSERT_FALSE(turn_origin_unasked(s, &o)); /* still in its window */
+      session_turn_begin(s, 0, 1);
+      session_turn_end(s);
+   }
+   TEST_ASSERT_TRUE(turn_origin_unasked(s, &o));
+   TEST_ASSERT_EQUAL_UINT32(before + TURN_ORIGIN_UNASKED_QUIET_TURNS + 1, o.turn_number);
+
+   /* A preview answered (its confirm ran) holds nothing back: a job asking
+    * right after the user agreed to start it is asked about at once. */
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_prepare(s);
+   const uint32_t made = s->turn_number;
+   session_turn_end(s);
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_answered(s, made);
+   session_turn_end(s);
+   TEST_ASSERT_TRUE(turn_origin_unasked(s, &o));
+
+   /* Two previews in one turn: answering one leaves the other holding. */
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_prepare(s);
+   turn_origin_note_prepare(s);
+   const uint32_t both = s->turn_number;
+   session_turn_end(s);
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_answered(s, both);
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(turn_origin_unasked(s, &o));
+
+   /* Previews in two turns: answering the newer leaves the older holding. */
+   for (int i = 0; i < TURN_ORIGIN_UNASKED_QUIET_TURNS; i++) { /* let those age out */
+      session_turn_begin(s, 0, 1);
+      session_turn_end(s);
+   }
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_prepare(s);
+   session_turn_end(s);
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_prepare(s);
+   const uint32_t newer = s->turn_number;
+   session_turn_end(s);
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_answered(s, newer);
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(turn_origin_unasked(s, &o));
+
+   /* A preview made the window's length before a new one is still open when
+    * the new one is made: confirming the old one leaves the new one holding. */
+   for (int i = 0; i < TURN_ORIGIN_UNASKED_QUIET_TURNS + 1; i++) {
+      session_turn_begin(s, 0, 1);
+      session_turn_end(s);
+   }
+   TEST_ASSERT_TRUE(turn_origin_unasked(s, &o));
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_prepare(s);
+   const uint32_t old = s->turn_number;
+   session_turn_end(s);
+   for (int i = 0; i < TURN_ORIGIN_UNASKED_QUIET_TURNS - 1; i++) {
+      session_turn_begin(s, 0, 1);
+      session_turn_end(s);
+   }
+   session_turn_begin(s, 0, 1); /* the old preview's last confirmable turn */
+   turn_origin_note_prepare(s);
+   const uint32_t later = s->turn_number;
+   turn_origin_note_answered(s, old);
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(turn_origin_unasked(s, &o));
+
+   /* Then a preview three turns after another, the older left unanswered: once
+    * it has expired, answering the newer one holds nothing back. */
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_answered(s, later);
+   session_turn_end(s);
+   TEST_ASSERT_TRUE(turn_origin_unasked(s, &o));
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_prepare(s); /* never answered */
+   session_turn_end(s);
+   for (int i = 0; i < TURN_ORIGIN_UNASKED_QUIET_TURNS - 1; i++) {
+      session_turn_begin(s, 0, 1);
+      session_turn_end(s);
+   }
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_prepare(s);
+   const uint32_t newest = s->turn_number;
+   session_turn_end(s);
+   session_turn_begin(s, 0, 1); /* the older one's window has passed */
+   turn_origin_note_answered(s, newest);
+   session_turn_end(s);
+   TEST_ASSERT_TRUE(turn_origin_unasked(s, &o));
 }
 
 void test_notice_is_one_line(void) {
@@ -1424,6 +1541,7 @@ int main(void) {
    RUN_TEST(test_full_queue_drops_without_claiming_no_conversation);
    RUN_TEST(test_rollback_after_moving_to_own_history);
    RUN_TEST(test_notice_is_one_line);
+   RUN_TEST(test_unasked_origin);
    RUN_TEST(test_cleared_turn_exchange_goes_to_no_new_conversation);
    RUN_TEST(test_cleared_turn_is_not_adopted_by_the_next_chat);
    RUN_TEST(test_sidebar_load_keeps_the_exchange_for_its_conversation);

@@ -160,7 +160,8 @@
    font-size: 0.7rem;
    letter-spacing: 0.08em;
    text-transform: uppercase;
-   color: var(--text-tertiary);
+   /* secondary, not tertiary: tertiary is under AA on this panel (see .jobs-empty) */
+   color: var(--text-secondary);
 }
 
 .jobs-section-head .jobs-section-count {
@@ -427,7 +428,7 @@
    .jobs-group-open,
    .jobs-retry,
    #jobs-load-more {
-      min-height: 32px;
+      min-height: 44px;
       padding-top: 6px;
       padding-bottom: 6px;
    }
@@ -558,4 +559,321 @@
 }
 .agent-event-round::before {
    content: '\25B8'; /* ▸ */
+}
+
+/* =============================================================================
+ * Coding jobs: the card answering what a job waits on (jobs panel row and the
+ * job's transcript, one builder in coding-events.js) and the job's trail.
+ * ============================================================================= */
+.jobs-row {
+   flex-wrap: wrap;
+}
+
+.coding-card {
+   display: grid;
+   gap: 0.5rem;
+   padding: 0.6rem 0.75rem;
+   border: 1px solid var(--border-color);
+   border-left: 3px solid var(--warning);
+   border-radius: var(--border-radius-sm);
+   background: var(--bg-tertiary);
+   text-align: left;
+   min-width: 0;
+}
+
+/* Full width under its row, lined up with the title. */
+.jobs-row > .coding-card {
+   flex-basis: 100%;
+   margin-left: 1.1rem;
+}
+
+.coding-cards {
+   margin: 0.75rem 0;
+}
+
+.coding-card-head {
+   font-size: 0.8rem;
+   font-weight: 600;
+   color: var(--warning);
+}
+
+.coding-card-line,
+.coding-card-label {
+   font-size: 0.85rem;
+   color: var(--text-primary);
+   overflow-wrap: anywhere;
+}
+
+.coding-quote {
+   border-left: 3px solid var(--border-color);
+   padding-left: 0.6rem;
+   max-height: 12rem;
+   overflow: auto;
+   white-space: pre-wrap;
+   overflow-wrap: anywhere;
+   unicode-bidi: isolate;
+   color: var(--text-secondary);
+   font-size: 0.85rem;
+}
+
+.coding-answer {
+   width: 100%;
+   resize: vertical;
+   background: var(--bg-secondary);
+   border-color: var(--text-tertiary);
+}
+
+.coding-card-actions {
+   display: flex;
+   flex-wrap: wrap;
+   gap: 0.5rem;
+}
+
+/* The panel's own pill buttons (.jobs-action-btn), with an accent primary. */
+.coding-card-btn {
+   background: none;
+   border: 1px solid var(--text-tertiary);
+   color: var(--text-secondary);
+   font-size: 0.72rem;
+   padding: 4px 12px;
+   border-radius: 999px;
+   cursor: pointer;
+   white-space: nowrap;
+   transition:
+      background var(--transition-fast) ease,
+      color var(--transition-fast) ease,
+      border-color var(--transition-fast) ease,
+      filter var(--transition-fast) ease;
+}
+
+.coding-card-btn.primary {
+   background: var(--accent);
+   border-color: var(--accent);
+   color: var(--bg-primary);
+}
+
+.coding-card-btn.ghost {
+   border-color: transparent;
+}
+
+.coding-card-btn.primary:hover:not([aria-disabled='true']) {
+   filter: brightness(1.1);
+}
+
+.coding-card-btn.secondary:hover:not([aria-disabled='true']) {
+   background: var(--accent-hover);
+   border-color: var(--accent-medium);
+   color: var(--text-primary);
+}
+
+.coding-card-btn.ghost:hover:not([aria-disabled='true']),
+.coding-card-btn.danger:hover:not([aria-disabled='true']) {
+   background: var(--error-subtle);
+   color: var(--error-text);
+}
+
+.coding-card-btn[aria-disabled='true'] {
+   opacity: 0.45;
+   cursor: default;
+}
+
+.coding-card-btn:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+@media (pointer: coarse) {
+   .coding-card-btn {
+      min-height: 44px;
+      padding: 0 16px;
+   }
+}
+
+.coding-steps {
+   color: var(--text-secondary);
+}
+
+.coding-steps-head {
+   cursor: pointer;
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+.coding-steps-last {
+   unicode-bidi: isolate;
+}
+
+.coding-step,
+.coding-note {
+   padding-left: 1rem;
+   overflow-wrap: anywhere;
+   unicode-bidi: isolate;
+}
+
+.coding-step {
+   font-family: var(--font-mono);
+   font-size: 0.75rem;
+}
+
+.coding-end {
+   margin: 0.5rem 0;
+}
+
+.coding-end-head {
+   cursor: pointer;
+   font-weight: 600;
+   overflow-wrap: anywhere;
+}
+
+.coding-end-head.ok {
+   color: var(--success);
+}
+
+.coding-end-head.err {
+   color: var(--error-text);
+}
+
+.coding-end-head.muted,
+.coding-muted {
+   color: var(--text-secondary);
+}
+
+.coding-report {
+   white-space: pre-wrap;
+   overflow-wrap: anywhere;
+   color: var(--text-primary);
+   margin: 0.5rem 0;
+   unicode-bidi: isolate;
+}
+
+.coding-facts {
+   display: grid;
+   gap: 0.25rem;
+}
+
+.coding-commits {
+   white-space: pre-wrap;
+   overflow-wrap: anywhere;
+   font-family: var(--font-mono);
+   font-size: 0.75rem;
+}
+
+/* A protected path as written (case and all): not a .dawn-badge (uppercase). */
+.coding-path {
+   display: inline-block;
+   margin: 0 0.25rem 0.25rem 0;
+   padding: 0 0.4rem;
+   border: 1px solid var(--warning);
+   border-radius: var(--border-radius-sm);
+   color: var(--warning);
+   font-family: var(--font-mono);
+   font-size: 0.75rem;
+   overflow-wrap: anywhere;
+   unicode-bidi: isolate;
+}
+
+/* The jobs pill: a dot when a coding job needs the user (focus keeps its ring). */
+#global-jobs-pill.needs-you {
+   position: relative;
+}
+
+#global-jobs-pill.needs-you::after {
+   content: '';
+   position: absolute;
+   top: 0;
+   right: 0;
+   width: 8px;
+   height: 8px;
+   border-radius: 50%;
+   background: var(--warning);
+   box-shadow: 0 0 0 2px var(--bg-primary);
+}
+
+/* The coding agent's standing approvals, at the panel's foot (coding-grants.js). */
+.coding-grants.hidden {
+   display: none;
+}
+
+.coding-grants {
+   margin: 0.5rem 0 0.25rem;
+   border-top: 1px solid var(--border-color);
+}
+
+/* The summary is a .jobs-section-head: only what a summary adds is here. */
+.coding-grants > summary {
+   list-style: none;
+   cursor: pointer;
+}
+
+.coding-grants > summary::-webkit-details-marker {
+   display: none;
+}
+
+.coding-grants > summary::after {
+   content: ' ▾';
+   color: var(--text-tertiary);
+}
+
+.coding-grants[open] > summary::after {
+   content: ' ▴';
+}
+
+.coding-grants > summary:hover {
+   color: var(--text-primary);
+}
+
+.coding-grants > summary:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: -2px;
+}
+
+@media (pointer: coarse) {
+   .coding-grants > summary {
+      padding-top: 0.9rem;
+      padding-bottom: 0.9rem;
+   }
+}
+
+.coding-grants-list {
+   list-style: none;
+   margin: 0;
+   padding: 0 1rem 0.5rem;
+}
+
+.coding-grant {
+   display: flex;
+   align-items: center;
+   justify-content: space-between;
+   gap: 0.5rem;
+   padding: 0.35rem 0;
+   font-size: 0.8rem;
+}
+
+.coding-grant + .coding-grant {
+   border-top: 1px solid var(--border-color);
+}
+
+.coding-grant-what {
+   display: flex;
+   flex-wrap: wrap;
+   align-items: baseline;
+   gap: 0.4rem;
+   min-width: 0;
+}
+
+.coding-grant-scope,
+.coding-grants-note {
+   color: var(--text-secondary);
+   font-size: 0.72rem;
+}
+
+.coding-grants-note {
+   padding: 0 1rem 0.5rem;
+}
+
+.coding-grant-value {
+   font-family: var(--font-mono);
+   overflow-wrap: anywhere;
+   unicode-bidi: isolate;
 }

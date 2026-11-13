@@ -65,6 +65,11 @@ extern "C" {
 /* The completeness critic's verdict at a natural-end stop: stop (confirmed) or
  * continue (re-armed with N new gap sub-questions). */
 #define CONV_EVENT_RESEARCH_CRITIC "research_critic"
+/* A coding agent's work, as its gateway reported it (event_payload_agent): a
+ * step (a tool run, its words), a request and its answer, and its end. */
+#define CONV_EVENT_AGENT_STEP "agent_step"
+#define CONV_EVENT_AGENT_REQUEST "agent_request"
+#define CONV_EVENT_AGENT_END "agent_end"
 
 /**
  * @brief Persist one event and fan it out to the owner's attached clients.
