@@ -1606,8 +1606,13 @@ bool turn_origin_unasked(session_t *session, turn_origin_t *out) {
    pthread_mutex_lock(&session->history_mutex);
    /* A preview's answer can come in any of the turns after it up to the quiet
     * count; once they have all run, the next message can't be one. */
-   const bool quiet = !session->prepared_any || session->turn_number - session->last_prepare_turn >=
-                                                    TURN_ORIGIN_UNASKED_QUIET_TURNS;
+   bool quiet = true;
+   for (int i = 0; i < SESSION_PREPARE_TURNS; i++) {
+      if (session->prepares[i].open > 0 &&
+          session->turn_number - session->prepares[i].turn < TURN_ORIGIN_UNASKED_QUIET_TURNS) {
+         quiet = false;
+      }
+   }
    const bool idle = !session->turn_active;
    const uint32_t number = session->turn_number;
    pthread_mutex_unlock(&session->history_mutex);
@@ -1623,21 +1628,23 @@ bool turn_origin_unasked(session_t *session, turn_origin_t *out) {
    return true;
 }
 
+_Static_assert(SESSION_PREPARE_TURNS == TURN_ORIGIN_UNASKED_QUIET_TURNS + 1,
+               "a session counts previews over the confirm window and its own turn");
+
 void turn_origin_note_prepare(session_t *session) {
    if (!session) {
       return;
    }
    pthread_mutex_lock(&session->history_mutex);
-   /* Previews older than the window can't be answered any more: forget them;
-    * any younger one still counts (one made the window's length ago can still
-    * be confirmed in this turn). */
-   if (!session->prepared_any ||
-       session->turn_number - session->last_prepare_turn > TURN_ORIGIN_UNASKED_QUIET_TURNS) {
-      session->prepares_open = 0;
+   /* This turn's slot; one left by a turn the window's length ago is reused,
+    * since that turn's previews can't be answered after this one. */
+   const uint32_t turn = session->turn_number;
+   const int i = (int)(turn % SESSION_PREPARE_TURNS);
+   if (session->prepares[i].turn != turn) {
+      session->prepares[i].turn = turn;
+      session->prepares[i].open = 0;
    }
-   session->last_prepare_turn = session->turn_number;
-   session->prepares_open++;
-   session->prepared_any = true;
+   session->prepares[i].open++;
    pthread_mutex_unlock(&session->history_mutex);
 }
 
@@ -1646,11 +1653,10 @@ void turn_origin_note_answered(session_t *session, uint32_t made_turn) {
       return;
    }
    pthread_mutex_lock(&session->history_mutex);
-   /* Clear only once every preview still in its window is answered. */
-   if (session->prepared_any &&
-       session->turn_number - made_turn <= TURN_ORIGIN_UNASKED_QUIET_TURNS &&
-       --session->prepares_open <= 0) {
-      session->prepared_any = false;
+   /* Only its own turn's count: the others expire on their own. */
+   const int i = (int)(made_turn % SESSION_PREPARE_TURNS);
+   if (session->prepares[i].turn == made_turn && session->prepares[i].open > 0) {
+      session->prepares[i].open--;
    }
    pthread_mutex_unlock(&session->history_mutex);
 }

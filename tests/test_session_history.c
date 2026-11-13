@@ -1141,9 +1141,32 @@ void test_unasked_origin(void) {
    }
    session_turn_begin(s, 0, 1); /* the old preview's last confirmable turn */
    turn_origin_note_prepare(s);
+   const uint32_t later = s->turn_number;
    turn_origin_note_answered(s, old);
    session_turn_end(s);
    TEST_ASSERT_FALSE(turn_origin_unasked(s, &o));
+
+   /* Then a preview three turns after another, the older left unanswered: once
+    * it has expired, answering the newer one holds nothing back. */
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_answered(s, later);
+   session_turn_end(s);
+   TEST_ASSERT_TRUE(turn_origin_unasked(s, &o));
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_prepare(s); /* never answered */
+   session_turn_end(s);
+   for (int i = 0; i < TURN_ORIGIN_UNASKED_QUIET_TURNS - 1; i++) {
+      session_turn_begin(s, 0, 1);
+      session_turn_end(s);
+   }
+   session_turn_begin(s, 0, 1);
+   turn_origin_note_prepare(s);
+   const uint32_t newest = s->turn_number;
+   session_turn_end(s);
+   session_turn_begin(s, 0, 1); /* the older one's window has passed */
+   turn_origin_note_answered(s, newest);
+   session_turn_end(s);
+   TEST_ASSERT_TRUE(turn_origin_unasked(s, &o));
 }
 
 void test_notice_is_one_line(void) {
