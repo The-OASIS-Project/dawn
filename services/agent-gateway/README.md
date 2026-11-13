@@ -83,15 +83,42 @@ Agent SDK with your Claude plan" on support.claude.com before relying on it.
 
 List the repos the agent may work in under `[[repos]]` in
 `/usr/local/etc/agent-gateway/agent-gateway.toml`, then `sudo systemctl restart agent-gateway`.
-To publish, put a fine-grained GitHub token in `AGENT_GATEWAY_GITHUB_TOKEN` in
-`/usr/local/etc/agent-gateway/env` and restart the gateway. On GitHub: Settings, Developer
-settings, Personal access tokens, Fine-grained tokens; only the repos the gateway works on;
-Contents and Pull requests, read and write. Leave **Workflows** at no access: pushing a change to
-`.github/workflows/` runs it with the repo's secrets before anyone reviews it, and a token
-without that permission makes GitHub refuse such a push (DAWN then says to publish that work
-yourself). Without a token, publishing is off.
 
-To connect DAWN, add the gateway to `dawn.toml` and its token (`AGENT_GATEWAY_TOKEN` in
+### Publishing (optional): a GitHub token
+
+Publishing pushes a task's `agent/*` branch and opens a pull request; it needs a fine-grained
+GitHub token. Without one, publishing is off and everything else works.
+
+1. On GitHub: Settings, Developer settings, Personal access tokens, Fine-grained tokens, Generate
+   new token.
+2. **Resource owner**: the account or organization that owns the repos. For a repo in an
+   organization, pick the organization, or its repos won't be listed. If the organization
+   requires approval for fine-grained tokens, the token stays pending until an owner approves it
+   (the organization's Settings, Personal access tokens).
+3. **Expiration**: GitHub requires one. When the token expires, publishing fails until a new one
+   replaces it (step 6).
+4. **Repository access**: only select repositories, the ones the gateway works on.
+5. **Permissions**, under Repository permissions:
+   - **Contents**: read and write (the push).
+   - **Pull requests**: read and write (opening the PR, and the hourly check that closes a task
+     whose PR merged).
+   - **Metadata**: read-only. GitHub adds it on its own, and it is required.
+   - **Workflows**: leave at no access. Pushing a change to `.github/workflows/` runs it with the
+     repo's secrets before anyone reviews it; a token without that permission makes GitHub refuse
+     such a push, and DAWN then says to publish that work yourself.
+6. Put it in the gateway's environment file and restart the gateway:
+
+   ```bash
+   sudo nano /usr/local/etc/agent-gateway/env   # add: AGENT_GATEWAY_GITHUB_TOKEN=github_pat_...
+   sudo systemctl restart agent-gateway
+   ```
+
+To check it, ask DAWN to publish a finished coding job: it shows a preview, and after your yes it
+answers with the pull request's link. Without a token it says publishing is off.
+
+### Connecting DAWN
+
+Add the gateway to `dawn.toml` and its token (`AGENT_GATEWAY_TOKEN` in
 `/usr/local/etc/agent-gateway/env`) to `secrets.toml`, then restart DAWN:
 
 ```toml
