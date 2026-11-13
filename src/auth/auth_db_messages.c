@@ -62,8 +62,9 @@ _Static_assert(IMAGE_FILENAME_MAX <= CONV_IMAGE_FILENAME_MAX,
  * and refused by strict chat templates, and the turn after a post tells it in
  * its own context (conv_db_posted_after()), which replays with its question.
  * A post stored before that was so (replayed, v115) replays as it did. */
-#define NOT_POSTED_SQL \
-   "AND m.id NOT IN (SELECT message_id FROM message_unprompted WHERE replayed = 0) "
+#define NOT_POSTED_SQL                                                             \
+   "AND NOT EXISTS (SELECT 1 FROM message_unprompted p WHERE p.message_id = m.id " \
+   "AND p.replayed = 0) "
 
 /* Rows the watermark GC clears per statement: each is its own short hold of
  * the database lock, since clearing a row frees its blocks' pages. */

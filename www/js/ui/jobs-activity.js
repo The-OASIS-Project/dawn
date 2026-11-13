@@ -262,9 +262,9 @@ window.DawnJobsActivity = (function () {
    }
 
    function renderAll() {
-      renderConvPill();
-      renderGlobalPill();
-      // What the active coding jobs wait on (asked once per change of the set).
+      // What the active coding jobs wait on (asked once per change of the set),
+      // first: a job gone from the set takes its requests with it before the
+      // global pill counts them.
       if (typeof DawnCodingEvents !== 'undefined') {
          DawnCodingEvents.track(
             Object.keys(jobs).map(function (k) {
@@ -272,6 +272,8 @@ window.DawnJobsActivity = (function () {
             })
          );
       }
+      renderConvPill();
+      renderGlobalPill();
    }
 
    // --- server-driven updates ------------------------------------------------
