@@ -864,9 +864,19 @@ static json_object *build_conv_llm_settings_json(const conversation_t *conv) {
                           json_object_new_string(conv->cloud_provider[0]
                                                      ? conv->cloud_provider
                                                      : (def_provider ? def_provider : "")));
+   /* The default's model stands in for a missing one only when the conversation
+    * runs on the default's type and provider: a local conversation must not be
+    * handed the cloud default's model name (or the reverse).  Empty means that
+    * type's own default. */
+   const char *conv_type = conv->llm_type[0] ? conv->llm_type : def_type;
+   const char *conv_provider = conv->cloud_provider[0] ? conv->cloud_provider
+                                                       : (def_provider ? def_provider : "");
+   bool on_default = strcmp(conv_type, def_type) == 0 &&
+                     (def_r.type == LLM_LOCAL ||
+                      strcmp(conv_provider, def_provider ? def_provider : "") == 0);
+   const char *fill_model = on_default && def_model ? def_model : "";
    json_object_object_add(llm, "model",
-                          json_object_new_string(conv->model[0] ? conv->model
-                                                                : (def_model ? def_model : "")));
+                          json_object_new_string(conv->model[0] ? conv->model : fill_model));
    /* tools_mode is a retired dead column — no longer surfaced to the client. */
    json_object_object_add(llm, "thinking_mode",
                           json_object_new_string(conv->thinking_mode[0] ? conv->thinking_mode

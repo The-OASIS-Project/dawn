@@ -102,6 +102,10 @@ static bool conversation_llm_config(const conversation_t *conv,
             cfg.cloud_provider = CLOUD_PROVIDER_GEMINI;
          }
       }
+   } else if (cfg.type != base->type || cfg.cloud_provider != base->cloud_provider) {
+      /* No stored model means its type's and provider's own default, not the
+       * model the session carried on another type or provider. */
+      cfg.model[0] = '\0';
    }
 
    /* The conversation's reasoning: its mode and its effort, both. */
