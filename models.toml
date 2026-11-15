@@ -121,6 +121,7 @@
 
 [cache_pricing.anthropic]
 "claude-opus-5-5" = { read = 0.05, write_5m = 1.25, write_1h = 2.0 }   # $0.20 on $4
+"claude-fable-5-2" = { read = 0.025, write_5m = 1.25, write_1h = 2.0 } # $0.20 on $8
 "claude-fable-5-1" = { read = 0.025, write_5m = 1.25, write_1h = 2.0 } # $0.25 on $10
 # Mythos 5.1 shares Fable 5.1's price, but whether its cache reads do was open
 # at launch: the default (0.10) until confirmed.

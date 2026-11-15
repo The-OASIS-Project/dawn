@@ -99,9 +99,11 @@ static void test_adaptive_only_claude_has_no_off_switch(void) {
    /* "disabled" becomes the gentlest reasoning, and says so. */
    assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-opus-5-5", "disabled", "high"),
                    LLM_THINK_ADAPTIVE, "low", true);
-   /* Fable 5 and 5.1 share the row. */
+   /* Fable 5, 5.1 and 5.2 share the row. */
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-fable-5-1", "disabled", ""),
+                   LLM_THINK_ADAPTIVE, "low", true);
    assert_resolved(
-       resolve(CLOUD_PROVIDER_CLAUDE, "claude-fable-5-1", "disabled", ""), LLM_THINK_ADAPTIVE,
+       resolve(CLOUD_PROVIDER_CLAUDE, "claude-fable-5-2", "disabled", ""), LLM_THINK_ADAPTIVE,
        "low", true); /* Sonnet 5.5 can't turn it off either: its row, not Sonnet 5's, applies. */
    assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-sonnet-5-5", "disabled", "high"),
                    LLM_THINK_ADAPTIVE, "low", true);
@@ -193,6 +195,8 @@ static void test_mid_system_models(void) {
    TEST_ASSERT_TRUE(llm_model_mid_system("claude-haiku-5-5"));
    TEST_ASSERT_TRUE(llm_model_mid_system("claude-sonnet-5-5"));
    TEST_ASSERT_TRUE(llm_model_mid_system("claude-opus-5-5"));
+   TEST_ASSERT_TRUE(llm_model_mid_system("claude-fable-5-2"));
+   TEST_ASSERT_TRUE(llm_model_inline_tools("claude-fable-5-2"));
    TEST_ASSERT_FALSE(llm_model_mid_system("claude-sonnet-5"));
    TEST_ASSERT_FALSE(llm_model_mid_system("claude-haiku-4-5"));
 }
@@ -396,6 +400,7 @@ int main(void) {
    }
    llm_capabilities_load_registry(s_root);
    llm_capabilities_load_mid_system(s_root);
+   llm_capabilities_load_inline_tools(s_root);
 
    UNITY_BEGIN();
    RUN_TEST(test_adaptive_only_claude_has_no_off_switch);

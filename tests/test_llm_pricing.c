@@ -55,6 +55,10 @@ void test_shipped_models_toml_parses(void) {
 void test_anthropic_prices_per_model(void) {
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f, price(CLOUD_PROVIDER_CLAUDE, "claude-opus-5-5").read);
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.025f, price(CLOUD_PROVIDER_CLAUDE, "claude-fable-5-1").read);
+   const llm_cache_pricing_t fable52 = price(CLOUD_PROVIDER_CLAUDE, "claude-fable-5-2");
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.025f, fable52.read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.25f, fable52.write_5m);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.00f, fable52.write_1h);
    /* Everything else falls to the "claude" row. */
    const llm_cache_pricing_t sonnet = price(CLOUD_PROVIDER_CLAUDE, "claude-sonnet-5");
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, sonnet.read);
