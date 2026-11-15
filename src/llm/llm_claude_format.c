@@ -37,6 +37,7 @@
 #include "llm/llm_capabilities.h"
 #include "llm/llm_claude_tools.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_context.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_model_family.h"
@@ -735,10 +736,13 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                    : 0;
 
    /* max_tokens covers the thinking and the answer: sized by effort when
-    * streamed, and at least a thinking budget plus CLAUDE_ANSWER_TOKENS_MIN (a
-    * memory extraction's JSON runs ~2K). */
+    * streamed, held to the room the window leaves, and at least a thinking
+    * budget plus CLAUDE_ANSWER_TOKENS_MIN (a memory extraction's JSON runs ~2K;
+    * budget_tokens must stay below max_tokens). */
    int max_tokens = llm_reply_max_tokens(LLM_CLOUD, model_provider, model_name, &thinking,
                                          streamed);
+   max_tokens = llm_context_fit_reply(max_tokens, openai_conversation, input_text, LLM_CLOUD,
+                                      model_provider, model_name);
    if (thinking_budget > 0 && max_tokens < thinking_budget + CLAUDE_ANSWER_TOKENS_MIN) {
       max_tokens = thinking_budget + CLAUDE_ANSWER_TOKENS_MIN;
       OLOG_INFO("Claude: Adjusted max_tokens to %d (budget %d + %d for the answer)", max_tokens,

@@ -253,6 +253,22 @@ bool llm_context_over_threshold(uint32_t session_id,
                                 float threshold);
 
 /**
+ * @brief @p max_tokens, held to the room the model's window leaves the reply
+ *
+ * The request's input is @p history and @p input_text, estimated as the
+ * compaction check does (calibrated by the session's measured requests), with
+ * a 2% slack for the estimate.  A provider may reject a request whose input
+ * plus max_tokens passes the window.  Never below 1024 (a request that close
+ * is the compaction's to fix); unchanged when the window is unknown.
+ */
+int llm_context_fit_reply(int max_tokens,
+                          struct json_object *history,
+                          const char *input_text,
+                          llm_type_t type,
+                          cloud_provider_t provider,
+                          const char *model);
+
+/**
  * @brief After a compaction: the session's history now estimates at
  *        @p estimate (the last response counted the history before the swap)
  */

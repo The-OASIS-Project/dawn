@@ -502,9 +502,22 @@ static void test_a_request_is_fixed_part_plus_density(void) {
    TEST_ASSERT_EQUAL_INT(40000, llm_compaction_calibrated_tokens(NULL, 40000));
 }
 
+static void test_reply_room_holds_the_ceiling_to_the_window(void) {
+   /* Room enough: unchanged. */
+   TEST_ASSERT_EQUAL_INT(65536, llm_compaction_reply_room(65536, 1000000, 500000));
+   /* 200K window, 170K in, 2% (4000) slack: 26000 left. */
+   TEST_ASSERT_EQUAL_INT(26000, llm_compaction_reply_room(64000, 200000, 170000));
+   /* Over the window already: the floor, not zero or negative. */
+   TEST_ASSERT_EQUAL_INT(LLM_REPLY_ROOM_MIN, llm_compaction_reply_room(64000, 200000, 250000));
+   /* A ceiling at or under the floor, or an unknown window: unchanged. */
+   TEST_ASSERT_EQUAL_INT(512, llm_compaction_reply_room(512, 200000, 250000));
+   TEST_ASSERT_EQUAL_INT(128000, llm_compaction_reply_room(128000, 0, 900000));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_compact_deterministic_basic);
+   RUN_TEST(test_reply_room_holds_the_ceiling_to_the_window);
    RUN_TEST(test_compact_deterministic_budget);
    RUN_TEST(test_compact_deterministic_empty);
    RUN_TEST(test_compact_deterministic_single);

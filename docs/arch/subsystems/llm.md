@@ -29,7 +29,8 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Supports Google Gemini (via OpenAI-compatible endpoint)
    - Both blocking and streaming modes
    - Conversation history management
-   - Extended thinking support (reasoning_effort for OpenAI/Gemini models)
+   - Extended thinking support (reasoning_effort for OpenAI/Gemini models); the reply
+     ceiling follows the effort as for Claude (below)
 
 - **llm_claude.c/h**: Claude API implementation
    - Supports Claude Fable 5.x, Opus/Sonnet/Haiku 5.5 and earlier; a model's thinking modes,
@@ -38,8 +39,9 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Different API format than OpenAI (Messages API)
    - Adaptive thinking by effort, or a configurable token budget on the models that take one
    - A streamed reply that thinks gets `max_tokens` by its effort, up to the model's max
-     output (`llm_reply_max_tokens`, also used by OpenAI Responses); a call that isn't
-     streamed keeps `[llm] max_tokens`
+     output (`llm_reply_max_tokens`, also used by OpenAI Responses and Chat Completions);
+     a call that isn't streamed keeps `[llm] max_tokens`.  Every cloud request's ceiling is then
+     held to the room the context window leaves (`llm_context_fit_reply`)
    - Full thinking content visibility (unlike OpenAI/Gemini)
 
 - **llm_streaming.c/h**: Streaming response handler

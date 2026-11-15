@@ -24,6 +24,7 @@
 
 #include <json-c/json.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -342,6 +343,17 @@ int llm_compaction_calibrated_tokens(const llm_compaction_calibration_t *cal, in
    }
    const float tokens = fixed_part(cal) + cal->factor * (float)estimate;
    return tokens > (float)INT_MAX ? INT_MAX : (int)tokens;
+}
+
+int llm_compaction_reply_room(int max_tokens, int window, int input_tokens) {
+   if (window <= 0 || max_tokens <= LLM_REPLY_ROOM_MIN) {
+      return max_tokens;
+   }
+   const int64_t left = (int64_t)window - input_tokens - window / 50;
+   if (left >= max_tokens) {
+      return max_tokens;
+   }
+   return left > LLM_REPLY_ROOM_MIN ? (int)left : LLM_REPLY_ROOM_MIN;
 }
 
 int llm_compaction_estimate_budget(const llm_compaction_calibration_t *cal, int tokens) {

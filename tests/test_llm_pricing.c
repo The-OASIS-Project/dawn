@@ -61,6 +61,11 @@ void test_anthropic_prices_per_model(void) {
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.00f, fable52.write_1h);
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.025f, price(CLOUD_PROVIDER_CLAUDE, "claude-mythos-5-2").read);
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.025f, price(CLOUD_PROVIDER_CLAUDE, "claude-mythos-5-1").read);
+   /* Sonnet 5.5: $0.10 reads, $2.50 / $4 writes, on $2. */
+   const llm_cache_pricing_t sonnet55 = price(CLOUD_PROVIDER_CLAUDE, "claude-sonnet-5-5");
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f, sonnet55.read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.25f, sonnet55.write_5m);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.00f, sonnet55.write_1h);
    /* Fable 5 and Mythos 5 read at $1 on $10: the default. */
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, price(CLOUD_PROVIDER_CLAUDE, "claude-fable-5").read);
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, price(CLOUD_PROVIDER_CLAUDE, "claude-mythos-5").read);

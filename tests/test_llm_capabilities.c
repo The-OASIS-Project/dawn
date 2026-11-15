@@ -103,9 +103,14 @@ static void test_adaptive_only_claude_has_no_off_switch(void) {
    /* Fable 5, 5.1 and 5.2 share the row. */
    assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-fable-5-1", "disabled", ""),
                    LLM_THINK_ADAPTIVE, "low", true);
-   assert_resolved(
-       resolve(CLOUD_PROVIDER_CLAUDE, "claude-fable-5-2", "disabled", ""), LLM_THINK_ADAPTIVE,
-       "low", true); /* Sonnet 5.5 can't turn it off either: its row, not Sonnet 5's, applies. */
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-fable-5-2", "disabled", ""),
+                   LLM_THINK_ADAPTIVE, "low", true);
+   /* Mythos has Fable's row: always thinking, low through max. */
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-mythos-5-2", "disabled", ""),
+                   LLM_THINK_ADAPTIVE, "low", true);
+   assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-mythos-5-1", "adaptive", "max"),
+                   LLM_THINK_ADAPTIVE, "max", false);
+   /* Sonnet 5.5 can't turn it off either: its row, not Sonnet 5's, applies. */
    assert_resolved(resolve(CLOUD_PROVIDER_CLAUDE, "claude-sonnet-5-5", "disabled", "high"),
                    LLM_THINK_ADAPTIVE, "low", true);
 }
@@ -426,6 +431,14 @@ static void test_reply_max_tokens_follow_the_effort(void) {
                          reply_tokens(CLOUD_PROVIDER_OPENAI, "o3", LLM_THINK_ENABLED, "max", true));
    TEST_ASSERT_EQUAL_INT(16384, reply_tokens(CLOUD_PROVIDER_OPENAI, "gpt-5-mini", LLM_THINK_ENABLED,
                                              "minimal", true));
+   /* Gemini's thoughts count toward its output limit (64K). */
+   TEST_ASSERT_EQUAL_INT(65536, reply_tokens(CLOUD_PROVIDER_GEMINI, "gemini-3.7-flash",
+                                             LLM_THINK_ENABLED, "high", true));
+   TEST_ASSERT_EQUAL_INT(65536, reply_tokens(CLOUD_PROVIDER_OPENROUTER, "google/gemini-2.5-pro",
+                                             LLM_THINK_ENABLED, "max", true));
+   /* Mythos, each the same model as its Fable. */
+   TEST_ASSERT_EQUAL_INT(128000,
+                         reply_tokens(c, "claude-mythos-5-2", LLM_THINK_ADAPTIVE, "max", true));
 }
 
 static void test_reply_max_tokens_keep_the_configured_value(void) {
@@ -437,13 +450,10 @@ static void test_reply_max_tokens_keep_the_configured_value(void) {
    TEST_ASSERT_EQUAL_INT(16384, reply_tokens(c, "claude-haiku-5-5", LLM_THINK_DISABLED, "", true));
    llm_thinking_resolved_t off = { .controllable = false };
    TEST_ASSERT_EQUAL_INT(16384, llm_reply_max_tokens(LLM_CLOUD, c, "claude-3-5-haiku", &off, true));
-   /* No max_output listed (gpt-5.3, Gemini, an unlisted Claude). */
+   /* No max_output listed (gpt-5.3). */
    TEST_ASSERT_EQUAL_INT(16384, reply_tokens(CLOUD_PROVIDER_OPENAI, "gpt-5.3", LLM_THINK_ENABLED,
                                              "high", true));
-   TEST_ASSERT_EQUAL_INT(16384, reply_tokens(CLOUD_PROVIDER_GEMINI, "gemini-3-flash",
-                                             LLM_THINK_ENABLED, "high", true));
-   TEST_ASSERT_EQUAL_INT(16384,
-                         reply_tokens(c, "claude-mythos-5-2", LLM_THINK_ADAPTIVE, "high", true));
+
    /* Local. */
    llm_thinking_resolved_t local = { .controllable = true, .mode = LLM_THINK_ENABLED };
    snprintf(local.effort, sizeof(local.effort), "high");

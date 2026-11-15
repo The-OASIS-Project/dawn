@@ -1122,6 +1122,31 @@ bool llm_context_over_threshold(uint32_t session_id,
    return over;
 }
 
+int llm_context_fit_reply(int max_tokens,
+                          struct json_object *history,
+                          const char *input_text,
+                          llm_type_t type,
+                          cloud_provider_t provider,
+                          const char *model) {
+   const int window = llm_context_get_size(type, provider, model);
+   if (window <= 0 || max_tokens <= LLM_REPLY_ROOM_MIN) {
+      return max_tokens;
+   }
+   int estimate = history ? llm_context_estimate_tokens(history) : 0;
+   if (input_text) {
+      estimate += (int)(strlen(input_text) / 4);
+   }
+   const session_t *session = session_get_command_context();
+   const int input = llm_context_request_tokens(session ? session->session_id : 0, estimate, type,
+                                                provider, model);
+   const int fitted = llm_compaction_reply_room(max_tokens, window, input);
+   if (fitted < max_tokens) {
+      OLOG_INFO("llm_context: reply ceiling %d -> %d (~%d input tokens of a %d window)", max_tokens,
+                fitted, input, window);
+   }
+   return fitted;
+}
+
 void llm_context_note_compacted(uint32_t session_id, int estimate) {
    pthread_mutex_lock(&s_state.mutex);
    session_token_tracking_t *tracking = get_session_tracking(session_id, false);

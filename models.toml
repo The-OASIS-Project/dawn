@@ -116,11 +116,12 @@
 # listed gets its provider's default (Anthropic 0.10/1.25/2.00, OpenAI and
 # Gemini 0.10/1.00).  OpenRouter models ("anthropic/...") use their vendor's
 # table.  Used for DAWN's "saved by caching" estimates and cost telemetry only.
-# Sources (list prices, Sep 2026): platform.claude.com, developers.openai.com
+# Sources (list prices, Sep 2026; Anthropic rows Nov 2026): platform.claude.com, developers.openai.com
 # /api/docs/pricing, ai.google.dev/gemini-api/docs/pricing.
 
 [cache_pricing.anthropic]
 "claude-opus-5-5" = { read = 0.05, write_5m = 1.25, write_1h = 2.0 }   # $0.20 on $4
+"claude-sonnet-5-5" = { read = 0.05, write_5m = 1.25, write_1h = 2.0 } # $0.10 on $2
 "claude-fable-5-2" = { read = 0.025, write_5m = 1.25, write_1h = 2.0 } # $0.20 on $8
 "claude-fable-5-1" = { read = 0.025, write_5m = 1.25, write_1h = 2.0 } # $0.25 on $10
 "claude-mythos-5-2" = { read = 0.025, write_5m = 1.25, write_1h = 2.0 } # $0.20 on $8
@@ -164,7 +165,8 @@
 #            ask for.  A streamed reply that reasons gets a max_tokens by
 #            its effort (low 16K, medium 32K, high 64K, xhigh/max 128K), held
 #            under this; a model without it, a reply that doesn't reason, and
-#            a call that isn't streamed get [llm] max_tokens.
+#            a call that isn't streamed get [llm] max_tokens.  Either way the
+#            ceiling is held to the room the context window leaves.
 #
 # A prefix matches every model it starts, so a family row catches its future
 # and specialty variants too: those get a row with no modes (below) until
@@ -175,12 +177,12 @@
 # 2026-10-07).  On the 5.x rows "disabled" takes no effort above high; DAWN
 # sends no effort with it.  OpenAI and Gemini rows encode DAWN's shipped
 # effort rules for those families.  max_output: platform.claude.com models
-# overview and developers.openai.com model pages, 2026-11-15 (Gemini rows have
-# none yet: they keep [llm] max_tokens).
+# overview, developers.openai.com and ai.google.dev model pages, 2026-11-15.
 
 [thinking.anthropic]
 "claude-opus-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
 "claude-fable-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-mythos-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 } # each the same model as its Fable
 "claude-opus-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
 "claude-sonnet-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
 "claude-haiku-5-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
@@ -221,8 +223,8 @@
 # here get reasoning parameters.
 
 [thinking.gemini]
-"gemini-3" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
-"gemini-2.5" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
+"gemini-3" = { modes = ["enabled"], efforts = ["low", "medium", "high"], max_output = 65536 }
+"gemini-2.5" = { modes = ["enabled"], efforts = ["low", "medium", "high"], max_output = 65536 }
 "gemini-2.5-flash-image" = { modes = [], efforts = [] } # image generation: no reasoning
 # Default for an unlisted Gemini model: no reasoning control.
 #

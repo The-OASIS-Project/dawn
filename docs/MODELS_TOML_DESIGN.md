@@ -148,11 +148,26 @@ reply that doesn't reason, a local model, and a row without `max_output`.
 | claude-opus-4 / 4-1 | 32000 | retired on the Claude API |
 | gpt-5 / 5.1 / 5.2 / 5.4 / 5.5 / 5.6 (and mini, nano) | 128000 | developers.openai.com model pages |
 | o1 / o3 / o4-mini | 100000 | |
+| claude-mythos-5 | 128000 | each the same model as its Fable (5, 5.1, 5.2) |
+| gemini-3 / gemini-2.5 | 65536 | ai.google.dev model pages |
 
-Not listed yet, so they keep `[llm] max_tokens`: gpt-5.3 (no model page),
-Gemini, and Claude Mythos (no thinking row). Chat Completions requests (OpenAI
-before gpt-5.4, o-series, Gemini, OpenRouter's non-Anthropic models) keep it
-too; only Claude Messages and OpenAI Responses requests are sized by effort.
+Every request path is sized this way: Claude Messages (direct and OpenRouter),
+OpenAI Responses, and Chat Completions (OpenAI before gpt-5.4, o-series, Gemini,
+OpenRouter's other vendors). Each vendor documents that reasoning counts toward
+the limit: Anthropic's `max_tokens`, OpenAI's `max_output_tokens` and
+`max_completion_tokens`, and Gemini's `max_output_tokens` ("including thought
+tokens"). gpt-5.3 has no model page, so no `max_output`: it keeps
+`[llm] max_tokens`.
+
+**Held to the window.** Every cloud request's ceiling is then
+held to the room the model's context window leaves
+(`llm_context_fit_reply`): the window less the request's input, estimated as
+the compaction check does (calibrated once a response has counted one), less
+a 2% slack, and never below 1024. Not every vendor needs it: on Claude 4.5+
+and the OpenAI Responses API a reply that reaches the window just stops,
+where older Claude models reject the request outright. Local servers aren't
+clamped: they stop at their window rather than reject, and a local window read
+before the server answers is only DAWN's 8K default.
 
 > **Behavior note:** bumping the Claude flagships 200K→1M changes when DAWN
 > compacts a Claude conversation (much later). If a deployment's account tier does

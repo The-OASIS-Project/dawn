@@ -92,7 +92,8 @@ static const cost_entry_t COST_TABLE[] = {
    { "claude", "claude-haiku-5-5", 0.10, 0.50 }, /* prompts up to 100K tokens (5x above) */
    { "claude", "claude-haiku-4-5", 1.00, 5.00 },
    { "claude", "claude-3-5-haiku", 0.80, 4.00 },
-   { "claude", "claude-sonnet", 3.00, 15.00 },
+   { "claude", "claude-sonnet-5", 2.00, 10.00 }, /* Sonnet 5 and 5.5 */
+   { "claude", "claude-sonnet", 3.00, 15.00 },   /* Sonnet 4.5 and 4.6 */
    { "claude", "claude-opus-5-5", 4.00, 20.00 },
    { "claude", "claude-opus", 5.00, 25.00 }, /* Opus 4.5 through 5 (4 and 4.1 are retired) */
    { "claude", "claude", 1.00, 5.00 },       /* generic Claude fallback */

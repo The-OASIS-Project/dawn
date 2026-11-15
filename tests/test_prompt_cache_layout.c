@@ -822,6 +822,21 @@ static void test_stable_handles_items_sent_once(void) {
    json_object_put(h);
 }
 
+/* The window's room (llm_context.c, not linked): the ceiling as given. */
+int llm_context_fit_reply(int max_tokens,
+                          struct json_object *history,
+                          const char *input_text,
+                          llm_type_t type,
+                          cloud_provider_t provider,
+                          const char *model) {
+   (void)history;
+   (void)input_text;
+   (void)type;
+   (void)provider;
+   (void)model;
+   return max_tokens;
+}
+
 int main(void) {
    char err[256];
    FILE *f = fopen(MODELS_TOML_PATH, "r");

@@ -131,6 +131,19 @@ int llm_compaction_calibrated_tokens(const llm_compaction_calibration_t *cal, in
  */
 int llm_compaction_estimate_budget(const llm_compaction_calibration_t *cal, int tokens);
 
+/** The least room llm_compaction_reply_room() leaves a reply. */
+#define LLM_REPLY_ROOM_MIN 1024
+
+/**
+ * @brief @p max_tokens, held to the room a @p window leaves a request of
+ *        @p input_tokens, less a 2% slack for the estimate
+ *
+ * Never below LLM_REPLY_ROOM_MIN (a request that close to its window is the
+ * compaction's to fix; a near-zero ceiling only guarantees an empty reply),
+ * and @p max_tokens itself when it is no larger or @p window is unknown (<= 0).
+ */
+int llm_compaction_reply_room(int max_tokens, int window, int input_tokens);
+
 /** Maximum bytes of a summary (capped when it is made, never on reload). */
 #define LLM_COMPACTION_SUMMARY_MAX 16384
 

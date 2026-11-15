@@ -76,6 +76,7 @@ const char *llm_get_current_reasoning_effort(void) {
    return s_effort;
 }
 static bool s_tools_on;
+static int s_room; /* the window room llm_context_fit_reply() gives (0: unlimited) */
 bool llm_tools_enabled(const llm_resolved_config_t *c) {
    (void)c;
    return s_tools_on;
@@ -156,6 +157,7 @@ int is_vision_enabled_for_current_llm(void) {
 
 void setUp(void) {
    g_config.llm.max_tokens = 4096;
+   s_room = 0;
    s_mode = "disabled";
    s_effort = "medium";
    s_utility_effort = "";
@@ -288,6 +290,21 @@ static const char *effort_of(json_object *req) {
    return json_object_get_string(v);
 }
 
+/* The window's room (llm_context.c, not linked): s_room when set. */
+int llm_context_fit_reply(int max_tokens,
+                          struct json_object *history,
+                          const char *input_text,
+                          llm_type_t type,
+                          cloud_provider_t provider,
+                          const char *model) {
+   (void)history;
+   (void)input_text;
+   (void)type;
+   (void)provider;
+   (void)model;
+   return s_room > 0 && s_room < max_tokens ? s_room : max_tokens;
+}
+
 static json_object *request_for(const char *model) {
    json_object *conv = one_user_turn();
    json_object *req = convert_to_claude_format(conv, NULL, model, TEST_CLAUDE_CARRIER, 0, false,
@@ -347,6 +364,13 @@ static void test_max_tokens_follow_the_effort_when_streamed(void) {
    s_mode = "disabled";
    req = request_for("claude-sonnet-5");
    TEST_ASSERT_EQUAL_INT(4096, max_tokens_of(req));
+   json_object_put(req);
+
+   /* Held to the room the window leaves. */
+   s_mode = "adaptive";
+   s_room = 50000;
+   req = request_for("claude-fable-5-2");
+   TEST_ASSERT_EQUAL_INT(50000, max_tokens_of(req));
    json_object_put(req);
 }
 

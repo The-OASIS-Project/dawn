@@ -193,10 +193,11 @@
                                   # Env: DAWN_LLM_TYPE
 # max_tokens = 16384              # Maximum response tokens (ceiling, not a target). 16384 is the
                                   # universally-safe max (= GPT-4o's cap). A streamed reply that
-                                  # reasons (Claude, OpenAI Responses models) gets at least its
+                                  # reasons (Claude, OpenAI, Gemini) gets at least its
                                   # effort's ceiling instead (low 16K, medium 32K, high 64K,
                                   # xhigh/max 128K), held under the model's max_output in
-                                  # models.toml: reasoning counts toward it.
+                                  # models.toml: reasoning counts toward it. A cloud reply's
+                                  # ceiling is also held to the room left in the model's window.
                                   # Env: DAWN_LLM_MAX_TOKENS
 # compact_soft_threshold = 0.60   # Async background compaction trigger
 # compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)

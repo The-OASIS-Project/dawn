@@ -35,12 +35,13 @@ being retired.
 ## 2026-11-15 — A reply's token ceiling follows its reasoning effort
 
 **What changed.** Reasoning counts toward a reply's token limit, so at a high effort a reply could
-end after its reasoning with no answer. A streamed reply that reasons, on Claude or on an OpenAI
-model that uses the Responses API (gpt-5.4 and later), now gets a ceiling by its effort: low 16K,
-medium 32K, high 64K, xhigh and max 128K, up to the model's maximum. `[llm] max_tokens` is now the
-lowest ceiling these replies get, and stays the ceiling for everything else: replies without
-reasoning, local models, other OpenAI and Gemini models, and calls that aren't streamed
-(briefings, memory extraction).
+end after its reasoning with no answer. A streamed reply that reasons, on Claude, OpenAI or Gemini,
+now gets a ceiling by its effort: low 16K, medium 32K, high 64K, xhigh and max 128K, up to the
+model's maximum (64K on Gemini). `[llm] max_tokens` is now the lowest ceiling these replies get,
+and stays the ceiling for everything else: replies without reasoning, local models, gpt-5.3, and
+calls that aren't streamed (briefings, memory extraction). Every cloud reply's ceiling is also held
+to the room left in the model's context window, so a long conversation's reply never asks for more
+than fits.
 
 **What you need to do.** Nothing, unless you lowered `max_tokens` to cap what reasoning replies
 cost. That no longer caps them. Lower the reasoning effort instead: it's what decides how much the

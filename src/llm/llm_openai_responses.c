@@ -349,10 +349,11 @@ static struct json_object *build_responses_request(struct json_object *history,
    }
 
    /* max_output_tokens: reasoning counts toward it, so it follows the effort
-    * (every Responses request is streamed). */
-   json_object_object_add(root, "max_output_tokens",
-                          json_object_new_int(llm_reply_max_tokens(LLM_CLOUD, CLOUD_PROVIDER_OPENAI,
-                                                                   model_name, &resolved, true)));
+    * (every Responses request is streamed), held to the room the window leaves. */
+   const int max_output = llm_context_fit_reply(
+       llm_reply_max_tokens(LLM_CLOUD, CLOUD_PROVIDER_OPENAI, model_name, &resolved, true), history,
+       input_text, LLM_CLOUD, CLOUD_PROVIDER_OPENAI, model_name);
+   json_object_object_add(root, "max_output_tokens", json_object_new_int(max_output));
 
    /* Tools.  The loop's last call (iteration at the cap), for a text answer:
     * the tools stay (the request reads as every other did), none may be
