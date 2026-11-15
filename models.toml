@@ -21,9 +21,12 @@
 # /props) and are intentionally not listed.
 #
 # Keys must be quoted (model ids contain '.' and '-').
-# Sources: developers.openai.com model reference, platform.claude.com (Aug 2026).
+# Sources: developers.openai.com model reference, platform.claude.com (Aug 2026;
+# gpt-6-astra and Gemini 4, with ai.google.dev, Nov 2026).
 
 [openai]
+# GPT-6 Astra — 1,050,000
+"gpt-6-astra" = 1050000
 # GPT-5.6 family — 1,050,000 (gpt-5.6, gpt-5.6-luna, gpt-5.6-sol, ...)
 "gpt-5.6" = 1050000
 # GPT-5.5 — 1,050,000 API window (the Codex surface caps it at 400K, not the API)
@@ -94,7 +97,9 @@
 "claude-3-haiku" = 200000
 
 [gemini]
-# All current Gemini families use a 1,048,576 (1M) input window.
+# All current Gemini families use a 1,048,576 (1M) input window (Gemini 4's is
+# shared by input and output).
+"gemini-4" = 1048576
 "gemini-3.1-pro" = 1048576
 "gemini-3-flash" = 1048576
 "gemini-3-pro" = 1048576
@@ -116,7 +121,8 @@
 # listed gets its provider's default (Anthropic 0.10/1.25/2.00, OpenAI and
 # Gemini 0.10/1.00).  OpenRouter models ("anthropic/...") use their vendor's
 # table.  Used for DAWN's "saved by caching" estimates and cost telemetry only.
-# Sources (list prices, Sep 2026; Anthropic rows Nov 2026): platform.claude.com, developers.openai.com
+# Sources (list prices, Sep 2026; Anthropic, gpt-6-astra and Gemini 4 rows Nov 2026):
+# platform.claude.com, developers.openai.com
 # /api/docs/pricing, ai.google.dev/gemini-api/docs/pricing.
 
 [cache_pricing.anthropic]
@@ -130,6 +136,7 @@
 "claude" = { read = 0.10, write_5m = 1.25, write_1h = 2.0 }
 
 [cache_pricing.openai]
+"gpt-6-astra" = { read = 0.10, write_5m = 1.25, write_1h = 1.25 } # $1 on $10, writes $12.50
 "gpt-5.6" = { read = 0.10, write_5m = 1.25, write_1h = 1.25 } # sol, terra, luna
 "gpt-5" = { read = 0.10, write_5m = 1.0, write_1h = 1.0 }     # 5.0-5.5, mini, nano
 "gpt-4.1" = { read = 0.25, write_5m = 1.0, write_1h = 1.0 }
@@ -138,6 +145,7 @@
 "gpt-4o" = { read = 0.50, write_5m = 1.0, write_1h = 1.0 }
 
 [cache_pricing.gemini]
+"gemini-4" = { read = 0.05, write_5m = 1.0, write_1h = 1.0 } # implicit caching only: $0.075 on $1.50
 "gemini" = { read = 0.10, write_5m = 1.0, write_1h = 1.0 } # 2.5 and 3.x families
 
 
@@ -203,6 +211,7 @@
 # Default for an unlisted Claude model: adaptive, low/medium/high, no "disabled".
 
 [thinking.openai]
+"gpt-6-astra" = { modes = ["enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
 "gpt-5.6" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }
 "gpt-5.5" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }
 "gpt-5.4" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }
@@ -223,6 +232,10 @@
 # here get reasoning parameters.
 
 [thinking.gemini]
+# Gemini 4 can't turn reasoning off; xhigh is Hydrogen's alone.  DAWN sends
+# reasoning_effort, which Google's OpenAI endpoint maps to thinking_level.
+"gemini-4" = { modes = ["enabled"], efforts = ["low", "medium", "high"], max_output = 65536 }
+"gemini-4-hydrogen" = { modes = ["enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 65536 }
 "gemini-3" = { modes = ["enabled"], efforts = ["low", "medium", "high"], max_output = 65536 }
 "gemini-2.5" = { modes = ["enabled"], efforts = ["low", "medium", "high"], max_output = 65536 }
 "gemini-2.5-flash-image" = { modes = [], efforts = [] } # image generation: no reasoning

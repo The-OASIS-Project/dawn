@@ -439,6 +439,30 @@ static void test_reply_max_tokens_follow_the_effort(void) {
    /* Mythos, each the same model as its Fable. */
    TEST_ASSERT_EQUAL_INT(128000,
                          reply_tokens(c, "claude-mythos-5-2", LLM_THINK_ADAPTIVE, "max", true));
+   /* GPT-6 Astra and Gemini 4. */
+   TEST_ASSERT_EQUAL_INT(128000, reply_tokens(CLOUD_PROVIDER_OPENAI, "gpt-6-astra",
+                                              LLM_THINK_ENABLED, "max", true));
+   TEST_ASSERT_EQUAL_INT(65536, reply_tokens(CLOUD_PROVIDER_GEMINI, "gemini-4-hydrogen",
+                                             LLM_THINK_ENABLED, "xhigh", true));
+   TEST_ASSERT_EQUAL_INT(32768, reply_tokens(CLOUD_PROVIDER_GEMINI, "gemini-4-carbon",
+                                             LLM_THINK_ENABLED, "medium", true));
+}
+
+/* Neither can turn reasoning off; xhigh is Gemini 4 Hydrogen's alone. */
+static void test_gpt6_astra_and_gemini_4_rows(void) {
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "gpt-6-astra", "disabled", ""), LLM_THINK_ENABLED,
+                   "low", true);
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "gpt-6-astra", "enabled", "max"),
+                   LLM_THINK_ENABLED, "max", false);
+   assert_resolved(resolve(CLOUD_PROVIDER_GEMINI, "gemini-4-argon", "disabled", ""),
+                   LLM_THINK_ENABLED, "low", true);
+   assert_resolved(resolve(CLOUD_PROVIDER_GEMINI, "gemini-4-carbon", "enabled", "xhigh"),
+                   LLM_THINK_ENABLED, "high", true);
+   assert_resolved(resolve(CLOUD_PROVIDER_GEMINI, "gemini-4-hydrogen", "enabled", "xhigh"),
+                   LLM_THINK_ENABLED, "xhigh", false);
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENROUTER, "google/gemini-4-hydrogen", "enabled",
+                           "xhigh"),
+                   LLM_THINK_ENABLED, "xhigh", false);
 }
 
 static void test_reply_max_tokens_keep_the_configured_value(void) {
@@ -502,6 +526,7 @@ int main(void) {
    RUN_TEST(test_utility_calls_are_cheapest_and_never_clamped);
    RUN_TEST(test_wire_shape);
    RUN_TEST(test_reply_max_tokens_follow_the_effort);
+   RUN_TEST(test_gpt6_astra_and_gemini_4_rows);
    RUN_TEST(test_reply_max_tokens_keep_the_configured_value);
    const int rc = UNITY_END();
    llm_capabilities_free_registry();

@@ -86,6 +86,20 @@ void test_openai_and_gemini_prices_per_model(void) {
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, price(CLOUD_PROVIDER_GEMINI, "gemini-3-flash").read);
 }
 
+void test_gpt6_astra_and_gemini_4_prices(void) {
+   const llm_cache_pricing_t astra = price(CLOUD_PROVIDER_OPENAI, "gpt-6-astra");
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, astra.read); /* $1 on $10 */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.25f, astra.write_5m);
+   /* Gemini 4: implicit caching only, reads at 0.05x, no write premium. */
+   const llm_cache_pricing_t hydrogen = price(CLOUD_PROVIDER_GEMINI, "gemini-4-hydrogen");
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f, hydrogen.read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.00f, hydrogen.write_5m);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f,
+                            price(CLOUD_PROVIDER_OPENROUTER, "google/gemini-4-carbon").read);
+   /* Gemini 3 keeps the family row. */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, price(CLOUD_PROVIDER_GEMINI, "gemini-3.7-flash").read);
+}
+
 void test_openrouter_prices_by_vendor(void) {
    /* OpenRouter spells Anthropic versions with dots. */
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f,
@@ -123,6 +137,7 @@ int main(void) {
    RUN_TEST(test_shipped_models_toml_parses);
    RUN_TEST(test_anthropic_prices_per_model);
    RUN_TEST(test_openai_and_gemini_prices_per_model);
+   RUN_TEST(test_gpt6_astra_and_gemini_4_prices);
    RUN_TEST(test_openrouter_prices_by_vendor);
    RUN_TEST(test_saved_tokens);
    RUN_TEST(test_defaults_without_a_registry);

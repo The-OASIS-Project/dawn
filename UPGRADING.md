@@ -47,6 +47,11 @@ than fits.
 cost. That no longer caps them. Lower the reasoning effort instead: it's what decides how much the
 model thinks, and with it what a reply costs.
 
+**If you already use GPT-6 Astra, a Gemini 4 model or Claude Mythos.** DAWN now knows these
+models' reasoning settings and sends them the conversation's effort. Before, GPT-6 Astra and
+Gemini 4 ran at the provider's default (Gemini 4 Hydrogen's is high), and Mythos was offered only
+low to high. Check the effort in the WebUI's reasoning menu.
+
 ---
 
 ## 2026-11-03 — A named audio device is no longer swapped for another

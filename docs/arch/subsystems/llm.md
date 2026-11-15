@@ -23,10 +23,12 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Provider selection based on configuration (`OPENAI_MODEL`, `ANTHROPIC_MODEL`)
 
 - **llm_openai.c/h**: OpenAI API implementation
-   - Supports GPT-5 series, GPT-4o, GPT-4
+   - Supports GPT-6 Astra, the GPT-5 series, GPT-4o, GPT-4 (gpt-5.4 and later, and gpt-6, on
+     the Responses API)
    - Supports llama.cpp local server (OpenAI-compatible endpoint)
    - Supports Ollama with runtime model switching
-   - Supports Google Gemini (via OpenAI-compatible endpoint)
+   - Supports Google Gemini 4, 3 and 2.5 (via OpenAI-compatible endpoint, whose
+     `reasoning_effort` Google maps to each model's thinking level)
    - Both blocking and streaming modes
    - Conversation history management
    - Extended thinking support (reasoning_effort for OpenAI/Gemini models); the reply

@@ -106,6 +106,7 @@ OpenAI (developers.openai.com + model reference):
 
 | prefix | context | note |
 |---|---|---|
+| gpt-6-astra | 1050000 | added Nov 2026 |
 | gpt-5.6 | 1050000 | luna/sol etc. |
 | gpt-5.5 | 1050000 | API window (Codex surface caps at 400K) |
 | gpt-5.4 | 256000 | |
@@ -127,7 +128,8 @@ Anthropic (**1M is GA at standard pricing since March 2026 — no beta header**)
 | claude-opus-4-5 / sonnet-4-5 and older | 200000 | |
 | claude-3* | 200000 | |
 
-Gemini (unchanged): all current families 1048576.
+Gemini (unchanged): all current families 1048576. Gemini 4 (added Nov 2026)
+shares its 1048576 between input and output.
 
 ## Max output per request (`max_output` on the `[thinking.*]` rows, Nov 2026)
 
@@ -150,6 +152,15 @@ reply that doesn't reason, a local model, and a row without `max_output`.
 | o1 / o3 / o4-mini | 100000 | |
 | claude-mythos-5 | 128000 | each the same model as its Fable (5, 5.1, 5.2) |
 | gemini-3 / gemini-2.5 | 65536 | ai.google.dev model pages |
+| gemini-4 (carbon, argon) / gemini-4-hydrogen | 65536 | synchronous limit; long decode (up to 1M) isn't used |
+| gpt-6-astra | 128000 | |
+
+Reasoning on the newest rows (Nov 2026): gpt-6-astra takes low through max and
+can't turn reasoning off. Gemini 4 can't turn it off either; Carbon and Argon
+take low/medium/high, Hydrogen adds xhigh (Google's OpenAI endpoint maps
+`reasoning_effort` to `thinking_level`). Cache pricing: gpt-6-astra reads at
+0.10x with 1.25x writes; Gemini 4 has implicit caching only, reads at 0.05x
+with no write premium.
 
 Every request path is sized this way: Claude Messages (direct and OpenRouter),
 OpenAI Responses, and Chat Completions (OpenAI before gpt-5.4, o-series, Gemini,
