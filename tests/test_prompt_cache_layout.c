@@ -156,7 +156,8 @@ static struct json_object *parse(const char *json) {
 }
 
 static struct json_object *render(struct json_object *history, const char *model) {
-   struct json_object *req = convert_to_claude_format(history, NULL, model, CARRIER, 0, false);
+   struct json_object *req = convert_to_claude_format(history, NULL, model, CARRIER, 0, false,
+                                                      true);
    TEST_ASSERT_NOT_NULL(req);
    return req;
 }
@@ -405,7 +406,8 @@ static void test_images_follow_the_question(void) {
               "\"data:image/png;base64,iVBORw0KGgo=\"}}]}"
    };
    struct json_object *h = history(msgs, 2);
-   struct json_object *req = convert_to_claude_format(h, NULL, MID_SYSTEM_MODEL, CARRIER, 0, false);
+   struct json_object *req = convert_to_claude_format(h, NULL, MID_SYSTEM_MODEL, CARRIER, 0, false,
+                                                      true);
    struct json_object *messages = field(req, "messages");
    TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(messages));
    struct json_object *blocks = field(json_object_array_get_idx(messages, 0), "content");
@@ -457,7 +459,7 @@ static const char *NEXT = "{\"role\":\"user\",\"content\":\"And now?\"}";
 
 static struct json_object *render_tools(struct json_object *h, bool inline_tools) {
    struct json_object *req = convert_to_claude_format(h, NULL, MID_SYSTEM_MODEL, CARRIER, 0,
-                                                      inline_tools);
+                                                      inline_tools, true);
    TEST_ASSERT_NOT_NULL(req);
    return req;
 }

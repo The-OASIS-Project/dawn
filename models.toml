@@ -123,8 +123,9 @@
 "claude-opus-5-5" = { read = 0.05, write_5m = 1.25, write_1h = 2.0 }   # $0.20 on $4
 "claude-fable-5-2" = { read = 0.025, write_5m = 1.25, write_1h = 2.0 } # $0.20 on $8
 "claude-fable-5-1" = { read = 0.025, write_5m = 1.25, write_1h = 2.0 } # $0.25 on $10
-# Mythos 5.1 shares Fable 5.1's price, but whether its cache reads do was open
-# at launch: the default (0.10) until confirmed.
+"claude-mythos-5-2" = { read = 0.025, write_5m = 1.25, write_1h = 2.0 } # $0.20 on $8
+"claude-mythos-5-1" = { read = 0.025, write_5m = 1.25, write_1h = 2.0 } # $0.25 on $10
+# Fable 5 and Mythos 5 ($1 on $10) and the rest: the default below.
 "claude" = { read = 0.10, write_5m = 1.25, write_1h = 2.0 }
 
 [cache_pricing.openai]
@@ -159,6 +160,11 @@
 #   efforts  effort levels for "adaptive" (Claude output_config.effort) or, on
 #            OpenAI/Gemini, for "enabled"; lowest first.  Claude "enabled" uses
 #            the budget levels instead.
+#   max_output  the most output tokens (reasoning included) one request may
+#            ask for.  A streamed reply that reasons gets a max_tokens by
+#            its effort (low 16K, medium 32K, high 64K, xhigh/max 128K), held
+#            under this; a model without it, a reply that doesn't reason, and
+#            a call that isn't streamed get [llm] max_tokens.
 #
 # A prefix matches every model it starts, so a family row catches its future
 # and specialty variants too: those get a row with no modes (below) until
@@ -168,45 +174,47 @@
 # and a thinking.type "disabled" probe per model, 2026-09-28 (Claude Haiku 5.5:
 # 2026-10-07).  On the 5.x rows "disabled" takes no effort above high; DAWN
 # sends no effort with it.  OpenAI and Gemini rows encode DAWN's shipped
-# effort rules for those families.
+# effort rules for those families.  max_output: platform.claude.com models
+# overview and developers.openai.com model pages, 2026-11-15 (Gemini rows have
+# none yet: they keep [llm] max_tokens).
 
 [thinking.anthropic]
-"claude-opus-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-fable-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-opus-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-sonnet-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-haiku-5-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-sonnet-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-opus-4-8" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-opus-4-7" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-opus-4-6" = { modes = ["disabled", "adaptive", "enabled"], efforts = ["low", "medium", "high", "max"] }
-"claude-sonnet-4-6" = { modes = ["disabled", "adaptive", "enabled"], efforts = ["low", "medium", "high", "max"] }
-"claude-opus-4-5" = { modes = ["disabled", "enabled"], efforts = [] }
-"claude-sonnet-4-5" = { modes = ["disabled", "enabled"], efforts = [] }
-"claude-haiku-4-5" = { modes = ["disabled", "enabled"], efforts = [] }
+"claude-opus-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-fable-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-opus-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-sonnet-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-haiku-5-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-sonnet-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-opus-4-8" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-opus-4-7" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-opus-4-6" = { modes = ["disabled", "adaptive", "enabled"], efforts = ["low", "medium", "high", "max"], max_output = 128000 }
+"claude-sonnet-4-6" = { modes = ["disabled", "adaptive", "enabled"], efforts = ["low", "medium", "high", "max"], max_output = 128000 }
+"claude-opus-4-5" = { modes = ["disabled", "enabled"], efforts = [], max_output = 64000 }
+"claude-sonnet-4-5" = { modes = ["disabled", "enabled"], efforts = [], max_output = 64000 }
+"claude-haiku-4-5" = { modes = ["disabled", "enabled"], efforts = [], max_output = 64000 }
 # Older models, budget thinking only (the 4.5+ rows above are longer, so they win):
-"claude-opus-4-1" = { modes = ["disabled", "enabled"], efforts = [] }
-"claude-opus-4" = { modes = ["disabled", "enabled"], efforts = [] }
-"claude-sonnet-4" = { modes = ["disabled", "enabled"], efforts = [] }
-"claude-3-7-sonnet" = { modes = ["disabled", "enabled"], efforts = [] }
+"claude-opus-4-1" = { modes = ["disabled", "enabled"], efforts = [], max_output = 32000 }
+"claude-opus-4" = { modes = ["disabled", "enabled"], efforts = [], max_output = 32000 }
+"claude-sonnet-4" = { modes = ["disabled", "enabled"], efforts = [], max_output = 64000 }
+"claude-3-7-sonnet" = { modes = ["disabled", "enabled"], efforts = [], max_output = 64000 }
 "claude-3" = { modes = [], efforts = [] } # 3.5 and earlier: no extended thinking
 # Default for an unlisted Claude model: adaptive, low/medium/high, no "disabled".
 
 [thinking.openai]
-"gpt-5.6" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
-"gpt-5.5" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
-"gpt-5.4" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
+"gpt-5.6" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }
+"gpt-5.5" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }
+"gpt-5.4" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }
 "gpt-5.3" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
-"gpt-5.2" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
-"gpt-5.1" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high"] }
-"gpt-5" = { modes = ["enabled"], efforts = ["minimal", "low", "medium", "high"] } # 5, mini, nano
+"gpt-5.2" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }
+"gpt-5.1" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high"], max_output = 128000 }
+"gpt-5" = { modes = ["enabled"], efforts = ["minimal", "low", "medium", "high"], max_output = 128000 } # 5, mini, nano
 "gpt-5." = { modes = [], efforts = [] } # a gpt-5.x newer than the rows above: unknown until listed
 "gpt-5-chat" = { modes = [], efforts = [] } # the chat alias takes no reasoning parameter
-"o1" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
+"o1" = { modes = ["enabled"], efforts = ["low", "medium", "high"], max_output = 100000 }
 "o1-mini" = { modes = [], efforts = [] } # takes no reasoning_effort
 "o1-preview" = { modes = [], efforts = [] }
-"o3" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
-"o4-mini" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
+"o3" = { modes = ["enabled"], efforts = ["low", "medium", "high"], max_output = 100000 }
+"o4-mini" = { modes = ["enabled"], efforts = ["low", "medium", "high"], max_output = 100000 }
 "gpt-4" = { modes = [], efforts = [] } # 4o, 4.1: no reasoning
 # Default for an unlisted OpenAI model: no reasoning control (nothing sent).
 # An OpenAI-compatible endpoint can serve anything, so only models listed

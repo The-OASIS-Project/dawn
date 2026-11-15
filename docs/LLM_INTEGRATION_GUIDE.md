@@ -425,7 +425,7 @@ All LLM settings in `dawn.toml`:
 ```toml
 [llm]
 type = "cloud"                  # "cloud" or "local"
-max_tokens = 4096               # Maximum response tokens
+max_tokens = 16384              # Reply ceiling; a streamed reply that reasons gets more by effort
 compact_soft_threshold = 0.60   # Async background compaction trigger
 compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)
 compact_use_session = true      # Use session's LLM for compaction

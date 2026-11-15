@@ -565,7 +565,8 @@ static void run_turn(int64_t conv, const char *question, script_t script) {
 /* ---- live vs reload, as each provider is sent them ---- */
 
 static char *claude_request(struct json_object *history) {
-   struct json_object *req = convert_to_claude_format(history, NULL, MODEL, CARRIER, 0, false);
+   struct json_object *req = convert_to_claude_format(history, NULL, MODEL, CARRIER, 0, false,
+                                                      true);
    TEST_ASSERT_NOT_NULL(req);
    char *out = strdup(json_object_to_json_string_ext(req, FLAGS));
    json_object_put(req);

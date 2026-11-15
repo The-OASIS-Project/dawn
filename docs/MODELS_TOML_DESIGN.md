@@ -122,12 +122,37 @@ Anthropic (**1M is GA at standard pricing since March 2026 — no beta header**)
 |---|---|---|
 | claude-opus-4-8 / 4-7 / 4-6 | 1000000 | GA 1M |
 | claude-sonnet-4-6 | 1000000 | GA 1M |
-| claude-sonnet-5 / fable-5 / mythos-5 | 1000000 | GA 1M |
+| claude-sonnet-5 / fable-5 / mythos-5 | 1000000 | GA 1M (fable-5 / mythos-5 also match 5.1 and 5.2) |
 | claude-haiku-4-5 | 200000 | |
 | claude-opus-4-5 / sonnet-4-5 and older | 200000 | |
 | claude-3* | 200000 | |
 
 Gemini (unchanged): all current families 1048576.
+
+## Max output per request (`max_output` on the `[thinking.*]` rows, Nov 2026)
+
+Reasoning counts toward `max_tokens` (Anthropic) and `max_output_tokens`
+(OpenAI), so a fixed 16K ceiling can end a high-effort reply after its
+reasoning with no text. A streamed reply that reasons gets a ceiling by its
+effort (`llm_reply_max_tokens`): low and minimal 16384, medium 32768, high
+65536, xhigh and max 128000, never below `[llm] max_tokens` and never above the
+row's `max_output`. Everything else keeps `[llm] max_tokens`: a call that isn't
+streamed (both vendors warn against a long reply on one idle connection), a
+reply that doesn't reason, a local model, and a row without `max_output`.
+
+| prefix | max_output | source |
+|---|---|---|
+| claude-fable-5 / opus-5 / opus-5-5 / sonnet-5 / sonnet-5-5 / haiku-5-5 | 128000 | platform.claude.com models overview |
+| claude-opus-4-6 / 4-7 / 4-8, claude-sonnet-4-6 | 128000 | |
+| claude-opus-4-5 / sonnet-4-5 / haiku-4-5, claude-sonnet-4, claude-3-7-sonnet | 64000 | |
+| claude-opus-4 / 4-1 | 32000 | retired on the Claude API |
+| gpt-5 / 5.1 / 5.2 / 5.4 / 5.5 / 5.6 (and mini, nano) | 128000 | developers.openai.com model pages |
+| o1 / o3 / o4-mini | 100000 | |
+
+Not listed yet, so they keep `[llm] max_tokens`: gpt-5.3 (no model page),
+Gemini, and Claude Mythos (no thinking row). Chat Completions requests (OpenAI
+before gpt-5.4, o-series, Gemini, OpenRouter's non-Anthropic models) keep it
+too; only Claude Messages and OpenAI Responses requests are sized by effort.
 
 > **Behavior note:** bumping the Claude flagships 200K→1M changes when DAWN
 > compacts a Claude conversation (much later). If a deployment's account tier does

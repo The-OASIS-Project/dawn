@@ -700,7 +700,8 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                       const char *model,
                                       const char *carrier,
                                       int iteration,
-                                      bool inline_tools) {
+                                      bool inline_tools,
+                                      bool streamed) {
    /* A model that takes no images reads a fixed text for each a tool returned. */
    json_object *shown_history = NULL;
    if (!is_vision_enabled_for_current_llm()) {
@@ -733,9 +734,11 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                    ? llm_budget_tokens_for_effort(thinking.effort)
                                    : 0;
 
-   /* max_tokens covers a thinking budget and the answer: leave the answer at
-    * least CLAUDE_ANSWER_TOKENS_MIN (a memory extraction's JSON runs ~2K). */
-   int max_tokens = g_config.llm.max_tokens;
+   /* max_tokens covers the thinking and the answer: sized by effort when
+    * streamed, and at least a thinking budget plus CLAUDE_ANSWER_TOKENS_MIN (a
+    * memory extraction's JSON runs ~2K). */
+   int max_tokens = llm_reply_max_tokens(LLM_CLOUD, model_provider, model_name, &thinking,
+                                         streamed);
    if (thinking_budget > 0 && max_tokens < thinking_budget + CLAUDE_ANSWER_TOKENS_MIN) {
       max_tokens = thinking_budget + CLAUDE_ANSWER_TOKENS_MIN;
       OLOG_INFO("Claude: Adjusted max_tokens to %d (budget %d + %d for the answer)", max_tokens,

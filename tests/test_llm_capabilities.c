@@ -61,6 +61,7 @@ void setUp(void) {
    s_suppressed = false;
    s_utility_effort = "";
    s_local = LOCAL_PROVIDER_LLAMA_CPP;
+   g_config.llm.max_tokens = 16384;
 }
 void tearDown(void) {
 }
@@ -388,6 +389,77 @@ static void test_wire_shape(void) {
    json_object_put(j);
 }
 
+/* The max_tokens a streamed reply at @p effort gets on @p model. */
+static int reply_tokens(cloud_provider_t provider,
+                        const char *model,
+                        llm_think_mode_t mode,
+                        const char *effort,
+                        bool streamed) {
+   llm_thinking_resolved_t r = { .controllable = true, .mode = mode };
+   snprintf(r.effort, sizeof(r.effort), "%s", effort);
+   return llm_reply_max_tokens(LLM_CLOUD, provider, model, &r, streamed);
+}
+
+static void test_reply_max_tokens_follow_the_effort(void) {
+   const cloud_provider_t c = CLOUD_PROVIDER_CLAUDE;
+   TEST_ASSERT_EQUAL_INT(16384,
+                         reply_tokens(c, "claude-fable-5-2", LLM_THINK_ADAPTIVE, "low", true));
+   TEST_ASSERT_EQUAL_INT(32768,
+                         reply_tokens(c, "claude-fable-5-2", LLM_THINK_ADAPTIVE, "medium", true));
+   TEST_ASSERT_EQUAL_INT(65536,
+                         reply_tokens(c, "claude-fable-5-2", LLM_THINK_ADAPTIVE, "high", true));
+   TEST_ASSERT_EQUAL_INT(128000,
+                         reply_tokens(c, "claude-opus-5-5", LLM_THINK_ADAPTIVE, "xhigh", true));
+   TEST_ASSERT_EQUAL_INT(128000,
+                         reply_tokens(c, "claude-opus-5-5", LLM_THINK_ADAPTIVE, "max", true));
+   /* Held under the model's own cap: Haiku 4.5 (a budget level) takes 64K. */
+   TEST_ASSERT_EQUAL_INT(64000,
+                         reply_tokens(c, "claude-haiku-4-5", LLM_THINK_ENABLED, "xhigh", true));
+   /* OpenRouter's Claude ids use the Anthropic rows. */
+   TEST_ASSERT_EQUAL_INT(128000,
+                         reply_tokens(CLOUD_PROVIDER_OPENROUTER, "anthropic/claude-opus-5.5",
+                                      LLM_THINK_ADAPTIVE, "max", true));
+   /* OpenAI reasoning models the same way; "minimal" is the lowest step. */
+   TEST_ASSERT_EQUAL_INT(65536, reply_tokens(CLOUD_PROVIDER_OPENAI, "gpt-5.6-luna",
+                                             LLM_THINK_ENABLED, "high", true));
+   TEST_ASSERT_EQUAL_INT(100000,
+                         reply_tokens(CLOUD_PROVIDER_OPENAI, "o3", LLM_THINK_ENABLED, "max", true));
+   TEST_ASSERT_EQUAL_INT(16384, reply_tokens(CLOUD_PROVIDER_OPENAI, "gpt-5-mini", LLM_THINK_ENABLED,
+                                             "minimal", true));
+}
+
+static void test_reply_max_tokens_keep_the_configured_value(void) {
+   const cloud_provider_t c = CLOUD_PROVIDER_CLAUDE;
+   /* Not streamed. */
+   TEST_ASSERT_EQUAL_INT(16384,
+                         reply_tokens(c, "claude-fable-5-2", LLM_THINK_ADAPTIVE, "max", false));
+   /* No reasoning. */
+   TEST_ASSERT_EQUAL_INT(16384, reply_tokens(c, "claude-haiku-5-5", LLM_THINK_DISABLED, "", true));
+   llm_thinking_resolved_t off = { .controllable = false };
+   TEST_ASSERT_EQUAL_INT(16384, llm_reply_max_tokens(LLM_CLOUD, c, "claude-3-5-haiku", &off, true));
+   /* No max_output listed (gpt-5.3, Gemini, an unlisted Claude). */
+   TEST_ASSERT_EQUAL_INT(16384, reply_tokens(CLOUD_PROVIDER_OPENAI, "gpt-5.3", LLM_THINK_ENABLED,
+                                             "high", true));
+   TEST_ASSERT_EQUAL_INT(16384, reply_tokens(CLOUD_PROVIDER_GEMINI, "gemini-3-flash",
+                                             LLM_THINK_ENABLED, "high", true));
+   TEST_ASSERT_EQUAL_INT(16384,
+                         reply_tokens(c, "claude-mythos-5-2", LLM_THINK_ADAPTIVE, "high", true));
+   /* Local. */
+   llm_thinking_resolved_t local = { .controllable = true, .mode = LLM_THINK_ENABLED };
+   snprintf(local.effort, sizeof(local.effort), "high");
+   TEST_ASSERT_EQUAL_INT(16384, llm_reply_max_tokens(LLM_LOCAL, CLOUD_PROVIDER_NONE, "qwen", &local,
+                                                     true));
+   /* A larger configured value is a floor, still under the model's cap. */
+   g_config.llm.max_tokens = 50000;
+   TEST_ASSERT_EQUAL_INT(50000,
+                         reply_tokens(c, "claude-fable-5-2", LLM_THINK_ADAPTIVE, "low", true));
+   TEST_ASSERT_EQUAL_INT(65536,
+                         reply_tokens(c, "claude-fable-5-2", LLM_THINK_ADAPTIVE, "high", true));
+   g_config.llm.max_tokens = 200000;
+   TEST_ASSERT_EQUAL_INT(128000,
+                         reply_tokens(c, "claude-fable-5-2", LLM_THINK_ADAPTIVE, "low", true));
+}
+
 int main(void) {
    char err[256];
    FILE *f = fopen(MODELS_TOML_PATH, "r");
@@ -419,6 +491,8 @@ int main(void) {
    RUN_TEST(test_local_providers);
    RUN_TEST(test_utility_calls_are_cheapest_and_never_clamped);
    RUN_TEST(test_wire_shape);
+   RUN_TEST(test_reply_max_tokens_follow_the_effort);
+   RUN_TEST(test_reply_max_tokens_keep_the_configured_value);
    const int rc = UNITY_END();
    llm_capabilities_free_registry();
    toml_free(s_root);

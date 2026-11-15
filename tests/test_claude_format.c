@@ -16,7 +16,7 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Unit tests for convert_to_claude_format() — OpenAI->Claude history conversion.
+ * Unit tests for convert_to_claude_format(, true) — OpenAI->Claude history conversion.
  *
  * Regression for the consecutive-tool-result double-free: when an assistant
  * issues several parallel tool calls, the history carries several role="tool"
@@ -208,7 +208,7 @@ static void test_parallel_tool_results_no_double_free(void) {
    }
 
    json_object *req = convert_to_claude_format(conv, NULL, "claude-sonnet-4-6", TEST_CLAUDE_CARRIER,
-                                               0, false);
+                                               0, false, true);
    TEST_ASSERT_NOT_NULL(req);
 
    /* The N tool_results must coalesce into ONE user message holding N blocks. */
@@ -232,7 +232,7 @@ static void test_single_tool_result_ok(void) {
    add_tool_result(conv, 0);
 
    json_object *req = convert_to_claude_format(conv, NULL, "claude-sonnet-4-6", TEST_CLAUDE_CARRIER,
-                                               0, false);
+                                               0, false, true);
    TEST_ASSERT_NOT_NULL(req);
    json_object_put(req);
    json_object_put(conv);
@@ -248,7 +248,7 @@ static void test_an_image_that_doesnt_convert_is_a_stand_in(void) {
                                    "[{\"type\":\"text\",\"text\":\"Captured.\"},{\"type\":"
                                    "\"image_url\",\"image_url\":{\"url\":\"https://x/y.png\"}}]}"));
    json_object *req = convert_to_claude_format(conv, NULL, "claude-sonnet-4-6", TEST_CLAUDE_CARRIER,
-                                               0, false);
+                                               0, false, true);
    TEST_ASSERT_NOT_NULL(req);
    const char *wire = json_object_to_json_string(req);
    TEST_ASSERT_NOT_NULL(strstr(wire, IMAGE_REHYDRATE_MISSING_TEXT));
@@ -290,7 +290,8 @@ static const char *effort_of(json_object *req) {
 
 static json_object *request_for(const char *model) {
    json_object *conv = one_user_turn();
-   json_object *req = convert_to_claude_format(conv, NULL, model, TEST_CLAUDE_CARRIER, 0, false);
+   json_object *req = convert_to_claude_format(conv, NULL, model, TEST_CLAUDE_CARRIER, 0, false,
+                                               true);
    json_object_put(conv);
    TEST_ASSERT_NOT_NULL(req);
    return req;
@@ -318,6 +319,34 @@ static void test_adaptive_carries_the_session_effort(void) {
    json_object *req = request_for("claude-opus-5-5");
    TEST_ASSERT_EQUAL_STRING("adaptive", thinking_type(req));
    TEST_ASSERT_EQUAL_STRING("high", effort_of(req));
+   json_object_put(req);
+}
+
+static int max_tokens_of(json_object *req) {
+   json_object *v = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(req, "max_tokens", &v));
+   return json_object_get_int(v);
+}
+
+/* A streamed request's max_tokens follows the effort; one that isn't streamed,
+ * or doesn't think, keeps [llm] max_tokens. */
+static void test_max_tokens_follow_the_effort_when_streamed(void) {
+   s_mode = "adaptive";
+   s_effort = "xhigh";
+   json_object *req = request_for("claude-fable-5-2");
+   TEST_ASSERT_EQUAL_INT(128000, max_tokens_of(req));
+   json_object_put(req);
+
+   json_object *conv = one_user_turn();
+   req = convert_to_claude_format(conv, NULL, "claude-fable-5-2", TEST_CLAUDE_CARRIER, 0, false,
+                                  false);
+   json_object_put(conv);
+   TEST_ASSERT_EQUAL_INT(4096, max_tokens_of(req));
+   json_object_put(req);
+
+   s_mode = "disabled";
+   req = request_for("claude-sonnet-5");
+   TEST_ASSERT_EQUAL_INT(4096, max_tokens_of(req));
    json_object_put(req);
 }
 
@@ -402,7 +431,7 @@ static void test_tool_use_without_thinking_keeps_reasoning(void) {
    json_object_array_add(conv, assistant_with_tool_calls(1));
    add_tool_result(conv, 0);
    json_object *req = convert_to_claude_format(conv, NULL, "claude-opus-5-5", TEST_CLAUDE_CARRIER,
-                                               1, false);
+                                               1, false, true);
    json_object_put(conv);
    TEST_ASSERT_EQUAL_STRING("adaptive", thinking_type(req));
    TEST_ASSERT_EQUAL_STRING("medium", effort_of(req));
@@ -430,7 +459,7 @@ static void test_final_answer_replays_its_blocks(void) {
    json_object_array_add(conv, next);
 
    json_object *req = convert_to_claude_format(conv, NULL, "claude-opus-5-5", TEST_CLAUDE_CARRIER,
-                                               0, false);
+                                               0, false, true);
    json_object *messages = NULL;
    TEST_ASSERT_TRUE(json_object_object_get_ex(req, "messages", &messages));
    json_object *assistant = json_object_array_get_idx(messages, 1);
@@ -463,7 +492,7 @@ static void test_results_without_their_call_become_notes(void) {
    json_object_array_add(conv, assistant_with_tool_calls(1));
    add_tool_result(conv, 0); /* answered properly */
    json_object *req = convert_to_claude_format(conv, NULL, "claude-sonnet-4-6", TEST_CLAUDE_CARRIER,
-                                               0, false);
+                                               0, false, true);
    TEST_ASSERT_NOT_NULL(req);
    const char *wire = json_object_to_json_string(req);
    TEST_ASSERT_NULL(strstr(wire, "\"call_05\""));
@@ -489,7 +518,7 @@ static void test_calls_and_results_are_paired(void) {
    json_object_array_add(conv, lost);
    add_tool_result(conv, 1);
    json_object *req = convert_to_claude_format(conv, NULL, "claude-sonnet-4-6", TEST_CLAUDE_CARRIER,
-                                               0, false);
+                                               0, false, true);
    TEST_ASSERT_NOT_NULL(req);
    json_object *messages = NULL;
    TEST_ASSERT_TRUE(json_object_object_get_ex(req, "messages", &messages));
@@ -557,7 +586,7 @@ static void test_reasoning_only_turn_and_user_text(void) {
    add_tool_result(conv, 3); /* follows the user's text; its call isn't anywhere */
 
    json_object *req = convert_to_claude_format(conv, NULL, "claude-sonnet-4-6", TEST_CLAUDE_CARRIER,
-                                               0, false);
+                                               0, false, true);
    TEST_ASSERT_NOT_NULL(req);
    const char *wire = json_object_to_json_string(req);
    TEST_ASSERT_NULL(strstr(wire, "SIG"));
@@ -604,6 +633,7 @@ int main(void) {
    RUN_TEST(test_disabled_on_adaptive_only_model_is_lowest_adaptive);
    RUN_TEST(test_disabled_is_sent_where_accepted);
    RUN_TEST(test_adaptive_carries_the_session_effort);
+   RUN_TEST(test_max_tokens_follow_the_effort_when_streamed);
    RUN_TEST(test_openrouter_slug_gets_its_models_rules);
    RUN_TEST(test_budget_model_gets_enabled_with_budget);
    RUN_TEST(test_utility_call_gets_the_cheapest_legal_setting);

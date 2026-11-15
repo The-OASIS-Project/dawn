@@ -36,13 +36,14 @@
 #include "toml.h"
 #include "utils/string_utils.h"
 
-/* A models.toml row: "prefix" = { modes = [...], efforts = [...] }. */
+/* A models.toml row: "prefix" = { modes = [...], efforts = [...], max_output = N }. */
 typedef struct {
    char *prefix; /* NULL-terminated array */
    int mode_count;
    llm_think_mode_t modes[LLM_THINK_MODES_MAX];
    int effort_count;
    char efforts[LLM_EFFORTS_MAX][LLM_EFFORT_NAME_MAX];
+   int max_output; /* 0: not listed */
 } caps_row_t;
 
 /* Longest prefix first; loaded once at startup, read-only afterwards. */
@@ -133,6 +134,13 @@ static void parse_row(const char *provider,
                       d.u.s);
       }
       free(d.u.s);
+   }
+   toml_datum_t max_output = toml_int_in(entry, "max_output");
+   if (max_output.ok && max_output.u.i > 0 && max_output.u.i <= INT_MAX) {
+      row->max_output = (int)max_output.u.i;
+   } else if (max_output.ok) {
+      OLOG_WARNING("models.toml [thinking.%s] \"%s\": ignoring max_output %lld", provider, prefix,
+                   (long long)max_output.u.i);
    }
 }
 
@@ -348,6 +356,7 @@ static void add_mode(llm_thinking_caps_t *out,
 
 static void from_row(const caps_row_t *row, llm_model_family_t family, llm_thinking_caps_t *out) {
    out->source = LLM_CAPS_ROW;
+   out->max_output = row->max_output;
    for (int i = 0; i < row->mode_count; i++) {
       const llm_think_mode_t mode = row->modes[i];
       if (mode == LLM_THINK_DISABLED) {
@@ -563,6 +572,45 @@ int llm_thinking_budget_size(const char *level) {
       return g_config.llm.thinking.budget_xhigh;
    }
    return g_config.llm.thinking.budget_medium;
+}
+
+/* The reply ceiling each effort gets: reasoning counts toward max_tokens, and a
+ * higher effort reasons longer (the Anthropic effort and OpenAI reasoning
+ * guides: set a large max_tokens at high and above, 128K for agentic work). */
+static const struct {
+   const char *effort;
+   int tokens;
+} EFFORT_MAX_TOKENS[] = {
+   { "minimal", 16384 }, { "low", 16384 },    { "medium", 32768 },
+   { "high", 65536 },    { "xhigh", 128000 }, { "max", 128000 },
+};
+
+int llm_reply_max_tokens(llm_type_t type,
+                         cloud_provider_t provider,
+                         const char *model,
+                         const llm_thinking_resolved_t *thinking,
+                         bool streamed) {
+   const int configured = g_config.llm.max_tokens;
+   /* Not streamed: a long reply on one idle connection is what the providers
+    * warn against, so a bare completion keeps the configured ceiling. */
+   if (!streamed || type == LLM_LOCAL || !thinking || !thinking->controllable ||
+       thinking->mode == LLM_THINK_DISABLED) {
+      return configured;
+   }
+   llm_thinking_caps_t caps;
+   llm_thinking_caps(type, provider, model, &caps);
+   if (caps.max_output <= 0) {
+      return configured;
+   }
+   int tokens = configured;
+   for (size_t i = 0; i < sizeof(EFFORT_MAX_TOKENS) / sizeof(EFFORT_MAX_TOKENS[0]); i++) {
+      if (strcmp(thinking->effort, EFFORT_MAX_TOKENS[i].effort) == 0) {
+         tokens = EFFORT_MAX_TOKENS[i].tokens > configured ? EFFORT_MAX_TOKENS[i].tokens
+                                                           : configured;
+         break;
+      }
+   }
+   return tokens < caps.max_output ? tokens : caps.max_output;
 }
 
 static const char *source_name(llm_caps_source_t source) {

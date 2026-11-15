@@ -32,10 +32,14 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Extended thinking support (reasoning_effort for OpenAI/Gemini models)
 
 - **llm_claude.c/h**: Claude API implementation
-   - Supports Claude 4.6 Opus/Sonnet, Claude 4.5 Sonnet
+   - Supports Claude Fable 5.x, Opus/Sonnet/Haiku 5.5 and earlier; a model's thinking modes,
+     efforts and max output come from `models.toml [thinking.anthropic]`
    - Streaming support
    - Different API format than OpenAI (Messages API)
-   - Extended thinking support with configurable token budget
+   - Adaptive thinking by effort, or a configurable token budget on the models that take one
+   - A streamed reply that thinks gets `max_tokens` by its effort, up to the model's max
+     output (`llm_reply_max_tokens`, also used by OpenAI Responses); a call that isn't
+     streamed keeps `[llm] max_tokens`
    - Full thinking content visibility (unlike OpenAI/Gemini)
 
 - **llm_streaming.c/h**: Streaming response handler

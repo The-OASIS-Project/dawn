@@ -50,6 +50,8 @@
  * @param inline_tools Whether the request may send the conversation's stored
  *                     inline tool changes in place (claude_betas_render_inline):
  *                     the rows and the conversation's record decide the rest
+ * @param streamed The request is streamed: its max_tokens follows the reasoning
+ *                 effort (llm_reply_max_tokens)
  * @return json_object containing Claude-format request, or NULL on error
  *         Caller must json_object_put() when done
  */
@@ -58,6 +60,7 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                       const char *model,
                                       const char *carrier,
                                       int iteration,
-                                      bool inline_tools);
+                                      bool inline_tools,
+                                      bool streamed);
 
 #endif  // LLM_CLAUDE_FORMAT_H
