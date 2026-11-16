@@ -135,6 +135,13 @@ void llm_cache_monitor_pop_kind(int previous);
 bool llm_cache_monitor_in_side_call(void);
 
 /**
+ * @brief The session whose conversation the calling thread's call belongs to:
+ *        its command context, or NULL for a side call (extraction, compaction,
+ *        a briefing, a summarizer) or a call with no command context
+ */
+struct session *llm_cache_monitor_conversation_session(void);
+
+/**
  * @brief Whether the calling thread's call is sent once and never again (a
  *        compaction's summary, a memory extraction): a cache write for it would
  *        only cost (a write is billed above an uncached read, and nothing reads

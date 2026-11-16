@@ -97,8 +97,13 @@ void test_openai_and_gemini_prices_per_model(void) {
 
 void test_gpt6_astra_and_gemini_4_prices(void) {
    const llm_cache_pricing_t astra = price(CLOUD_PROVIDER_OPENAI, "gpt-6-astra");
-   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, astra.read); /* $1 on $10 */
-   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.25f, astra.write_5m);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, astra.read);     /* $1 on $10 */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.25f, astra.write_5m); /* the default 30-minute write */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.50f, astra.write_1h); /* the 12-hour write */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.50f, price(CLOUD_PROVIDER_OPENAI, "gpt-6.1-sol").write_1h);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.50f, price(CLOUD_PROVIDER_OPENAI, "gpt-5.6-luna").write_1h);
+   /* Before GPT-5.6, writes cost nothing extra. */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.00f, price(CLOUD_PROVIDER_OPENAI, "gpt-5.5").write_1h);
    /* The rest of GPT-6: 6.1 reads at 0.05x, the others 0.10x; writes 1.25x. */
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, price(CLOUD_PROVIDER_OPENAI, "gpt-6-sol").read);
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f, price(CLOUD_PROVIDER_OPENAI, "gpt-6.1-sol").read);

@@ -136,7 +136,9 @@ int llm_compaction_estimate_budget(const llm_compaction_calibration_t *cal, int 
 
 /**
  * @brief @p max_tokens, held to the room a @p window leaves a request of
- *        @p input_tokens, less a 2% slack for the estimate
+ *        @p input_tokens, less a safety margin for the estimate: 10% of the
+ *        input (code, non-English text and images run denser than its ~4
+ *        characters a token) and 2% of the window
  *
  * Never below LLM_REPLY_ROOM_MIN (a request that close to its window is the
  * compaction's to fix; a near-zero ceiling only guarantees an empty reply),

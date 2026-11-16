@@ -505,8 +505,13 @@ static void test_a_request_is_fixed_part_plus_density(void) {
 static void test_reply_room_holds_the_ceiling_to_the_window(void) {
    /* Room enough: unchanged. */
    TEST_ASSERT_EQUAL_INT(65536, llm_compaction_reply_room(65536, 1000000, 500000));
-   /* 200K window, 170K in, 2% (4000) slack: 26000 left. */
-   TEST_ASSERT_EQUAL_INT(26000, llm_compaction_reply_room(64000, 200000, 170000));
+   /* 200K window, 100K in: less a 10% margin on the input (10000) and 2% of
+    * the window (4000), 86000 left. */
+   TEST_ASSERT_EQUAL_INT(86000, llm_compaction_reply_room(128000, 200000, 100000));
+   /* 170K in: 200000 - 170000 - 17000 - 4000 = 9000. */
+   TEST_ASSERT_EQUAL_INT(9000, llm_compaction_reply_room(64000, 200000, 170000));
+   /* Without the 10% margin this would leave 4000; with it, under the floor. */
+   TEST_ASSERT_EQUAL_INT(LLM_REPLY_ROOM_MIN, llm_compaction_reply_room(16384, 200000, 192000));
    /* Over the window already: the floor, not zero or negative. */
    TEST_ASSERT_EQUAL_INT(LLM_REPLY_ROOM_MIN, llm_compaction_reply_room(64000, 200000, 250000));
    /* A ceiling at or under the floor, or an unknown window: unchanged. */

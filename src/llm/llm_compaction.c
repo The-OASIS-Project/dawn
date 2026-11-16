@@ -349,7 +349,9 @@ int llm_compaction_reply_room(int max_tokens, int window, int input_tokens) {
    if (window <= 0 || max_tokens <= LLM_REPLY_ROOM_MIN) {
       return max_tokens;
    }
-   const int64_t left = (int64_t)window - input_tokens - window / 50;
+   /* The estimate reads ~4 characters a token; code, non-English text and
+    * images run denser.  A 10% margin on the input, and 2% of the window. */
+   const int64_t left = (int64_t)window - input_tokens - input_tokens / 10 - window / 50;
    if (left >= max_tokens) {
       return max_tokens;
    }

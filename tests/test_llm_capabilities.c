@@ -203,6 +203,9 @@ static void test_mid_system_models(void) {
    TEST_ASSERT_TRUE(llm_model_mid_system("claude-opus-5-5"));
    TEST_ASSERT_TRUE(llm_model_mid_system("claude-fable-5-2"));
    TEST_ASSERT_TRUE(llm_model_inline_tools("claude-fable-5-2"));
+   TEST_ASSERT_TRUE(llm_model_inline_tools("claude-sonnet-5-5"));
+   TEST_ASSERT_TRUE(llm_model_inline_tools("claude-haiku-5-5"));
+   TEST_ASSERT_FALSE(llm_model_inline_tools("claude-sonnet-5"));
    TEST_ASSERT_FALSE(llm_model_mid_system("claude-sonnet-5"));
    TEST_ASSERT_FALSE(llm_model_mid_system("claude-haiku-4-5"));
 }

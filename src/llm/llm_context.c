@@ -1136,9 +1136,14 @@ int llm_context_fit_reply(int max_tokens,
    if (input_text) {
       estimate += (int)(strlen(input_text) / 4);
    }
-   const session_t *session = session_get_command_context();
-   const int input = llm_context_request_tokens(session ? session->session_id : 0, estimate, type,
-                                                provider, model);
+   /* Measured by its session only when it is that session's own conversation
+    * request.  A side call (extraction, compaction, a briefing, a summarizer)
+    * or a call with no session is its own estimate: never the local session's
+    * (id 0) or another conversation's count. */
+   const session_t *session = llm_cache_monitor_conversation_session();
+   const int input = session ? llm_context_request_tokens(session->session_id, estimate, type,
+                                                          provider, model)
+                             : estimate;
    const int fitted = llm_compaction_reply_room(max_tokens, window, input);
    if (fitted < max_tokens) {
       OLOG_INFO("llm_context: reply ceiling %d -> %d (~%d input tokens of a %d window)", max_tokens,

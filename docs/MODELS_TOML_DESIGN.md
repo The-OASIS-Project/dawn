@@ -163,7 +163,10 @@ family row: gpt-6-cyber (its page lists no effort levels) and any later gpt-6
 model get the OpenAI default, no reasoning parameters, as "gpt-5." does for a
 newer gpt-5.x. Gemini 4 can't turn it off either; Carbon and Argon
 take low/medium/high, Hydrogen adds xhigh (Google's OpenAI endpoint maps
-`reasoning_effort` to `thinking_level`). Cache pricing: the GPT-6 models write at 1.25x
+`reasoning_effort` to `thinking_level`). Cache pricing: `write_5m` is a provider's default write lifetime, the only
+write rate DAWN estimates with (Anthropic 5 minutes; OpenAI GPT-5.6 and later
+30 minutes, since DAWN sets no lifetime), and `write_1h` its longer one
+(Anthropic 1 hour; OpenAI 12 hours, 2.5x, Responses API only). The GPT-6 models write at 1.25x
 and read at 0.10x (astra, sol, luna, cyber) or 0.05x (6.1 sol, 6.1 terra); Gemini 4 has implicit caching only, reads at 0.05x
 with no write premium.
 
@@ -177,9 +180,15 @@ tokens"). gpt-5.3 has no model page, so no `max_output`: it keeps
 
 **Held to the window.** Every cloud request's ceiling is then
 held to the room the model's context window leaves
-(`llm_context_fit_reply`): the window less the request's input, estimated as
-the compaction check does (calibrated once a response has counted one), less
-a 2% slack, and never below 1024. Not every vendor needs it: on Claude 4.5+
+(`llm_context_fit_reply`): the window less the request's input and a safety
+margin, never below 1024. The input is estimated as the compaction check does,
+calibrated by the session's measured requests only when the request is that
+session's own conversation turn; a side call (memory extraction, compaction,
+a briefing, a summarizer) or a call with no session uses its own plain
+estimate, never the local session's or another conversation's count
+(`llm_cache_monitor_conversation_session`). The margin is 10% of the input
+(the estimate reads ~4 characters a token, and code, non-English text and
+images run denser) plus 2% of the window. Not every vendor needs it: on Claude 4.5+
 and the OpenAI Responses API a reply that reaches the window just stops,
 where older Claude models reject the request outright. Local servers aren't
 clamped: they stop at their window rather than reject, and a local window read
