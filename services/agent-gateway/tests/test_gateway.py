@@ -1977,6 +1977,7 @@ def test_agent_writes_the_pull_request_once_per_head(store, monkeypatch):
       "Made by a coding agent for DAWN.")
    assert rmod.pr_title(t, "job name") == "Fix the parser"
    assert t["session_cost"] == 0.5 and t["cost_usd"] == pytest.approx(0.2)  # the fork's growth
+   assert store.spent_since(0) == pytest.approx(0.2)    # and in the day's spend
    asyncio.run(r.finish("t1", report))                  # same head: not asked again
    assert len(asked) == 2
    r.repos.head = "1111111111111111"                    # a revise's commits; writing fails

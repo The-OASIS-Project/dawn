@@ -194,10 +194,11 @@ class Store:
       self.db.commit()
 
    def spent_since(self, since: float) -> float:
-      """Spend of every run that ended since `since` (each run logs its cost)."""
+      """Spend since `since`: every run's (logged when it ends) and every pull
+      request turn's."""
       row = self.db.execute(
          "SELECT COALESCE(SUM(json_extract(data, '$.cost_usd')), 0) FROM events "
-         "WHERE kind = 'run_end' AND ts >= ?", (since,)).fetchone()
+         "WHERE kind IN ('run_end', 'pr_written') AND ts >= ?", (since,)).fetchone()
       return row[0]
 
    # --- events ------------------------------------------------------------

@@ -609,11 +609,14 @@ static struct json_object *view_job_state(int user_id,
       struct json_object *task = json_object_object_get(ans, "task");
       struct json_object *pub = json_object_object_get(task, "published");
       struct json_object *jleft = json_object_object_get(ans, "unpublished_commits");
-      /* No task at all: the gateway's state was lost, nothing is held there
-       * (a close of it is recorded by DAWN alone). */
+      /* No task at all (the gateway's state was lost): closed once DAWN recorded
+       * its close (Close does), so the button stays until then and the delete
+       * guard, which reads that record, agrees. */
+      int64_t holder = 0;
       closed = coding_gateway_jstr(task, "closed")[0] != '\0' ||
                (!json_object_is_type(task, json_type_object) &&
-                strcmp(rec->job_status, "queued") != 0 && strcmp(rec->job_status, "running") != 0);
+                conv_db_job_holds_agent_work(job, user_id, &holder) == AUTH_DB_SUCCESS &&
+                holder == 0);
       published = json_object_is_type(pub, json_type_object);
       left = json_object_is_type(jleft, json_type_int) ? json_object_get_int(jleft) : -1;
       const char *url = coding_gateway_jstr(pub, "pr_url");

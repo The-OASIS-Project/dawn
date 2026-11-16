@@ -761,7 +761,10 @@ class Runner:
       if result and result.total_cost_usd is not None:
          before = self.store.task(task_id)["session_cost"]
          total = result.total_cost_usd
-         self.store.add_cost(task_id, total - before if total >= before else total)
+         cost = total - before if total >= before else total
+         self.store.add_cost(task_id, cost)
+         # Its own kind (DAWN reads run_end as a run's end), counted in the day's spend.
+         self.store.add_event(task_id, "pr_written", cost_usd=cost)
       pr = parse_pr(result.result if result and not result.is_error else "")
       if pr:
          self.store.update_task(task_id, pr_title=pr[0], pr_description=pr[1], pr_head=head)

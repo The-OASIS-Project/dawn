@@ -54,6 +54,7 @@ static atomic_int g_ncalls; /* the cancel thread calls too */
 static bool g_start_fails;
 static bool g_start_queued; /* task_start: every slot busy, so it waits its turn */
 static bool g_task_gone;    /* task_list by client_ref: the gateway has no such task */
+static int64_t g_holder;    /* conv_db_job_holds_agent_work's answer: no close recorded yet */
 static char g_recorded[32]; /* the gateway kind of the last agent event DAWN recorded itself */
 static bool g_cancel_during_start; /* the job is cancelled while task_start runs */
 static int g_start_lost;           /* task_start answers lost before one arrives */
@@ -372,6 +373,11 @@ char *event_payload_agent(const char *gw_kind,
    snprintf(g_recorded, sizeof(g_recorded), "%s", gw_kind);
    return strdup("{}");
 }
+int conv_db_job_holds_agent_work(int64_t conv_id, int user_id, int64_t *holder) {
+   (void)conv_id, (void)user_id;
+   *holder = g_holder;
+   return AUTH_DB_SUCCESS;
+}
 session_t *session_get(uint32_t session_id) {
    (void)session_id;
    return NULL; /* no live session to release questions in */
@@ -589,6 +595,7 @@ void setUp(void) {
    g_start_fails = false;
    g_start_queued = false;
    g_task_gone = false;
+   g_holder = 0;
    g_recorded[0] = '\0';
    g_cancel_during_start = false;
    g_start_lost = 0;
@@ -2198,6 +2205,21 @@ static void test_close_when_the_gateway_lost_the_task(void) {
    free(r);
    TEST_ASSERT_EQUAL_STRING("closed", g_recorded);
    TEST_ASSERT_EQUAL_INT(-1, last_call("task_close")); /* nothing asked of the gateway */
+
+   /* The viewer: Close stays until DAWN recorded the close, then it reads closed. */
+   g_holder = 42;
+   char *err = NULL;
+   struct json_object *v = coding_view_fetch(5, 42, false, "", "diff", &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(v, err);
+   TEST_ASSERT_FALSE(json_object_get_boolean(
+       json_object_object_get(json_object_object_get(v, "job_state"), "closed")));
+   json_object_put(v);
+   g_holder = 0;
+   v = coding_view_fetch(5, 42, false, "", "diff", &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(v, err);
+   TEST_ASSERT_TRUE(json_object_get_boolean(
+       json_object_object_get(json_object_object_get(v, "job_state"), "closed")));
+   json_object_put(v);
 }
 
 int main(void) {

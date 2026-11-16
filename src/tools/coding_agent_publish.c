@@ -948,14 +948,17 @@ char *coding_close(struct json_object *details, int user_id, const turn_origin_t
    turn_origin_note_prepare(session_get_command_context());
    char lost[CP_LOST_TEXT_MAX];
    lost_text(lost, sizeof(lost), want.commits, want.files);
-   snprintf(buf, sizeof(buf),
-            "Closing %s%s deletes %s on branch %s%s%.12s%s; nothing else has them. Read this to "
-            "the user and ask them to confirm; if they say yes in their reply, call coding_agent "
-            "with action 'confirm_close' and arguments {\"id\": %u}.",
-            want.label, stopped ? " (now stopped)" : "", lost,
-            want.branch[0] ? want.branch : "(its branch)", want.head[0] ? " (at " : "", want.head,
-            want.head[0] ? ")" : "", (unsigned)id);
-   return strdup(buf);
+   /* Grown, not fixed: a cut here would lose the id the confirm needs. */
+   strbuf_t sb;
+   strbuf_init(&sb, 512);
+   strbuf_appendf(&sb,
+                  "Closing %s%s deletes %s on branch %s%s%.12s%s; nothing else has them. Read this "
+                  "to the user and ask them to confirm; if they say yes in their reply, call "
+                  "coding_agent with action 'confirm_close' and arguments {\"id\": %u}.",
+                  want.label, stopped ? " (now stopped)" : "", lost,
+                  want.branch[0] ? want.branch : "(its branch)", want.head[0] ? " (at " : "",
+                  want.head, want.head[0] ? ")" : "", (unsigned)id);
+   return strbuf_steal(&sb);
 }
 
 char *coding_close_confirm(struct json_object *details, int user_id, const turn_origin_t *origin) {
