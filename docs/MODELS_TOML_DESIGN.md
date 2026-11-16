@@ -106,7 +106,8 @@ OpenAI (developers.openai.com + model reference):
 
 | prefix | context | note |
 |---|---|---|
-| gpt-6-astra | 1050000 | added Nov 2026 |
+| gpt-6-astra / gpt-6-sol / gpt-6.1-sol / gpt-6.1-terra / gpt-6-luna / gpt-6-cyber | 1050000 | added Nov 2026, each by name (no gpt-6 catch-all) |
+| gpt-5.6-cyber | 400000 | under the gpt-5.6 row it read as 1050000 |
 | gpt-5.6 | 1050000 | luna/sol etc. |
 | gpt-5.5 | 1050000 | API window (Codex surface caps at 400K) |
 | gpt-5.4 | 256000 | |
@@ -153,13 +154,17 @@ reply that doesn't reason, a local model, and a row without `max_output`.
 | claude-mythos-5 | 128000 | each the same model as its Fable (5, 5.1, 5.2) |
 | gemini-3 / gemini-2.5 | 65536 | ai.google.dev model pages |
 | gemini-4 (carbon, argon) / gemini-4-hydrogen | 65536 | synchronous limit; long decode (up to 1M) isn't used |
-| gpt-6-astra | 128000 | |
+| gpt-6-astra / gpt-6-sol / gpt-6.1-sol / gpt-6.1-terra / gpt-6-luna | 128000 | |
 
-Reasoning on the newest rows (Nov 2026): gpt-6-astra takes low through max and
-can't turn reasoning off. Gemini 4 can't turn it off either; Carbon and Argon
+Reasoning on the newest rows (Nov 2026): each listed GPT-6 model takes low through
+max, and gpt-6-sol, gpt-6.1-terra and gpt-6-luna also take "none" (DAWN's
+"disabled"); gpt-6-astra and gpt-6.1-sol can't turn reasoning off. GPT-6 has no
+family row: gpt-6-cyber (its page lists no effort levels) and any later gpt-6
+model get the OpenAI default, no reasoning parameters, as "gpt-5." does for a
+newer gpt-5.x. Gemini 4 can't turn it off either; Carbon and Argon
 take low/medium/high, Hydrogen adds xhigh (Google's OpenAI endpoint maps
-`reasoning_effort` to `thinking_level`). Cache pricing: gpt-6-astra reads at
-0.10x with 1.25x writes; Gemini 4 has implicit caching only, reads at 0.05x
+`reasoning_effort` to `thinking_level`). Cache pricing: the GPT-6 models write at 1.25x
+and read at 0.10x (astra, sol, luna, cyber) or 0.05x (6.1 sol, 6.1 terra); Gemini 4 has implicit caching only, reads at 0.05x
 with no write premium.
 
 Every request path is sized this way: Claude Messages (direct and OpenRouter),

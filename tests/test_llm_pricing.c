@@ -50,6 +50,15 @@ void test_shipped_models_toml_parses(void) {
    toml_datum_t window = toml_int_in(toml_table_in(s_root, "anthropic"), "claude-opus-5");
    TEST_ASSERT_TRUE(window.ok);
    TEST_ASSERT_EQUAL_INT64(1000000, window.u.i);
+   /* GPT-5.6 Cyber has its own, smaller window than the gpt-5.6 row; each GPT-6
+    * model is listed by name. */
+   toml_table_t *openai = toml_table_in(s_root, "openai");
+   TEST_ASSERT_EQUAL_INT64(400000, toml_int_in(openai, "gpt-5.6-cyber").u.i);
+   const char *gpt6[] = { "gpt-6-astra",   "gpt-6-sol",  "gpt-6.1-sol",
+                          "gpt-6.1-terra", "gpt-6-luna", "gpt-6-cyber" };
+   for (size_t i = 0; i < sizeof(gpt6) / sizeof(gpt6[0]); i++) {
+      TEST_ASSERT_EQUAL_INT64_MESSAGE(1050000, toml_int_in(openai, gpt6[i]).u.i, gpt6[i]);
+   }
 }
 
 void test_anthropic_prices_per_model(void) {
@@ -90,6 +99,14 @@ void test_gpt6_astra_and_gemini_4_prices(void) {
    const llm_cache_pricing_t astra = price(CLOUD_PROVIDER_OPENAI, "gpt-6-astra");
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, astra.read); /* $1 on $10 */
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.25f, astra.write_5m);
+   /* The rest of GPT-6: 6.1 reads at 0.05x, the others 0.10x; writes 1.25x. */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, price(CLOUD_PROVIDER_OPENAI, "gpt-6-sol").read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f, price(CLOUD_PROVIDER_OPENAI, "gpt-6.1-sol").read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f, price(CLOUD_PROVIDER_OPENAI, "gpt-6.1-terra").read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, price(CLOUD_PROVIDER_OPENAI, "gpt-6-luna").read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.25f, price(CLOUD_PROVIDER_OPENAI, "gpt-6-cyber").write_5m);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f,
+                            price(CLOUD_PROVIDER_OPENROUTER, "openai/gpt-6.1-terra").read);
    /* Gemini 4: implicit caching only, reads at 0.05x, no write premium. */
    const llm_cache_pricing_t hydrogen = price(CLOUD_PROVIDER_GEMINI, "gemini-4-hydrogen");
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f, hydrogen.read);

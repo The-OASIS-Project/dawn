@@ -47,10 +47,15 @@ than fits.
 cost. That no longer caps them. Lower the reasoning effort instead: it's what decides how much the
 model thinks, and with it what a reply costs.
 
-**If you already use GPT-6 Astra, a Gemini 4 model or Claude Mythos.** DAWN now knows these
-models' reasoning settings and sends them the conversation's effort. Before, GPT-6 Astra and
-Gemini 4 ran at the provider's default (Gemini 4 Hydrogen's is high), and Mythos was offered only
-low to high. Check the effort in the WebUI's reasoning menu.
+**If you already use a GPT-6 model, a Gemini 4 model or Claude Mythos.** DAWN now knows these
+models' reasoning settings and sends them the conversation's effort. Before, GPT-6 (Astra, Sol,
+6.1 Sol, 6.1 Terra, Luna) and Gemini 4 ran at the provider's default (Gemini 4 Hydrogen's is
+high), and Mythos was offered only low to high. Check the effort in the WebUI's reasoning menu.
+GPT-6 Cyber still gets no reasoning setting: OpenAI doesn't list its levels.
+
+**If you use GPT-5.6 Cyber.** DAWN took its context window to be GPT-5.6's 1,050,000 tokens; it's
+400,000. Its conversations are now compacted well before they reach that, where a long one could
+fail before.
 
 ---
 

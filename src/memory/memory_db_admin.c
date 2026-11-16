@@ -99,8 +99,14 @@ static const cost_entry_t COST_TABLE[] = {
    { "claude", "claude-opus-5-5", 4.00, 20.00 },
    { "claude", "claude-opus", 5.00, 25.00 }, /* Opus 4.5 through 5 (4 and 4.1 are retired) */
    { "claude", "claude", 1.00, 5.00 },       /* generic Claude fallback */
-   /* OpenAI */
-   { "openai", "gpt-6-astra", 10.00, 50.00 }, /* prompts up to 272K tokens */
+   /* OpenAI — developers.openai.com model pages, 2026-11-16; prompts up to 272K tokens */
+   { "openai", "gpt-6-astra", 10.00, 50.00 },
+   { "openai", "gpt-6-cyber", 20.00, 100.00 },
+   { "openai", "gpt-6-sol", 2.00, 10.00 },
+   { "openai", "gpt-6.1-sol", 2.00, 10.00 },
+   { "openai", "gpt-6.1-terra", 1.00, 5.00 },
+   { "openai", "gpt-6-luna", 0.10, 0.50 },
+   { "openai", "gpt-5.6-cyber", 12.50, 75.00 },
    { "openai", "gpt-4o-mini", 0.15, 0.60 },
    { "openai", "gpt-4o", 2.50, 10.00 },
    { "openai", "gpt-5", 2.50, 10.00 },

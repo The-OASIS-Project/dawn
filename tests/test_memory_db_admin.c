@@ -481,9 +481,21 @@ void test_estimate_cloud_model_rates(void) {
       TEST_ASSERT_DOUBLE_WITHIN_MESSAGE(haiku * 0.001, haiku * cases[i].multiple,
                                         estimate_high_on("claude", cases[i].model), cases[i].model);
    }
-   /* GPT-6 Astra: $10 / $50, the same 1:5. */
-   TEST_ASSERT_DOUBLE_WITHIN(haiku * 0.001, haiku * 10.0,
-                             estimate_high_on("openai", "gpt-6-astra"));
+   /* GPT-6: each at the same 1:5. */
+   const struct {
+      const char *model;
+      double multiple;
+   } gpt6[] = {
+      { "gpt-6-astra", 10.0 }, { "gpt-6-cyber", 20.0 },  { "gpt-6-sol", 2.0 },
+      { "gpt-6.1-sol", 2.0 },  { "gpt-6.1-terra", 1.0 }, { "gpt-6-luna", 0.1 },
+   };
+   for (size_t i = 0; i < sizeof(gpt6) / sizeof(gpt6[0]); i++) {
+      TEST_ASSERT_DOUBLE_WITHIN_MESSAGE(haiku * 0.001, haiku * gpt6[i].multiple,
+                                        estimate_high_on("openai", gpt6[i].model), gpt6[i].model);
+   }
+   /* GPT-5.6 Cyber ($12.50 / $75) has its own row, above the gpt-5 family's. */
+   TEST_ASSERT_TRUE(estimate_high_on("openai", "gpt-5.6-cyber") >
+                    estimate_high_on("openai", "gpt-5.6-luna") * 4.0);
 }
 
 void test_estimate_unknown_local_provider_marks_uncosted(void) {

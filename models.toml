@@ -22,11 +22,19 @@
 #
 # Keys must be quoted (model ids contain '.' and '-').
 # Sources: developers.openai.com model reference, platform.claude.com (Aug 2026;
-# gpt-6-astra and Gemini 4, with ai.google.dev, Nov 2026).
+# the GPT-6 family, gpt-5.6-cyber and Gemini 4, with ai.google.dev, Nov 2026).
 
 [openai]
-# GPT-6 Astra — 1,050,000
+# GPT-6 family — 1,050,000 each.  Listed one by one, no "gpt-6" catch-all: an
+# alias can have a smaller window than its family (gpt-5.6-cyber below).
 "gpt-6-astra" = 1050000
+"gpt-6-sol" = 1050000
+"gpt-6.1-sol" = 1050000
+"gpt-6.1-terra" = 1050000
+"gpt-6-luna" = 1050000
+"gpt-6-cyber" = 1050000
+# GPT-5.6 Cyber — 400,000 (the gpt-5.6 row below would give it 1,050,000)
+"gpt-5.6-cyber" = 400000
 # GPT-5.6 family — 1,050,000 (gpt-5.6, gpt-5.6-luna, gpt-5.6-sol, ...)
 "gpt-5.6" = 1050000
 # GPT-5.5 — 1,050,000 API window (the Codex surface caps it at 400K, not the API)
@@ -121,7 +129,7 @@
 # listed gets its provider's default (Anthropic 0.10/1.25/2.00, OpenAI and
 # Gemini 0.10/1.00).  OpenRouter models ("anthropic/...") use their vendor's
 # table.  Used for DAWN's "saved by caching" estimates and cost telemetry only.
-# Sources (list prices, Sep 2026; Anthropic, gpt-6-astra and Gemini 4 rows Nov 2026):
+# Sources (list prices, Sep 2026; Anthropic, GPT-6 and Gemini 4 rows Nov 2026):
 # platform.claude.com, developers.openai.com
 # /api/docs/pricing, ai.google.dev/gemini-api/docs/pricing.
 
@@ -136,7 +144,12 @@
 "claude" = { read = 0.10, write_5m = 1.25, write_1h = 2.0 }
 
 [cache_pricing.openai]
-"gpt-6-astra" = { read = 0.10, write_5m = 1.25, write_1h = 1.25 } # $1 on $10, writes $12.50
+"gpt-6-astra" = { read = 0.10, write_5m = 1.25, write_1h = 1.25 }   # $1 on $10, writes $12.50
+"gpt-6-sol" = { read = 0.10, write_5m = 1.25, write_1h = 1.25 }     # $0.20 on $2
+"gpt-6.1-sol" = { read = 0.05, write_5m = 1.25, write_1h = 1.25 }   # $0.10 on $2
+"gpt-6.1-terra" = { read = 0.05, write_5m = 1.25, write_1h = 1.25 } # $0.05 on $1 (30-minute writes)
+"gpt-6-luna" = { read = 0.10, write_5m = 1.25, write_1h = 1.25 }    # $0.01 on $0.10
+"gpt-6-cyber" = { read = 0.10, write_5m = 1.25, write_1h = 1.25 }   # $2 on $20, writes $25
 "gpt-5.6" = { read = 0.10, write_5m = 1.25, write_1h = 1.25 } # sol, terra, luna
 "gpt-5" = { read = 0.10, write_5m = 1.0, write_1h = 1.0 }     # 5.0-5.5, mini, nano
 "gpt-4.1" = { read = 0.25, write_5m = 1.0, write_1h = 1.0 }
@@ -211,7 +224,15 @@
 # Default for an unlisted Claude model: adaptive, low/medium/high, no "disabled".
 
 [thinking.openai]
+# GPT-6: each model's own effort set ("disabled" is effort "none", which only
+# some take).  No "gpt-6" family row, so an unlisted gpt-6 model (gpt-6-cyber,
+# whose page lists no effort levels) gets the OpenAI default: no reasoning
+# parameters, the same guard "gpt-5." gives a newer gpt-5.x.
 "gpt-6-astra" = { modes = ["enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"gpt-6-sol" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"gpt-6.1-sol" = { modes = ["enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"gpt-6.1-terra" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"gpt-6-luna" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
 "gpt-5.6" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }
 "gpt-5.5" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }
 "gpt-5.4" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }

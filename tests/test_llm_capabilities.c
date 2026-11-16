@@ -448,6 +448,25 @@ static void test_reply_max_tokens_follow_the_effort(void) {
                                              LLM_THINK_ENABLED, "medium", true));
 }
 
+/* Each GPT-6 model has its own effort set: "none" (DAWN's "disabled") only on
+ * some.  An unlisted one (gpt-6-cyber) gets no reasoning parameters. */
+static void test_gpt6_family_rows(void) {
+   const cloud_provider_t o = CLOUD_PROVIDER_OPENAI;
+   assert_resolved(resolve(o, "gpt-6-sol", "disabled", ""), LLM_THINK_DISABLED, "", false);
+   assert_resolved(resolve(o, "gpt-6.1-terra", "disabled", ""), LLM_THINK_DISABLED, "", false);
+   assert_resolved(resolve(o, "gpt-6-luna", "disabled", ""), LLM_THINK_DISABLED, "", false);
+   assert_resolved(resolve(o, "gpt-6.1-sol", "disabled", ""), LLM_THINK_ENABLED, "low", true);
+   assert_resolved(resolve(o, "gpt-6.1-sol", "enabled", "max"), LLM_THINK_ENABLED, "max", false);
+   assert_resolved(resolve(o, "gpt-6-luna", "enabled", "xhigh"), LLM_THINK_ENABLED, "xhigh", false);
+   TEST_ASSERT_FALSE(resolve(o, "gpt-6-cyber", "enabled", "high").controllable);
+   TEST_ASSERT_EQUAL_INT(128000, reply_tokens(o, "gpt-6-luna", LLM_THINK_ENABLED, "max", true));
+   TEST_ASSERT_EQUAL_INT(65536, reply_tokens(o, "gpt-6.1-terra", LLM_THINK_ENABLED, "high", true));
+   llm_thinking_resolved_t cyber = resolve(o, "gpt-6-cyber", "enabled", "high");
+   TEST_ASSERT_EQUAL_INT(16384, llm_reply_max_tokens(LLM_CLOUD, o, "gpt-6-cyber", &cyber, true));
+   /* GPT-5.6 Cyber keeps the gpt-5.6 row. */
+   TEST_ASSERT_TRUE(resolve(o, "gpt-5.6-cyber", "enabled", "high").controllable);
+}
+
 /* Neither can turn reasoning off; xhigh is Gemini 4 Hydrogen's alone. */
 static void test_gpt6_astra_and_gemini_4_rows(void) {
    assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "gpt-6-astra", "disabled", ""), LLM_THINK_ENABLED,
@@ -527,6 +546,7 @@ int main(void) {
    RUN_TEST(test_wire_shape);
    RUN_TEST(test_reply_max_tokens_follow_the_effort);
    RUN_TEST(test_gpt6_astra_and_gemini_4_rows);
+   RUN_TEST(test_gpt6_family_rows);
    RUN_TEST(test_reply_max_tokens_keep_the_configured_value);
    const int rc = UNITY_END();
    llm_capabilities_free_registry();
