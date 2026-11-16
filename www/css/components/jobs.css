@@ -36,9 +36,20 @@
    outline-offset: 2px;
 }
 
-#jobs-btn svg {
+#jobs-btn > svg {
    width: 20px;
    height: 20px;
+}
+
+/* Running jobs: their count over the icon, in its place. */
+#jobs-btn #global-jobs-pill {
+   position: absolute;
+   inset: 0;
+   margin: auto;
+}
+
+#jobs-btn.has-jobs > svg {
+   visibility: hidden;
 }
 
 #jobs-btn.hidden {
@@ -782,10 +793,6 @@
 }
 
 /* The jobs pill: a dot when a coding job needs the user (focus keeps its ring). */
-#global-jobs-pill.needs-you {
-   position: relative;
-}
-
 #global-jobs-pill.needs-you::after {
    content: '';
    position: absolute;

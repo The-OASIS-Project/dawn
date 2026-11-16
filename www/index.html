@@ -315,19 +315,6 @@
                </button>
             </div>
             <div id="header-controls">
-               <!-- A real <button>, not a span with role="button": it opens the
-                    Background Jobs panel, and a native button brings the role,
-                    focusability and Space-on-keyup behaviour for free.  Its
-                    text and aria-label are written by jobs-activity.js; its
-                    click behaviour by jobs.js. -->
-               <button
-                  id="global-jobs-pill"
-                  type="button"
-                  class="jobs-pill jobs-pill-global hidden"
-                  aria-live="off"
-                  aria-haspopup="dialog"
-                  aria-expanded="false"
-               ></button>
                <button
                   id="debug-btn"
                   title="Show command/tool call details"
@@ -420,6 +407,15 @@
                      <polyline points="2 17 12 22 22 17" />
                      <polyline points="2 12 12 17 22 12" />
                   </svg>
+                  <!-- While jobs run, their count sits over this icon, so the
+                       header never shifts; the button itself stays the way in.
+                       Drawn by jobs-activity.js (which also writes the
+                       button's label); decoration for AT. -->
+                  <span
+                     id="global-jobs-pill"
+                     class="jobs-pill jobs-pill-global hidden"
+                     aria-hidden="true"
+                  ></span>
                </button>
                <button
                   id="doc-library-btn"
@@ -2195,7 +2191,7 @@ Format rules:
             <!-- Background-jobs running indicator: floats above the composer beside
                  the "working" pill.  Shown whenever this conversation has jobs
                  running.  Rendered by DawnJobsActivity. -->
-            <!-- A <button>, like #global-jobs-pill: it opens the same panel.
+            <!-- A <button>: it opens the jobs panel, as the jobs button does.
                  Deliberately NOT a live region.  It used to carry
                  role="status" aria-live="polite", but that never announced
                  anything: its only child is aria-hidden (the ⚙ glyph), and

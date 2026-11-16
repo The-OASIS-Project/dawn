@@ -390,10 +390,6 @@
    .cv-viewbtn {
       min-height: 36px;
    }
-
-   .cv-row {
-      grid-template-columns: 4ch 4ch 2ch 1fr;
-   }
 }
 
 /* ---- publish and close (coding-viewer-actions.js) ------------------------ */

@@ -60,7 +60,7 @@
       return Math.max(0, Number(x) || 0);
    }
 
-   /* @p h, from the viewer: dlg, panel, footer, elem, appendShown, shownPath,
+   /* @p h, from the viewer: dlg, panel, footer, elem, appendShown, shownPath, close,
     * say, shortHead, job(), head() (the full head it loaded), isOpen(), refresh(), home(). */
    function create(h) {
       const elem = h.elem;
@@ -74,6 +74,7 @@
       let req = null; /* the request in flight: {nonce, timer} */
       let preview = null; /* the preview shown: {head, sha, workflows, title, desc, edit} */
       let lose = null; /* what a close would lose, as shown: {head} */
+      let panelDone = null; /* what Done (and Escape) does on a result panel; null: back */
       let seq = 0;
       const kinds = new Map(); /* nonce -> 'preview' | 'publish' | 'close' | 'close-confirm' */
       /* job -> {title, desc}: what the user typed, kept until it is published, so a
@@ -293,6 +294,7 @@
 
       /* @p tone: 'publish', 'lose' or '' (neutral). */
       function showPanel(tone, nodes, btns) {
+         panelDone = null; /* a result sets its own after this */
          if (mode !== 'panel') panelFrom = mode === 'confirm' ? 'close' : 'publish';
          mode = 'panel';
          h.dlg.classList.add('show-action');
@@ -307,6 +309,7 @@
 
       function closePanel(refocus) {
          const from = panelFrom;
+         panelDone = null;
          mode = '';
          panelFrom = '';
          panelBtns = null;
@@ -700,7 +703,8 @@
 
       /* ---- outcomes ----------------------------------------------------- */
 
-      function result(tone, title, p, retry) {
+      /* @p done: what Done does (default: back to the job's view). */
+      function result(tone, title, p, retry, done) {
          const msg = p.message || p.error || (p.ok ? 'Done.' : 'It didn’t go through.');
          const box = para('');
          h.appendShown(box, String(msg));
@@ -715,7 +719,8 @@
             if (!retry) {
                return [
                   button('Done', 'primary', 'done', function () {
-                     closePanel(true);
+                     if (panelDone) panelDone();
+                     else closePanel(true);
                   }),
                ];
             }
@@ -723,6 +728,7 @@
             const again = retry === startPublish ? 'Show the new preview' : 'Check again';
             return [button(again, 'primary', 'retry', retry), cancelBtn()];
          });
+         panelDone = done || null; /* after showPanel: Escape does the same */
          h.say(shownText(msg));
       }
 
@@ -741,7 +747,8 @@
          } else if (p.needs_confirm && !p.closed) {
             renderLose(p.needs_confirm);
          } else if (p.ok) {
-            result('', p.closed ? 'Closed' : 'Job #' + h.job(), p, null);
+            /* A closed job has nothing left to look at: Done closes the viewer. */
+            result('', p.closed ? 'Closed' : 'Job #' + h.job(), p, null, p.closed ? h.close : null);
          } else {
             result('lose', 'Not closed', p, kind === 'close-confirm' ? sendClose : null);
          }
@@ -816,6 +823,10 @@
          },
          /* Escape: the panel or the close question first.  True when handled. */
          dismiss: function () {
+            if (mode === 'panel' && panelDone) {
+               panelDone(); /* a closed job: nothing left to go back to */
+               return true;
+            }
             if (mode === 'panel') {
                closePanel(true);
                return true;

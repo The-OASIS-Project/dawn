@@ -259,6 +259,17 @@ window.DawnJobsActivity = (function () {
          plural(n) + (need > 0 ? ', ' + need + ' need' + (need === 1 ? 's' : '') + ' you' : '')
       );
       if (pill) pill.classList.toggle('needs-you', need > 0);
+      /* It sits inside the jobs button: the button carries what it says (the
+       * badge keeps no tooltip of its own, which would hide the button's). */
+      var btn = document.getElementById('jobs-btn');
+      if (btn && pill) {
+         var label = n > 0 ? 'Background jobs: ' + pill.title : 'Open background jobs';
+         pill.removeAttribute('title');
+         pill.removeAttribute('aria-label');
+         btn.classList.toggle('has-jobs', n > 0);
+         btn.setAttribute('aria-label', label);
+         btn.title = n > 0 ? label : 'Background Jobs';
+      }
    }
 
    function renderAll() {
