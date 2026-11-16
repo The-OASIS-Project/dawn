@@ -12,6 +12,26 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-11-16 — Gemini 2.5 Flash and 2.5 Pro are retired on December 1, 2026
+
+**What changed.** Google is retiring `gemini-2.5-flash` and `gemini-2.5-pro`. From December 1,
+2026, Google answers requests to `gemini-2.5-flash` with `gemini-3.5-flash-lite`, and requests to
+`gemini-2.5-pro` with `gemini-3.8-flash`, billed at those models' rates. Neither can be picked in
+Google AI Studio any more, and only accounts that already used them can call them. Before August 2026, DAWN's default
+Gemini model list began with these two, so an install set up then may still have them in
+`dawn.toml`.
+
+**What you need to do.** In `dawn.toml`, look for `gemini-2.5-flash` and `gemini-2.5-pro` in
+`[llm.cloud] gemini_models`, in any task's model setting (`compact_model`, `[llm.silent_observe]
+model`, `[memory] extraction_model`), and `google/gemini-2.5-flash` / `google/gemini-2.5-pro` in
+`openrouter_models`. Replace `gemini-2.5-flash` with `gemini-3.5-flash-lite`, Google's named
+replacement at the same list price, and `gemini-2.5-pro` with `gemini-3.8-flash`, or edit the
+lists in the WebUI's LLM settings. Nothing else changes: DAWN keeps sending the reasoning level
+you pick, and Google maps it to the newer models' thinking levels. `gemini-2.5-flash-lite` is not
+being retired.
+
+---
+
 ## 2026-11-03 — A named audio device is no longer swapped for another
 
 **What changed.** When the microphone or speaker named in `[audio] capture_device` /
