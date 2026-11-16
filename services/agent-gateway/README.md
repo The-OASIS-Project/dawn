@@ -46,6 +46,11 @@ client (DAWN)  --MCP + bearer token-->  agent-gateway (user dawn, 127.0.0.1:9760
   never pushes and holds no GitHub credential: publishing (`task_publish`) pushes the collected
   `agent/*` branch from the mirror and can open a PR, on the user's confirmation in DAWN. Never
   a force push.
+- **The pull request is the agent's.** When a run ends with new commits, the gateway asks the
+  agent for the PR's title and description, written for the repo's reviewers (summary, changes,
+  testing), in one turn in a fork of its session: its loaded context (read from cache, with the
+  session's tool set), every tool call refused, the main session untouched. Publishing uses them, ending with "Made by a coding agent for DAWN.";
+  if that turn fails, the agent's report describes the work instead.
 - **Asking the operator.** A host not on the allowlist, a tool not on the list, or a question from
   the agent records a request and the gateway stops the run; nothing waits open. The answer
   resumes the session. "allow" covers the task; "always_repo" and "always" become standing
@@ -54,7 +59,8 @@ client (DAWN)  --MCP + bearer token-->  agent-gateway (user dawn, 127.0.0.1:9760
 - **What the sandbox doesn't stop.** Any allowed host that accepts uploads (a package registry,
   the Anthropic API itself) is a way out for data the agent can read. Keep the allowlist short and
   the agent's reach (`/var/lib/dawn-agent`) free of anything private.
-- **Limits.** One task at a time by default; each has a budget and all share a daily one (the
+- **Limits.** One task at a time by default (a task asked for meanwhile waits its turn, queued);
+  each has a budget and all share a daily one (the
   gateway's estimate from Claude Code's reported cost; a run killed with the gateway loses its
   spend). The systemd unit caps the agent's memory and CPU so a build can't starve DAWN.
 - **Restarts.** Tasks and events are in `/var/lib/dawn-gateway/gateway.db`. A run cut off by a
@@ -179,15 +185,15 @@ is collected there whenever a run stops, so work in progress can be looked at to
 | Tool | Does |
 |---|---|
 | `agents_list` | agents, Claude Code and SDK versions, `update` (the updater's last result when it failed, rolled back or needs review), repos (`name`, `url`, `base`), tasks running and the limit |
-| `task_start {dawn_user_id, repo, task, budget_usd?, client_ref?}` | new branch `agent/<id>-<slug>`; returns at once, then clones in the background (`started` once the agent runs; `failed` if the clone fails); a repeated `client_ref` returns the task it already started |
+| `task_start {dawn_user_id, repo, task, budget_usd?, client_ref?}` | new branch `agent/<id>-<slug>`; returns at once, then clones in the background (`started` once the agent runs; `failed` if the clone fails). With every slot busy it returns with status `queued` (event `queued`) and starts by itself, oldest first, when a running task finishes; a spent daily budget refuses it. A repeated `client_ref` returns the task it already started |
 | `task_events {after_seq, wait_s}` | every task's events after `after_seq`, waiting up to 25 s |
 | `task_list {dawn_user_id, task?}` | a task with its pending requests and `unpublished_commits` (commits on its branch not in what was published; null when the mirror can't be read) (`task` null for a `client_ref` with none), or the user's recent tasks |
 | `task_reply {dawn_user_id, task, request_id, decision \| answer}` | `allow`, `always_repo`, `always` or `deny`; a question takes `answer` |
-| `task_revise {dawn_user_id, instructions, client_ref, budget_usd?, revise_ref?}` | more work for a completed or failed task: its session resumes on the same branch and clone (`revised`, then `resumed`); `budget_usd` adds to its budget; a repeated `revise_ref` adds nothing |
+| `task_revise {dawn_user_id, instructions, client_ref, budget_usd?, revise_ref?}` | more work for a completed or failed task: its session resumes on the same branch and clone (`revised`, then `resumed`), with the clone's `origin/<base>` first updated from the remote (through the mirror, as a bundle fetched in the jail; `base_updated`), so the agent can rebase onto work merged since; `budget_usd` adds to its budget; a repeated `revise_ref` adds nothing |
 | `task_cancel {dawn_user_id, task}` | stop; the branch is kept (a close collects the work committed so far before counting it) |
-| `task_publish {dawn_user_id, task, head, open_pr?, title?}` | push exactly `head` (the full commit id the user was shown, from `task_changes`) to the branch, open a PR; refused if the work has moved on; a second call returns the first result while nothing moved, and after a revise pushes the new commits (keeping an open PR, opening a new one if it was merged or closed) |
-| `task_close {dawn_user_id, task, head?}` | the user is done with a finished task: its clone and `refs/agent/<id>` are removed and it is marked `closed` (it then refuses revise, publish and the viewer tools). Without `head`, only when nothing would be lost (no commits, or all of them in what was published), else `{closed: false, unpublished_commits, head}`; with `head`, only while the branch is still at that commit |
-| `task_changes {dawn_user_id, task}` | the work so far: changed files with +/- counts (each marked `protected` when it matches the repo's patterns), commits, head |
+| `task_publish {dawn_user_id, task, head, open_pr?, title?, expect_body_sha256?, pr_title?, pr_description?}` | push exactly `head` (the full commit id the user was shown, from `task_changes`) to the branch, open a PR; refused if the work has moved on, or, with `expect_body_sha256` (`task_changes`' `pr_body_sha256`), if the PR description changed since it was shown; `pr_title` / `pr_description` are the user's own text for a new PR, sent instead of the agent's (the description with `pr_footer` appended; too long, a multi-line title, no PR to open, or a PR still open are refused); a second call returns the first result while nothing moved, and after a revise pushes the new commits (keeping an open PR, opening a new one if it was merged or closed). When GitHub says the branch already has an open PR, it is taken over only if the token's own user opened it; anyone else's is refused, named |
+| `task_close {dawn_user_id, task, head?}` | the user is done with a finished task: its clone and `refs/agent/<id>` are removed and it is marked `closed` (it then refuses revise, publish and the viewer tools). A task already closed returns `{closed: true}`. Without `head`, only when nothing would be lost (no commits, or all of them in what was published), else `{closed: false, unpublished_commits, head}`; with `head`, only while the branch is still at that commit |
+| `task_changes {dawn_user_id, task}` | the work so far: changed files with +/- counts (each marked `protected` when it matches the repo's patterns), commits, head; `history_only` (`[{path, protected}]`: paths its commits changed that the net diff doesn't show, public too once pushed); `workflows` (any path, net or history, under `.github/workflows/`); `pr_title` (the title the agent wrote; null when none, then DAWN's), `pr_body` (the PR description `task_publish` would send now) and its `pr_body_sha256`, `pr_footer` (the line it appends to every description) |
 | `task_file {dawn_user_id, task, path, view}` | one file: `diff`, `new` (after) or `old` (before); too large, binary or missing are reported, not sent |
 | `task_tree {dawn_user_id, task, path?}` | one folder of the repo at the task's latest collected commit |
 | `grants_list {dawn_user_id}` / `grant_revoke {dawn_user_id, grant_id}` | standing grants |
@@ -209,6 +215,8 @@ agent's words, never as instructions.
 
 | `kind` | `data` |
 |---|---|
+| `queued` | `repo`, `branch`, `task` (waiting for a free slot) |
+| `base_updated` | `base`, `head`: before a follow-up's run, the clone's `origin/<base>` was set to the remote's |
 | `started` | `repo`, `branch`, `task` |
 | `tool` | `tool`, `brief` (what it ran, edited or searched; up to 300 chars) |
 | `progress` | `text` (the agent's words; up to 2000 chars) |
@@ -218,10 +226,10 @@ agent's words, never as instructions.
 | `reply` | `request_id`, `decision` |
 | `resumed` | (none): a new run of the same session |
 | `run_end` | `cost_usd` of that run |
-| `revised` | `revise_ref`, `budget_added`: the operator sent more work; checks on the next `completed` count from here |
+| `revised` | `revise_ref`, `budget_added`: the operator sent more work; checks on the next `completed` count from here, plus the last completion's when the branch's head hasn't moved since and that completion had nothing uncommitted |
 | `check` | `command` (a build or test command the agent ran, up to 300 chars), `ok`: its exit status, or null when the status wasn't its own (piped, or followed by other commands) |
 | `report_asked` | (none): a run ended with no report; the agent is resumed once to finish and report |
-| `completed` | `summary` (the agent's final report, up to 8000 chars), `branch`, `session_id`, `cost_usd` (the task's total), `commits` (`"<hash> <subject>"`, up to 20), `diffstat`, `uncommitted` (files changed but not committed), `protected` (changed paths matching the repo's `protected` patterns, up to 20), `checks` (each build or test command's last run: `command`, `ok`; up to 10) |
+| `completed` | `summary` (the agent's final report, up to 8000 chars), `branch`, `session_id`, `cost_usd` (the task's total), `commits` (`"<hash> <subject>"`, up to 20), `diffstat`, `uncommitted` (files changed but not committed), `protected` (changed paths matching the repo's `protected` patterns, up to 20), `checks` (each build or test command's last run: `command`, `ok`; up to 10), `head` (the branch's head the checks speak for) |
 | `failed` | `error`, `cost_usd` |
 | `cancelled` | (none) |
 | `published` | `pushed` (`owner/repo:branch`), `pr_url` when a PR was opened, `head` |
