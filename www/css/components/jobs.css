@@ -149,6 +149,7 @@
    overflow-y: auto;
    padding: 0.5rem 0 0.75rem;
    flex: 1;
+   min-height: 0; /* scroll inside the panel's max-height, never grow past it */
 }
 
 .jobs-section-head {
