@@ -240,6 +240,13 @@ static void test_openai_rows(void) {
 static void test_gemini_rows(void) {
    assert_resolved(resolve(CLOUD_PROVIDER_GEMINI, "gemini-3-flash-preview", "disabled", ""),
                    LLM_THINK_ENABLED, "low", true);
+   /* gemini-3.5-flash-lite, where Google routes gemini-2.5-flash from
+    * 2026-12-01, defaults to "minimal" thinking, which Google warns cuts tool
+    * loops short: DAWN always sends at least "low". */
+   assert_resolved(resolve(CLOUD_PROVIDER_GEMINI, "gemini-3.5-flash-lite", "disabled", ""),
+                   LLM_THINK_ENABLED, "low", true);
+   assert_resolved(resolve(CLOUD_PROVIDER_GEMINI, "gemini-3.5-flash-lite", "enabled", "high"),
+                   LLM_THINK_ENABLED, "high", false);
    TEST_ASSERT_FALSE(
        resolve(CLOUD_PROVIDER_GEMINI, "gemini-1.5-pro", "enabled", "high").controllable);
 }
