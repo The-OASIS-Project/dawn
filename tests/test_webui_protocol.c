@@ -278,6 +278,17 @@ static void test_a_request_echoes_only_what_is_safe(void) {
    json_object_put(p);
    webui_protocol_request_end();
 
+   /* an empty type and req are valid, and echoed as they came */
+   struct json_object *empty_req = json_tokener_parse("{\"req\":\"\"}");
+   webui_protocol_request_begin(&conn, "", empty_req);
+   p = json_object_new_object();
+   TEST_ASSERT_TRUE(webui_protocol_request_stamp(&conn, p, true));
+   TEST_ASSERT_EQUAL_STRING("", field(p, "request_type"));
+   TEST_ASSERT_EQUAL_STRING("", field(p, "req"));
+   json_object_put(p);
+   webui_protocol_request_end();
+   json_object_put(empty_req);
+
    /* a type or req one byte over the limit */
    char longer[WEBUI_REQ_MAX + 2];
    memset(longer, 't', sizeof(longer) - 1);

@@ -745,6 +745,29 @@ bool handle_smart_home_message(ws_connection_t *conn,
 /* Forward declaration — defined after handle_text_message */
 static bool webui_conn_create_session(ws_connection_t *conn);
 
+/* Note a whole JSON text frame as the request being handled (see
+ * webui_protocol_request_begin); a binary frame, a fragment or anything that
+ * doesn't parse notes nothing.  The caller ends it. */
+static void request_note_frame(ws_connection_t *conn, struct lws *wsi, const char *in, size_t len) {
+   if (lws_frame_is_binary(wsi) || !lws_is_final_fragment(wsi) || conn->text_buffer_len != 0 ||
+       len > INT_MAX) {
+      return;
+   }
+   struct json_tokener *tok = json_tokener_new();
+   struct json_object *root = tok ? json_tokener_parse_ex(tok, in, (int)len) : NULL;
+   struct json_object *type_obj = NULL, *payload = NULL;
+   if (root && json_object_object_get_ex(root, "type", &type_obj) &&
+       json_object_is_type(type_obj, json_type_string) &&
+       strlen(json_object_get_string(type_obj)) == (size_t)json_object_get_string_len(type_obj)) {
+      json_object_object_get_ex(root, "payload", &payload);
+      webui_protocol_request_begin(wsi, json_object_get_string(type_obj), payload);
+   }
+   json_object_put(root);
+   if (tok) {
+      json_tokener_free(tok);
+   }
+}
+
 /* Connections still in the registry: every socket is registered when it's
  * established and unregistered when it closes, whether or not it was counted
  * as a client */
@@ -997,7 +1020,11 @@ static int callback_websocket(struct lws *wsi,
             }
             if (conn->authenticated) {
                OLOG_INFO("WebUI: Session expired for authenticated connection, auto-creating");
-               if (!webui_conn_create_session(conn)) {
+               /* A refusal here drops the message: name it, as dispatch would. */
+               request_note_frame(conn, wsi, (const char *)in, len);
+               bool created = webui_conn_create_session(conn);
+               webui_protocol_request_end();
+               if (!created) {
                   break; /* Error already sent to client */
                }
                /* Fall through to normal message handling below */
