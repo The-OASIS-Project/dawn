@@ -136,6 +136,10 @@ class FakeRepos:
       return "abcdef1234567890", "base000"
 
    synced = 0  # follow-ups that updated the clone's base first
+   workflows = False  # the work changes .github/workflows
+
+   async def changes(self, name, task_id, base):
+      return {"workflows": self.workflows}
 
    async def sync_base(self, name, base, task_id):
       self.synced += 1
@@ -836,6 +840,13 @@ def test_publish_sends_the_users_own_title_and_description(store, monkeypatch):
    # The agent's description hash doesn't bind the user's own text.
    asyncio.run(r.publish("t1", 1, True, None, head, "0" * 64, "Mine", "my text"))
    assert r.repos.sent == ("Mine", "my text" + rmod.PR_FOOTER)
+   # Work that changes CI workflows is never pushed from here.
+   r.repos.workflows = True
+   store.update_task("t1", published=None)
+   with pytest.raises(ValueError, match="CI workflows"):
+      asyncio.run(r.publish("t1", 1, True, None, head, None, None, None))
+   r.repos.workflows = False
+   asyncio.run(r.publish("t1", 1, True, None, head, None, "Mine", "my text"))
    # Published already at this head: edits are refused, not reported as done.
    with pytest.raises(ValueError, match="published already"):
       asyncio.run(r.publish("t1", 1, True, None, head, None, "Other", None))
@@ -1337,6 +1348,14 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    assert git("rev-parse", "origin/main", cwd=wt) == upstream
    assert not (tmp_path / "home/work/aaaa0001/planted").exists()   # it didn't run
    assert not list((tmp_path / "mirrors").glob(".sync-*"))         # the bundle is gone
+   # Nothing new upstream: no bundle, the clone left as it is.
+   assert asyncio.run(repos.sync_base("r", "main", "aaaa0001")) == upstream
+   # One more commit: only it crosses (the bundle needs the clone's base).
+   (src / "f").write_text("z\n")
+   git("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qam", "later2", cwd=src)
+   upstream = git("rev-parse", "main", cwd=src)
+   assert asyncio.run(repos.sync_base("r", "main", "aaaa0001")) == upstream
+   assert git("rev-parse", "origin/main", cwd=wt) == upstream
    assert git("rev-parse", "refs/heads/main", cwd=tmp_path / "mirrors/r.git") == upstream
    asyncio.run(repos.drop("r", "aaaa0001"))  # nothing there: no error either
    asyncio.run(repos.remove("aaaa0001"))
@@ -1415,6 +1434,11 @@ def test_follow_up_run_updates_the_base_first(store, monkeypatch):
    asyncio.run(r.run("t1", "rebase onto main"))
    asyncio.run(r.run("t1", "the answer"))                # synced once per follow-up
    assert repos.synced == 1
+   assert "already pushed" not in asked[2]
+   store.update_task("t1", published='{"pushed": "o/r:b"}')   # published: merge, not rebase
+   store.add_event("t1", "revised", revise_ref="b", budget_added=0)
+   asyncio.run(r.run("t1", "more"))
+   assert "already pushed: to bring in the new base, merge it" in asked[-1]
    assert asked[0] == "first" and asked[1] == "the answer"
    assert asked[2].startswith("(Before this run the gateway updated origin/main to feedface0011.)")
    assert asked[2].endswith("rebase onto main")

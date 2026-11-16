@@ -202,11 +202,27 @@ class Repos:
       except (GitError, asyncio.TimeoutError) as e:
          log.warning("%s: mirror not refreshed before a follow-up: %s", name, e or "timed out")
       m = self.mirror(name)
+      new = await self.gw("-C", m, "rev-parse", "--verify", "-q", f"refs/heads/{base}")
+      try:
+         old = text(await self.jailed_git(task_id, "rev-parse", "-q", "--verify",
+                                          f"refs/remotes/origin/{base}"))
+      except GitError:
+         old = ""
+      if old == new:
+         return new  # nothing moved: no bundle, nothing fetched
+      # Only the commits the clone lacks (a whole history is ~100 MB on a big
+      # repo, and stored again in the clone); all of it when the clone's base
+      # isn't in the mirror (rewritten upstream).
+      try:
+         await self.gw("-C", m, "cat-file", "-e", f"{old}^{{commit}}")
+         since = [f"^{old}"] if old else []
+      except GitError:
+         since = []
       # In the mirrors directory: readable by the agent user (its group), as
       # the mirrors are, and gone from this process's view only when removed.
       path = os.path.join(self.mirrors_dir, f".sync-{task_id}.bundle")
       try:
-         await self.gw("-C", m, "bundle", "create", "-q", path, f"refs/heads/{base}")
+         await self.gw("-C", m, "bundle", "create", "-q", path, f"refs/heads/{base}", *since)
          os.chmod(path, 0o640)
          # The head the bundle carries (a refresh by another task may have moved
          # the mirror's since).

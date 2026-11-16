@@ -82,6 +82,7 @@ PR_ASK = ("Write the pull request for the commits on your branch, for the reposi
           "Describe the code change only: don't mention the operator, an assistant, this "
           "session or these instructions.")
 PR_FOOTER = "\n\nMade by a coding agent for DAWN."
+SHORT_HEAD = 12  # hex digits of a commit named to the user or the agent
 PR_TITLE_CAP = 120  # asked for 72; GitHub allows more, a runaway line is cut here
 
 # Said to the agent once when a run ends with no report.
@@ -508,7 +509,7 @@ class Runner:
                        "head": now}
             if head.lower() != now:
                raise ValueError(f"the branch moved since it was shown (it is now at "
-                                f"{now[:12] or 'no commits'})")
+                                f"{now[:SHORT_HEAD] or 'no commits'})")
          await self.close_held(t, "user")
       finally:
          self.busy.discard(task_id)
@@ -633,8 +634,12 @@ class Runner:
             try:
                head = await self.repos.sync_base(task["repo"], task["base"], task_id)
                self.store.add_event(task_id, "base_updated", base=task["base"], head=head)
+               # Pushed commits can only be added to (publish never force-pushes).
+               published = (" This branch's commits are already pushed: to bring in the "
+                            "new base, merge it; don't rebase or amend them."
+                            if task["published"] else "")
                prompt = (f"(Before this run the gateway updated origin/{task['base']} to "
-                         f"{head[:12]}.)\n\n{prompt}")
+                         f"{head[:SHORT_HEAD]}.){published}\n\n{prompt}")
             except GitError as e:
                log.warning("task %s: base not updated before the follow-up: %s", task_id, e)
          async with ClaudeSDKClient(options=await self.options(task)) as client:
@@ -1001,7 +1006,12 @@ class Runner:
          raise ValueError("only a completed task is published")
       now, _ = await self.repos.agent_ref(t["repo"], task_id, t["base"])
       if head.lower() != now:
-         raise ValueError(f"the branch moved since it was shown (it is now at {now[:12]})")
+         raise ValueError(f"the branch moved since it was shown (it is now at {now[:SHORT_HEAD]})")
+      # A pushed workflow runs with the repository's secrets before anyone reads
+      # it: never from here, whatever the token allows.
+      if (await self.repos.changes(t["repo"], task_id, t["base"])).get("workflows"):
+         raise ValueError("this work changes CI workflows (.github/workflows), which the gateway "
+                          "doesn't push; publish it yourself")
       body = own_body or pr_body(t)
       if own_body is None and expect_body_sha256 is not None and \
             body_sha256(body) != expect_body_sha256.strip().lower():

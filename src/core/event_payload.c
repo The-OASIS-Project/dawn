@@ -419,7 +419,8 @@ char *event_payload_agent(const char *gw_kind,
    if (root == NULL) {
       return NULL;
    }
-   json_object_object_add(root, "gw", json_object_new_string(gw_kind ? gw_kind : ""));
+   json_object_object_add(root, EVENT_PAYLOAD_GW_KEY,
+                          json_object_new_string(gw_kind ? gw_kind : ""));
    json_object_object_add(root, "gw_seq", json_object_new_int64(gw_seq));
    json_object_object_add(root, "gw_ts", json_object_new_int64(gw_ts));
    for (size_t i = 0; data != NULL && fields != NULL && fields[i] != NULL; i++) {

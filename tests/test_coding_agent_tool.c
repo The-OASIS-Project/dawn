@@ -52,7 +52,9 @@ static char g_calls[MAX_CALLS][64]; /* tool names called, in order */
 static char g_args[MAX_CALLS][512];
 static atomic_int g_ncalls; /* the cancel thread calls too */
 static bool g_start_fails;
-static bool g_start_queued;        /* task_start: every slot busy, so it waits its turn */
+static bool g_start_queued; /* task_start: every slot busy, so it waits its turn */
+static bool g_task_gone;    /* task_list by client_ref: the gateway has no such task */
+static char g_recorded[32]; /* the gateway kind of the last agent event DAWN recorded itself */
 static bool g_cancel_during_start; /* the job is cancelled while task_start runs */
 static int g_start_lost;           /* task_start answers lost before one arrives */
 static int g_ntasks;               /* tasks task_list returns */
@@ -140,6 +142,10 @@ int mcp_bridge_call_tool(const char *alias,
    } else if (strcmp(tool, "task_list") == 0 && args_json && strstr(args_json, "client_ref")) {
       if (g_list_fails) {
          return FAILURE;
+      }
+      if (g_task_gone) {
+         *result_out = strdup("{\"task\":null,\"pending\":[]}");
+         return SUCCESS;
       }
       char buf[2048];
       snprintf(buf, sizeof(buf),
@@ -356,6 +362,23 @@ void conv_event_emit(int64_t conv_id, int user_id, const char *kind, char *paylo
    (void)conv_id, (void)user_id, (void)kind;
    free(payload_owned);
 }
+char *event_payload_agent(const char *gw_kind,
+                          int64_t gw_seq,
+                          int64_t gw_ts,
+                          struct json_object *data,
+                          const char *const *fields,
+                          const char *const *scrubbed) {
+   (void)gw_seq, (void)gw_ts, (void)data, (void)fields, (void)scrubbed;
+   snprintf(g_recorded, sizeof(g_recorded), "%s", gw_kind);
+   return strdup("{}");
+}
+session_t *session_get(uint32_t session_id) {
+   (void)session_id;
+   return NULL; /* no live session to release questions in */
+}
+void session_release(session_t *session) {
+   (void)session;
+}
 char *event_payload_spawn(int64_t child_conv_id, const char *title) {
    (void)child_conv_id, (void)title;
    return strdup("{}");
@@ -565,6 +588,8 @@ void setUp(void) {
    atomic_store(&g_ncalls, 0);
    g_start_fails = false;
    g_start_queued = false;
+   g_task_gone = false;
+   g_recorded[0] = '\0';
    g_cancel_during_start = false;
    g_start_lost = 0;
    g_ntasks = 0;
@@ -2162,6 +2187,19 @@ static void test_publish_with_own_text(void) {
        strstr(g_args[last_call("task_publish")], "\"pr_description\": \"Edited.\""));
 }
 
+/* The gateway lost the task (its state was reset): a close records it closed,
+ * with nothing to stop or lose, so the job can be deleted. */
+static void test_close_when_the_gateway_lost_the_task(void) {
+   coding_job();
+   snprintf(g_status, sizeof(g_status), "done");
+   g_task_gone = true;
+   char *r = call("close", "{\"job\":42}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
+   free(r);
+   TEST_ASSERT_EQUAL_STRING("closed", g_recorded);
+   TEST_ASSERT_EQUAL_INT(-1, last_call("task_close")); /* nothing asked of the gateway */
+}
+
 int main(void) {
    g_session = calloc(1, sizeof(session_t));
    g_session->type = SESSION_TYPE_WEBUI;
@@ -2215,6 +2253,7 @@ int main(void) {
    RUN_TEST(test_publish_with_own_text);
    RUN_TEST(test_publish_when_nothing_is_new_or_closed);
    RUN_TEST(test_close);
+   RUN_TEST(test_close_when_the_gateway_lost_the_task);
    RUN_TEST(test_publish_and_close_texts);
    RUN_TEST(test_publish_buttons);
    RUN_TEST(test_close_buttons);

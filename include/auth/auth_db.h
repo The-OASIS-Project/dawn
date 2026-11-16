@@ -1485,12 +1485,17 @@ int conv_db_job_get_status(int64_t conv_id, int user_id, char *status_out, size_
  * @brief Whether deleting @p conv_id would drop a coding job whose work may
  *        still be at the agent gateway: it, or one of its child jobs, is a
  *        coding job that ran there (started, or its trail has a gateway event)
- *        with no event saying its task was closed.  False for a coding job that
+ *        with no event saying its task was closed.  None for a coding job that
  *        never reached the gateway, and for any other conversation.
  *
- * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, AUTH_DB_FORBIDDEN, AUTH_DB_FAILURE.
+ * @param conv_id The conversation to be deleted (a job or a chat).
+ * @param user_id Its owner.
+ * @param holder  Receives the id of a coding job that holds work (@p conv_id
+ *                itself or a child of it), 0 when none; 0 unless SUCCESS.
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID, AUTH_DB_NOT_FOUND, AUTH_DB_FORBIDDEN,
+ *         AUTH_DB_FAILURE.
  */
-int conv_db_job_holds_agent_work(int64_t conv_id, int user_id, bool *holds);
+int conv_db_job_holds_agent_work(int64_t conv_id, int user_id, int64_t *holder);
 
 /**
  * @brief Ownership-scoped: list a user's jobs (newest first), up to @p max.

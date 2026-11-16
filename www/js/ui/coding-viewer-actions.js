@@ -31,8 +31,8 @@
    const SENT_MAX = 16; /* action answers remembered for a toast after the panel closed */
    const TOAST_MS = 5000;
    const TOAST_LINK_MS = 10000; /* a toast with a pull request link stays longer */
-   const SHORT_HEAD = 12; /* characters of a commit hash shown */
-   /* The user's own pull request text (DAWN's CODING_PR_TITLE_MAX / _DESC_MAX). */
+   /* The user's own pull request text: CODING_PR_TITLE_MAX / CODING_PR_DESC_MAX in
+    * include/tools/coding_agent_card.h (bytes; the gateway checks its own limits too). */
    const PR_TITLE_MAX = 120;
    const PR_DESC_MAX = 5900;
    const CLIPPED = ' [...]'; /* the gateway's mark on a description it cut to its limit */
@@ -61,9 +61,10 @@
    }
 
    /* @p h, from the viewer: dlg, panel, footer, elem, appendShown, shownPath,
-    * say, job(), head() (the full head it loaded), isOpen(), refresh(), home(). */
+    * say, shortHead, job(), head() (the full head it loaded), isOpen(), refresh(), home(). */
    function create(h) {
       const elem = h.elem;
+      const SHORT_HEAD = h.shortHead; /* characters of a commit hash shown (the viewer's) */
       let state = null; /* the job's facts, from the last changes answer */
       let mode = ''; /* '', 'confirm' (the footer's close question), 'panel' */
       let panelFrom = ''; /* the footer button the panel was opened from */
@@ -136,7 +137,9 @@
 
       function request(type, extra, kind) {
          if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) {
-            h.say('Not connected.');
+            /* The toast is a live region itself: said once, by it when there is one. */
+            if (typeof DawnToast !== 'undefined') DawnToast.show('Not connected.', 'error');
+            else h.say('Not connected.');
             return '';
          }
          if (req) clearTimeout(req.timer);
@@ -165,7 +168,11 @@
             preview.edit.desc.readOnly = false;
          }
          if (!h.isOpen()) return false;
-         if (waited) h.panel.appendChild(para('No answer from the coding agent yet.', 'warning'));
+         if (waited && !h.panel.querySelector('#cv-no-answer')) {
+            const p = para('No answer from the coding agent yet.', 'warning');
+            p.id = 'cv-no-answer';
+            h.panel.appendChild(p);
+         }
          drawFooter();
          return true;
       }
@@ -215,7 +222,8 @@
             line.textContent = 'Closed';
             closable = false;
          } else if (s.status === 'running' || s.status === 'queued') {
-            line.textContent = 'Running: publish or close when it stops';
+            line.textContent =
+               (s.status === 'queued' ? 'Queued' : 'Running') + ': publish or close when it stops';
             closable = false;
          } else if (s.status !== 'done') {
             line.textContent = statusWord(s.status);
@@ -522,9 +530,11 @@
        * panel, whose heading takes it). */
       function startEdit(titleFacts, label, desc, refs, editBtn, focus) {
          if (!preview || preview.edit) return;
-         const draft = drafts.get(h.job());
-         const startTitle = draft ? draft.title : preview.title;
-         const startDesc = draft ? draft.desc : preview.desc;
+         /* A draft holds only the fields the user changed: the others are the agent's
+          * text as it is now (a follow-up may have rewritten it). */
+         const draft = drafts.get(h.job()) || {};
+         const startTitle = 'title' in draft ? draft.title : preview.title;
+         const startDesc = 'desc' in draft ? draft.desc : preview.desc;
          const title = elem('input', 'dawn-input');
          title.type = 'text';
          title.maxLength = PR_TITLE_MAX;
@@ -569,11 +579,11 @@
          editBtn.remove();
          /* Only what the user changed is a draft (looking isn't editing). */
          const keep = function () {
-            if (title.value !== preview.title || box.value !== preview.desc) {
-               drafts.set(h.job(), { title: title.value, desc: box.value });
-            } else {
-               drafts.delete(h.job());
-            }
+            const d = {};
+            if (title.value !== preview.title) d.title = title.value;
+            if (box.value !== preview.desc) d.desc = box.value;
+            if (Object.keys(d).length) drafts.set(h.job(), d);
+            else drafts.delete(h.job());
          };
          title.addEventListener('input', keep);
          box.addEventListener('input', keep);
@@ -636,6 +646,7 @@
             e.desc.readOnly = true;
          }
          busy = { act: 'do-publish', label: 'Publishing…' };
+         h.say('Publishing…');
          drawFooter();
       }
 
@@ -658,6 +669,7 @@
          if (!lose) return;
          if (!request('coding_close', { confirm: true, head: lose.head }, 'close-confirm')) return;
          busy = { act: 'close-anyway', label: 'Closing…' };
+         h.say('Closing…');
          drawFooter();
       }
 

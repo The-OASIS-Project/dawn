@@ -568,10 +568,12 @@
    color: var(--bg-primary);
 }
 
+/* Brighter, not darker: the dark text keeps its contrast (as primary's hover). */
 .cv-actions .coding-card-btn.danger[data-act='close-anyway']:hover:not([aria-disabled='true']) {
-   background: var(--error-hover);
-   border-color: var(--error-hover);
+   background: var(--error);
+   border-color: var(--error);
    color: var(--bg-primary);
+   filter: brightness(1.1);
 }
 
 /* The close question's Close: set apart from Keep before any hover. */

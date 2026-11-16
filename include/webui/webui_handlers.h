@@ -212,7 +212,8 @@ void webui_coding_handle_reply(ws_connection_t *conn, struct json_object *payloa
 /** coding_publish_preview {job, nonce}: what Publish would push (webui_coding.c). */
 void webui_coding_handle_publish_preview(ws_connection_t *conn, struct json_object *payload);
 
-/** coding_publish {job, head, pr_body_sha256, nonce}: the user's click on Publish. */
+/** coding_publish {job, head, pr_body_sha256?, pr_title?, pr_description?, nonce}: the user's
+ *  click on Publish (the hash is needed unless the description is the user's own). */
 void webui_coding_handle_publish(ws_connection_t *conn, struct json_object *payload);
 
 /** coding_close {job, nonce, confirm?, head?}: the user's click on Close. */

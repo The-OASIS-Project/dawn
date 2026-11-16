@@ -42,6 +42,8 @@
 #include <time.h>
 
 #include "auth/auth_db_internal.h"
+#include "core/conv_event.h"    /* CONV_EVENT_AGENT_REQUEST */
+#include "core/event_payload.h" /* EVENT_PAYLOAD_GW_KEY, EVENT_GW_CLOSED */
 #include "logging.h"
 #include "utils/string_utils.h"
 
@@ -685,27 +687,30 @@ int conv_db_job_get_status(int64_t conv_id, int user_id, char *status_out, size_
  * no event says the task was closed.  CASE, not AND, inside: json_extract
  * raises on a payload that isn't JSON.  Ordinary conversations stop at the
  * first test. */
-#define JOB_HOLDS_AGENT_WORK(a)                                                               \
-   "(" a ".job_kind IS '" JOB_KIND_CODING "' AND (" a ".started_at > 0 OR EXISTS (SELECT 1 "  \
-   "FROM conversation_events e WHERE e.conversation_id = " a ".id AND CASE WHEN "             \
-   "json_valid(e.payload) THEN json_extract(e.payload, '$.gw') END IS NOT NULL)) AND NOT "    \
-   "EXISTS (SELECT 1 FROM conversation_events e WHERE e.conversation_id = " a ".id AND CASE " \
-   "WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.gw') END = 'closed'))"
+#define JOB_GW_KIND                                                                              \
+   "CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$." EVENT_PAYLOAD_GW_KEY "') " \
+   "END"
+#define JOB_HOLDS_AGENT_WORK(a)                                                                \
+   "(" a ".job_kind IS '" JOB_KIND_CODING "' AND (" a ".started_at > 0 OR EXISTS (SELECT 1 "   \
+   "FROM conversation_events e WHERE e.conversation_id = " a ".id AND " JOB_GW_KIND            \
+   " IS NOT NULL)) AND NOT EXISTS (SELECT 1 FROM conversation_events e WHERE "                 \
+   "e.conversation_id = " a ".id AND e.kind = '" CONV_EVENT_AGENT_REQUEST "' AND " JOB_GW_KIND \
+   " = '" EVENT_GW_CLOSED "'))"
 
-int conv_db_job_holds_agent_work(int64_t conv_id, int user_id, bool *holds) {
-   if (conv_id <= 0 || !holds) {
+int conv_db_job_holds_agent_work(int64_t conv_id, int user_id, int64_t *holder) {
+   if (conv_id <= 0 || !holder) {
       return AUTH_DB_INVALID;
    }
-   *holds = false;
+   *holder = 0;
    AUTH_DB_LOCK_OR_FAIL();
    sqlite3_stmt *st = NULL;
    /* The conversation itself, then any child job of it (deleted with it). */
    int rc = sqlite3_prepare_v2(
        s_db.db,
-       "SELECT c.user_id, " JOB_HOLDS_AGENT_WORK(
-           "c") " OR EXISTS (SELECT 1 FROM "
-                "conversations k WHERE k.parent_id = c.id AND k.user_id = c.user_id "
-                "AND " JOB_HOLDS_AGENT_WORK("k") ") FROM conversations c WHERE c.id = ?",
+       "SELECT c.user_id, CASE WHEN " JOB_HOLDS_AGENT_WORK(
+           "c") " THEN c.id ELSE COALESCE((SELECT k.id FROM conversations k WHERE "
+                "k.parent_id = c.id AND k.user_id = c.user_id AND " JOB_HOLDS_AGENT_WORK(
+                    "k") " LIMIT 1), 0) END FROM conversations c WHERE c.id = ?",
        -1, &st, NULL);
    if (rc != SQLITE_OK) {
       AUTH_DB_UNLOCK();
@@ -723,7 +728,7 @@ int conv_db_job_holds_agent_work(int64_t conv_id, int user_id, bool *holds) {
       AUTH_DB_UNLOCK();
       return AUTH_DB_FORBIDDEN;
    }
-   *holds = sqlite3_column_int(st, 1) != 0;
+   *holder = sqlite3_column_int64(st, 1);
    sqlite3_finalize(st);
    AUTH_DB_UNLOCK();
    return AUTH_DB_SUCCESS;

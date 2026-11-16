@@ -165,7 +165,10 @@
       ui.body.append(ui.list, side);
       ui.action = elem('section', 'cv-action');
       ui.action.setAttribute('aria-labelledby', 'cv-action-title');
-      ui.actions = elem('footer', 'cv-actions');
+      /* A group, not a <footer>: inside the dialog that would be a second page footer. */
+      ui.actions = elem('div', 'cv-actions');
+      ui.actions.setAttribute('role', 'group');
+      ui.actions.setAttribute('aria-label', 'Job actions');
       ui.actions.hidden = true;
       ui.status = elem('div', 'sr-only');
       ui.status.setAttribute('role', 'status');
@@ -179,6 +182,7 @@
             appendShown: appendShown,
             shownPath: shownPath,
             say: say,
+            shortHead: SHORT_HEAD,
             job: function () {
                return job;
             },
@@ -221,7 +225,9 @@
    /* Where focus goes when the footer has nothing to take it. */
    function home() {
       const sel = ui.list.querySelector('[aria-current="true"]') || ui.list.querySelector('button');
-      (sel || ui.pane).focus();
+      /* An empty pane says nothing: the dialog's close button then. */
+      const empty = !ui.pane.childNodes.length;
+      (sel || (empty ? dlg.querySelector('.dawn-dialog-close') : ui.pane)).focus();
    }
 
    /* Escape or a phone's back: the publish or close panel first, then from a
@@ -345,7 +351,7 @@
          loadedHead = '';
          dropFiles();
          ui.head.textContent = '';
-         ui.list.replaceChildren();
+         ui.list.replaceChildren(elem('div', 'cv-note', 'Closed: its clone and branch are gone.'));
          ui.pane.replaceChildren();
          ui.pane.removeAttribute('aria-busy');
          return;

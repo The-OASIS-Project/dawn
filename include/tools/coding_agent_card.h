@@ -115,7 +115,9 @@ struct json_object *coding_view_fetch(int user_id,
  *        gateway, with the same checks as the tool's publish.  {head, repo,
  *        branch, base, commits, commits_more, files, files_total, protected:
  *        [path], history_only: [{path, protected}], workflows, pr_title, pr_body
- *        (exactly what would go public), pr_body_sha256, mentions, closes,
+ *        (exactly what would go public), pr_body_sha256, pr_title_by_agent,
+ *        pr_footer (what the gateway appends to the user's own description),
+ *        mentions, closes,
  *        pr_url (its open pull request, when it has one)}.  The agent's text is
  *        raw: the client shows it as text.  Blocks on the gateway.
  * @return The object (caller puts), or NULL with the refusal in *err_out.

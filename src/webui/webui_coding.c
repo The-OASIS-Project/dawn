@@ -36,6 +36,7 @@
 #include "tools/coding_agent_card.h"
 #include "tools/coding_agent_gateway.h"
 #include "tools/tool_registry.h"
+#include "utils/string_utils.h"
 #include "webui/webui_internal.h"
 
 #define WC_JOBS_MAX 16     /* jobs one coding_pending asks about */
@@ -675,14 +676,19 @@ void webui_coding_handle_view(ws_connection_t *conn, json_object *payload) {
 }
 
 /* =============================================================================
- * coding_publish_preview {job, nonce}, coding_publish {job, head, pr_body_sha256,
- * nonce}, coding_close {job, nonce, confirm?, head?}: the viewer's buttons
+ * coding_publish_preview {job, nonce}, coding_publish {job, head, pr_body_sha256?,
+ * pr_title?, pr_description?, nonce}, coding_close {job, nonce, confirm?, head?}:
+ * the viewer's buttons
  *
  * The click is the user's confirm: no model turn in between.  Everything shown
  * and sent to the gateway is built here from its state; the client's head and
  * description hash only bind the push to what was shown.  One at a time per job
  * (with the card's replies); answered to the asking tab.
  * ============================================================================= */
+
+/* A title as typed, before its runs of white space become one space: room for
+ * a few times what the checked title may hold. */
+#define WC_PR_TITLE_RAW_MAX (CODING_PR_TITLE_MAX * 4)
 
 typedef enum {
    WC_ACT_PREVIEW,
@@ -699,8 +705,8 @@ typedef struct {
    char head[WC_HEAD_MAX];
    char sha[WC_SHA_MAX];
    char nonce[WC_NONCE_MAX];
-   bool own_title, own_desc;                   /* publish: the user's own text below */
-   char pr_title[CODING_PR_TITLE_MAX * 4 + 1]; /* as typed: checked where it is used */
+   bool own_title, own_desc;               /* publish: the user's own text below */
+   char pr_title[WC_PR_TITLE_RAW_MAX + 1]; /* as typed: checked where it is used */
    char pr_desc[CODING_PR_DESC_MAX + 1];
 } wc_action_t;
 
@@ -796,7 +802,7 @@ static void action_start(ws_connection_t *conn, json_object *payload, wc_act_kin
    req.job = json_object_object_get_ex(payload, "job", &o) ? json_object_get_int64(o) : 0;
    const char *nonce = json_object_object_get_ex(payload, "nonce", &o) ? json_object_get_string(o)
                                                                        : "";
-   snprintf(req.nonce, sizeof(req.nonce), "%s", nonce && strlen(nonce) < WC_NONCE_MAX ? nonce : "");
+   safe_strscpy(req.nonce, nonce && strlen(nonce) < WC_NONCE_MAX ? nonce : "");
    /* "Close anyway" says so by the key, not by an empty head (a close with only
     * uncommitted edits binds head ""). */
    req.confirm = kind == WC_ACT_CLOSE && json_object_object_get_ex(payload, "confirm", &o) &&
@@ -847,10 +853,11 @@ static void action_start(ws_connection_t *conn, json_object *payload, wc_act_kin
    }
    req.own_title = pr_title != NULL;
    req.own_desc = pr_desc != NULL;
-   snprintf(req.pr_title, sizeof(req.pr_title), "%s", pr_title ? pr_title : "");
-   snprintf(req.pr_desc, sizeof(req.pr_desc), "%s", pr_desc ? pr_desc : "");
-   snprintf(req.head, sizeof(req.head), "%s", wants_head ? head : "");
-   snprintf(req.sha, sizeof(req.sha), "%s", sha ? sha : "");
+   /* Lengths were checked above: these never cut. */
+   safe_strscpy(req.pr_title, pr_title ? pr_title : "");
+   safe_strscpy(req.pr_desc, pr_desc ? pr_desc : "");
+   safe_strscpy(req.head, wants_head ? head : "");
+   safe_strscpy(req.sha, sha ? sha : "");
    /* The user's own coding job before anything is held for it. */
    if (!users_coding_job(req.user_id, req.job)) {
       action_refuse(&req, "No coding job with that number.");

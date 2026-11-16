@@ -1331,11 +1331,15 @@ const char *webui_delete_conversation(ws_connection_t *conn, int64_t conv_id) {
    /* A coding job (this one, or a child of this chat) whose task the gateway
     * still holds: deleting it would leave its clone and branch with nothing in
     * DAWN to publish or close them.  Close first, which says what would be lost. */
-   bool holds = false;
-   if (conv_db_job_holds_agent_work(conv_id, conn->auth_user_id, &holds) == AUTH_DB_SUCCESS &&
-       holds) {
-      return "A coding job's work is still at the agent: close it first (View changes, then "
-             "Close). If you just closed it, try again in a moment.";
+   int64_t holder = 0;
+   if (conv_db_job_holds_agent_work(conv_id, conn->auth_user_id, &holder) == AUTH_DB_SUCCESS &&
+       holder > 0) {
+      static char why[160]; /* the lws thread is its only caller */
+      snprintf(why, sizeof(why),
+               "Coding job #%lld still has work at the agent: close it first (View changes, "
+               "then Close). If you just closed it, try again in a moment.",
+               (long long)holder);
+      return why;
    }
 
    /* Cancel + delete this conversation's background-job children first, so a

@@ -468,6 +468,12 @@
    #jobs-popover .popover-arrow {
       display: none;
    }
+   /* Three buttons on a finished row: they wrap rather than crush the title. */
+   .jobs-row-actions {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      max-width: 45%;
+   }
 }
 
 @media (prefers-reduced-motion: reduce) {

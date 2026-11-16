@@ -31,6 +31,8 @@
 #include <strings.h>
 
 #include "auth/auth_db.h"
+#include "core/conv_event.h"
+#include "core/event_payload.h"
 #include "core/job_report.h"
 #include "core/pending_slots.h"
 #include "core/session_manager.h"
@@ -57,7 +59,10 @@
 #define CP_URL_MAX 200
 #define CP_LINES_SHOWN 20      /* commits, files and history-only paths in a preview, each */
 #define CP_DESCRIBE_EXCERPT 90 /* the user's own title or description in a reply-code line */
-#define CP_LINE_MAX 200        /* one of those lines: an excerpt of 160 bytes plus its marks */
+#define CP_PATH_SHOWN 160      /* a path's excerpt in such a line */
+#define CP_SUBJECT_SHOWN 120   /* a commit subject's excerpt */
+#define CP_LINE_MAX 200        /* one of those lines: the longest excerpt plus its marks */
+#define CP_EXCERPT_MARK 8      /* room an excerpt keeps for its cut mark */
 /* The commits, files and history-only lists with their headings and "more" lines. */
 #define CP_AGENT_TEXT_MAX (3 * (CP_LINES_SHOWN * CP_LINE_MAX + 64))
 #define CP_SUMMARY_SHOWN 1500 /* the agent's summary (the pull request's description) */
@@ -84,6 +89,7 @@ typedef struct {
    int files;
    int protected_paths;
    bool pr;
+   bool gone; /* close: the gateway has no record of the task (its state was lost) */
    char body_sha[CODING_SHA256_LEN + 1];   /* publish: the description shown ("" if unknown) */
    char pr_title[CODING_PR_TITLE_MAX + 1]; /* publish: the user's own ("": the agent's) */
    char pr_desc[CODING_PR_DESC_MAX + 1];   /* publish: the user's own ("": the agent's) */
@@ -198,7 +204,7 @@ static char *agent_lines(struct json_object *changes,
        &sb, 512, CP_AGENT_TEXT_MAX + CODING_PR_DESC_MAX + CP_SUMMARY_SHOWN + CP_TITLE_SHOWN + 256);
    if (title != NULL && title[0] != '\0') {
       char line[CP_TITLE_SHOWN];
-      str_excerpt_line(title, CP_TITLE_SHOWN - 8, line, sizeof(line));
+      str_excerpt_line(title, CP_TITLE_SHOWN - CP_EXCERPT_MARK, line, sizeof(line));
       strbuf_appendf(&sb, "Pull request title:\n%s\n", line);
    }
    if (summary != NULL && summary[0] != '\0' && whole) {
@@ -220,16 +226,16 @@ static char *agent_lines(struct json_object *changes,
                                                                  : 0;
    strbuf_append(&sb, "Commits:\n");
    for (size_t i = 0; i < nc && i < CP_LINES_SHOWN; i++) {
-      char line[160];
-      str_excerpt_line(coding_gateway_jstr(json_object_array_get_idx(commits, i), "subject"), 120,
-                       line, sizeof(line));
+      char line[CP_LINE_MAX];
+      str_excerpt_line(coding_gateway_jstr(json_object_array_get_idx(commits, i), "subject"),
+                       CP_SUBJECT_SHOWN, line, sizeof(line));
       strbuf_appendf(&sb, "- %s\n", line);
    }
    strbuf_append(&sb, "Files:\n");
    for (size_t i = 0; i < nf && i < CP_LINES_SHOWN; i++) {
       struct json_object *f = json_object_array_get_idx(files, i);
-      char path[200];
-      str_excerpt_line(coding_gateway_jstr(f, "path"), 160, path, sizeof(path));
+      char path[CP_LINE_MAX];
+      str_excerpt_line(coding_gateway_jstr(f, "path"), CP_PATH_SHOWN, path, sizeof(path));
       strbuf_appendf(&sb, "- %s%s\n", path,
                      json_object_get_boolean(json_object_object_get(f, "protected"))
                          ? " (protected)"
@@ -247,8 +253,8 @@ static char *agent_lines(struct json_object *changes,
    }
    for (size_t i = 0; i < nh && i < CP_LINES_SHOWN; i++) {
       struct json_object *f = json_object_array_get_idx(hist, i);
-      char path[200];
-      str_excerpt_line(coding_gateway_jstr(f, "path"), 160, path, sizeof(path));
+      char path[CP_LINE_MAX];
+      str_excerpt_line(coding_gateway_jstr(f, "path"), CP_PATH_SHOWN, path, sizeof(path));
       strbuf_appendf(&sb, "- %s%s\n", path,
                      json_object_get_boolean(json_object_object_get(f, "protected"))
                          ? " (protected)"
@@ -738,8 +744,9 @@ static char *close_target_job(int user_id,
    char *err = NULL;
    if (coding_gateway_call(user_id, "task_list", coding_agent_job_args(job), &ans, &err) ==
        CODING_GW_OK) {
-      const char *status = coding_gateway_jstr(json_object_object_get(ans, "task"), "status");
-      *open = coding_task_status_open(status);
+      struct json_object *task = json_object_object_get(ans, "task");
+      *open = coding_task_status_open(coding_gateway_jstr(task, "status"));
+      want->gone = !json_object_is_type(task, json_type_object);
    }
    json_object_put(ans);
    free(err);
@@ -815,9 +822,27 @@ static void lost_text(char *out, size_t len, int commits, int files) {
  * stopped: it was), then closed when nothing would be lost (*@p closed), else
  * @p want filled with what would be (commits, files, branch, the head to bind).
  * NULL, or the refusal. */
+/* @p job's task is gone from the gateway (its state was lost): nothing is held
+ * there, so its close is recorded as the gateway's would be, and the job can be
+ * deleted. */
+static void record_gone(int64_t job, int user_id) {
+   static const char *const fields[] = { "reason", NULL };
+   struct json_object *data = json_object_new_object();
+   json_object_object_add(data, "reason", json_object_new_string("gone"));
+   conv_event_emit(job, user_id, CONV_EVENT_AGENT_REQUEST,
+                   event_payload_agent(EVENT_GW_CLOSED, 0, (int64_t)time(NULL), data, fields,
+                                       NULL));
+   json_object_put(data);
+}
+
 static char *close_first(int user_id, cp_pending_t *want, bool open, bool *closed, bool *stopped) {
    *closed = false;
    *stopped = false;
+   if (want->gone && want->job > 0) {
+      record_gone(want->job, user_id);
+      *closed = true;
+      return NULL;
+   }
    struct json_object *ans = NULL;
    char *err = NULL;
    if (open) { /* no job to cancel: the user asking to close it is asking to stop it */
@@ -961,14 +986,26 @@ char *coding_close_confirm(struct json_object *details, int user_id, const turn_
 /* A staged chat publish or close of @p job (@p kind, or any with 0), made moot
  * by a click. */
 static void drop_staged(int64_t job, int kind) {
+   turn_origin_t dropped[CP_PENDING_MAX];
+   int n = 0;
    pthread_mutex_lock(&s_pending_mutex);
    for (int i = 0; i < CP_PENDING_MAX; i++) {
       if (s_pending[i].hdr.active && (kind == 0 || s_pending[i].hdr.kind == kind) &&
           s_pending[i].job == job) {
+         dropped[n++] = s_pending[i].hdr.origin;
          pending_slots_clear(&s_pending_slots, &s_pending[i].hdr);
       }
    }
    pthread_mutex_unlock(&s_pending_mutex);
+   /* Its preview is settled by the click: it no longer holds back what DAWN
+    * would post unasked in the chat that staged it. */
+   for (int i = 0; i < n; i++) {
+      session_t *s = session_get(dropped[i].session_id);
+      if (s != NULL) {
+         turn_origin_note_answered(s, dropped[i].turn_number);
+         session_release(s);
+      }
+   }
 }
 
 /* What a click did, said in the job's conversation, as a card's answer is: the
@@ -1266,12 +1303,12 @@ int coding_publish_describe(const char *value,
           * not left to its read-back. */
          if (n > 0 && (size_t)n < out_len && p->pr_title[0]) {
             char t[CP_DESCRIBE_EXCERPT];
-            str_excerpt_line(p->pr_title, sizeof(t) - 8, t, sizeof(t));
+            str_excerpt_line(p->pr_title, sizeof(t) - CP_EXCERPT_MARK, t, sizeof(t));
             n += snprintf(out + n, out_len - (size_t)n, ", titled \"%s\"", t);
          }
          if (n > 0 && (size_t)n < out_len && p->pr_desc[0]) {
             char d[CP_DESCRIBE_EXCERPT];
-            str_excerpt_line(p->pr_desc, sizeof(d) - 8, d, sizeof(d));
+            str_excerpt_line(p->pr_desc, sizeof(d) - CP_EXCERPT_MARK, d, sizeof(d));
             n += snprintf(out + n, out_len - (size_t)n,
                           ", with a description of %zu bytes that begins \"%s\"",
                           strlen(p->pr_desc), d);

@@ -75,6 +75,9 @@
    let activeSig = '';
 
    /* Accumulated terminal rows + the keyset cursor for the next page. */
+   /* After a Delete: the job id whose row takes focus once History is rebuilt
+    * ('' for the close button); null when no Delete waits. */
+   let deleteFocusId = null;
    let historyRows = [];
    let historyCursor = null;
    let historyHasMore = false;
@@ -257,7 +260,19 @@
          }
          /* The goal goes in `detail`, which the modal renders via textContent —
           * the same non-parsing sink this panel uses everywhere else. */
-         DawnDialog.confirm(ask.question, {
+         /* A coding job may still have work at the agent: the server says so after
+          * the confirm, so say it before. */
+         const question =
+            action === 'delete' && job.kind === 'coding'
+               ? ask.question +
+                 ' A coding job with work still at the agent has to be closed first (View ' +
+                 'changes, then Close).'
+               : ask.question;
+         /* Where focus goes once the row is gone: the next row, else the one above. */
+         const row = btn.closest('.jobs-row');
+         const near = row && (row.nextElementSibling || row.previousElementSibling);
+         const nearBtn = near && near.querySelector('[data-job-id]');
+         DawnDialog.confirm(question, {
             title: ask.title,
             detail: job.title || 'Untitled job',
             okText: ask.ok,
@@ -265,6 +280,7 @@
             danger: true,
          }).then(function (ok) {
             if (ok) {
+               if (action === 'delete') deleteFocusId = nearBtn ? nearBtn.dataset.jobId : '';
                sendAction(job.conversation_id, action);
             }
          });
@@ -641,6 +657,15 @@
       if (focusMark) {
          restoreFocus(focusMark, el.historyList);
       }
+      /* After a Delete, the row next to the deleted one (or the close button). */
+      if (deleteFocusId !== null && !historyLoading) {
+         const next = deleteFocusId
+            ? el.historyList.querySelector('[data-job-id="' + deleteFocusId + '"]')
+            : null;
+         deleteFocusId = null;
+         (next || el.closeBtn).focus();
+         return;
+      }
       if (focusWasInRegion && document.activeElement === document.body) {
          const fallback =
             el.historyList.querySelector(
@@ -823,6 +848,7 @@
          payload.ok ? 'success' : 'error'
       );
       if (!payload.ok) {
+         if (payload.action === 'delete') deleteFocusId = null;
          return;
       }
       /* The conversation shown here was deleted: start a new chat, as the

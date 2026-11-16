@@ -351,8 +351,9 @@ job, finished (`done`). The title is the agent's, else the job's name (set by th
 Optional `pr_title` and `pr_description` are the user's own text for a new pull request,
 sent instead of the agent's: the title as one line (up to 120 bytes), the description up
 to 5900 bytes with the preview's `pr_footer` appended by the gateway; with
-`pr_description`, `pr_body_sha256` may be left out. Refused when the job's pull request
-is still open (its text is edited on GitHub). On success DAWN
+`pr_description`, `pr_body_sha256` may be left out. The user's own text is refused when
+the job already has an open pull request (its text is edited on GitHub); its new commits
+still go there. On success DAWN
 posts its line to the job's parent conversation and drops any publish staged in chat for
 that job. Answered with `coding_publish_response`, to the asking tab only.
 ```json

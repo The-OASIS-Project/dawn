@@ -609,7 +609,11 @@ static struct json_object *view_job_state(int user_id,
       struct json_object *task = json_object_object_get(ans, "task");
       struct json_object *pub = json_object_object_get(task, "published");
       struct json_object *jleft = json_object_object_get(ans, "unpublished_commits");
-      closed = coding_gateway_jstr(task, "closed")[0] != '\0';
+      /* No task at all: the gateway's state was lost, nothing is held there
+       * (a close of it is recorded by DAWN alone). */
+      closed = coding_gateway_jstr(task, "closed")[0] != '\0' ||
+               (!json_object_is_type(task, json_type_object) &&
+                strcmp(rec->job_status, "queued") != 0 && strcmp(rec->job_status, "running") != 0);
       published = json_object_is_type(pub, json_type_object);
       left = json_object_is_type(jleft, json_type_int) ? json_object_get_int(jleft) : -1;
       const char *url = coding_gateway_jstr(pub, "pr_url");
@@ -667,8 +671,20 @@ struct json_object *coding_view_fetch(int user_id,
    }
    struct json_object *ans = NULL;
    char *err = NULL;
-   if (coding_gateway_call(user_id, file ? "task_file" : "task_changes", args, &ans, &err) !=
-       CODING_GW_OK) {
+   const int rc = coding_gateway_call(user_id, file ? "task_file" : "task_changes", args, &ans,
+                                      &err);
+   if (rc == CODING_GW_REFUSED && state != NULL) {
+      /* Nothing collected (cancelled or ended before a commit): nothing to list,
+       * but its buttons still show, so it can be closed and then deleted. */
+      free(err);
+      json_object_put(ans);
+      ans = json_object_new_object();
+      json_object_object_add(ans, "files", json_object_new_array());
+      json_object_object_add(ans, "commits", json_object_new_array());
+      json_object_object_add(ans, "job_state", state);
+      return ans;
+   }
+   if (rc != CODING_GW_OK) {
       json_object_put(state);
       *err_out = coding_agent_error_free(err);
       return NULL;
