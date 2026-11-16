@@ -476,7 +476,7 @@
                      type: 'model_list',
                      label: 'Gemini Models',
                      rows: 8, // LLM_CLOUD_MAX_MODELS
-                     placeholder: 'gemini-2.5-flash\ngemini-2.5-pro\ngemini-3-flash-preview',
+                     placeholder: 'gemini-3.8-flash\ngemini-3.5-flash-lite\ngemini-3.1-pro-preview',
                      hint: 'Available models for quick controls (one per line). 2.5+ and 3.x support reasoning.',
                   },
                   gemini_default_model_idx: {
@@ -490,7 +490,7 @@
                      label: 'OpenRouter Models',
                      rows: 8, // LLM_CLOUD_MAX_MODELS
                      placeholder:
-                        'anthropic/claude-sonnet-4\nopenai/gpt-5.4\ngoogle/gemini-2.5-flash',
+                        'anthropic/claude-sonnet-4\nopenai/gpt-5.4\ngoogle/gemini-3.5-flash-lite',
                      hint: 'Curated shortlist shown in the header model switcher. One OpenRouter model ID per line, "vendor/model" (e.g. anthropic/claude-sonnet-4).',
                   },
                   openrouter_default_model_idx: {
