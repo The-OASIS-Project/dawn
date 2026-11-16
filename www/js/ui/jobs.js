@@ -1197,10 +1197,10 @@
       }
 
       /* An activity pill already means "N jobs running", so clicking one to see
-       * them is the gesture users reach for first — that applies to the
-       * per-conversation pill above the composer as much as the header one, so
-       * both are wired. Both are real <button>s in the markup, so role,
-       * focusability and Space-on-keyup come from the platform;
+       * them is the gesture users reach for first. The per-conversation pill
+       * above the composer is a real <button> in the markup, so role,
+       * focusability and Space-on-keyup come from the platform (the header's
+       * count is a badge inside #jobs-btn, which opens the panel itself);
        * jobs-activity.js still owns their text and aria-label, this module only
        * owns what the click does.
        *
@@ -1215,7 +1215,8 @@
        * looking live — styled, counted, aria-expanded — and doing nothing. */
       document.addEventListener('click', function (e) {
          const pill = e.target && e.target.closest ? e.target.closest('.jobs-pill') : null;
-         if (pill) {
+         /* The header's sits inside the jobs button, which opens the panel itself. */
+         if (pill && !pill.closest('#jobs-btn')) {
             toggle();
          }
       });

@@ -196,6 +196,7 @@
                send('changes');
             },
             home: home,
+            close: close,
          });
       }
       document.body.appendChild(dlg);
@@ -293,7 +294,13 @@
             : (openerRoot || document).querySelector(
                  '[data-action="changes"][data-job-id="' + String(job) + '"]'
               );
-      if (again) again.focus();
+      if (again) {
+         again.focus();
+      } else {
+         /* Its row went with the close: the jobs button, always there signed in. */
+         const btn = document.getElementById('jobs-btn');
+         if (btn) btn.focus();
+      }
    }
 
    /* ---- the listing ------------------------------------------------------ */
