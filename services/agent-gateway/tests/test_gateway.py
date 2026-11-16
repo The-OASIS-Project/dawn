@@ -1988,6 +1988,23 @@ def test_agent_writes_the_pull_request_once_per_head(store, monkeypatch):
    assert rmod.pr_body(t).startswith("Did it; tests pass.")      # the report describes it
 
 
+def test_cancel_stops_the_pull_request_turn(store):
+   """A run has ended and its pull request is being written: a cancel stops
+   that turn too, and the task is cancelled."""
+   r = runner(store)
+   add_task(store)
+   store.update_task("t1", status=st.WORKING, session_id="s1")
+
+   class Client:
+      interrupted = False
+
+      async def interrupt(self):
+         Client.interrupted = True
+   r.clients["t1"] = Client()                              # the PR turn, no run left
+   t = asyncio.run(r.cancel("t1", 1))
+   assert Client.interrupted and t["status"] == st.CANCELLED
+
+
 def test_title_falls_back_to_dawns_then_the_task():
    from agent_gateway.runner import pr_title
    t = {"pr_title": None, "task": "fix the oracle\nand more"}

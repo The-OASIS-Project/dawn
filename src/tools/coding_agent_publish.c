@@ -1082,7 +1082,7 @@ static void body_refs(const char *body, struct json_object *mentions, struct jso
             }
             const size_t len = (size_t)(u - q);
             char tok[CP_ISSUE_REF_MAX + 1];
-            if (len <= CP_ISSUE_REF_MAX) {
+            if (len > 0 && len <= CP_ISSUE_REF_MAX) {
                memcpy(tok, q, len);
                tok[len] = '\0';
                if ((strstr(tok, "/issues/") || strstr(tok, "/pull/")) &&

@@ -750,10 +750,15 @@ class Runner:
          settings["sandbox"]["autoAllowBashIfSandboxed"] = False
          opts.settings = json.dumps(settings)
          async with ClaudeSDKClient(options=opts) as client:
-            await client.query(PR_ASK)
-            async for m in client.receive_response():
-               if isinstance(m, ResultMessage):
-                  result = m
+            self.clients[task_id] = client  # a cancel stops it, as it stops a run
+            try:
+               await client.query(PR_ASK)
+               async for m in client.receive_response():
+                  if isinstance(m, ResultMessage):
+                     result = m
+            finally:
+               if self.clients.get(task_id) is client:
+                  del self.clients[task_id]
       except Exception as e:  # the report still describes the work
          log.warning("task %s: could not write its pull request: %s", task_id, e)
       # The fork reports its own running total: its spend is the growth over the
@@ -931,6 +936,10 @@ class Runner:
             del self.running[task_id]
             self.clients.pop(task_id, None)
             self.soon(self.retry_blocked())
+      elif task_id in self.clients:
+         # Its run ended and its pull request is being written: that turn stops
+         # too (its slot is freed when it ends; the task stays cancelled).
+         await self.interrupt(self.clients[task_id])
       return self.store.task(task_id)
 
    async def revise(self, task_id: str, dawn_user_id: int, instructions: str,
