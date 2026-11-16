@@ -680,6 +680,55 @@ int conv_db_job_get_status(int64_t conv_id, int user_id, char *status_out, size_
    return AUTH_DB_SUCCESS;
 }
 
+/* A coding job row (table alias @p a, a string literal) whose task the gateway
+ * may still hold: it ran there (started, or its trail has a gateway event) and
+ * no event says the task was closed.  CASE, not AND, inside: json_extract
+ * raises on a payload that isn't JSON.  Ordinary conversations stop at the
+ * first test. */
+#define JOB_HOLDS_AGENT_WORK(a)                                                               \
+   "(" a ".job_kind IS '" JOB_KIND_CODING "' AND (" a ".started_at > 0 OR EXISTS (SELECT 1 "  \
+   "FROM conversation_events e WHERE e.conversation_id = " a ".id AND CASE WHEN "             \
+   "json_valid(e.payload) THEN json_extract(e.payload, '$.gw') END IS NOT NULL)) AND NOT "    \
+   "EXISTS (SELECT 1 FROM conversation_events e WHERE e.conversation_id = " a ".id AND CASE " \
+   "WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.gw') END = 'closed'))"
+
+int conv_db_job_holds_agent_work(int64_t conv_id, int user_id, bool *holds) {
+   if (conv_id <= 0 || !holds) {
+      return AUTH_DB_INVALID;
+   }
+   *holds = false;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* The conversation itself, then any child job of it (deleted with it). */
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT c.user_id, " JOB_HOLDS_AGENT_WORK(
+           "c") " OR EXISTS (SELECT 1 FROM "
+                "conversations k WHERE k.parent_id = c.id AND k.user_id = c.user_id "
+                "AND " JOB_HOLDS_AGENT_WORK("k") ") FROM conversations c WHERE c.id = ?",
+       -1, &st, NULL);
+   if (rc != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   rc = sqlite3_step(st);
+   if (rc != SQLITE_ROW) {
+      sqlite3_finalize(st);
+      AUTH_DB_UNLOCK();
+      return (rc == SQLITE_DONE) ? AUTH_DB_NOT_FOUND : AUTH_DB_FAILURE;
+   }
+   if (sqlite3_column_int(st, 0) != user_id) {
+      sqlite3_finalize(st);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FORBIDDEN;
+   }
+   *holds = sqlite3_column_int(st, 1) != 0;
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return AUTH_DB_SUCCESS;
+}
+
 int conv_db_job_list_by_user(int user_id, job_record_t *out, int max, int *count_out) {
    if (user_id <= 0 || !count_out) {
       return AUTH_DB_INVALID;

@@ -44,6 +44,8 @@
 #define WC_LINE_MAX CODING_GATEWAY_REQUEST_LINE_MAX
 #define WC_ANSWER_MAX 2048 /* the server's cap is 2000 bytes; longer is refused there */
 #define WC_NONCE_MAX 40    /* the clicking tab's own reference, echoed back */
+#define WC_HEAD_MAX (CODING_HEAD_LEN + 1)
+#define WC_SHA_MAX (CODING_SHA256_LEN + 1)
 
 static void send_to_user(int user_id, const char *type, struct json_object *payload) {
    struct json_object *frame = json_object_new_object();
@@ -670,4 +672,217 @@ void webui_coding_handle_view(ws_connection_t *conn, json_object *payload) {
       pthread_mutex_unlock(&s_viewers_mutex);
       view_reply(user_id, &r, NULL, "Try again in a moment.");
    }
+}
+
+/* =============================================================================
+ * coding_publish_preview {job, nonce}, coding_publish {job, head, pr_body_sha256,
+ * nonce}, coding_close {job, nonce, confirm?, head?}: the viewer's buttons
+ *
+ * The click is the user's confirm: no model turn in between.  Everything shown
+ * and sent to the gateway is built here from its state; the client's head and
+ * description hash only bind the push to what was shown.  One at a time per job
+ * (with the card's replies); answered to the asking tab.
+ * ============================================================================= */
+
+typedef enum {
+   WC_ACT_PREVIEW,
+   WC_ACT_PUBLISH,
+   WC_ACT_CLOSE,
+} wc_act_kind_t;
+
+typedef struct {
+   wc_act_kind_t kind;
+   int user_id;
+   int64_t job;
+   uint32_t session_id;
+   bool confirm;
+   char head[WC_HEAD_MAX];
+   char sha[WC_SHA_MAX];
+   char nonce[WC_NONCE_MAX];
+   bool own_title, own_desc;                   /* publish: the user's own text below */
+   char pr_title[CODING_PR_TITLE_MAX * 4 + 1]; /* as typed: checked where it is used */
+   char pr_desc[CODING_PR_DESC_MAX + 1];
+} wc_action_t;
+
+static const char *const k_act_types[] = {
+   [WC_ACT_PREVIEW] = "coding_publish_preview_response",
+   [WC_ACT_PUBLISH] = "coding_publish_response",
+   [WC_ACT_CLOSE] = "coding_close_response",
+};
+static const char *const k_act_names[] = {
+   [WC_ACT_PREVIEW] = "publish preview",
+   [WC_ACT_PUBLISH] = "publish",
+   [WC_ACT_CLOSE] = "close",
+};
+
+/* An answer with @p payload's fields (taken) plus the request's job, nonce, ok. */
+static void action_reply(const wc_action_t *a, struct json_object *payload, bool ok) {
+   json_object_object_add(payload, "job", json_object_new_int64(a->job));
+   json_object_object_add(payload, "nonce", json_object_new_string(a->nonce));
+   json_object_object_add(payload, "ok", json_object_new_boolean(ok));
+   struct json_object *frame = json_object_new_object();
+   json_object_object_add(frame, "type", json_object_new_string(k_act_types[a->kind]));
+   json_object_object_add(frame, "payload", payload);
+   send_to_session(a->session_id, a->user_id, frame);
+}
+
+static void action_refuse(const wc_action_t *a, const char *text) {
+   struct json_object *payload = json_object_new_object();
+   json_object_object_add(payload, "error", json_object_new_string(text));
+   action_reply(a, payload, false);
+}
+
+/* A refusal result's words without its mark. */
+static const char *refusal_text(const char *err) {
+   if (err == NULL) {
+      return "The coding-agent gateway didn't answer.";
+   }
+   return tool_result_is_error(err) ? err + strlen(TOOL_RESULT_ERROR_MARK) : err;
+}
+
+static void action_run(void *arg) {
+   wc_action_t *a = arg;
+   struct json_object *payload = NULL;
+   char *err = NULL;
+   if (a->kind == WC_ACT_PREVIEW) {
+      struct json_object *preview = coding_publish_preview(a->user_id, a->job, &err);
+      if (preview != NULL) {
+         payload = json_object_new_object();
+         json_object_object_add(payload, "preview", preview);
+      }
+   } else if (a->kind == WC_ACT_PUBLISH) {
+      char *pr_url = NULL;
+      char *result = coding_publish_click(a->user_id, a->job, a->head, a->sha,
+                                          a->own_title ? a->pr_title : NULL,
+                                          a->own_desc ? a->pr_desc : NULL, &pr_url);
+      if (result != NULL && !tool_result_is_error(result)) {
+         payload = json_object_new_object();
+         json_object_object_add(payload, "message", json_object_new_string(result));
+         if (pr_url != NULL) {
+            json_object_object_add(payload, "pr_url", json_object_new_string(pr_url));
+         }
+         free(result);
+      } else {
+         err = result;
+      }
+      free(pr_url);
+   } else {
+      payload = coding_close_click(a->user_id, a->job, a->confirm, a->head, &err);
+   }
+   OLOG_INFO("coding_agent: %s of job %" PRId64 " by user %d: %s", k_act_names[a->kind], a->job,
+             a->user_id, payload ? "done" : "refused");
+   if (coding_gateway_stopping()) {
+      json_object_put(payload);
+   } else if (payload != NULL) {
+      action_reply(a, payload, true);
+   } else {
+      action_refuse(a, refusal_text(err));
+   }
+   free(err);
+   inflight_release(a->user_id, a->job);
+   free(a);
+}
+
+static void action_start(ws_connection_t *conn, json_object *payload, wc_act_kind_t kind) {
+   if (!conn || !conn->authenticated || conn->is_satellite || conn->auth_user_id <= 0) {
+      return;
+   }
+   session_t *s = conn_get_session(conn);
+   if (s == NULL) {
+      return; /* nowhere to answer */
+   }
+   wc_action_t req = { .kind = kind, .user_id = conn->auth_user_id, .session_id = s->session_id };
+   struct json_object *o = NULL;
+   req.job = json_object_object_get_ex(payload, "job", &o) ? json_object_get_int64(o) : 0;
+   const char *nonce = json_object_object_get_ex(payload, "nonce", &o) ? json_object_get_string(o)
+                                                                       : "";
+   snprintf(req.nonce, sizeof(req.nonce), "%s", nonce && strlen(nonce) < WC_NONCE_MAX ? nonce : "");
+   /* "Close anyway" says so by the key, not by an empty head (a close with only
+    * uncommitted edits binds head ""). */
+   req.confirm = kind == WC_ACT_CLOSE && json_object_object_get_ex(payload, "confirm", &o) &&
+                 json_object_get_boolean(o);
+   const bool wants_head = kind == WC_ACT_PUBLISH || req.confirm;
+   const char *head = json_object_object_get_ex(payload, "head", &o) ? json_object_get_string(o)
+                                                                     : NULL;
+   const char *sha = json_object_object_get_ex(payload, "pr_body_sha256", &o)
+                         ? json_object_get_string(o)
+                         : NULL;
+   /* The user's own title and description: only on a publish, taken as typed
+    * (coding_publish_click checks them as the chat's are). */
+   const char *pr_title = kind == WC_ACT_PUBLISH &&
+                                  json_object_object_get_ex(payload, "pr_title", &o) &&
+                                  json_object_is_type(o, json_type_string)
+                              ? json_object_get_string(o)
+                              : NULL;
+   const char *pr_desc = kind == WC_ACT_PUBLISH &&
+                                 json_object_object_get_ex(payload, "pr_description", &o) &&
+                                 json_object_is_type(o, json_type_string)
+                             ? json_object_get_string(o)
+                             : NULL;
+   if (req.job <= 0 || (wants_head && (head == NULL || strlen(head) >= sizeof(req.head))) ||
+       (kind == WC_ACT_PUBLISH && pr_desc == NULL &&
+        (sha == NULL || strlen(sha) >= sizeof(req.sha))) ||
+       (sha != NULL && strlen(sha) >= sizeof(req.sha))) {
+      action_refuse(&req, "Malformed request.");
+      return;
+   }
+   /* A NUL inside would cut the text short, unseen. */
+   struct json_object *jt = NULL, *jd = NULL;
+   if ((pr_title && json_object_object_get_ex(payload, "pr_title", &jt) &&
+        (size_t)json_object_get_string_len(jt) != strlen(pr_title)) ||
+       (pr_desc && json_object_object_get_ex(payload, "pr_description", &jd) &&
+        (size_t)json_object_get_string_len(jd) != strlen(pr_desc))) {
+      action_refuse(&req, "The pull request title or description holds a NUL character.");
+      return;
+   }
+   if ((pr_title && strlen(pr_title) >= sizeof(req.pr_title)) ||
+       (pr_desc && strlen(pr_desc) >= sizeof(req.pr_desc))) {
+      char msg[96];
+      snprintf(msg, sizeof(msg), "The pull request description must be 1 to %d bytes.",
+               CODING_PR_DESC_MAX);
+      action_refuse(&req, pr_desc && strlen(pr_desc) >= sizeof(req.pr_desc)
+                              ? msg
+                              : "The pull request title is too long.");
+      return;
+   }
+   req.own_title = pr_title != NULL;
+   req.own_desc = pr_desc != NULL;
+   snprintf(req.pr_title, sizeof(req.pr_title), "%s", pr_title ? pr_title : "");
+   snprintf(req.pr_desc, sizeof(req.pr_desc), "%s", pr_desc ? pr_desc : "");
+   snprintf(req.head, sizeof(req.head), "%s", wants_head ? head : "");
+   snprintf(req.sha, sizeof(req.sha), "%s", sha ? sha : "");
+   /* The user's own coding job before anything is held for it. */
+   if (!users_coding_job(req.user_id, req.job)) {
+      action_refuse(&req, "No coding job with that number.");
+      return;
+   }
+   const wc_claim_t claim = inflight_claim(req.user_id, req.job);
+   if (claim != WC_CLAIMED) {
+      action_refuse(&req, claim == WC_ALREADY
+                              ? "Something for this job is already on its way; try again in a "
+                                "moment."
+                              : "Too many at once; try again in a moment.");
+      return;
+   }
+   wc_action_t *a = malloc(sizeof(*a));
+   if (a != NULL) {
+      *a = req;
+   }
+   if (a == NULL || coding_gateway_run_async(action_run, a) != SUCCESS) {
+      free(a);
+      inflight_release(req.user_id, req.job);
+      action_refuse(&req, "Try again in a moment.");
+   }
+}
+
+void webui_coding_handle_publish_preview(ws_connection_t *conn, json_object *payload) {
+   action_start(conn, payload, WC_ACT_PREVIEW);
+}
+
+void webui_coding_handle_publish(ws_connection_t *conn, json_object *payload) {
+   action_start(conn, payload, WC_ACT_PUBLISH);
+}
+
+void webui_coding_handle_close(ws_connection_t *conn, json_object *payload) {
+   action_start(conn, payload, WC_ACT_CLOSE);
 }

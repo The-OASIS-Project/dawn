@@ -1259,6 +1259,10 @@
                if (typeof DawnJobsActivity !== 'undefined' && msg.payload) {
                   DawnJobsActivity.upsertJob(msg.payload.job);
                }
+               // The changes viewer asks for the job's facts again on its status change.
+               if (typeof DawnCodingViewer !== 'undefined' && msg.payload) {
+                  DawnCodingViewer.onJobUpdate(msg.payload.job);
+               }
                break;
             case 'jobs_snapshot':
                // Connect/reconnect rehydration of the complete active set.
@@ -1293,6 +1297,14 @@
                // A coding job's work for the changes viewer (to this tab only).
                if (typeof DawnCodingViewer !== 'undefined') {
                   DawnCodingViewer.handleResponse(msg.payload);
+               }
+               break;
+            case 'coding_publish_preview_response':
+            case 'coding_publish_response':
+            case 'coding_close_response':
+               // Publish and close from the changes viewer (to this tab only).
+               if (typeof DawnCodingViewer !== 'undefined') {
+                  DawnCodingViewer.handleActionResponse(msg.type, msg.payload);
                }
                break;
             case 'coding_grants_response':

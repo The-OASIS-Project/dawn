@@ -374,7 +374,8 @@
    color: var(--text-primary);
 }
 
-.jobs-action-btn.cancel:hover:not(:disabled) {
+.jobs-action-btn.cancel:hover:not(:disabled),
+.jobs-action-btn.delete:hover:not(:disabled) {
    background: var(--error-subtle);
    border-color: var(--error);
    color: var(--error);

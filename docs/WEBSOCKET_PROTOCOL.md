@@ -296,7 +296,7 @@ clamped server-side (default 25, max 50). Response: `list_jobs_response`.
 ```
 
 #### `job_action`
-Cancel or resume one background job. Ownership is checked against the connection's
+Cancel, resume or delete one background job. Ownership is checked against the connection's
 authenticated user **before** acting; a job belonging to someone else and a job
 that does not exist give the same answer, so this cannot be used to probe for
 other users' job ids. Always answered with `job_action_response`.
@@ -307,6 +307,11 @@ other users' job ids. Always answered with `job_action_response`.
 - `resume` — re-dispatches an `interrupted` or `failed` job, continuing its
   existing transcript. Counts as a spawn against the job caps. Refused for
   `done` (it has an answer), `cancelled` (stopped deliberately), and `running`.
+- `delete` — deletes a finished job's conversation, as `delete_conversation` does
+  (its child jobs and images go with it), then sends `jobs_invalidate`. Refused while
+  the job is queued or running, and for a coding job whose task the agent gateway may
+  still hold (its trail has gateway events and none saying the task was closed): close
+  it first. `delete_conversation` refuses the same two.
 
 #### `coding_pending`
 What coding jobs wait on (built with the coding agent only). Asks the agent gateway,
@@ -326,7 +331,43 @@ per user at a time; a newer one replaces one still waiting. Answered with
 `coding_view_response`, to the asking tab only; `nonce` (optional, up to 39
 characters) is echoed so the tab renders only its latest.
 ```json
-{ "type": "coding_view", "payload": { "job": 1987, "what": "file", "path": "src/a.c", "view": "diff", "nonce": "v3" } }
+{ "type": "coding_view", "payload": { "job": 42, "what": "file", "path": "src/a.c", "view": "diff", "nonce": "v3" } }
+```
+
+#### `coding_publish_preview`
+The changes viewer's **Publish…**: DAWN's own preview of what publishing the coding job
+would push and open, built with the same checks as the coding agent tool's publish. The
+user's own coding job only. Answered with `coding_publish_preview_response`, to the
+asking tab only; `nonce` (up to 39 characters) is echoed.
+```json
+{ "type": "coding_publish_preview", "payload": { "job": 42, "nonce": "a1" } }
+```
+
+#### `coding_publish`
+Publish a coding job from the preview the user saw: `head` (the preview's full commit
+hash) and `pr_body_sha256` (the preview's) bind the click to that preview; the gateway
+refuses when the branch moved or the description changed since. The user's own coding
+job, finished (`done`). The title is the agent's, else the job's name (set by the server).
+Optional `pr_title` and `pr_description` are the user's own text for a new pull request,
+sent instead of the agent's: the title as one line (up to 120 bytes), the description up
+to 5900 bytes with the preview's `pr_footer` appended by the gateway; with
+`pr_description`, `pr_body_sha256` may be left out. Refused when the job's pull request
+is still open (its text is edited on GitHub). On success DAWN
+posts its line to the job's parent conversation and drops any publish staged in chat for
+that job. Answered with `coding_publish_response`, to the asking tab only.
+```json
+{ "type": "coding_publish", "payload": { "job": 42, "head": "4f1c…(40 hex)", "pr_body_sha256": "9a0b…", "nonce": "a2" } }
+```
+
+#### `coding_close`
+Close a coding job (its clone and branch go; it can't be revised afterwards). Without
+`confirm`: closes when nothing would be lost, and otherwise answers with
+`needs_confirm`. With `confirm: true` ("Close anyway"): closes with `head`, the head the
+`needs_confirm` answer showed (`""` when only uncommitted edits would be lost); refused
+when the work changed since. The `confirm` key, not an empty head, tells the two apart.
+Answered with `coding_close_response`, to the asking tab only.
+```json
+{ "type": "coding_close", "payload": { "job": 42, "nonce": "a3", "confirm": true, "head": "" } }
 ```
 
 #### `coding_grants`
@@ -2188,13 +2229,61 @@ through the assistant: "follow up on job 1977: ...").
 `base`, `task_id` (the job's branch is `refs/agent/<task_id>` in the gateway's
 mirror), `files` ({`path`, `added`, `removed`, `protected`}; `added`/`removed` null
 for a binary file; protected first, at most 2000) with `files_total`, and `commits`
-({`hash`, `subject`}, at most 100). For `file`: `path`, `view`, and `text` (a unified
+({`hash`, `subject`}, at most 100), plus `job_state`, DAWN's facts about the job (the
+viewer's Publish and Close buttons come only from these): `status`, `closed` (bool),
+`pr_url` (checked; absent when none), `unpublished_commits` (int, `-1` when unknown) and
+`published` (bool). For `file`: `path`, `view`, and `text` (a unified
 diff, or the file), or `too_large` (bytes), `binary` or `missing`. Paths, subjects
 and text are the agent's: show them as text, and show invisible and
 direction-changing characters (bidi controls, zero-width characters) visibly, since
 this is where the user checks the work before publishing it.
 ```json
-{ "type": "coding_view_response", "payload": { "job": 1987, "what": "file", "nonce": "v3", "ok": true, "result": { "path": "src/a.c", "view": "diff", "text": "@@ -1 +1 @@\n-a\n+b\n" } } }
+{ "type": "coding_view_response", "payload": { "job": 42, "what": "file", "nonce": "v3", "ok": true, "result": { "path": "src/a.c", "view": "diff", "text": "@@ -1 +1 @@\n-a\n+b\n" } } }
+```
+
+#### `coding_publish_preview_response`
+`ok` with `preview`, or `error`. `preview`: `head` (full hash), `repo`, `branch`,
+`base`, `commits` (count listed) with `commits_more` (true: 100 or more), `files` (count
+listed) with `files_total`, `protected` (paths), `history_only` ({`path`, `protected`}:
+paths changed by the job's commits but not in its final diff, public in the branch's
+history), `workflows` (true: the work changes `.github/workflows`, which the gateway's
+token can't push; offer no Publish), `pr_title` (the title the agent wrote when
+`pr_title_by_agent`, else the job's name), `pr_body` (exactly the description the
+gateway will send) with `pr_body_sha256`, `mentions` (@handles in it), `closes` (issues
+its closing keywords close on merge), `pr_footer` (what the gateway appends to a
+description the user writes), and `pr_url` (an open pull request the job already
+has; absent if none). The strings are raw, and the paths, title and description are the
+agent's: show them as text, with invisible and direction-changing characters visible.
+```json
+{
+   "type": "coding_publish_preview_response",
+   "payload": {
+      "job": 42, "nonce": "a1", "ok": true,
+      "preview": {
+         "head": "4f1c…", "repo": "owner/repo", "branch": "agent/42-fix", "base": "main",
+         "commits": 2, "commits_more": false, "files": 3, "files_total": 3,
+         "protected": [], "history_only": [ { "path": "notes.txt", "protected": false } ],
+         "workflows": false, "pr_title": "Fix the parser", "pr_title_by_agent": true, "pr_body": "…", "pr_body_sha256": "9a0b…",
+         "mentions": [], "closes": [ "#41" ]
+      }
+   }
+}
+```
+
+#### `coding_publish_response`
+`ok: true` with `message` (DAWN's line: what was pushed) and, when a pull request is
+open, `pr_url`; or `ok: false` with `error` (why it wasn't published).
+```json
+{ "type": "coding_publish_response", "payload": { "job": 42, "nonce": "a2", "ok": true, "message": "Published coding job #42 …", "pr_url": "https://github.com/owner/repo/pull/12" } }
+```
+
+#### `coding_close_response`
+`ok: true` with `closed` (bool) and `message`; when closing would delete unpublished
+work, `closed` is false and `needs_confirm`: {`commits`, `files` (with uncommitted
+changes), `branch`, `head` (`""` when there are no commits)} says what, to be sent back
+with `confirm: true`. A refusal is `ok: false` with `error`, and no `closed`.
+```json
+{ "type": "coding_close_response", "payload": { "job": 42, "nonce": "a3", "ok": true, "closed": false, "message": "Closing coding job #42 (\"Fix the parser\") deletes its 3 unpublished commits and 2 files with uncommitted changes; nothing else has them.", "needs_confirm": { "commits": 3, "files": 2, "branch": "agent/42-fix", "head": "4f1c…" } } }
 ```
 
 #### `coding_grants_response`

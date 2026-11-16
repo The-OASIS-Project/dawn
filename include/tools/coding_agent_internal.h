@@ -49,6 +49,13 @@ char *coding_agent_error(const char *text);
 /** Room for a repo's name at the gateway. */
 #define CODING_AGENT_REPO_MAX 64
 
+/** Whether a gateway task with @p status is still open: waiting its turn,
+ *  working, or waiting on the user (a close stops it first). */
+bool coding_task_status_open(const char *status);
+
+/** The gateway lists at most this many of a task's commits (its COMMITS_CAP). */
+#define CODING_COMMITS_LISTED 100
+
 /** Whether @p repo is a gateway repo name DAWN shows and grants for (letters,
  *  digits, '.', '_', '-'; not "." or ".."). */
 bool coding_agent_repo_name_ok(const char *repo);
@@ -63,6 +70,12 @@ void coding_agent_mark_read(void);
 /** A report posted as message @p msg_id of @p conv_id carries a take on the
  *  agent's words: the turn it is told to reads them (coding_agent_turn_read). */
 void coding_agent_note_take(int64_t conv_id, int64_t msg_id);
+
+/** A preview staged over this session's earlier one of the same kind, made in
+ *  turn @p replaced_turn (the slot's replaced_turn; 0: none): that one won't be
+ *  answered now, so it no longer holds DAWN's own questions back.  Call with no
+ *  tool lock held. */
+void coding_agent_preview_replaced(uint32_t replaced_turn);
 
 /** Whether the turn @p o returned the agent's words (coding_agent_mark_read), or
  *  was told a report with a take on them. */

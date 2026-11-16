@@ -1317,29 +1317,7 @@ static int cascade_delete_child_jobs(ws_connection_t *conn, int64_t parent_id) {
    return total;
 }
 
-void handle_delete_conversation(ws_connection_t *conn, struct json_object *payload) {
-   if (!conn_require_auth(conn)) {
-      return;
-   }
-
-   json_object *response = json_object_new_object();
-   json_object_object_add(response, "type", json_object_new_string("delete_conversation_response"));
-   json_object *resp_payload = json_object_new_object();
-
-   /* Get conversation ID */
-   json_object *id_obj;
-   if (!json_object_object_get_ex(payload, "conversation_id", &id_obj)) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Missing conversation_id"));
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
-      return;
-   }
-
-   int64_t conv_id = json_object_get_int64(id_obj);
-
+const char *webui_delete_conversation(ws_connection_t *conn, int64_t conv_id) {
    /* Refuse to delete a live background-job conversation out from under its
     * running worker (which is still writing to it).  Sidebar-hiding is
     * presentation, not authorization — a conv id learned from `job list` is
@@ -1348,14 +1326,16 @@ void handle_delete_conversation(ws_connection_t *conn, struct json_object *paylo
    if (conv_db_job_get_status(conv_id, conn->auth_user_id, job_status, sizeof(job_status)) ==
            AUTH_DB_SUCCESS &&
        (strcmp(job_status, "running") == 0 || strcmp(job_status, "queued") == 0)) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string(
-                                 "Cancel the background job before deleting it."));
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
-      return;
+      return "Cancel the background job before deleting it.";
+   }
+   /* A coding job (this one, or a child of this chat) whose task the gateway
+    * still holds: deleting it would leave its clone and branch with nothing in
+    * DAWN to publish or close them.  Close first, which says what would be lost. */
+   bool holds = false;
+   if (conv_db_job_holds_agent_work(conv_id, conn->auth_user_id, &holds) == AUTH_DB_SUCCESS &&
+       holds) {
+      return "A coding job's work is still at the agent: close it first (View changes, then "
+             "Close). If you just closed it, try again in a moment.";
    }
 
    /* Cancel + delete this conversation's background-job children first, so a
@@ -1372,42 +1352,56 @@ void handle_delete_conversation(ws_connection_t *conn, struct json_object *paylo
 
    /* With the images it owns (its uploads and captures), in one transaction. */
    int result = conv_images_delete_conversation(conv_id, conn->auth_user_id);
+   if (result == AUTH_DB_NOT_FOUND) {
+      return "Conversation not found";
+   }
+   if (result != AUTH_DB_SUCCESS) {
+      return "Failed to delete conversation";
+   }
+   /* Free any live-partial replay-ring entry for the deleted conversation. */
+   conv_stream_clear(conv_id);
 
-   if (result == AUTH_DB_SUCCESS) {
-      /* Free any live-partial replay-ring entry for the deleted conversation. */
-      conv_stream_clear(conv_id);
-
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-      json_object_object_add(resp_payload, "message",
-                             json_object_new_string("Conversation deleted"));
-
-      /* If the deleted conversation is the one currently loaded into this
-       * session, drop the in-memory copy and reset conversation tracking.
-       * Memory extraction mines session->conversation_history (not the DB), so
-       * without this a later trigger — session teardown (session_manager.c),
-       * or a switch/clear/new in this file — would still consolidate the
-       * just-deleted conversation from RAM.  Deleting must mean "forget it",
-       * so we clear the history and the active-id/private flags (mirrors
-       * handle_clear_session). */
-      if (conn->session && conn->active_conversation_id == conv_id) {
-         session_clear_history(conn->session);
-         webui_conn_set_active_conversation(conn, 0);
-         conn->active_conversation_private = false;
-      }
-
-      char details[64];
-      snprintf(details, sizeof(details), "Deleted conversation %lld", (long long)conv_id);
-      auth_db_log_event("CONVERSATION_DELETED", conn->username, conn->client_ip, details);
-   } else if (result == AUTH_DB_NOT_FOUND) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Conversation not found"));
-   } else {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Failed to delete conversation"));
+   /* If the deleted conversation is the one currently loaded into this
+    * session, drop the in-memory copy and reset conversation tracking.
+    * Memory extraction mines session->conversation_history (not the DB), so
+    * without this a later trigger — session teardown (session_manager.c),
+    * or a switch/clear/new in this file — would still consolidate the
+    * just-deleted conversation from RAM.  Deleting must mean "forget it",
+    * so we clear the history and the active-id/private flags (mirrors
+    * handle_clear_session). */
+   if (conn->session && conn->active_conversation_id == conv_id) {
+      session_clear_history(conn->session);
+      webui_conn_set_active_conversation(conn, 0);
+      conn->active_conversation_private = false;
    }
 
+   char details[64];
+   snprintf(details, sizeof(details), "Deleted conversation %lld", (long long)conv_id);
+   auth_db_log_event("CONVERSATION_DELETED", conn->username, conn->client_ip, details);
+   return NULL;
+}
+
+void handle_delete_conversation(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("delete_conversation_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   /* Get conversation ID */
+   json_object *id_obj;
+   const char *err = !json_object_object_get_ex(payload, "conversation_id", &id_obj)
+                         ? "Missing conversation_id"
+                         : webui_delete_conversation(conn, json_object_get_int64(id_obj));
+   json_object_object_add(resp_payload, "success", json_object_new_boolean(err == NULL));
+   if (err) {
+      json_object_object_add(resp_payload, "error", json_object_new_string(err));
+   } else {
+      json_object_object_add(resp_payload, "message",
+                             json_object_new_string("Conversation deleted"));
+   }
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);

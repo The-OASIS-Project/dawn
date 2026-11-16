@@ -749,6 +749,48 @@ static void test_list_children(void) {
    TEST_ASSERT_EQUAL_INT64(other, out[0].id);
 }
 
+/* What the delete guard reads: a coding job holds agent work once its trail has
+ * a gateway event, until one says the task was closed. */
+static void test_coding_job_holds_agent_work(void) {
+   int64_t cjob = 0, plain = 0;
+   conv_db_create_job(alice_id, "fix it", 0, "detached", "notify", NULL, 1, "task", &cjob);
+   conv_db_create_job(alice_id, "plain", 0, "detached", "notify", NULL, 1, "goal", &plain);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_kind(cjob, JOB_KIND_CODING));
+   bool holds = true;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(cjob, alice_id, &holds));
+   TEST_ASSERT_FALSE(holds); /* never reached the gateway */
+   conv_db_event_append(cjob, "note", "not json", NULL);
+   conv_db_event_append(cjob, "agent_step", "{\"gw\":\"tool\",\"tool\":\"Bash\"}", NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(cjob, alice_id, &holds));
+   TEST_ASSERT_TRUE(holds);
+   conv_db_event_append(cjob, "agent_request", "{\"gw\":\"closed\"}", NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(cjob, alice_id, &holds));
+   TEST_ASSERT_FALSE(holds);
+   conv_db_event_append(plain, "agent_step", "{\"gw\":\"tool\"}", NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(plain, alice_id, &holds));
+   TEST_ASSERT_FALSE(holds); /* not a coding job */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_FORBIDDEN, conv_db_job_holds_agent_work(cjob, bob_id, &holds));
+
+   /* Started but cancelled before any event reached the trail: still held. */
+   int64_t early = 0;
+   conv_db_create_job(alice_id, "early", 0, "detached", "notify", NULL, 1, "task", &early);
+   conv_db_job_set_kind(early, JOB_KIND_CODING);
+   conv_db_job_set_running(early, 1000);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(early, alice_id, &holds));
+   TEST_ASSERT_TRUE(holds);
+
+   /* A chat whose child coding job holds work: deleting the chat would drop it. */
+   int64_t chat = 0, child = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "chat", &chat));
+   conv_db_create_job(alice_id, "child", chat, "detached", "notify", NULL, 1, "task", &child);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(chat, alice_id, &holds));
+   TEST_ASSERT_FALSE(holds); /* a plain child job */
+   conv_db_job_set_kind(child, JOB_KIND_CODING);
+   conv_db_event_append(child, "agent_step", "{\"gw\":\"tool\"}", NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(chat, alice_id, &holds));
+   TEST_ASSERT_TRUE(holds);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_create_and_get);
@@ -763,6 +805,7 @@ int main(void) {
    RUN_TEST(test_resume_claim_is_exclusive);
    RUN_TEST(test_research_job_is_not_plain_resumable);
    RUN_TEST(test_coding_job_is_not_plain_resumable);
+   RUN_TEST(test_coding_job_holds_agent_work);
    RUN_TEST(test_terminal_if_active_first_wins);
    RUN_TEST(test_resume_claim_is_ownership_scoped);
    RUN_TEST(test_set_running_loses_to_a_cancel);
