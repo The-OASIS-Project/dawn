@@ -75,6 +75,9 @@
    let activeSig = '';
 
    /* Accumulated terminal rows + the keyset cursor for the next page. */
+   /* After a Delete: the job id whose row takes focus once History is rebuilt
+    * ('' for the close button); null when no Delete waits. */
+   let deleteFocusId = null;
    let historyRows = [];
    let historyCursor = null;
    let historyHasMore = false;
@@ -215,6 +218,21 @@
       return btn;
    }
 
+   const CONFIRMS = {
+      cancel: {
+         question: 'Stop this background job?',
+         title: 'Cancel background job',
+         ok: 'Stop job',
+         keep: 'Keep running',
+      },
+      delete: {
+         question: 'Delete this job and its conversation? This cannot be undone.',
+         title: 'Delete background job',
+         ok: 'Delete job',
+         keep: 'Keep',
+      },
+   };
+
    function buildActionButton(job, action, label) {
       const btn = elem('button', 'jobs-action-btn ' + action, label);
       btn.type = 'button';
@@ -229,8 +247,10 @@
       btn.addEventListener('click', function () {
          /* Cancel discards an LLM run that may be many minutes deep and cannot
           * be undone (Resume restarts from the goal, not from where it died),
-          * so it takes the house confirm the other destructive actions use. */
-         if (action !== 'cancel') {
+          * and Delete removes the job's conversation for good, so both take the
+          * house confirm the other destructive actions use. */
+         const ask = CONFIRMS[action];
+         if (!ask) {
             sendAction(job.conversation_id, action);
             return;
          }
@@ -240,14 +260,27 @@
          }
          /* The goal goes in `detail`, which the modal renders via textContent —
           * the same non-parsing sink this panel uses everywhere else. */
-         DawnDialog.confirm('Stop this background job?', {
-            title: 'Cancel background job',
+         /* A coding job may still have work at the agent: the server says so after
+          * the confirm, so say it before. */
+         const question =
+            action === 'delete' && job.kind === 'coding'
+               ? ask.question +
+                 ' A coding job with work still at the agent has to be closed first (View ' +
+                 'changes, then Close).'
+               : ask.question;
+         /* Where focus goes once the row is gone: the next row, else the one above. */
+         const row = btn.closest('.jobs-row');
+         const near = row && (row.nextElementSibling || row.previousElementSibling);
+         const nearBtn = near && near.querySelector('[data-job-id]');
+         DawnDialog.confirm(question, {
+            title: ask.title,
             detail: job.title || 'Untitled job',
-            okText: 'Stop job',
-            cancelText: 'Keep running',
+            okText: ask.ok,
+            cancelText: ask.keep,
             danger: true,
          }).then(function (ok) {
             if (ok) {
+               if (action === 'delete') deleteFocusId = nearBtn ? nearBtn.dataset.jobId : '';
                sendAction(job.conversation_id, action);
             }
          });
@@ -338,9 +371,14 @@
       }
       if (isActiveStatus(job.status)) {
          actions.appendChild(buildActionButton(job, 'cancel', 'Cancel'));
-      } else if (isResumable(job.status) && job.kind !== 'coding') {
-         /* A coding task goes on through the agent (revise), not a generic resume. */
-         actions.appendChild(buildActionButton(job, 'resume', 'Resume'));
+      } else {
+         if (isResumable(job.status) && job.kind !== 'coding') {
+            /* A coding task goes on through the agent (revise), not a generic resume. */
+            actions.appendChild(buildActionButton(job, 'resume', 'Resume'));
+         }
+         /* A coding job whose work the agent still holds is refused by the server
+          * with the way out (close it first). */
+         actions.appendChild(buildActionButton(job, 'delete', 'Delete'));
       }
       row.appendChild(actions);
       asks.forEach(function (req) {
@@ -619,6 +657,15 @@
       if (focusMark) {
          restoreFocus(focusMark, el.historyList);
       }
+      /* After a Delete, the row next to the deleted one (or the close button). */
+      if (deleteFocusId !== null && !historyLoading) {
+         const next = deleteFocusId
+            ? el.historyList.querySelector('[data-job-id="' + deleteFocusId + '"]')
+            : null;
+         deleteFocusId = null;
+         (next || el.closeBtn).focus();
+         return;
+      }
       if (focusWasInRegion && document.activeElement === document.body) {
          const fallback =
             el.historyList.querySelector(
@@ -801,7 +848,18 @@
          payload.ok ? 'success' : 'error'
       );
       if (!payload.ok) {
+         if (payload.action === 'delete') deleteFocusId = null;
          return;
+      }
+      /* The conversation shown here was deleted: start a new chat, as the
+       * sidebar's delete does. */
+      if (
+         payload.action === 'delete' &&
+         typeof DawnHistory !== 'undefined' &&
+         DawnHistory.getActiveConversationId &&
+         String(DawnHistory.getActiveConversationId()) === key
+      ) {
+         DawnHistory.startNewChat();
       }
       /* Both actions move a job ACROSS the active/history partition — cancel
        * pushes it out of the active set, resume pulls it back in — and only the
@@ -874,6 +932,22 @@
          return; // belongs on an unloaded older page — nothing rendered
       }
       renderHistory();
+   }
+
+   /* A finished job was resumed (from anywhere): it leaves History in place,
+    * as onJobTerminal moves one in. */
+   function onJobResumed(job) {
+      if (!isOpen || !el.historyList || !job || job.conversation_id == null) {
+         return;
+      }
+      const key = String(job.conversation_id);
+      const before = historyRows.length;
+      historyRows = historyRows.filter(function (r) {
+         return String(r.conversation_id) !== key;
+      });
+      if (historyRows.length !== before) {
+         renderHistory();
+      }
    }
 
    /* ---- open / close ----------------------------------------------------- */
@@ -1167,5 +1241,6 @@
       handleHistoryPage: handleHistoryPage,
       handleActionResult: handleActionResult,
       onJobTerminal: onJobTerminal,
+      onJobResumed: onJobResumed,
    };
 })(window);

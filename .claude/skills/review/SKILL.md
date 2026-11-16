@@ -47,6 +47,8 @@ The agents already know their domains and how to structure their output:
 | "run all four" | 1–4 + ui-design-architect |
 | "run all five", "run all six", "full review" | all six (mandatory for large refactors, new modules, pre-release audits) |
 
+Brief each agent for the real install (CLAUDE.md, "Brief for the real install, not the worst case"): the change, what it runs on, and a request for findings that each name a realistic trigger. No leading threat-model questions.
+
 If the changes clearly don't touch any UI surface at all, you may skip the ui-design-architect and note why. Do NOT substitute or add `master-code-reviewer`; the specialized set above replaces it. Use it only if the developer asks for it by name.
 
 ## Step 3: Synthesize and Validate
@@ -68,6 +70,8 @@ The goal is to fix things that genuinely improve the code — real bugs, real se
 - If it's a real efficiency problem on embedded (unnecessary allocations in hot paths, unbounded buffers, things that'll hurt on a Jetson with limited RAM) — fix it. Abstract "could be more efficient" observations on cold paths aren't worth touching.
 - If it's a genuine code quality improvement that makes the code clearer or more correct, and the fix is localized and low-risk — fix it. Good engineering.
 - If it's a UI consistency issue — mismatched styling between parallel components, accessibility gaps, broken patterns that work in one module but not the mirrored one — fix it. UI quality matters as much as backend quality. Don't dismiss visual or interaction bugs just because they're "only UI."
+- If it needs several unlikely things to line up (CLAUDE.md, "Count the conditions") — drop it, even when the fix is one line, and add no TODO row. Say so in one line in the table.
+- If its fix would refuse, rewrite or slow something a real user does (CLAUDE.md, "A guard for a rare case never costs a real one") — don't take that fix, however real the finding; find one that leaves real input alone, or list it.
 - If it's a real bug — even low-severity — and the fix is easy and localized, fix it. Don't skip real issues just because they're low priority. The cost of a one-line fix is near zero; the cost of a known bug sitting around is not.
 - **Pre-existing issues: fix them.** If an agent surfaces a real issue — bug, missing validation, inaccurate docs, security gap — fix it regardless of whether this diff introduced it. The review found it; that's the opportunity. If we don't fix it now, when will we? The only valid skip reason is if the fix is genuinely invasive (touches many files outside the diff, changes public APIs, high risk of regression). Never use "pre-existing" as an automatic skip. Triage on merit: severity + fix effort, not on when it was introduced.
 - If it's a nitpick, a style opinion beyond what CLAUDE.md specifies, or a "nice to have" future improvement unrelated to the code being changed — skip it. Mention it in the table for awareness, but don't touch working code to satisfy a preference.

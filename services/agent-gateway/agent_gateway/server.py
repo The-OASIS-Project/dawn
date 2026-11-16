@@ -36,6 +36,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
 from .repos import GitError
+from .runner import PR_FOOTER, body_sha256, pr_body
 
 MAX_WAIT_S = 25
 UPDATE_STATUS = "update-status.json"
@@ -209,24 +210,38 @@ def build(runner, cfg) -> MCPServer:
    @tool
    async def task_publish(dawn_user_id: int, head: str, task_id: str | None = None,
                           client_ref: str | None = None, open_pr: bool = True,
-                          title: str | None = None) -> dict:
+                          title: str | None = None,
+                          expect_body_sha256: str | None = None,
+                          pr_title: str | None = None,
+                          pr_description: str | None = None) -> dict:
       """Push a completed task's agent/* branch and optionally open a pull request.  DAWN
       calls this only after the user confirmed, passing the head commit they were shown;
-      a branch that moved since is refused.  A second call returns the first result while
-      nothing moved; after a revise it pushes the new commits, keeping an open PR."""
+      a branch that moved since is refused, and with `expect_body_sha256` (task_changes'
+      pr_body_sha256) so is a description that changed since.  `pr_title` and
+      `pr_description` are the user's own text for a new pull request, sent instead of
+      the agent's (the description gets pr_footer appended); refused when the task's
+      pull request is still open.  A second call returns the first result while nothing
+      moved; after a revise it pushes the new commits, keeping an open PR."""
       t = task_of(dawn_user_id, task_id, client_ref)
-      return await runner.publish(t["id"], dawn_user_id, open_pr, title, head)
+      return await runner.publish(t["id"], dawn_user_id, open_pr, title, head,
+                                  expect_body_sha256, pr_title, pr_description)
 
    # --- reading the work: from the gateway's mirror, never the agent's clone ---
 
    @tool
    async def task_changes(dawn_user_id: int, task_id: str | None = None,
                           client_ref: str | None = None) -> dict:
-      """The task's work so far: changed files with +/- counts, and its commits."""
+      """The task's work so far: changed files with +/- counts, its commits, paths only
+      its commits changed (history_only), whether any path is a CI workflow, and the
+      pull request publish would open: the title the agent wrote (pr_title; null when
+      none, then DAWN's) and the description (pr_body, with its pr_body_sha256)."""
       t = task_of(dawn_user_id, task_id, client_ref)
       closed_check(t)
       res = await runner.repos.changes(t["repo"], t["id"], t["base"])
-      return {**res, "task_id": t["id"]}  # names refs/agent/<id> for looking locally
+      body = pr_body(t)
+      # task_id names refs/agent/<id> for looking locally
+      return {**res, "task_id": t["id"], "pr_title": t["pr_title"], "pr_body": body,
+              "pr_body_sha256": body_sha256(body), "pr_footer": PR_FOOTER}
 
    @tool
    async def task_file(dawn_user_id: int, path: str, view: str = "diff",

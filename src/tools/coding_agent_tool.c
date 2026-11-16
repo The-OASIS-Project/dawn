@@ -67,10 +67,9 @@
 /* One file or diff: the gateway caps it at 512 KB of git's bytes, and its decode
  * can make each invalid byte a 3-byte replacement character. */
 #define CA_FILE_MAX (3 * 512 * 1024)
-#define CA_PATH_SHOWN 512     /* a path in a changes listing (a rename holds two) */
-#define CA_HASH_SHOWN 8       /* a commit's hash, as shown */
-#define CA_COMMITS_LISTED 100 /* the gateway lists at most this many commits */
-#define CA_RENAME_SEP " -> "  /* a rename in a changes listing: "old -> new" */
+#define CA_PATH_SHOWN 512    /* a path in a changes listing (a rename holds two) */
+#define CA_HASH_SHOWN 8      /* a commit's hash, as shown */
+#define CA_RENAME_SEP " -> " /* a rename in a changes listing: "old -> new" */
 
 /* The turn, per session, in which a read returned the agent's words. */
 static pthread_mutex_t s_marks_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -174,6 +173,17 @@ void coding_agent_mark_read(void) {
    s_marks[slot].session_id = o.session_id;
    s_marks[slot].turn_token = o.turn_token;
    pthread_mutex_unlock(&s_marks_mutex);
+}
+
+bool coding_task_status_open(const char *status) {
+   return status != NULL && (strcmp(status, "queued") == 0 || strcmp(status, "working") == 0 ||
+                             strcmp(status, "input_required") == 0);
+}
+
+void coding_agent_preview_replaced(uint32_t replaced_turn) {
+   if (replaced_turn != 0) {
+      turn_origin_note_answered(session_get_command_context(), replaced_turn);
+   }
 }
 
 void coding_agent_note_take(int64_t conv_id, int64_t msg_id) {
@@ -508,7 +518,7 @@ static char *handle_changes(struct json_object *details, int user_id) {
    strbuf_appendf(&sb,
                   "Job #%lld [%s]: %zu file%s changed in %zu%s commit%s, head %.*s on base %.*s.\n",
                   (long long)job, rec.job_status, nf, nf == 1 ? "" : "s", nc,
-                  nc >= CA_COMMITS_LISTED ? "+" : "", nc == 1 ? "" : "s", CA_HASH_SHOWN,
+                  nc >= CODING_COMMITS_LISTED ? "+" : "", nc == 1 ? "" : "s", CA_HASH_SHOWN,
                   coding_gateway_jstr(ans, "head"), CA_HASH_SHOWN,
                   coding_gateway_jstr(ans, "base"));
    if (nf > 0) {
@@ -581,6 +591,47 @@ static struct json_object *file_args(int64_t job,
    return args;
 }
 
+/* The facts a changes view's buttons rest on: {status, closed, published,
+ * pr_url (checked), unpublished_commits (-1: unknown)}.  The gateway away: only
+ * DAWN's status, so no button shows what it can't back. */
+static struct json_object *view_job_state(int user_id,
+                                          int64_t job,
+                                          const job_record_t *rec,
+                                          int *gw_rc) {
+   struct json_object *o = json_object_new_object();
+   json_object_object_add(o, "status", json_object_new_string(rec->job_status));
+   struct json_object *ans = NULL;
+   char *err = NULL;
+   int left = -1;
+   bool closed = false, published = false;
+   *gw_rc = coding_gateway_call(user_id, "task_list", coding_agent_job_args(job), &ans, &err);
+   if (*gw_rc == CODING_GW_OK) {
+      struct json_object *task = json_object_object_get(ans, "task");
+      struct json_object *pub = json_object_object_get(task, "published");
+      struct json_object *jleft = json_object_object_get(ans, "unpublished_commits");
+      /* No task at all (the gateway's state was lost): closed once DAWN recorded
+       * its close (Close does), so the button stays until then and the delete
+       * guard, which reads that record, agrees. */
+      int64_t holder = 0;
+      closed = coding_gateway_jstr(task, "closed")[0] != '\0' ||
+               (!json_object_is_type(task, json_type_object) &&
+                conv_db_job_holds_agent_work(job, user_id, &holder) == AUTH_DB_SUCCESS &&
+                holder == 0);
+      published = json_object_is_type(pub, json_type_object);
+      left = json_object_is_type(jleft, json_type_int) ? json_object_get_int(jleft) : -1;
+      const char *url = coding_gateway_jstr(pub, "pr_url");
+      if (coding_publish_pr_url_ok(url)) {
+         json_object_object_add(o, "pr_url", json_object_new_string(url));
+      }
+   }
+   free(err);
+   json_object_put(ans);
+   json_object_object_add(o, "closed", json_object_new_boolean(closed));
+   json_object_object_add(o, "published", json_object_new_boolean(published));
+   json_object_object_add(o, "unpublished_commits", json_object_new_int(left));
+   return o;
+}
+
 struct json_object *coding_view_fetch(int user_id,
                                       int64_t job,
                                       bool file,
@@ -594,6 +645,23 @@ struct json_object *coding_view_fetch(int user_id,
       *err_out = bad;
       return NULL;
    }
+   struct json_object *state = NULL; /* the changes view's job facts, for its buttons */
+   if (!file) {
+      int gw_rc = CODING_GW_OK;
+      state = view_job_state(user_id, job, &rec, &gw_rc);
+      if (gw_rc == CODING_GW_FAILED) { /* away: one wait, not two */
+         json_object_put(state);
+         *err_out = coding_agent_error("The coding-agent gateway didn't answer.");
+         return NULL;
+      }
+      if (json_object_get_boolean(json_object_object_get(state, "closed"))) {
+         struct json_object *ans = json_object_new_object(); /* its work is gone: nothing to list */
+         json_object_object_add(ans, "files", json_object_new_array());
+         json_object_object_add(ans, "commits", json_object_new_array());
+         json_object_object_add(ans, "job_state", state);
+         return ans;
+      }
+   }
    struct json_object *args = coding_agent_job_args(job);
    if (file) {
       json_object_put(args);
@@ -606,12 +674,28 @@ struct json_object *coding_view_fetch(int user_id,
    }
    struct json_object *ans = NULL;
    char *err = NULL;
-   if (coding_gateway_call(user_id, file ? "task_file" : "task_changes", args, &ans, &err) !=
-       CODING_GW_OK) {
+   const int rc = coding_gateway_call(user_id, file ? "task_file" : "task_changes", args, &ans,
+                                      &err);
+   if (rc == CODING_GW_REFUSED && state != NULL) {
+      /* Nothing collected (cancelled or ended before a commit): nothing to list,
+       * but its buttons still show, so it can be closed and then deleted. */
+      free(err);
+      json_object_put(ans);
+      ans = json_object_new_object();
+      json_object_object_add(ans, "files", json_object_new_array());
+      json_object_object_add(ans, "commits", json_object_new_array());
+      json_object_object_add(ans, "job_state", state);
+      return ans;
+   }
+   if (rc != CODING_GW_OK) {
+      json_object_put(state);
       *err_out = coding_agent_error_free(err);
       return NULL;
    }
    free(err);
+   if (state != NULL) {
+      json_object_object_add(ans, "job_state", state);
+   }
    return ans;
 }
 
@@ -824,7 +908,9 @@ static const treg_param_t coding_agent_params[] = {
                       "run), 'file' (one file's "
                       "diff, or the file after or before), 'delegate' (propose a task; nothing "
                       "starts), 'confirm_delegate' (start the proposed task once the user "
-                      "agrees), 'revise' (propose more work for a finished job, on its branch), "
+                      "agrees; when the agent is busy it is queued and starts by itself when a "
+                      "running task finishes, so propose and confirm as usual), 'revise' (propose "
+                      "more work for a finished job, on its branch), "
                       "'confirm_revise' (send it once the user agrees), 'publish' (propose "
                       "pushing a finished job's branch and opening a pull request), "
                       "'confirm_publish' (push it once the user agrees), 'close' (the user is "
@@ -857,7 +943,10 @@ static const treg_param_t coding_agent_params[] = {
            "budget_usd (optional)}. revise: {job, instructions (the more work, in "
            "the user's words; the same agent resumes with what it knows), budget_usd "
            "(optional, added to the job's budget)}. publish: {job, pr (optional, true by "
-           "default; false pushes the branch only)}. close: {job}, or {task (the id, as a string)} "
+           "default; false pushes the branch only), title and description (optional: the "
+           "pull request's own text when the user wants it changed, instead of the agent's; "
+           "not for a job whose pull request exists)}. close: {job}, or {task (the id, as a "
+           "string)} "
            "for a task the list shows with no DAWN job. confirm_delegate, "
            "confirm_revise, confirm_publish, confirm_close, confirm_approve: {id (the "
            "number its preview returned)}; "

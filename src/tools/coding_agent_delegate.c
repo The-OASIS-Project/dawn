@@ -237,6 +237,7 @@ char *coding_delegate_propose(struct json_object *details,
                                                          CA_PENDING_DELEGATE, pending_slots_now(),
                                                          &rc);
    const uint32_t id = p ? p->hdr.item_id : 0;
+   const uint32_t replaced = p ? p->hdr.replaced_turn : 0;
    char shown[CONV_TITLE_MAX] = "";
    if (p != NULL) {
       safe_strscpy(p->repo, repo);
@@ -251,6 +252,7 @@ char *coding_delegate_propose(struct json_object *details,
       p->parent_conv = parent_conv;
    }
    pthread_mutex_unlock(&s_pending_mutex);
+   coding_agent_preview_replaced(replaced);
    if (id == 0) {
       return tool_pending_stage_refusal(rc, "coding task");
    }
@@ -271,12 +273,14 @@ char *coding_delegate_propose(struct json_object *details,
 
 /* Start the staged task for job @p conv_id: once more with the same name when
  * the first answer was lost (the gateway returns the task it started).  The
- * branch goes to @p branch; CODING_GW_*. */
+ * branch goes to @p branch; *@p queued: every slot was busy, so the gateway
+ * starts it when a running task finishes.  CODING_GW_*. */
 static int start_task(int user_id,
                       int64_t conv_id,
                       const ca_pending_t *p,
                       char *branch,
                       size_t branch_len,
+                      bool *queued,
                       char **err) {
    char ref[CODING_AGENT_REF_MAX];
    if (!coding_gateway_ref(conv_id, ref, sizeof(ref))) {
@@ -298,6 +302,7 @@ static int start_task(int user_id,
       rc = coding_gateway_call(user_id, "task_start", args, &ans, err);
       if (rc == CODING_GW_OK) {
          snprintf(branch, branch_len, "%s", coding_gateway_jstr(ans, "branch"));
+         *queued = strcmp(coding_gateway_jstr(ans, "status"), "queued") == 0;
       }
       json_object_put(ans);
    }
@@ -348,43 +353,61 @@ char *coding_delegate_confirm(struct json_object *details,
 
    char branch[CA_BRANCH_MAX] = "";
    char *err = NULL;
-   if (start_task(user_id, conv_id, &p, branch, sizeof(branch), &err) != CODING_GW_OK) {
+   bool queued = false;
+   if (start_task(user_id, conv_id, &p, branch, sizeof(branch), &queued, &err) != CODING_GW_OK) {
       /* Refused, or no answer: one whose answer was lost may exist, so stop it. */
       coding_agent_end_quietly(conv_id, user_id, "failed", "the gateway didn't start it");
       coding_gateway_cancel(user_id, conv_id);
       return coding_agent_error_free(err);
    }
 
-   /* queued -> running is a claim, and only this path makes it: a cancel since
-    * the row was made wins, and the task it started is stopped. */
-   if (conv_db_job_set_running(conv_id, time(NULL)) != AUTH_DB_SUCCESS) {
+   if (queued) {
+      /* The gateway holds it until a slot frees; the job stays queued and its
+       * "started" event (the watcher) makes it running.  A cancel since the row
+       * was made reached no task, so it is stopped here. */
       job_record_t rec;
-      const bool read = conv_db_job_get(conv_id, user_id, &rec) == AUTH_DB_SUCCESS;
-      if (read && strcmp(rec.job_status, "queued") != 0 &&
-          strcmp(rec.job_status, "cancelled") != 0) {
-         /* The agent already finished (its end came in first): the job says how. */
-         char buf[2 * CONV_TITLE_MAX + 64];
-         snprintf(buf, sizeof(buf), "Started coding job #%lld (%s); it has already ended (%s).",
-                  (long long)conv_id, title, rec.job_status);
-         return strdup(buf);
-      }
-      coding_gateway_cancel(user_id, conv_id);
-      if (read && strcmp(rec.job_status, "cancelled") == 0) {
+      if (conv_db_job_get(conv_id, user_id, &rec) == AUTH_DB_SUCCESS &&
+          strcmp(rec.job_status, "cancelled") == 0) {
+         coding_gateway_cancel(user_id, conv_id);
          return coding_agent_error(
              "The job was cancelled while it started; the agent was stopped.");
       }
-      coding_agent_end_quietly(conv_id, user_id, "failed", "couldn't record the start");
-      return coding_agent_error("Couldn't record the job's start, so the agent was stopped.");
+   } else if (conv_db_job_set_running(conv_id, time(NULL)) != AUTH_DB_SUCCESS) {
+      /* queued -> running is a claim: a cancel since the row was made wins, and
+       * the task it started is stopped. */
+      job_record_t rec;
+      const bool read = conv_db_job_get(conv_id, user_id, &rec) == AUTH_DB_SUCCESS;
+      /* "running": the watcher saw its "started" event first, so it runs. */
+      if (!read || strcmp(rec.job_status, "running") != 0) {
+         if (read && strcmp(rec.job_status, "queued") != 0 &&
+             strcmp(rec.job_status, "cancelled") != 0) {
+            /* The agent already finished (its end came in first): the job says how. */
+            char buf[2 * CONV_TITLE_MAX + 64];
+            snprintf(buf, sizeof(buf), "Started coding job #%lld (%s); it has already ended (%s).",
+                     (long long)conv_id, title, rec.job_status);
+            return strdup(buf);
+         }
+         coding_gateway_cancel(user_id, conv_id);
+         if (read && strcmp(rec.job_status, "cancelled") == 0) {
+            return coding_agent_error(
+                "The job was cancelled while it started; the agent was stopped.");
+         }
+         coding_agent_end_quietly(conv_id, user_id, "failed", "couldn't record the start");
+         return coding_agent_error("Couldn't record the job's start, so the agent was stopped.");
+      }
    }
    job_update_emit(conv_id, user_id);
 
    strbuf_t sb;
    strbuf_init(&sb, 256);
    strbuf_appendf(&sb,
-                  "Started coding job #%lld (\"%s\") in %s on branch %s. It runs in the "
-                  "background; the user hears when it needs them or finishes, and can check on it "
-                  "with status. Call it by its name when you talk about it.",
-                  (long long)conv_id, title, p.repo, branch);
+                  "%s coding job #%lld (\"%s\") in %s on branch %s. %s the user hears when it "
+                  "needs them or finishes, and can check on it with status. Call it by its name "
+                  "when you talk about it.",
+                  queued ? "Queued" : "Started", (long long)conv_id, title, p.repo, branch,
+                  queued ? "Every slot at the agent is busy, so it starts by itself when a running "
+                           "task finishes; nothing to do until then. Then"
+                         : "It runs in the background;");
    return strbuf_steal(&sb);
 }
 
@@ -473,6 +496,7 @@ char *coding_revise_propose(struct json_object *details, int user_id, const turn
                                                          CA_PENDING_REVISE, pending_slots_now(),
                                                          &rc);
    const uint32_t id = p ? p->hdr.item_id : 0;
+   const uint32_t replaced = p ? p->hdr.replaced_turn : 0;
    if (p != NULL) {
       safe_strscpy(p->task, text);
       safe_strscpy(p->name, rec.title);
@@ -480,6 +504,7 @@ char *coding_revise_propose(struct json_object *details, int user_id, const turn
       p->job = job;
    }
    pthread_mutex_unlock(&s_pending_mutex);
+   coding_agent_preview_replaced(replaced);
    if (id == 0) {
       return tool_pending_stage_refusal(rc, "follow-up");
    }
@@ -564,9 +589,7 @@ static ca_task_state_t task_state(int user_id, int64_t job) {
    if (coding_gateway_call(user_id, "task_list", coding_agent_job_args(job), &ans, &err) ==
        CODING_GW_OK) {
       const char *status = coding_gateway_jstr(json_object_object_get(ans, "task"), "status");
-      state = strcmp(status, "working") == 0 || strcmp(status, "input_required") == 0
-                  ? CA_TASK_OPEN
-                  : CA_TASK_CLOSED;
+      state = coding_task_status_open(status) ? CA_TASK_OPEN : CA_TASK_CLOSED;
    }
    json_object_put(ans);
    free(err);
@@ -625,9 +648,11 @@ char *coding_revise_confirm(struct json_object *details, int user_id, const turn
    }
    free(err);
    const time_t started = before.started_at ? before.started_at : time(NULL);
-   if (conv_db_job_set_running(p.job, started) != AUTH_DB_SUCCESS) {
-      job_record_t now;
-      const bool read = conv_db_job_get(p.job, user_id, &now) == AUTH_DB_SUCCESS;
+   job_record_t now;
+   const bool running = conv_db_job_set_running(p.job, started) == AUTH_DB_SUCCESS;
+   const bool read = !running && conv_db_job_get(p.job, user_id, &now) == AUTH_DB_SUCCESS;
+   /* Running: the watcher claimed it on a "started" event, so the follow-up runs. */
+   if (!running && !(read && strcmp(now.job_status, "running") == 0)) {
       /* Ended meanwhile: by the new run (a real end, already reported, kept) or
        * from the task's old end (a reconcile racing this confirm, while the
        * follow-up runs: opened again rather than let the agent be stopped). */
