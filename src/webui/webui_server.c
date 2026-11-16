@@ -548,7 +548,18 @@ int generate_session_token(char token_out[WEBUI_SESSION_TOKEN_LEN]) {
 /* Queue a JSON response for delivery via the response queue.
  * Safe to call from any context — the JSON is serialized and copied. */
 void send_json_response(ws_connection_t *conn, json_object *response) {
+   /* Sent while handling a request of this connection's that carried `req`: echo
+    * it.  Taken off again after, since some callers send one cached object to
+    * many requests (safe unlocked only because such a request is handled on the
+    * service thread alone). */
+   struct json_object *payload = NULL;
+   json_object_object_get_ex(response, "payload", &payload);
+   bool stamped = webui_protocol_request_stamp(conn->wsi, payload, false);
    const char *json_str = json_object_to_json_string(response);
+   char *copy = json_str ? strdup(json_str) : NULL;
+   if (stamped) {
+      json_object_object_del(payload, "req");
+   }
    if (!json_str) {
       OLOG_ERROR("WebUI: Failed to serialize JSON response");
       return;
@@ -557,7 +568,7 @@ void send_json_response(ws_connection_t *conn, json_object *response) {
    ws_response_t resp = { 0 };
    resp.session = conn->session;
    resp.type = WS_RESP_JSON;
-   resp.generic_json.json = strdup(json_str);
+   resp.generic_json.json = copy;
    if (!resp.generic_json.json) {
       OLOG_ERROR("WebUI: Failed to allocate JSON response string");
       return;
