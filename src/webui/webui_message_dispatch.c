@@ -334,7 +334,9 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    } else {
       struct json_object *payload = NULL;
       json_object_object_get_ex(root, "payload", &payload);
+      webui_protocol_request_begin(conn->wsi, json_object_get_string(type_obj), payload);
       dispatch_message(conn, json_object_get_string(type_obj), payload);
+      webui_protocol_request_end();
    }
    json_object_put(root);
    free(json_str);
@@ -1902,13 +1904,9 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          OLOG_DEBUG("WebUI: Ignoring %s message (feature not compiled in)", shown);
       else
          OLOG_WARNING("WebUI: Unknown message type: %s", shown);
-      char req[WEBUI_REQ_MAX + 1];
-      char *reply = webui_protocol_unknown_type_json(
-          type, webui_protocol_payload_req(payload, WEBUI_REQ_MAX, req, sizeof(req)) ? req : NULL);
-      if (reply) {
-         send_json_message(conn->wsi, reply);
-         free(reply);
-      }
+      /* Names the type and the req, as every error sent for a request does. */
+      send_error_frame(conn->wsi, "UNKNOWN_TYPE", "This server doesn't handle that message type",
+                       WS_SEVERITY_ERROR, NULL);
    }
 }
 
