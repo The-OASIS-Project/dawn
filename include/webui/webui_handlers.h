@@ -226,6 +226,16 @@ void webui_coding_handle_grant_revoke(ws_connection_t *conn, json_object *payloa
 
 /** coding_reply {job, request_id, decision, answer?, line?}: the card's answer. */
 void webui_coding_handle_reply(ws_connection_t *conn, struct json_object *payload);
+
+/** coding_publish_preview {job, nonce}: what Publish would push (webui_coding.c). */
+void webui_coding_handle_publish_preview(ws_connection_t *conn, struct json_object *payload);
+
+/** coding_publish {job, head, pr_body_sha256?, pr_title?, pr_description?, nonce}: the user's
+ *  click on Publish (the hash is needed unless the description is the user's own). */
+void webui_coding_handle_publish(ws_connection_t *conn, struct json_object *payload);
+
+/** coding_close {job, nonce, confirm?, head?}: the user's click on Close. */
+void webui_coding_handle_close(ws_connection_t *conn, struct json_object *payload);
 #endif
 
 /**
@@ -244,6 +254,14 @@ void webui_broadcast_jobs_invalidate(int user_id);
  * @brief Delete a conversation
  */
 void handle_delete_conversation(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Delete one of @p conn's user's conversations, with its child jobs and
+ *        images (lws thread).  Refused for a job still queued or running, and
+ *        for a coding job whose work the agent gateway still holds.
+ * @return NULL on success, else why not (a static string for the user)
+ */
+const char *webui_delete_conversation(ws_connection_t *conn, int64_t conv_id);
 
 /**
  * @brief Rename a conversation

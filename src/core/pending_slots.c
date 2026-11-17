@@ -97,6 +97,8 @@ pending_slot_t *pending_slots_stage(const pending_slots_t *slots,
       *rc = PENDING_TWICE_IN_TURN;
       return NULL;
    }
+   /* A newer preview of the same thing: the one it replaces is answered by it. */
+   const uint32_t replaced = slot ? slot->origin.turn_number : 0;
    for (int i = 0; !slot && i < slots->count; i++) {
       pending_slot_t *s = slot_at(slots, i);
       if (!s->active) {
@@ -112,6 +114,7 @@ pending_slot_t *pending_slots_stage(const pending_slots_t *slots,
    slot->kind = kind;
    slot->item_id = next_item_id();
    slot->origin = turn_origin_stored(current);
+   slot->replaced_turn = replaced;
    slot->made_at = now;
    *rc = PENDING_STAGED;
    return slot;

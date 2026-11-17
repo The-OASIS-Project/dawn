@@ -53,10 +53,11 @@ extern "C" {
 typedef struct {
    bool active;
    int user_id;
-   int kind;             /* the tool's own kind of pending item */
-   uint32_t item_id;     /* new for every staged item; never 0 */
-   turn_origin_t origin; /* where it was made (turn_origin_stored) */
-   time_t made_at;       /* pending_slots_now() when staged */
+   int kind;               /* the tool's own kind of pending item */
+   uint32_t item_id;       /* new for every staged item; never 0 */
+   turn_origin_t origin;   /* where it was made (turn_origin_stored) */
+   time_t made_at;         /* pending_slots_now() when staged */
+   uint32_t replaced_turn; /* staged over this session's live item made in that turn; 0: none */
 } pending_slot_t;
 
 /** A tool's slots: @p count structs of @p stride bytes, each starting with a
@@ -109,8 +110,10 @@ typedef enum {
  * model read), and replacing the first would have the user approve one item
  * while the confirm carries out another.
  *
- * The returned slot's header is filled (a new item_id, the stored origin); the
- * caller fills the rest of its struct (cleared first).
+ * The returned slot's header is filled (a new item_id, the stored origin, and
+ * replaced_turn: the turn of the live item of this kind it replaced, 0 if none;
+ * an expired one doesn't count); the caller fills the rest of its struct
+ * (cleared first).
  *
  * @param rc Receives why it wasn't staged (may be NULL)
  * @return The slot, or NULL (see @p rc)

@@ -2423,9 +2423,20 @@ dawn_add_unit_test(test_coding_agent_tool
            ${SRC_ROOT}/src/tools/coding_agent_delegate.c
            ${SRC_ROOT}/src/tools/coding_agent_requests.c
            ${SRC_ROOT}/src/tools/coding_agent_publish.c
+           ${SRC_ROOT}/src/tools/coding_agent_github.c
            ${SRC_ROOT}/src/tools/coding_agent_gateway.c
            ${SRC_ROOT}/src/core/pending_slots.c
            ${SRC_ROOT}/src/tools/tool_pending.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# coding_agent's GitHub reads: framed as web content, what is sent, what is said.
+dawn_add_unit_test(test_coding_agent_github
+   SOURCES test_coding_agent_github.c
+           ${SRC_ROOT}/src/tools/coding_agent_tool.c
+           ${SRC_ROOT}/src/tools/coding_agent_github.c
+           ${SRC_ROOT}/src/tools/coding_agent_gateway.c
            ${SRC_ROOT}/src/core/strbuf.c
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)

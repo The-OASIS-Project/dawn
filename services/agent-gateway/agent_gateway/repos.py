@@ -37,7 +37,9 @@ import logging
 import os
 import re
 import tempfile
-import urllib.request
+import urllib.error
+
+from .github import GitError, adopt_pull_request, error_text, github_url, open_pull_request
 
 log = logging.getLogger("agent-gateway")
 
@@ -65,11 +67,6 @@ FILES_CAP = 2000          # changed files in one changes listing (protected firs
 TREE_CAP = 2000           # entries in one folder listing
 COMMITS_CAP = 100
 CLAUDE_MD_CAP = 64 * 1024
-
-
-class GitError(Exception):
-   pass
-
 
 async def run(argv: list[str], cwd: str | None = None, env: dict | None = None,
               stdin: str | None = None) -> bytes:
@@ -137,8 +134,12 @@ def slug(s: str) -> str:
 class Repos:
    def __init__(self, repos: dict, mirrors_dir: str, work_dir: str, run_as: list[str],
                 agent_home: str, agent_gitconfig: str,
-                identity: tuple[str, str] = ("DAWN agent", "dawn-agent@localhost")):
+                identity: tuple[str, str] = ("DAWN agent", "dawn-agent@localhost"),
+                hidden: list[str] = ()):
       self.repos = repos  # name -> {"url": ..., "base": ...}
+      # Hidden in the jail as from the agent (the gateway's state, deny_read),
+      # with the mirrors and every task's clone: only its own clone is bound.
+      self.hidden = [*hidden]
       self.mirrors_dir = mirrors_dir
       self.work_dir = work_dir
       self.run_as = run_as
@@ -160,15 +161,72 @@ class Repos:
    async def as_agent(self, *argv: str, stdin: str | None = None) -> str:
       return text(await run([*self.run_as, *self.agent_env, *argv], stdin=stdin))
 
-   async def jailed_git(self, task_id: str, *args: str) -> bytes:
-      """git in a task clone, as the agent user, inside bubblewrap: read-only,
-      no network, no system sockets (/run), the agent's home hidden."""
+   async def jailed_git(self, task_id: str, *args: str, writable: bool = False,
+                        read: str | None = None) -> bytes:
+      """git in a task clone, as the agent user, inside bubblewrap: read-only
+      (the clone itself writable only when asked), no network, no system sockets
+      (/run), the agent's home hidden; @read is bound read-only wherever it is."""
       w = self.workdir(task_id)
+      hide = []
+      for p in (*self.hidden, self.mirrors_dir, self.work_dir):
+         if os.path.isdir(p):
+            hide += ["--tmpfs", p]
+         elif os.path.exists(p):
+            hide += ["--ro-bind", "/dev/null", p]
+      extra = ["--ro-bind", read, read] if read else []
       return await run([*self.run_as, *self.agent_env, "bwrap", "--unshare-all",
                         "--die-with-parent", "--new-session", "--ro-bind", "/", "/",
                         "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", self.agent_home,
-                        "--ro-bind", w, w, "--dev", "/dev", "--proc", "/proc",
-                        "--setenv", "HOME", "/nonexistent", "git", "-C", w, *args])
+                        *hide, *extra, "--bind" if writable else "--ro-bind", w, w,
+                        "--dev", "/dev", "--proc", "/proc", "--setenv", "HOME", "/nonexistent",
+                        "git", "-C", w, *args])
+
+   async def sync_base(self, name: str, base: str, task_id: str) -> str:
+      """Before a follow-up: the mirror fetched from the remote (bounded in
+      time; one that can't be reached leaves it as it was), then the task
+      clone's origin/<base> set to it, so work merged since the task started is
+      in reach.  Only data crosses, as in collect: a bundle of the base the
+      gateway makes, fetched in the jail with hooks and transports off.
+      Returns the base head the gateway gave it."""
+      try:
+         await asyncio.wait_for(self.refresh(name), SUBMODULE_TIMEOUT_S)
+      except (GitError, asyncio.TimeoutError) as e:
+         log.warning("%s: mirror not refreshed before a follow-up: %s", name, e or "timed out")
+      m = self.mirror(name)
+      new = await self.gw("-C", m, "rev-parse", "--verify", "-q", f"refs/heads/{base}")
+      try:
+         old = text(await self.jailed_git(task_id, "rev-parse", "-q", "--verify",
+                                          f"refs/remotes/origin/{base}"))
+      except GitError:
+         old = ""
+      if old == new:
+         return new  # nothing moved: no bundle, nothing fetched
+      # Only the commits the clone lacks (a whole history is ~100 MB on a big
+      # repo, and stored again in the clone); all of it when the clone's base
+      # isn't in the mirror (rewritten upstream).
+      try:
+         await self.gw("-C", m, "cat-file", "-e", f"{old}^{{commit}}")
+         since = [f"^{old}"] if old else []
+      except GitError:
+         since = []
+      # In the mirrors directory: readable by the agent user (its group), as
+      # the mirrors are, and gone from this process's view only when removed.
+      path = os.path.join(self.mirrors_dir, f".sync-{task_id}.bundle")
+      try:
+         await self.gw("-C", m, "bundle", "create", "-q", path, f"refs/heads/{base}", *since)
+         os.chmod(path, 0o640)
+         # The head the bundle carries (a refresh by another task may have moved
+         # the mirror's since).
+         head = (await self.gw("bundle", "list-heads", path, f"refs/heads/{base}")).split()[0]
+         await self.jailed_git(task_id, "-c", "core.hooksPath=/dev/null",
+                               "-c", "protocol.allow=never", "-c", "protocol.file.allow=always",
+                               "-c", "gc.auto=0", "fetch", "-q", "--no-tags", path,
+                               f"+refs/heads/{base}:refs/remotes/origin/{base}", writable=True,
+                               read=path)
+      finally:
+         if os.path.exists(path):
+            os.remove(path)
+      return head
 
    # --- before the agent runs ----------------------------------------------
 
@@ -301,6 +359,7 @@ class Repos:
       numstat = await run(["git", "-C", m, "diff", "--no-ext-diff", "--no-textconv", "-M",
                            "--numstat", "-z", mb, head])
       files, fields = [], numstat.split(b"\0")
+      patterns = self.protected(name)
       i = 0
       while i < len(fields) and fields[i]:
          added, removed, path = fields[i].decode(errors="replace").split("\t", 2)
@@ -308,13 +367,24 @@ class Repos:
             path = f"{fields[i + 1].decode(errors='replace')} -> " \
                    f"{fields[i + 2].decode(errors='replace')}"
             i += 2
-         patterns = self.protected(name)
          files.append({"path": path, "added": None if added == "-" else int(added),
                        "removed": None if removed == "-" else int(removed),
                        "protected": any(is_protected(p, patterns)
                                         for p in path.split(" -> "))})
          i += 1
       files.sort(key=lambda f: not f["protected"])  # protected first: never cut off a listing
+      # Paths a commit changed that the net diff doesn't show (added then removed, or
+      # changed back): a push publishes the commits, so these are public too.
+      # --no-renames lists both names of a rename; either name of a net rename counts
+      # as listed.
+      net = {n for f in files for n in f["path"].split(" -> ")}
+      names = await run(["git", "-C", m, "log", "--no-renames", "--format=", "--name-only",
+                         "-z", f"{mb}..{head}"])
+      seen = dict.fromkeys(n for n in names.decode(errors="replace").split("\0") if n)
+      history = [{"path": p, "protected": is_protected(p, patterns)}
+                 for p in seen if p not in net]
+      history.sort(key=lambda f: not f["protected"])
+      workflows = any(p.startswith(".github/workflows/") for p in (*net, *seen))
       total = len(files)
       files = files[:FILES_CAP]
       log = await self.gw("-C", m, "log", "--format=%H%x00%s", f"-{COMMITS_CAP}", f"{mb}..{head}")
@@ -322,7 +392,8 @@ class Repos:
       for c in commits:
          c["subject"] = c.get("subject", "")[:SUBJECT_CAP]
       return {"head": head, "base": mb, "files": files, "files_total": total,
-              "commits": commits}
+              "commits": commits, "history_only": history[:FILES_CAP],
+              "workflows": workflows}
 
    async def file(self, name: str, task_id: str, base: str, path: str, view: str,
                   old_path: str | None = None) -> dict:
@@ -393,10 +464,10 @@ class Repos:
       mirror to `branch`; optionally open a PR.  The token goes in a header, never
       in argv; no force push."""
       url = self.repos[name]["url"]
-      m = re.match(r"https://github\.com/([^/]+)/([^/.]+?)(\.git)?$", url)
-      if not m:
+      found = github_url(url)
+      if not found or found[2] is not None:
          raise GitError("publishing needs an https://github.com/owner/repo URL")
-      owner, repo = m.group(1), m.group(2)
+      owner, repo = found[0], found[1]
       basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
       env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.mirrors_dir,
              "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": "1",
@@ -417,6 +488,16 @@ class Repos:
          try:
             result["pr_url"] = await asyncio.to_thread(
                open_pull_request, owner, repo, token, branch, base, title, body)
+         except urllib.error.HTTPError as e:
+            if e.code == 422 and "pull request already exists" in error_text(e):
+               # One already open for the branch (a publish whose answer was lost): take
+               # it over only when this token's own user opened it.
+               result["pr_url"] = await asyncio.to_thread(
+                  adopt_pull_request, owner, repo, token, branch, base, earlier_pr)
+            elif earlier_pr:
+               result["pr_url"] = earlier_pr
+            else:
+               raise
          except (OSError, ValueError):
             # The push went up; one already open for the branch (its state unread)
             # makes GitHub refuse a second: keep pointing at it.
@@ -424,31 +505,3 @@ class Repos:
                raise
             result["pr_url"] = earlier_pr
       return result
-
-
-def open_pull_request(owner, repo, token, head, base, title, body) -> str:
-   req = urllib.request.Request(
-      f"https://api.github.com/repos/{owner}/{repo}/pulls", method="POST",
-      data=json.dumps({"title": title, "head": head, "base": base, "body": body}).encode(),
-      headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-               "X-GitHub-Api-Version": "2022-11-28"})
-   with urllib.request.urlopen(req, timeout=30) as resp:
-      return json.load(resp)["html_url"]
-
-
-def pr_state(pr_url: str, token: str) -> str | None:
-   """The pull request at `pr_url` (https://github.com/o/r/pull/N): "open",
-   "merged" or "closed", or None when it can't be read."""
-   m = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)$", pr_url)
-   if not m:
-      return None
-   req = urllib.request.Request(
-      f"https://api.github.com/repos/{m.group(1)}/{m.group(2)}/pulls/{m.group(3)}",
-      headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-               "X-GitHub-Api-Version": "2022-11-28"})
-   try:
-      with urllib.request.urlopen(req, timeout=30) as resp:
-         pr = json.load(resp)
-   except (OSError, ValueError):
-      return None
-   return "merged" if pr.get("merged_at") else pr.get("state")

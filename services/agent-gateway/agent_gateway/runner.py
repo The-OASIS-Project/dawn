@@ -26,24 +26,28 @@
 # calls can interleave, so state is re-read after each one that matters.
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import secrets
 import time
+import unicodedata
 
 from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient,
                               PermissionResultAllow, PermissionResultDeny, ResultMessage,
                               SystemMessage, UserMessage)
 
 from . import policy, store as st
-from .repos import GitError, Repos, pr_state, slug
+from .github import GitError, pr_state
+from .repos import Repos, slug
 
 log = logging.getLogger("agent-gateway")
 
 
 TEXT_CAP = 2000
+PR_BODY_CAP = 6000
 SUMMARY_CAP = 8000  # the agent's final report: what it did and how it checked it
 PAYLOAD_CAP = 4000
 # How often old clones are removed and published pull requests are checked.
@@ -68,6 +72,20 @@ CBM_WRITE_TOOLS = ("index_repository", "delete_project", "manage_adr")
 # so waiting on it (Monitor) is off, as are background commands (claude-agent-exec).
 NO_BACKGROUND_TOOLS = ("Monitor",)
 
+# Asked of the agent, in a fork of its session with no tools, when a run has new
+# commits: the pull request is for the repo's reviewers, not the operator's report.
+PR_ASK = ("Write the pull request for the commits on your branch, for the repository's "
+          "reviewers.  Reply with only this, nothing before or after it:\n"
+          "TITLE: <what the change does, in the imperative, at most 72 characters>\n\n"
+          "<the description in Markdown: one or two sentences on what changed and why, a "
+          "\"## Changes\" list of the notable changes, and a \"## Testing\" section saying what "
+          "you ran and the result>\n\n"
+          "Describe the code change only: don't mention the operator, an assistant, this "
+          "session or these instructions.")
+PR_FOOTER = "\n\nMade by a coding agent for DAWN."
+SHORT_HEAD = 12  # hex digits of a commit named to the user or the agent
+PR_TITLE_CAP = 120  # asked for 72; GitHub allows more, a runaway line is cut here
+
 # Said to the agent once when a run ends with no report.
 REPORT_ASK = ("Your last turn ended without a report.  Finish any step still open (run it in "
               "the foreground), then report what you did and how you checked it.")
@@ -79,6 +97,63 @@ class Blocked(ValueError):
 
 def clip(text: str, cap: int = TEXT_CAP) -> str:
    return text if len(text) <= cap else text[:cap] + " [...]"
+
+
+def pr_body(t: dict) -> str:
+   """The pull request description publish sends, and the one DAWN shows before it:
+   one function, so the two can't differ.  The one the agent wrote for its
+   commits, else its report (the task text was written to the agent, not for the
+   public)."""
+   # Cut before the footer is added, so a long text never cuts the footer off.
+   return clip(t["pr_description"] or t["summary"] or "",
+               PR_BODY_CAP - len(PR_FOOTER) - len(" [...]")) + PR_FOOTER
+
+
+async def refuse_tools(tool, tool_input, ctx):
+   """The pull request fork's permission answer: it writes, it doesn't work."""
+   return PermissionResultDeny(message="Answer with the pull request text only.")
+
+
+def pr_title(t: dict, fallback: str | None = None) -> str:
+   """The pull request's title: the agent's, else the one DAWN passed (the job's
+   name), else the task's first line."""
+   return t["pr_title"] or fallback or t["task"].splitlines()[0][:72]
+
+
+def parse_pr(text: str) -> tuple[str, str] | None:
+   """The agent's "TITLE: ..." line and the description after it, or None."""
+   lines = (text or "").strip().splitlines()
+   if not lines or not lines[0].upper().startswith("TITLE:"):
+      return None
+   title = " ".join(lines[0][len("TITLE:"):].split())[:PR_TITLE_CAP]
+   body = "\n".join(lines[1:]).strip()
+   return (title, body) if title and body else None
+
+
+def edited_pr(title: str | None, description: str | None) -> tuple[str | None, str | None]:
+   """The user's own title and description, checked: one line of title, and the
+   description with the footer added (as the agent's gets it).  Too long is
+   refused, never cut: they confirmed this text."""
+   if title is not None:
+      # Controls and line breaks (not formatting characters: emoji joiners and
+      # direction marks are ordinary in a title).
+      if not title.strip() or len(title) > PR_TITLE_CAP or \
+            any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in title):
+         raise ValueError(f"the pull request title must be one line of 1 to {PR_TITLE_CAP} "
+                          "characters")
+   body = None
+   if description is not None:
+      if not description.strip():
+         raise ValueError("the pull request description is empty")
+      body = description + PR_FOOTER
+      if len(body) > PR_BODY_CAP:
+         raise ValueError(f"the pull request description is over {PR_BODY_CAP - len(PR_FOOTER)} "
+                          "characters")
+   return title, body
+
+
+def body_sha256(body: str) -> str:
+   return hashlib.sha256(body.encode()).hexdigest()
 
 
 # The repo's tool cache under the agent's home (claude-agent-exec points pip,
@@ -197,12 +272,18 @@ class Runner:
 
    # --- room to run ---------------------------------------------------------
 
-   def check_capacity(self) -> None:
-      busy = len(self.running) + self.starting
-      if busy >= self.cfg.max_concurrent_tasks:
-         raise Blocked(f"{busy} tasks already running (limit {self.cfg.max_concurrent_tasks})")
+   def has_room(self) -> bool:
+      return len(self.running) + self.starting < self.cfg.max_concurrent_tasks
+
+   def check_budget(self) -> None:
       if self.store.spent_since(time.time() - 86400) >= self.cfg.daily_budget_usd:
          raise Blocked(f"daily budget of ${self.cfg.daily_budget_usd:.2f} used")
+
+   def check_capacity(self) -> None:
+      if not self.has_room():
+         busy = len(self.running) + self.starting
+         raise Blocked(f"{busy} tasks already running (limit {self.cfg.max_concurrent_tasks})")
+      self.check_budget()
 
    # --- starting, resuming, recovering ----------------------------------
 
@@ -223,7 +304,7 @@ class Runner:
          raise ValueError("empty task")
       if budget_usd is not None and budget_usd <= 0:
          raise ValueError("budget_usd must be positive")
-      self.check_capacity()
+      self.check_budget()  # a spent day refuses; no run ending would start it
       task_id = secrets.token_hex(4)
       base = self.cfg.repos[repo]["base"]
       branch = f"agent/{task_id}-{slug(task)}"
@@ -231,10 +312,19 @@ class Runner:
       self.store.add_task(id=task_id, dawn_user_id=dawn_user_id, agent="claude", repo=repo,
                           base=base, branch=branch, worktree=self.repos.workdir(task_id),
                           task=task, budget_usd=budget, client_ref=client_ref)
+      if self.has_room():
+         self.begin(task_id)
+      else:
+         # Every slot busy: it waits its turn, started when a run ends (retry_blocked).
+         self.store.update_task(task_id, status=st.QUEUED)
+         self.store.add_event(task_id, "queued", repo=repo, branch=branch, task=clip(task))
+      return self.store.task(task_id)
+
+   def begin(self, task_id: str) -> None:
+      """Clone a new task's repo and start its first run, holding a slot."""
       self.starting += 1  # holds the slot across the clone
       self.cloning[task_id] = asyncio.get_running_loop().create_task(
          self.prepare_and_launch(task_id))
-      return self.store.task(task_id)
 
    async def cancel_ref(self, dawn_user_id: int, client_ref: str) -> dict:
       """Cancel the task started as `client_ref` (one still being cloned too)."""
@@ -300,8 +390,22 @@ class Runner:
       return True
 
    async def retry_blocked(self) -> None:
+      """A run ended (or a slot freed): resume what was answered meanwhile, then
+      start queued tasks in the order they were asked for."""
       for t in reversed(self.store.tasks(status=st.INPUT_REQUIRED)):
          await self.deliver(t["id"])
+      for t in reversed(self.store.tasks(status=st.QUEUED, limit=None)):
+         if self.stopping or not self.has_room():
+            break
+         if self.store.task(t["id"])["status"] != st.QUEUED:  # cancelled meanwhile
+            continue
+         try:
+            self.check_budget()  # as start() would: a spent day doesn't start it
+         except Blocked as e:
+            self.fail(t["id"], str(e))
+            continue
+         self.store.update_task(t["id"], status=st.WORKING)
+         self.begin(t["id"])
 
    async def recover(self) -> None:
       """After a gateway restart: runs that were cut off resume as room allows.
@@ -406,7 +510,7 @@ class Runner:
                        "head": now}
             if head.lower() != now:
                raise ValueError(f"the branch moved since it was shown (it is now at "
-                                f"{now[:12] or 'no commits'})")
+                                f"{now[:SHORT_HEAD] or 'no commits'})")
          await self.close_held(t, "user")
       finally:
          self.busy.discard(task_id)
@@ -513,11 +617,32 @@ class Runner:
               **({"DAWN_AGENT_CLAUDE": self.cfg.claude_bin} if self.cfg.claude_bin else {})},
          stderr=lambda line: log.debug("claude[%s]: %s", task["id"], line))
 
+   def base_out_of_date(self, task: dict) -> bool:
+      """A follow-up the operator sent since the base was last brought in (not a
+      resume after an answered request, which carries on the same work)."""
+      if not task["session_id"]:
+         return False
+      revised = self.store.task_events(task["id"], "revised", 1)
+      synced = self.store.task_events(task["id"], "base_updated", 1)
+      return bool(revised) and (not synced or synced[0]["seq"] < revised[0]["seq"])
+
    async def run(self, task_id: str, prompt: str) -> None:
       task = self.store.task(task_id)
       result, costed = None, False
       checks: dict[str, tuple[str, bool]] = {}  # a build/test call's id -> (command, own status)
       try:
+         if self.base_out_of_date(task):  # a follow-up: the base as it is now
+            try:
+               head = await self.repos.sync_base(task["repo"], task["base"], task_id)
+               self.store.add_event(task_id, "base_updated", base=task["base"], head=head)
+               # Pushed commits can only be added to (publish never force-pushes).
+               published = (" This branch's commits are already pushed: to bring in the "
+                            "new base, merge it; don't rebase or amend them."
+                            if task["published"] else "")
+               prompt = (f"(Before this run the gateway updated origin/{task['base']} to "
+                         f"{head[:SHORT_HEAD]}.){published}\n\n{prompt}")
+            except GitError as e:
+               log.warning("task %s: base not updated before the follow-up: %s", task_id, e)
          async with ClaudeSDKClient(options=await self.options(task)) as client:
             self.clients[task_id] = client
             await client.query(prompt)
@@ -599,6 +724,57 @@ class Runner:
          return False
       return len(resumes) < 2 or resumes[0]["seq"] < asks[0]["seq"]
 
+   async def write_pr(self, task_id: str) -> None:
+      """The agent writes the pull request for its commits, once per head: one
+      turn in a fork of its session (its context, the main session untouched).
+      The fork keeps the session's tool set, so its prompt matches the session's
+      and is read from cache, and refuses every call: an answer, not more work.
+      A failure leaves its report to describe the work."""
+      task = self.store.task(task_id)
+      try:
+         head, _ = await self.repos.agent_ref(task["repo"], task_id, task["base"])
+      except GitError:
+         return
+      if not task["session_id"] or task["pr_head"] == head:
+         return
+      # Written for an earlier head: it doesn't describe these commits.
+      self.store.update_task(task_id, pr_title=None, pr_description=None, pr_head=None)
+      result = None
+      try:
+         opts = await self.options(task)
+         opts.fork_session, opts.max_turns, opts.can_use_tool = True, 1, refuse_tools
+         # Edits in the clone and sandboxed Bash would run unasked (the session's
+         # acceptEdits, the floor's autoAllowBashIfSandboxed): here they ask, and are
+         # refused like any call.  Settings, not the tool list: the cache holds.
+         opts.permission_mode = "default"
+         settings = json.loads(opts.settings)
+         settings["sandbox"]["autoAllowBashIfSandboxed"] = False
+         opts.settings = json.dumps(settings)
+         async with ClaudeSDKClient(options=opts) as client:
+            self.clients[task_id] = client  # a cancel stops it, as it stops a run
+            try:
+               await client.query(PR_ASK)
+               async for m in client.receive_response():
+                  if isinstance(m, ResultMessage):
+                     result = m
+            finally:
+               if self.clients.get(task_id) is client:
+                  del self.clients[task_id]
+      except Exception as e:  # the report still describes the work
+         log.warning("task %s: could not write its pull request: %s", task_id, e)
+      # The fork reports its own running total: its spend is the growth over the
+      # task's, booked without touching the main session's.
+      if result and result.total_cost_usd is not None:
+         before = self.store.task(task_id)["session_cost"]
+         total = result.total_cost_usd
+         cost = total - before if total >= before else total
+         self.store.add_cost(task_id, cost)
+         # Its own kind (DAWN reads run_end as a run's end), counted in the day's spend.
+         self.store.add_event(task_id, "pr_written", cost_usd=cost)
+      pr = parse_pr(result.result if result and not result.is_error else "")
+      if pr:
+         self.store.update_task(task_id, pr_title=pr[0], pr_description=pr[1], pr_head=head)
+
    async def finish(self, task_id: str, r: ResultMessage | None) -> None:
       task = self.store.task(task_id)
       if task["status"] == st.CANCELLED:
@@ -646,11 +822,29 @@ class Runner:
          self.store.update_task(task_id, status=st.INPUT_REQUIRED)  # retried if no room
          await self.deliver(task_id)
          return
+      if outcome.get("commits"):
+         self.starting += 1  # the PR's turn is an agent running: it holds a slot
+         try:
+            await self.write_pr(task_id)
+         finally:
+            self.starting -= 1
+         if self.store.task(task_id)["status"] == st.CANCELLED:
+            return  # cancelled while the pull request was being written
       self.store.update_task(task_id, status=st.COMPLETED,
                              summary=clip(r.result or "", SUMMARY_CAP))
       # Each command's last run: a build that failed and was then fixed counts
       # as fixed.
       last: dict[str, object] = {}
+      try:
+         head, _ = await self.repos.agent_ref(task["repo"], task_id, task["base"])
+      except GitError:
+         head = None
+      # A check speaks for the commit it ran on: when this run left the branch
+      # where the last completion had it, that completion's checks still hold.
+      prev = self.store.task_events(task_id, "completed", 1)
+      if (head and prev and prev[0]["data"].get("head") == head
+            and prev[0]["data"].get("uncommitted") == 0):  # they ran on that commit alone
+         last.update((c["command"], c["ok"]) for c in prev[0]["data"].get("checks", []))
       revised = self.store.task_events(task_id, "revised", 1)
       since = revised[0]["seq"] if revised else 0  # this work's checks, not an earlier run's
       for e in (e for e in self.store.task_events(task_id, "check", CHECKS_SCANNED)
@@ -661,7 +855,7 @@ class Runner:
       self.store.add_event(task_id, "completed", summary=clip(r.result or "", SUMMARY_CAP),
                            branch=task["branch"], session_id=task["session_id"],
                            cost_usd=self.store.task(task_id)["cost_usd"], checks=checks,
-                           **outcome)
+                           head=head, **outcome)
 
    def fail(self, task_id: str, error: str) -> None:
       self.store.update_task(task_id, status=st.FAILED, error=error)
@@ -743,6 +937,10 @@ class Runner:
             del self.running[task_id]
             self.clients.pop(task_id, None)
             self.soon(self.retry_blocked())
+      elif task_id in self.clients:
+         # Its run ended and its pull request is being written: that turn stops
+         # too (its slot is freed when it ends; the task stays cancelled).
+         await self.interrupt(self.clients[task_id])
       return self.store.task(task_id)
 
    async def revise(self, task_id: str, dawn_user_id: int, instructions: str,
@@ -780,8 +978,12 @@ class Runner:
       return self.store.task(task_id)
 
    async def publish(self, task_id: str, dawn_user_id: int, open_pr: bool, title: str | None,
-                     head: str) -> dict:
-      """`head` is the commit the user was shown; a branch that moved since is refused."""
+                     head: str, expect_body_sha256: str | None = None,
+                     pr_title_text: str | None = None,
+                     pr_description: str | None = None) -> dict:
+      """`head` is the commit the user was shown; a branch that moved since is refused,
+      and so is a description that changed since (`expect_body_sha256`, when given).
+      `pr_title_text` / `pr_description`: the user's text instead of the agent's."""
       t = self.owned(task_id, dawn_user_id)
       if t["closed"]:
          raise ValueError("the task was closed; its work is gone from the gateway")
@@ -789,15 +991,27 @@ class Runner:
          raise ValueError("the task is busy (being closed or cleaned up); try again")
       self.busy.add(task_id)
       try:
-         return await self.publish_held(t, open_pr, title, head)
+         return await self.publish_held(t, open_pr, title, head, expect_body_sha256,
+                                        pr_title_text, pr_description)
       finally:
          self.busy.discard(task_id)
 
-   async def publish_held(self, t: dict, open_pr: bool, title: str | None, head: str) -> dict:
+   async def publish_held(self, t: dict, open_pr: bool, title: str | None, head: str,
+                          expect_body_sha256: str | None = None,
+                          pr_title_text: str | None = None,
+                          pr_description: str | None = None) -> dict:
       task_id = t["id"]
+      edited = pr_title_text is not None or pr_description is not None
+      own_title, own_body = edited_pr(pr_title_text, pr_description)
+      if edited and not open_pr:
+         raise ValueError("a title or description is for a pull request; none is opened")
       prev = json.loads(t["published"]) if t["published"] else None
       if prev and t["status"] == st.COMPLETED and (prev.get("pr_url") or not open_pr):
          now, _ = await self.repos.agent_ref(t["repo"], task_id, t["base"])
+         if prev.get("head") == now and edited and prev.get("pr_url"):
+            # Done already, with the text it had: never reported as done with these.
+            raise ValueError(f"it is published already ({prev['pr_url']}): edit its title "
+                             "and description on GitHub")
          if prev.get("head") == now:
             return prev  # already done: the same answer again (an older record has no
                          # head: pushed again, harmless when nothing moved)
@@ -805,12 +1019,18 @@ class Runner:
          raise ValueError("only a completed task is published")
       now, _ = await self.repos.agent_ref(t["repo"], task_id, t["base"])
       if head.lower() != now:
-         raise ValueError(f"the branch moved since it was shown (it is now at {now[:12]})")
+         raise ValueError(f"the branch moved since it was shown (it is now at {now[:SHORT_HEAD]})")
+      # A pushed workflow runs with the repository's secrets before anyone reads
+      # it: never from here, whatever the token allows.
+      if (await self.repos.changes(t["repo"], task_id, t["base"])).get("workflows"):
+         raise ValueError("this work changes CI workflows (.github/workflows), which the gateway "
+                          "doesn't push; publish it yourself")
+      body = own_body or pr_body(t)
+      if own_body is None and expect_body_sha256 is not None and \
+            body_sha256(body) != expect_body_sha256.strip().lower():
+         raise ValueError("the description changed since it was shown")
       if not self.cfg.github_token:
          raise ValueError("no GitHub token configured (AGENT_GATEWAY_GITHUB_TOKEN)")
-      # The agent's summary only: the task text was written to the agent, not for
-      # the public.
-      body = (t["summary"] or "") + "\n\nMade by a coding agent for DAWN."
       # Revised since it was published: push the new commits; its PR stays while
       # it is open (a merged or closed one gets a new PR).
       pr = prev.get("pr_url") if prev else None
@@ -820,9 +1040,13 @@ class Runner:
          if state != "open":
             earlier = pr if state is None else None
             pr = None
+      if (pr or earlier) and edited:
+         # Open, or its state unknown (the push may join it): never sent as done with
+         # text that wasn't used.
+         raise ValueError("its pull request is open: edit its title and description on GitHub")
       res = await self.repos.publish(t["repo"], now, t["branch"], t["base"],
                                      self.cfg.github_token, open_pr and not pr,
-                                     title or t["task"].splitlines()[0][:72], clip(body, 6000),
+                                     own_title or pr_title(t, title), body,
                                      earlier)
       if pr:
          res["pr_url"] = pr

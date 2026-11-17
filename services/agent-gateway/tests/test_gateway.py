@@ -30,7 +30,7 @@ import pytest
 from agent_gateway import policy, store as st
 from agent_gateway.config import Config
 from agent_gateway.repos import Repos
-from agent_gateway.runner import NO_BACKGROUND_TOOLS, Runner
+from agent_gateway.runner import NO_BACKGROUND_TOOLS, PR_FOOTER, Runner
 
 
 def test_policy(tmp_path):
@@ -134,6 +134,16 @@ class FakeRepos:
 
    async def agent_ref(self, name, task_id, base):
       return "abcdef1234567890", "base000"
+
+   synced = 0  # follow-ups that updated the clone's base first
+   workflows = False  # the work changes .github/workflows
+
+   async def changes(self, name, task_id, base):
+      return {"workflows": self.workflows}
+
+   async def sync_base(self, name, base, task_id):
+      self.synced += 1
+      return "feedface00112233"
 
    async def claude_md(self, name, base):
       return "Commits need the developer's OK."
@@ -684,7 +694,7 @@ def test_publish_after_a_revise_pushes_again(store, monkeypatch):
    store.update_task("t1", status=st.COMPLETED)
    first = asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890"))
    again = asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890"))
-   assert again == first and len(r.repos.pushes) == 1          # nothing moved
+   assert again == first and len(r.repos.pushes) == 1       # nothing moved: the same answer
    r.repos.head = "1111111111111111"                         # revised: new commits
    moved = asyncio.run(r.publish("t1", 1, True, None, "1111111111111111"))
    assert r.repos.pushes[-1] == ("1111111111111111", False)  # pushed, no second PR
@@ -795,6 +805,62 @@ def test_publish_refuses_a_moved_branch(store):
       asyncio.run(r.publish("t1", 1, False, None, "abcdef1"))  # a prefix isn't enough
 
 
+def test_long_agent_body_keeps_its_footer():
+   from agent_gateway import runner as rmod
+   body = rmod.pr_body({"pr_description": "x" * 9000, "summary": None})
+   assert body.endswith(rmod.PR_FOOTER) and len(body) <= rmod.PR_BODY_CAP
+
+
+def test_publish_sends_the_users_own_title_and_description(store, monkeypatch):
+   """Edited text goes out as confirmed (the footer added); refused when too long,
+   with no pull request, or when the task's pull request is still open."""
+   from agent_gateway import runner as rmod
+
+   class Pushing(FakeRepos):
+      sent = None
+
+      async def publish(self, name, head, branch, base, token, open_pr, title, body, earlier):
+         self.sent = (title, body)
+         return {"pushed": "o/r:b", "pr_url": "https://github.com/o/r/pull/9"}
+   r = runner(store, github_token="tok")
+   r.repos = Pushing()
+   add_task(store)
+   store.update_task("t1", status=st.COMPLETED, pr_title="Agent's title",
+                     pr_description="agent text")
+   head = "abcdef1234567890"
+   with pytest.raises(ValueError, match="one line"):
+      asyncio.run(r.publish("t1", 1, True, None, head, None, "two\nlines", None))
+   with pytest.raises(ValueError, match="over"):
+      asyncio.run(r.publish("t1", 1, True, None, head, None, None, "x" * rmod.PR_BODY_CAP))
+   with pytest.raises(ValueError, match="none is opened"):
+      asyncio.run(r.publish("t1", 1, False, None, head, None, "Mine", None))
+   with pytest.raises(ValueError, match="one line"):
+      asyncio.run(r.publish("t1", 1, True, None, head, None, "line\u2028break", None))
+   assert r.repos.sent is None
+   # The agent's description hash doesn't bind the user's own text.
+   asyncio.run(r.publish("t1", 1, True, None, head, "0" * 64, "Mine", "my text"))
+   assert r.repos.sent == ("Mine", "my text" + rmod.PR_FOOTER)
+   # Work that changes CI workflows is never pushed from here.
+   r.repos.workflows = True
+   store.update_task("t1", published=None)
+   with pytest.raises(ValueError, match="CI workflows"):
+      asyncio.run(r.publish("t1", 1, True, None, head, None, None, None))
+   r.repos.workflows = False
+   asyncio.run(r.publish("t1", 1, True, None, head, None, "Mine", "my text"))
+   # Published already at this head: edits are refused, not reported as done.
+   with pytest.raises(ValueError, match="published already"):
+      asyncio.run(r.publish("t1", 1, True, None, head, None, "Other", None))
+   # A title alone: the agent's description, still bound by its hash.
+   store.update_task("t1", published=None)
+   with pytest.raises(ValueError, match="changed since"):
+      asyncio.run(r.publish("t1", 1, True, None, head, "0" * 64, "Mine", None))
+   # Its pull request still open: new commits join it, its text is GitHub's to edit.
+   store.update_task("t1", published='{"pr_url": "https://github.com/o/r/pull/9", "head": "old"}')
+   monkeypatch.setattr(rmod, "pr_state", lambda url, token: "open")
+   with pytest.raises(ValueError, match="edit its title and description on GitHub"):
+      asyncio.run(r.publish("t1", 1, True, None, head, None, "Mine", None))
+
+
 def closed_events(store, tid="t1"):
    return [e["data"] for e in store.events_after(0) if e["task_id"] == tid
            and e["kind"] == "closed"]
@@ -816,7 +882,8 @@ def test_close_drops_only_what_is_safe_to_drop(store, tmp_path):
    t = store.task("t1")
    assert out["closed"] and t["closed"] and t["worktree"] == "" and r.repos.dropped == "t1"
    assert closed_events(store) == [{"reason": "user"}]
-   assert asyncio.run(r.close("t1", 1, None))["closed"]           # again: nothing more
+   again = asyncio.run(r.close("t1", 1, None))                     # again: nothing more
+   assert again["closed"]
    assert len(closed_events(store)) == 1
    for refused in (lambda: r.revise("t1", 1, "more", None, "x"),
                    lambda: r.publish("t1", 1, False, None, "abcdef1234567890")):
@@ -962,7 +1029,7 @@ def test_close_collects_before_counting(store, tmp_path):
             raise GitError("bundle failed")
          self.calls.append(keep_on_empty)
          return {**await super().collect(name, task_id, branch, base), "uncommitted": 0}
-   from agent_gateway.repos import GitError
+   from agent_gateway.github import GitError
    r = runner(store)
    r.repos = Recording()
    finished_with_clone(store, tmp_path)            # completed: collected as it finished
@@ -987,7 +1054,7 @@ def test_close_collects_before_counting(store, tmp_path):
 
 def test_prune_collects_before_removing_and_keeps_what_it_cant(store, tmp_path):
    """A cancelled run's clone is collected before it goes; unreadable, it stays."""
-   from agent_gateway.repos import GitError
+   from agent_gateway.github import GitError
 
    class Recording(FakeRepos):
       fail = False
@@ -1108,7 +1175,10 @@ def test_store_upgrades_a_v1_database(tmp_path):
    import sqlite3
    p = str(tmp_path / "g.db")
    db = sqlite3.connect(p)
-   v1 = st.SCHEMA.replace("   model TEXT,\n", "").replace("   closed REAL,\n", "")
+   v1 = st.SCHEMA
+   for col in ("model TEXT", "closed REAL", "pr_title TEXT", "pr_description TEXT",
+               "pr_head TEXT"):
+      v1 = v1.replace(f"   {col},\n", "")
    assert v1 != st.SCHEMA
    db.executescript(v1 + "PRAGMA user_version=1;")
    db.execute("INSERT INTO tasks (id, dawn_user_id, agent, repo, base, branch, worktree, task, "
@@ -1120,6 +1190,7 @@ def test_store_upgrades_a_v1_database(tmp_path):
    assert s.db.execute("PRAGMA user_version").fetchone()[0] == st.SCHEMA_VERSION
    s.update_task("t1", model="claude-sonnet-5")
    assert s.task("t1")["model"] == "claude-sonnet-5" and s.task("t1")["closed"] is None
+   assert s.task("t1")["pr_title"] is None and s.task("t1")["pr_head"] is None
 
 
 def test_protected_patterns():
@@ -1196,7 +1267,7 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    assert out["protected"] == ["g"] and out["protected_count"] == 1
    assert git("-C", str(tmp_path / "mirrors/r.git"), "log", "-1", "--format=%s",
               "refs/agent/aaaa0001") == "agent work"
-   from agent_gateway.repos import GitError
+   from agent_gateway.github import GitError
    with pytest.raises(GitError, match="github.com"):
       asyncio.run(repos.publish("r", "aaaa0001", "agent/aaaa0001-x", "main", "tok", False,
                                 "t", "b"))
@@ -1265,9 +1336,112 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    with pytest.raises(GitError, match="nothing collected"):
       asyncio.run(repos.changes("r", "aaaa0001", "main"))
    assert unpub(None) == 0
+   # main moves upstream after the clone was made: a follow-up's sync brings it in.
+   (src / "f").write_text("y\n")
+   git("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qam", "later", cwd=src)
+   upstream = git("rev-parse", "main", cwd=src)
+   assert git("rev-parse", "origin/main", cwd=wt) != upstream
+   hook = tmp_path / "home/work/aaaa0001/.git/hooks/reference-transaction"
+   hook.write_text("#!/bin/sh\ntouch \"$GIT_DIR/../planted\"\n")  # a hook the agent planted
+   hook.chmod(0o755)
+   assert asyncio.run(repos.sync_base("r", "main", "aaaa0001")) == upstream
+   assert git("rev-parse", "origin/main", cwd=wt) == upstream
+   assert not (tmp_path / "home/work/aaaa0001/planted").exists()   # it didn't run
+   assert not list((tmp_path / "mirrors").glob(".sync-*"))         # the bundle is gone
+   # Nothing new upstream: no bundle, the clone left as it is.
+   assert asyncio.run(repos.sync_base("r", "main", "aaaa0001")) == upstream
+   # One more commit: only it crosses (the bundle needs the clone's base).
+   (src / "f").write_text("z\n")
+   git("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qam", "later2", cwd=src)
+   upstream = git("rev-parse", "main", cwd=src)
+   assert asyncio.run(repos.sync_base("r", "main", "aaaa0001")) == upstream
+   assert git("rev-parse", "origin/main", cwd=wt) == upstream
+   assert git("rev-parse", "refs/heads/main", cwd=tmp_path / "mirrors/r.git") == upstream
    asyncio.run(repos.drop("r", "aaaa0001"))  # nothing there: no error either
    asyncio.run(repos.remove("aaaa0001"))
    assert not os.path.exists(wt)
+
+def test_follow_up_carries_checks_when_the_branch_did_not_move(store, tmp_path):
+   """A check speaks for the commit it ran on: a follow-up that commits nothing
+   keeps the last completion's checks; one that moved the branch doesn't."""
+   r = runner(store)
+   finished_with_clone(store, tmp_path)
+   store.add_event("t1", "completed", head="abcdef1234567890", uncommitted=0,
+                   checks=[{"command": "ctest -L ci", "ok": True}])
+
+   class Result:
+      is_error, result, subtype, total_cost_usd = False, "nothing to rebase", "success", 0.1
+   asyncio.run(r.revise("t1", 1, "rebase", None, "a"))
+   del r.running["t1"]
+   asyncio.run(r.finish("t1", Result()))
+   done = [e for e in store.events_after(0) if e["kind"] == "completed"][-1]["data"]
+   assert done["checks"] == [{"command": "ctest -L ci", "ok": True}]
+   assert done["head"] == "abcdef1234567890"
+   store.add_event("t1", "completed", head="abcdef1234567890", uncommitted=2,
+                   checks=[{"command": "make", "ok": True}])   # passed on edits since dropped
+   asyncio.run(r.revise("t1", 1, "again", None, "b"))
+   del r.running["t1"]
+   asyncio.run(r.finish("t1", Result()))
+   done = [e for e in store.events_after(0) if e["kind"] == "completed"][-1]["data"]
+   assert done["checks"] == []
+   store.add_event("t1", "completed", head="0ld0ld", uncommitted=0,
+                   checks=[{"command": "make", "ok": True}])
+   asyncio.run(r.revise("t1", 1, "again", None, "c"))
+   del r.running["t1"]
+   asyncio.run(r.finish("t1", Result()))
+   done = [e for e in store.events_after(0) if e["kind"] == "completed"][-1]["data"]
+   assert done["checks"] == []                           # the branch moved: nothing carries
+
+
+def test_follow_up_run_updates_the_base_first(store, monkeypatch):
+   """A follow-up's run starts on the base as it is now, and the agent is told."""
+   from agent_gateway import runner as rmod
+   asked = []
+
+   class Client:
+      def __init__(self, options):
+         pass
+
+      async def __aenter__(self):
+         return self
+
+      async def __aexit__(self, *a):
+         return False
+
+      async def query(self, prompt):
+         asked.append(prompt)
+
+      async def receive_response(self):
+         return
+         yield
+
+   monkeypatch.setattr(rmod, "ClaudeSDKClient", Client)
+
+   class R(Runner):
+      async def options(self, task):
+         return None
+
+      async def finish(self, task_id, result):
+         pass
+
+   repos = FakeRepos()
+   r = R(Config(token="x" * 32, repos={"r": {"url": "u", "base": "main"}}), store, repos)
+   add_task(store)
+   asyncio.run(r.run("t1", "first"))                     # a new task's first run: no sync
+   store.update_task("t1", session_id="s1")
+   asyncio.run(r.run("t1", "the answer"))                # a resume after a reply: no sync
+   store.add_event("t1", "revised", revise_ref="a", budget_added=0)
+   asyncio.run(r.run("t1", "rebase onto main"))
+   asyncio.run(r.run("t1", "the answer"))                # synced once per follow-up
+   assert repos.synced == 1
+   assert "already pushed" not in asked[2]
+   store.update_task("t1", published='{"pushed": "o/r:b"}')   # published: merge, not rebase
+   store.add_event("t1", "revised", revise_ref="b", budget_added=0)
+   asyncio.run(r.run("t1", "more"))
+   assert "already pushed: to bring in the new base, merge it" in asked[-1]
+   assert asked[0] == "first" and asked[1] == "the answer"
+   assert asked[2].startswith("(Before this run the gateway updated origin/main to feedface0011.)")
+   assert asked[2].endswith("rebase onto main")
 
 
 def test_http_requires_bearer():
@@ -1520,3 +1694,360 @@ def test_read_tools_never_reach_hidden_directories():
    assert not ok("Glob", {"pattern": "~/work/*"})
    assert not ok("Glob", {"pattern": "{..,src}/bbbb0002/*"})        # .. inside braces
    assert ok("Glob", {"pattern": "src/**/*.c", "path": f"{wt}/src"})
+
+
+def test_changes_lists_paths_only_the_history_has(tmp_path, service_umask):
+   """A push publishes every commit, so paths its commits touched that the net diff
+   doesn't show are listed (and checked against the protected patterns), and any CI
+   workflow path anywhere in the work is flagged."""
+   src = tmp_path / "src"
+   src.mkdir()
+   git("init", "-q", "-b", "main", cwd=src)
+   (src / "f").write_text("x\n")
+   (src / "kept").write_text("x\n")
+   git("add", "f", "kept", cwd=src)
+   git("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "init", cwd=src)
+   home = tmp_path / "home"
+   (home / "work").mkdir(parents=True)
+   gitconfig = tmp_path / "gitconfig"
+   gitconfig.write_text("")
+   repos = Repos({"r": {"url": str(src), "base": "main", "protected": ["keys/**"]}},
+                 str(tmp_path / "mirrors"), str(home / "work"), [], str(home), str(gitconfig))
+   wt = asyncio.run(repos.prepare("r", "main", "agent/aaaa0002-x", "aaaa0002"))
+   w = tmp_path / "home/work/aaaa0002"
+   (w / "keys").mkdir()
+   (w / "keys/k").write_text("secret\n")
+   (w / "scratch").write_text("tmp\n")
+   (w / "kept").write_text("changed\n")
+   git("add", "-A", cwd=wt)
+   git("commit", "-qm", "add", cwd=wt)
+   git("rm", "-q", "keys/k", "scratch", cwd=wt)
+   (w / "kept").write_text("x\n")  # changed back: in no net diff either
+   git("add", "-A", cwd=wt)
+   git("mv", "f", "f2", cwd=wt)  # a net rename: both names are listed, neither is history
+   git("commit", "-qm", "take back", cwd=wt)
+   asyncio.run(repos.collect("r", "aaaa0002", "agent/aaaa0002-x", "main"))
+   ch = asyncio.run(repos.changes("r", "aaaa0002", "main"))
+   assert [f["path"] for f in ch["files"]] == ["f -> f2"]
+   assert ch["history_only"] == [{"path": "keys/k", "protected": True},  # protected first
+                                 {"path": "kept", "protected": False},
+                                 {"path": "scratch", "protected": False}]
+   assert ch["workflows"] is False
+   # A workflow added and taken out again still went up with the commits.
+   (w / ".github/workflows").mkdir(parents=True)
+   (w / ".github/workflows/ci.yml").write_text("on: push\n")
+   git("add", "-A", cwd=wt)
+   git("commit", "-qm", "ci", cwd=wt)
+   git("rm", "-q", ".github/workflows/ci.yml", cwd=wt)
+   git("commit", "-qm", "no ci", cwd=wt)
+   asyncio.run(repos.collect("r", "aaaa0002", "agent/aaaa0002-x", "main"))
+   ch = asyncio.run(repos.changes("r", "aaaa0002", "main"))
+   assert ch["workflows"] is True
+   assert {"path": ".github/workflows/ci.yml", "protected": True} in ch["history_only"]
+
+
+class Publishing(FakeRepos):
+   """Records what publish would send."""
+
+   async def changes(self, name, task_id, base):
+      return {"head": "abcdef1234567890", "base": "base000", "files": [], "files_total": 0,
+              "commits": [], "history_only": [], "workflows": False}
+
+   async def publish(self, name, head, branch, base, token, open_pr, title, body, earlier):
+      self.sent = body
+      return {"pushed": "o/r:b"}
+
+
+def call_tool(c, name, args):
+   hdr = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json",
+          "Authorization": "Bearer " + "s" * 32}
+   res = c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                               "params": {"name": name, "arguments": args}},
+                headers=hdr).json()["result"]
+   return res, (None if res["isError"] else json.loads(res["content"][0]["text"]))
+
+
+def test_shown_description_is_the_one_published():
+   """task_changes shows the body publish sends; a body that changed since refuses."""
+   from starlette.testclient import TestClient
+   from agent_gateway import server
+   from agent_gateway.runner import body_sha256
+   s = st.Store(":memory:", check_same_thread=False)
+   r = runner(s, github_token="tok")
+   r.repos = Publishing()
+   add_task(s)
+   s.update_task("t1", status=st.COMPLETED, summary="Fixed it.  " + "é" * 7000)
+   with TestClient(server.app(r, Config(token="s" * 32)), base_url="http://127.0.0.1:9760") as c:
+      _, ch = call_tool(c, "task_changes", {"dawn_user_id": 1, "task_id": "t1"})
+      assert ch["pr_body_sha256"] == body_sha256(ch["pr_body"])
+      assert ch["pr_body"].endswith(" [...]" + PR_FOOTER)  # clipped as publish clips it
+      shown = ch["pr_body_sha256"]
+      s.update_task("t1", summary="Something else.")  # a revise's new report, say
+      res, _ = call_tool(c, "task_publish", {"dawn_user_id": 1, "task_id": "t1",
+                                             "head": "abcdef1234567890",
+                                             "expect_body_sha256": shown})
+      assert res["isError"] and "description changed" in str(res)
+      assert not hasattr(r.repos, "sent")  # refused before any push
+      _, ch = call_tool(c, "task_changes", {"dawn_user_id": 1, "task_id": "t1"})
+      _, out = call_tool(c, "task_publish", {"dawn_user_id": 1, "task_id": "t1",
+                                             "head": "abcdef1234567890",
+                                             "expect_body_sha256": ch["pr_body_sha256"].upper()})
+      assert out["pushed"] == "o/r:b" and r.repos.sent == ch["pr_body"]
+
+
+def test_publish_without_a_body_hash_still_publishes(store):
+   r = runner(store, github_token="tok")
+   r.repos = Publishing()
+   add_task(store)
+   store.update_task("t1", status=st.COMPLETED, summary="Done.")
+   asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890"))
+   assert r.repos.sent == "Done.\n\nMade by a coding agent for DAWN."
+
+
+class GitHub:
+   """urlopen as GitHub answers: a refused PR, the open PR list, the token's user."""
+
+   def __init__(self, refusal, prs, login="dawn-bot"):
+      self.refusal, self.prs, self.login, self.urls = refusal, prs, login, []
+
+   def __call__(self, req, timeout=None):
+      import io
+      import urllib.error
+      url = req.full_url
+      self.urls.append(url)
+      if req.get_method() == "POST":
+         code, msg = self.refusal
+         raise urllib.error.HTTPError(url, code, "x", {}, io.BytesIO(json.dumps(msg).encode()))
+      if url.endswith("/user"):
+         answer = {"login": self.login}
+      else:
+         answer = self.prs
+      resp = io.BytesIO(json.dumps(answer).encode())
+      resp.status, resp.headers = 200, {}
+      return resp
+
+
+EXISTS = (422, {"message": "Validation Failed", "errors": [
+   {"resource": "PullRequest", "code": "custom",
+    "message": "A pull request already exists for o:agent/t1."}]})
+
+
+def publish_against(tmp_path, monkeypatch, gh, earlier=None):
+   from agent_gateway import github, repos as repos_mod
+
+   async def pushed(argv, **kw):
+      return b""
+   monkeypatch.setattr(repos_mod, "run", pushed)
+   monkeypatch.setattr(github.urllib.request, "urlopen", gh)
+   monkeypatch.setattr(github, "_token_logins", {})
+   repos = Repos({"r": {"url": "https://github.com/o/r", "base": "main"}},
+                 str(tmp_path), str(tmp_path), [], str(tmp_path), str(tmp_path / "g"))
+   return asyncio.run(repos.publish("r", "abc", "agent/t1", "main", "tok", True, "t", "b",
+                                    earlier))
+
+
+def test_existing_pull_request_is_adopted_only_when_ours(tmp_path, monkeypatch):
+   from agent_gateway.github import GitError
+   mine = [{"html_url": "https://github.com/o/r/pull/7", "user": {"login": "Dawn-Bot"}}]
+   gh = GitHub(EXISTS, mine)
+   assert publish_against(tmp_path, monkeypatch, gh)["pr_url"] == \
+      "https://github.com/o/r/pull/7"
+   assert any("head=o%3Aagent%2Ft1" in u and "base=main" in u and "state=open" in u
+              for u in gh.urls)
+   theirs = [{"html_url": "https://github.com/o/r/pull/8", "user": {"login": "someone"}}]
+   with pytest.raises(GitError, match="pull/8"):
+      publish_against(tmp_path, monkeypatch, GitHub(EXISTS, theirs))
+   # Someone else's is refused even with an earlier record to fall back on.
+   with pytest.raises(GitError, match="pull/8"):
+      publish_against(tmp_path, monkeypatch, GitHub(EXISTS, theirs), "https://x/pull/1")
+
+
+def test_other_pull_request_errors_still_fail(tmp_path, monkeypatch):
+   import urllib.error
+   other_422 = (422, {"message": "Validation Failed",
+                      "errors": [{"message": "No commits between main and agent/t1"}]})
+   for refusal in ((403, {"message": "Resource not accessible"}), other_422):
+      gh = GitHub(refusal, [])
+      with pytest.raises(urllib.error.HTTPError):
+         publish_against(tmp_path, monkeypatch, gh)
+      assert len(gh.urls) == 1  # no lookup, no takeover
+   # The fallback to the PR the gateway recorded earlier stays.
+   out = publish_against(tmp_path, monkeypatch, GitHub((502, {}), []), "https://x/pull/1")
+   assert out["pr_url"] == "https://x/pull/1"
+
+
+def test_error_text_never_raises():
+   """A body cut off mid-read (IncompleteRead, not an OSError) reads as no text."""
+   import http.client
+   import io
+   import urllib.error
+   from agent_gateway.github import error_text
+
+   class Cut(io.BytesIO):
+      def read(self, *a):
+         raise http.client.IncompleteRead(b"par")
+   e = urllib.error.HTTPError("https://x", 422, "x", {}, Cut())
+   assert error_text(e) == ""
+   ok = urllib.error.HTTPError("https://x", 422, "x", {}, io.BytesIO(b"Pull Request Already"))
+   assert error_text(ok) == "pull request already"
+
+
+def test_parse_pr_reads_the_title_and_description():
+   from agent_gateway.runner import parse_pr
+   assert parse_pr("TITLE: Fix the parser\n\nIt fixed it.\n\n## Changes\n- a") == (
+      "Fix the parser", "It fixed it.\n\n## Changes\n- a")
+   assert parse_pr("Here you go:\nTITLE: x\n\nbody") is None    # anything before: refused
+   assert parse_pr("TITLE: only a title") is None
+   assert parse_pr("TITLE:   \n\nbody") is None
+   assert len(parse_pr("TITLE: " + "x" * 300 + "\n\nbody")[0]) == 120
+
+
+def test_agent_writes_the_pull_request_once_per_head(store, monkeypatch):
+   """A run with commits ends with the agent writing its pull request, in a fork
+   of its session whose every tool call is refused; publish uses it.  The same
+   head isn't asked about again; a failure leaves the report to describe it."""
+   import types
+   from agent_gateway import runner as rmod
+   asked = []
+
+   class Result:
+      def __init__(self, text, cost):
+         self.result, self.is_error, self.total_cost_usd = text, False, cost
+
+   monkeypatch.setattr(rmod, "ResultMessage", Result)
+   reply = {"text": "TITLE: Fix the parser\n\nFixes the parser.\n\n## Testing\nmake test: passed"}
+
+   class Client:
+      def __init__(self, options):
+         asked.append(options)
+
+      async def __aenter__(self):
+         if reply.get("fail"):
+            raise RuntimeError("no CLI")
+         return self
+
+      async def __aexit__(self, *a):
+         return False
+
+      async def query(self, prompt):
+         asked.append(prompt)
+
+      async def receive_response(self):
+         yield Result(reply["text"], 0.7)
+
+   monkeypatch.setattr(rmod, "ClaudeSDKClient", Client)
+
+   class WithCommits(FakeRepos):
+      head = "abcdef1234567890"
+
+      async def collect(self, name, task_id, branch, base):
+         return {"commits": ["abc fix the parser"], "diffstat": "", "uncommitted": 0}
+
+      async def agent_ref(self, name, task_id, base):
+         return self.head, "base000"
+
+   class R(FakeRunner):
+      async def options(self, task):
+         return types.SimpleNamespace(
+            settings=json.dumps({"sandbox": {"autoAllowBashIfSandboxed": True}}))
+
+   r = R(Config(token="x" * 32, repos={"r": {"url": "u", "base": "main"}}), store, WithCommits())
+   add_task(store)
+   store.update_task("t1", session_id="s1", session_cost=0.5)
+   report = Result("Did it; tests pass.", 0.6)
+   slots = []
+   orig = r.write_pr
+
+   async def counted(task_id):                          # the PR's turn holds a slot
+      slots.append(r.starting)
+      await orig(task_id)
+   r.write_pr = counted
+   asyncio.run(r.finish("t1", report))
+   r.write_pr = orig
+   assert slots == [1] and r.starting == 0
+   t = store.task("t1")
+   assert t["status"] == st.COMPLETED
+   opts = asked[0]
+   assert opts.fork_session and opts.max_turns == 1 and not hasattr(opts, "tools")
+   assert opts.permission_mode == "default"            # no edit goes through unasked
+   assert json.loads(opts.settings)["sandbox"]["autoAllowBashIfSandboxed"] is False  # nor Bash
+   denied = asyncio.run(opts.can_use_tool("Read", {}, None))  # it answers, doesn't work
+   assert "pull request text only" in denied.message
+   assert asked[1] == rmod.PR_ASK
+   assert (t["pr_title"], t["pr_head"]) == ("Fix the parser", "abcdef1234567890")
+   assert rmod.pr_body(t).startswith("Fixes the parser.") and rmod.pr_body(t).endswith(
+      "Made by a coding agent for DAWN.")
+   assert rmod.pr_title(t, "job name") == "Fix the parser"
+   assert t["session_cost"] == 0.5 and t["cost_usd"] == pytest.approx(0.2)  # the fork's growth
+   assert store.spent_since(0) == pytest.approx(0.2)    # and in the day's spend
+   asyncio.run(r.finish("t1", report))                  # same head: not asked again
+   assert len(asked) == 2
+   r.repos.head = "1111111111111111"                    # a revise's commits; writing fails
+   reply["fail"] = True
+   asyncio.run(r.finish("t1", report))
+   t = store.task("t1")
+   assert t["status"] == st.COMPLETED and t["pr_title"] is None  # the old one doesn't fit
+   assert rmod.pr_body(t).startswith("Did it; tests pass.")      # the report describes it
+
+
+def test_cancel_stops_the_pull_request_turn(store):
+   """A run has ended and its pull request is being written: a cancel stops
+   that turn too, and the task is cancelled."""
+   r = runner(store)
+   add_task(store)
+   store.update_task("t1", status=st.WORKING, session_id="s1")
+
+   class Client:
+      interrupted = False
+
+      async def interrupt(self):
+         Client.interrupted = True
+   r.clients["t1"] = Client()                              # the PR turn, no run left
+   t = asyncio.run(r.cancel("t1", 1))
+   assert Client.interrupted and t["status"] == st.CANCELLED
+
+
+def test_title_falls_back_to_dawns_then_the_task():
+   from agent_gateway.runner import pr_title
+   t = {"pr_title": None, "task": "fix the oracle\nand more"}
+   assert pr_title(t, "Job name") == "Job name"
+   assert pr_title(t) == "fix the oracle"
+
+
+def test_start_with_no_room_queues_and_starts_in_order(store):
+   """With every slot busy a new task waits its turn instead of being refused;
+   a run ending starts the oldest first; a cancel works while it waits; a spent
+   day still refuses (no run ending would start it)."""
+   r = runner(store, max_concurrent_tasks=1, daily_budget_usd=5.0)
+   began = []
+
+   def begin(task_id):                                     # record instead of cloning,
+      began.append(task_id)                                # holding the slot as begin does
+      r.starting += 1
+   r.begin = begin
+   r.running["busy"] = object()
+
+   async def go():
+      a = await r.start(1, "r", "first", None, "job:1")
+      b = await r.start(1, "r", "second", None, "job:2")
+      c = await r.start(1, "r", "third", None, "job:3")
+      return a, b, c
+
+   a, b, c = asyncio.run(go())
+   assert [t["status"] for t in (a, b, c)] == [st.QUEUED] * 3 and began == []
+   assert [e["kind"] for e in store.events_after(0)].count("queued") == 3
+   asyncio.run(r.cancel(b["id"], 1))                       # stopped while it waits
+   assert store.task(b["id"])["status"] == st.CANCELLED
+   del r.running["busy"]
+   asyncio.run(r.retry_blocked())
+   assert began == [a["id"]]                               # one slot: the oldest
+   assert store.task(a["id"])["status"] == st.WORKING
+   assert store.task(c["id"])["status"] == st.QUEUED
+   assert [t["id"] for t in store.tasks(1, open_only=True)] == [c["id"], a["id"]]
+   store.add_event(a["id"], "run_end", cost_usd=5.0)       # the day's budget spent
+   with pytest.raises(ValueError, match="daily budget"):
+      asyncio.run(r.start(1, "r", "fourth", None, "job:4"))
+   r.starting -= 1                                         # a's slot freed: c's turn, but
+   asyncio.run(r.retry_blocked())                          # the day is spent: it fails
+   assert began == [a["id"]] and store.task(c["id"])["status"] == st.FAILED
+   assert "daily budget" in store.task(c["id"])["error"]

@@ -7,6 +7,7 @@
  * Transcript
  * ============================================================================= */
 #transcript {
+   position: relative; /* absolute children (screen-reader labels) stay inside its scroll */
    flex: 1;
    overflow-y: auto;
    background-color: var(--bg-secondary);

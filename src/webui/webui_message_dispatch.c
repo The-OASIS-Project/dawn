@@ -1705,6 +1705,21 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
       if (!conn_require_auth(conn))
          return;
       webui_coding_handle_view(conn, payload);
+   } else if (strcmp(type, "coding_publish_preview") == 0) {
+      /* The viewer's Publish and Close: the click is the user's confirm.  The
+       * job's owner is checked inside; the gateway binds the push to what was
+       * shown. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_publish_preview(conn, payload);
+   } else if (strcmp(type, "coding_publish") == 0) {
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_publish(conn, payload);
+   } else if (strcmp(type, "coding_close") == 0) {
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_close(conn, payload);
    } else if (strcmp(type, "coding_grants") == 0) {
       if (!conn_require_auth(conn))
          return;

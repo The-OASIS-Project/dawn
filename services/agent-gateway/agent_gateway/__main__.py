@@ -42,7 +42,8 @@ async def main() -> None:
    os.makedirs(cfg.mirrors_dir, exist_ok=True)
    store = Store(os.path.join(cfg.state_dir, "gateway.db"))
    repos = Repos(cfg.repos, cfg.mirrors_dir, cfg.work_dir, cfg.run_as, cfg.agent_home,
-                 cfg.agent_gitconfig, (cfg.git_name, cfg.git_email))
+                 cfg.agent_gitconfig, (cfg.git_name, cfg.git_email),
+                 [cfg.state_dir, *cfg.deny_read])
    runner = Runner(cfg, store, repos)
    await runner.recover()
    housekeeping = asyncio.create_task(runner.housekeeping())  # noqa: F841 (lives with the loop)

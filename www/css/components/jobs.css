@@ -36,9 +36,20 @@
    outline-offset: 2px;
 }
 
-#jobs-btn svg {
+#jobs-btn > svg {
    width: 20px;
    height: 20px;
+}
+
+/* Running jobs: their count over the icon, in its place. */
+#jobs-btn #global-jobs-pill {
+   position: absolute;
+   inset: 0;
+   margin: auto;
+}
+
+#jobs-btn.has-jobs > svg {
+   visibility: hidden;
 }
 
 #jobs-btn.hidden {
@@ -149,6 +160,7 @@
    overflow-y: auto;
    padding: 0.5rem 0 0.75rem;
    flex: 1;
+   min-height: 0; /* scroll inside the panel's max-height, never grow past it */
 }
 
 .jobs-section-head {
@@ -373,7 +385,8 @@
    color: var(--text-primary);
 }
 
-.jobs-action-btn.cancel:hover:not(:disabled) {
+.jobs-action-btn.cancel:hover:not(:disabled),
+.jobs-action-btn.delete:hover:not(:disabled) {
    background: var(--error-subtle);
    border-color: var(--error);
    color: var(--error);
@@ -465,6 +478,12 @@
    }
    #jobs-popover .popover-arrow {
       display: none;
+   }
+   /* Three buttons on a finished row: they wrap rather than crush the title. */
+   .jobs-row-actions {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      max-width: 45%;
    }
 }
 
@@ -774,10 +793,6 @@
 }
 
 /* The jobs pill: a dot when a coding job needs the user (focus keeps its ring). */
-#global-jobs-pill.needs-you {
-   position: relative;
-}
-
 #global-jobs-pill.needs-you::after {
    content: '';
    position: absolute;

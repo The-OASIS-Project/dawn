@@ -361,6 +361,7 @@ char *coding_requests_approve(struct json_object *details,
                                                          CR_PENDING_APPROVE, pending_slots_now(),
                                                          &rc);
    const uint32_t id = p ? p->hdr.item_id : 0;
+   const uint32_t replaced = p ? p->hdr.replaced_turn : 0;
    if (p != NULL) {
       p->job = job;
       p->request_id = request_id(req);
@@ -372,6 +373,7 @@ char *coding_requests_approve(struct json_object *details,
       p->for_repo = for_repo;
    }
    pthread_mutex_unlock(&s_pending_mutex);
+   coding_agent_preview_replaced(replaced);
    json_object_put(ans);
    if (id == 0) {
       return tool_pending_stage_refusal(rc, "approval");

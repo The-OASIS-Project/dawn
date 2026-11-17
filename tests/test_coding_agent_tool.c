@@ -52,8 +52,13 @@ static char g_calls[MAX_CALLS][64]; /* tool names called, in order */
 static char g_args[MAX_CALLS][512];
 static atomic_int g_ncalls; /* the cancel thread calls too */
 static bool g_start_fails;
-static int g_start_lost; /* task_start answers lost before one arrives */
-static int g_ntasks;     /* tasks task_list returns */
+static bool g_start_queued; /* task_start: every slot busy, so it waits its turn */
+static bool g_task_gone;    /* task_list by client_ref: the gateway has no such task */
+static int64_t g_holder;    /* conv_db_job_holds_agent_work's answer: no close recorded yet */
+static char g_recorded[32]; /* the gateway kind of the last agent event DAWN recorded itself */
+static bool g_cancel_during_start; /* the job is cancelled while task_start runs */
+static int g_start_lost;           /* task_start answers lost before one arrives */
+static int g_ntasks;               /* tasks task_list returns */
 static bool g_reachable = true;
 static const char *g_pending = "[]";  /* the task's open requests, as task_list returns them */
 static int g_revise_mode;             /* task_revise: 0 accepted, 1 refused, 2 no answer */
@@ -63,8 +68,14 @@ static bool g_list_fails;             /* task_list gets no answer */
 static const char *g_task_status = "working"; /* the task's status, as task_list returns it */
 static const char *g_after_reply = "working"; /* the task's status task_reply returns */
 #define FULL_HEAD "0123456789abcdef0123456789abcdef01234567"
-static const char *g_task_extra = ""; /* more of the task's fields, after a comma */
-static int g_unpublished;             /* task_list / task_close: commits only the mirror has */
+#define BODY                                                                                      \
+   "Fixed it. Thanks @alice; fixes #12, closes o/r#3. user@host.org\\n\\nMade by a coding agent " \
+   "for DAWN."
+#define BODY_SHA "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+static const char *g_task_extra = "";   /* more of the task's fields, after a comma */
+static int g_unpublished;               /* task_list / task_close: commits only the mirror has */
+static int g_uncommitted;               /* files a close would lose (no commits needed) */
+static const char *g_pr_title = "null"; /* task_changes: the title the agent wrote */
 static const char *g_pr_url = "https://github.com/o/dawn/pull/7";
 static const char *g_task_ref = "null"; /* a task named by id: its client_ref (JSON) */
 
@@ -104,7 +115,12 @@ int mcp_bridge_call_tool(const char *alias,
          g_start_lost--;
          return FAILURE; /* no text: no answer */
       }
-      *result_out = strdup("{\"id\":\"t1\",\"branch\":\"agent/t1-fix\",\"status\":\"working\"}");
+      if (g_cancel_during_start) {
+         snprintf(g_status, sizeof(g_status), "cancelled");
+      }
+      *result_out = strdup(
+          g_start_queued ? "{\"id\":\"t1\",\"branch\":\"agent/t1-fix\",\"status\":\"queued\"}"
+                         : "{\"id\":\"t1\",\"branch\":\"agent/t1-fix\",\"status\":\"working\"}");
    } else if (strcmp(tool, "task_revise") == 0) {
       if (g_revise_ends_job) {
          snprintf(g_status, sizeof(g_status), "done");
@@ -127,6 +143,10 @@ int mcp_bridge_call_tool(const char *alias,
    } else if (strcmp(tool, "task_list") == 0 && args_json && strstr(args_json, "client_ref")) {
       if (g_list_fails) {
          return FAILURE;
+      }
+      if (g_task_gone) {
+         *result_out = strdup("{\"task\":null,\"pending\":[]}");
+         return SUCCESS;
       }
       char buf[2048];
       snprintf(buf, sizeof(buf),
@@ -173,11 +193,12 @@ int mcp_bridge_call_tool(const char *alias,
       *result_out = strdup("{\"id\":\"281935db\",\"status\":\"cancelled\"}");
    } else if (strcmp(tool, "task_close") == 0) {
       char buf[160];
-      if (g_unpublished > 0 && !(args_json && strstr(args_json, "\"head\""))) {
+      if ((g_unpublished > 0 || g_uncommitted > 0) &&
+          !(args_json && strstr(args_json, "\"head\""))) {
          snprintf(buf, sizeof(buf),
-                  "{\"closed\":false,\"unpublished_commits\":%d,\"head\":\"" FULL_HEAD
-                  "\",\"branch\":\"agent/t1-fix\"}",
-                  g_unpublished);
+                  "{\"closed\":false,\"unpublished_commits\":%d,\"uncommitted\":%d,\"head\":"
+                  "\"%s\",\"branch\":\"agent/t1-fix\"}",
+                  g_unpublished, g_uncommitted, g_unpublished > 0 ? FULL_HEAD : "");
       } else {
          snprintf(buf, sizeof(buf), "{\"closed\":true}");
       }
@@ -189,10 +210,16 @@ int mcp_bridge_call_tool(const char *alias,
       *result_out = strdup(buf);
    } else if (strcmp(tool, "task_changes") == 0 && g_status[0] == 'd') {
       /* A finished job's work: a full head, as publishing needs. */
-      *result_out = strdup("{\"head\":\"" FULL_HEAD "\",\"base\":\"fedcba9876543210\",\"files\":["
-                           "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3,\"protected\":true}],"
-                           "\"commits\":[{\"hash\":\"" FULL_HEAD
-                           "\",\"subject\":\"fix the oracle\"}]}");
+      char buf[1024];
+      snprintf(buf, sizeof(buf),
+               "{\"head\":\"" FULL_HEAD "\",\"base\":\"fedcba9876543210\",\"files\":["
+               "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3,\"protected\":true}],"
+               "\"commits\":[{\"hash\":\"" FULL_HEAD "\",\"subject\":\"fix the oracle\"}],"
+               "\"history_only\":[{\"path\":\"keys/k\",\"protected\":true}],"
+               "\"workflows\":false,\"pr_title\":%s,\"pr_body\":\"" BODY
+               "\",\"pr_body_sha256\":\"" BODY_SHA "\",\"pr_footer\":\"\\n\\nMade here.\"}",
+               g_pr_title);
+      *result_out = strdup(buf);
    } else if (strcmp(tool, "task_changes") == 0) {
       *result_out = strdup(
           "{\"head\":\"0123456789abcdef\",\"base\":\"fedcba9876543210\",\"files\":["
@@ -336,6 +363,28 @@ void conv_event_emit(int64_t conv_id, int user_id, const char *kind, char *paylo
    (void)conv_id, (void)user_id, (void)kind;
    free(payload_owned);
 }
+char *event_payload_agent(const char *gw_kind,
+                          int64_t gw_seq,
+                          int64_t gw_ts,
+                          struct json_object *data,
+                          const char *const *fields,
+                          const char *const *scrubbed) {
+   (void)gw_seq, (void)gw_ts, (void)data, (void)fields, (void)scrubbed;
+   snprintf(g_recorded, sizeof(g_recorded), "%s", gw_kind);
+   return strdup("{}");
+}
+int conv_db_job_holds_agent_work(int64_t conv_id, int user_id, int64_t *holder) {
+   (void)conv_id, (void)user_id;
+   *holder = g_holder;
+   return AUTH_DB_SUCCESS;
+}
+session_t *session_get(uint32_t session_id) {
+   (void)session_id;
+   return NULL; /* no live session to release questions in */
+}
+void session_release(session_t *session) {
+   (void)session;
+}
 char *event_payload_spawn(int64_t child_conv_id, const char *title) {
    (void)child_conv_id, (void)title;
    return strdup("{}");
@@ -433,8 +482,13 @@ bool turn_origin_unasked(struct session *session, turn_origin_t *out) {
 void turn_origin_note_prepare(struct session *session) {
    (void)session;
 }
+static uint32_t g_answered[8]; /* the turns whose previews were answered, in order */
+static int g_nanswered;
 void turn_origin_note_answered(struct session *session, uint32_t made_turn) {
-   (void)session, (void)made_turn;
+   (void)session;
+   if (g_nanswered < 8) {
+      g_answered[g_nanswered++] = made_turn;
+   }
 }
 int64_t session_turn_conversation(session_t *session) {
    return atomic_load(&session->history_conversation_id);
@@ -539,6 +593,11 @@ void setUp(void) {
    snprintf(g_config.mcp.servers[0].role, sizeof(g_config.mcp.servers[0].role), "agent_gateway");
    atomic_store(&g_ncalls, 0);
    g_start_fails = false;
+   g_start_queued = false;
+   g_task_gone = false;
+   g_holder = 0;
+   g_recorded[0] = '\0';
+   g_cancel_during_start = false;
    g_start_lost = 0;
    g_ntasks = 0;
    g_claim_lost = false;
@@ -555,6 +614,9 @@ void setUp(void) {
    g_after_reply = "working";
    g_task_extra = "";
    g_unpublished = 0;
+   g_uncommitted = 0;
+   g_nanswered = 0;
+   g_pr_title = "null";
    g_pr_url = "https://github.com/o/dawn/pull/7";
    g_task_ref = "null";
    g_turn++;
@@ -1609,11 +1671,12 @@ static void test_publish_then_confirm(void) {
    char *preview = call("publish", "{\"job\":42}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
    TEST_ASSERT_NOT_NULL(strstr(preview, "push branch agent/t1-fix of dawn at commit 0123456789ab"));
-   TEST_ASSERT_NOT_NULL(strstr(preview, "1 protected path"));
+   /* Protected paths in the history count too (changed, then changed back). */
+   TEST_ASSERT_NOT_NULL(strstr(preview, "2 protected paths"));
    TEST_ASSERT_NOT_NULL(strstr(preview, "open a pull request against main"));
    /* The public description, framed with the agent's other words. */
    TEST_ASSERT_NOT_NULL(strstr(preview, "[" TOOL_FRAME_AGENT "]\nPull request description:\n"
-                                        "Fixed the oracle.\nCommits:\n- fix the oracle"));
+                                        "Fixed it. Thanks @alice"));
    TEST_ASSERT_EQUAL_INT(-1, last_call("task_publish"));
    char args[48];
    snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
@@ -1627,7 +1690,7 @@ static void test_publish_then_confirm(void) {
    TEST_ASSERT_EQUAL_INT(SUCCESS,
                          g_meta.describe_call("confirm_publish", args, out, sizeof(out), &valid));
    TEST_ASSERT_NOT_NULL(strstr(out, "push agent/t1-fix of dawn at 0123456789ab (1 commit, 1 file, "
-                                    "1 protected) and open"));
+                                    "2 protected) and open"));
    TEST_ASSERT_NULL(strstr(out, "fix the oracle\n")); /* no agent words in a reply code */
    g_pr_url = "https://github.com/o/dawn/pull/7)[x](https://evil";
    char *done = call("confirm_publish", args);
@@ -1638,6 +1701,8 @@ static void test_publish_then_confirm(void) {
    TEST_ASSERT_NOT_EQUAL(-1, c);
    TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"head\": \"" FULL_HEAD "\""));
    TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"open_pr\": true"));
+   /* The chat's yes is bound to the description the preview read too. */
+   TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"expect_body_sha256\": \"" BODY_SHA "\""));
 }
 
 /* Nothing new since the last publish: its address, no preview; a closed job: refused. */
@@ -1769,7 +1834,24 @@ static void test_view_fetch(void) {
    TEST_ASSERT_NOT_NULL(ans);
    TEST_ASSERT_NULL(err);
    TEST_ASSERT_NOT_NULL(json_object_object_get(ans, "files"));
+   /* The facts the viewer's buttons rest on, from DAWN and the gateway. */
+   struct json_object *st = json_object_object_get(ans, "job_state");
+   TEST_ASSERT_EQUAL_STRING("running", coding_gateway_jstr(st, "status"));
+   TEST_ASSERT_FALSE(json_object_get_boolean(json_object_object_get(st, "closed")));
    json_object_put(ans);
+   /* A closed job's work is gone: its state, and nothing to list. */
+   g_task_extra = ",\"closed\":1793949000.5";
+   const int before = atomic_load(&g_ncalls);
+   ans = coding_view_fetch(5, 42, false, "", "diff", &err);
+   TEST_ASSERT_NOT_NULL(ans);
+   st = json_object_object_get(ans, "job_state");
+   TEST_ASSERT_TRUE(json_object_get_boolean(json_object_object_get(st, "closed")));
+   TEST_ASSERT_EQUAL_INT(0, (int)json_object_array_length(json_object_object_get(ans, "files")));
+   for (int c = before; c < atomic_load(&g_ncalls); c++) {
+      TEST_ASSERT_NOT_EQUAL(0, strcmp(g_calls[c], "task_changes")); /* not asked for */
+   }
+   json_object_put(ans);
+   g_task_extra = "";
    ans = coding_view_fetch(5, 42, true, "old.c -> src/a.c", "diff", &err);
    TEST_ASSERT_NOT_NULL(ans);
    json_object_put(ans);
@@ -1802,6 +1884,344 @@ static void test_pr_url_check(void) {
    }
 }
 
+/* The chat texts of publish and close, whole: the WebUI's buttons share their
+ * code, and the model's words for them must not change with it. */
+static void expect_text(const char *expected_fmt, unsigned id, const char *got) {
+   char expected[2048];
+   snprintf(expected, sizeof(expected), expected_fmt, id);
+   TEST_ASSERT_EQUAL_STRING(expected, got);
+}
+
+static void test_publish_and_close_texts(void) {
+   coding_job();
+   snprintf(g_status, sizeof(g_status), "done");
+   g_task_status = "completed";
+   g_unpublished = 1;
+   g_task_extra = ",\"summary\":\"Fixed the oracle.\"";
+   char *preview = call("publish", "{\"job\":42}");
+   const unsigned pid = preview_id(preview);
+   expect_text(
+       "About to publish coding job #42 (\"\"): push branch agent/t1-fix of dawn at commit "
+       "0123456789ab (1 commit, 1 file changed, 2 protected paths among them) and open a pull "
+       "request against main. The pull request is titled \"\" (the job's name); its description "
+       "is the agent's summary, shown below: read it to the user too, since it will be public. "
+       "Read this to the user (the protected paths too) and ask them to confirm; if they say yes "
+       "in their reply, call coding_agent with action 'confirm_publish' and arguments {\"id\": "
+       "%u}. The agent's commits and files, its own words:\n[AGENT CONTENT]\nPull request "
+       "description:\nFixed it. Thanks @alice; fixes #12, closes o/r#3. user@host.org\n\nMade by a "
+       "coding agent for DAWN.\nCommits:\n- fix the oracle\nFiles:\n- src/a.c "
+       "(protected)\nChanged only in commits (not in the final diff):\n- keys/k (protected)\n"
+       "[/AGENT CONTENT]",
+       pid, preview);
+   free(preview);
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", pid);
+   g_turn++;
+   char *done = call("confirm_publish", args);
+   TEST_ASSERT_EQUAL_STRING("Published coding job #42 (\"\"): pushed o/dawn:agent/t1-fix; pull "
+                            "request: https://github.com/o/dawn/pull/7",
+                            done);
+   free(done);
+   g_unpublished = 0;
+   char *one = call("close", "{\"job\":42}");
+   TEST_ASSERT_EQUAL_STRING("Closed coding job #42 (\"\"): its copy of the repo and its branch are "
+                            "gone from the gateway.",
+                            one);
+   free(one);
+   g_unpublished = 2;
+   char *cp = call("close", "{\"job\":42}");
+   const unsigned cid = preview_id(cp);
+   expect_text("Closing coding job #42 (\"\") deletes its 2 unpublished commits on branch "
+               "agent/t1-fix (at 0123456789ab); nothing else has them. Read this to the user and "
+               "ask them to confirm; if they say yes in their reply, call coding_agent with action "
+               "'confirm_close' and arguments {\"id\": %u}.",
+               cid, cp);
+   free(cp);
+   snprintf(args, sizeof(args), "{\"id\":%u}", cid);
+   g_turn++;
+   char *cd = call("confirm_close", args);
+   TEST_ASSERT_EQUAL_STRING("Closed coding job #42 (\"\"): its 2 unpublished commits, its copy of "
+                            "the repo and its branch are gone.",
+                            cd);
+   free(cd);
+}
+
+/* The viewer's Publish: a preview built from the gateway (the exact public
+ * description, what it notifies and closes), then a click bound to the head
+ * and the description's hash, posted to the job's conversation, the chat's
+ * staged publish dropped. */
+static void test_publish_buttons(void) {
+   coding_job();
+   char *err = NULL;
+   TEST_ASSERT_NULL(coding_publish_preview(5, 42, &err)); /* still running */
+   TEST_ASSERT_TRUE(tool_result_is_error(err));
+   free(err);
+   snprintf(g_status, sizeof(g_status), "done");
+   g_task_status = "completed";
+   g_unpublished = 1;
+   TEST_ASSERT_NULL(coding_publish_preview(9, 42, &err)); /* not this user's */
+   free(err);
+   struct json_object *pv = coding_publish_preview(5, 42, &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(pv, err);
+   TEST_ASSERT_EQUAL_STRING(FULL_HEAD, coding_gateway_jstr(pv, "head"));
+   TEST_ASSERT_EQUAL_STRING("agent/t1-fix", coding_gateway_jstr(pv, "branch"));
+   TEST_ASSERT_EQUAL_STRING("main", coding_gateway_jstr(pv, "base"));
+   TEST_ASSERT_EQUAL_STRING(BODY_SHA, coding_gateway_jstr(pv, "pr_body_sha256"));
+   TEST_ASSERT_NOT_NULL(strstr(coding_gateway_jstr(pv, "pr_body"), "Made by a coding agent"));
+   struct json_object *prot = json_object_object_get(pv, "protected");
+   TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(prot));
+   TEST_ASSERT_EQUAL_STRING("src/a.c", json_object_get_string(json_object_array_get_idx(prot, 0)));
+   TEST_ASSERT_EQUAL_INT(1,
+                         (int)json_object_array_length(json_object_object_get(pv, "history_only")));
+   struct json_object *mentions = json_object_object_get(pv, "mentions");
+   TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(mentions)); /* not user@host */
+   TEST_ASSERT_EQUAL_STRING("@alice",
+                            json_object_get_string(json_object_array_get_idx(mentions, 0)));
+   struct json_object *closes = json_object_object_get(pv, "closes");
+   TEST_ASSERT_EQUAL_INT(2, (int)json_object_array_length(closes));
+   TEST_ASSERT_EQUAL_STRING("#12", json_object_get_string(json_object_array_get_idx(closes, 0)));
+   TEST_ASSERT_EQUAL_STRING("o/r#3", json_object_get_string(json_object_array_get_idx(closes, 1)));
+   json_object_put(pv);
+   TEST_ASSERT_EQUAL_INT(-1, last_call("task_publish")); /* a preview pushes nothing */
+
+   /* A chat publish staged meanwhile is dropped by the click. */
+   char *staged = call("publish", "{\"job\":42}");
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(staged));
+   free(staged);
+
+   char *url = NULL;
+   char *r = coding_publish_click(5, 42, FULL_HEAD, "not-a-hash", NULL, NULL, &url);
+   TEST_ASSERT_TRUE_MESSAGE(tool_result_is_error(r), r);
+   free(r);
+   r = coding_publish_click(5, 42, "0123", BODY_SHA, NULL, NULL, &url);
+   TEST_ASSERT_TRUE_MESSAGE(tool_result_is_error(r), r);
+   free(r);
+   TEST_ASSERT_EQUAL_INT(-1, last_call("task_publish"));
+   g_posted[0] = '\0';
+   r = coding_publish_click(5, 42, FULL_HEAD, BODY_SHA, NULL, NULL, &url);
+   TEST_ASSERT_FALSE_MESSAGE(tool_result_is_error(r), r);
+   TEST_ASSERT_EQUAL_STRING("https://github.com/o/dawn/pull/7", url);
+   TEST_ASSERT_EQUAL_INT64(7, g_posted_conv);
+   TEST_ASSERT_EQUAL_STRING(r, g_posted);
+   free(r);
+   free(url);
+   const int c = last_call("task_publish");
+   TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"head\": \"" FULL_HEAD "\""));
+   TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"expect_body_sha256\": \"" BODY_SHA "\""));
+   TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"open_pr\": true"));
+   g_turn++;
+   r = call("confirm_publish", args);
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r); /* the click took its place */
+   free(r);
+}
+
+/* The viewer's Close: at once when nothing would be lost; what would be lost
+ * otherwise, then "Close anyway" by its confirm key, bound to the head shown
+ * ("" when only uncommitted edits would go). */
+static void test_close_buttons(void) {
+   coding_job();
+   char *err = NULL;
+   TEST_ASSERT_NULL(coding_close_click(5, 42, false, NULL, &err)); /* still running */
+   free(err);
+   snprintf(g_status, sizeof(g_status), "done");
+   g_posted[0] = '\0';
+   struct json_object *o = coding_close_click(5, 42, false, NULL, &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(o, err);
+   TEST_ASSERT_TRUE(json_object_get_boolean(json_object_object_get(o, "closed")));
+   TEST_ASSERT_EQUAL_STRING(coding_gateway_jstr(o, "message"), g_posted);
+   json_object_put(o);
+
+   g_unpublished = 2;
+   g_posted[0] = '\0';
+   o = coding_close_click(5, 42, false, NULL, &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(o, err);
+   TEST_ASSERT_FALSE(json_object_get_boolean(json_object_object_get(o, "closed")));
+   struct json_object *nc = json_object_object_get(o, "needs_confirm");
+   TEST_ASSERT_EQUAL_INT(2, json_object_get_int(json_object_object_get(nc, "commits")));
+   TEST_ASSERT_EQUAL_STRING(FULL_HEAD, coding_gateway_jstr(nc, "head"));
+   TEST_ASSERT_EQUAL_STRING("", g_posted); /* nothing happened yet */
+   json_object_put(o);
+   TEST_ASSERT_NULL(coding_close_click(5, 42, true, NULL, &err)); /* a confirm names its head */
+   free(err);
+   TEST_ASSERT_NULL(coding_close_click(5, 42, true, "0123", &err));
+   free(err);
+   o = coding_close_click(5, 42, true, FULL_HEAD, &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(o, err);
+   TEST_ASSERT_TRUE(json_object_get_boolean(json_object_object_get(o, "closed")));
+   json_object_put(o);
+   TEST_ASSERT_NOT_NULL(strstr(g_args[last_call("task_close")], "\"head\": \"" FULL_HEAD "\""));
+
+   /* Only uncommitted edits: head "", and the confirm still closes. */
+   g_unpublished = 0;
+   g_uncommitted = 3;
+   o = coding_close_click(5, 42, false, NULL, &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(o, err);
+   nc = json_object_object_get(o, "needs_confirm");
+   TEST_ASSERT_EQUAL_INT(3, json_object_get_int(json_object_object_get(nc, "files")));
+   TEST_ASSERT_EQUAL_STRING("", coding_gateway_jstr(nc, "head"));
+   json_object_put(o);
+   o = coding_close_click(5, 42, true, "", &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(o, err);
+   TEST_ASSERT_TRUE(json_object_get_boolean(json_object_object_get(o, "closed")));
+   json_object_put(o);
+   TEST_ASSERT_NOT_NULL(strstr(g_args[last_call("task_close")], "\"head\": \"\""));
+}
+
+/* The title the agent wrote for the pull request: the preview and the chat
+ * show it as the agent's (in the frame, never in DAWN's sentence). */
+static void test_agent_written_title(void) {
+   coding_job();
+   snprintf(g_status, sizeof(g_status), "done");
+   g_task_status = "completed";
+   g_unpublished = 1;
+   g_pr_title = "\"Fix the oracle\"";
+   char *err = NULL;
+   struct json_object *pv = coding_publish_preview(5, 42, &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(pv, err);
+   TEST_ASSERT_EQUAL_STRING("Fix the oracle", coding_gateway_jstr(pv, "pr_title"));
+   TEST_ASSERT_TRUE(json_object_get_boolean(json_object_object_get(pv, "pr_title_by_agent")));
+   json_object_put(pv);
+   char *preview = call("publish", "{\"job\":42}");
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(preview, "title and description are the agent's"), preview);
+   TEST_ASSERT_NOT_NULL(strstr(preview, "[" TOOL_FRAME_AGENT "]\nPull request title:\n"
+                                        "Fix the oracle\nPull request description:\n"));
+   free(preview);
+}
+
+/* A delegate previewed again (the user asked for a change) replaces the first
+ * preview, which then counts as answered: it doesn't hold DAWN's own approval
+ * questions back while it can't be confirmed any more. */
+static void test_replaced_preview_counts_as_answered(void) {
+   char *first = call("delegate", "{\"repo\":\"dawn\",\"task\":\"fix the oracle\"}");
+   TEST_ASSERT_FALSE(is_error(first));
+   free(first);
+   const uint32_t first_turn = (uint32_t)g_turn;
+   TEST_ASSERT_EQUAL_INT(0, g_nanswered);
+   g_turn++;
+   char *second = call("delegate", "{\"repo\":\"dawn\",\"task\":\"fix the oracle, carefully\"}");
+   TEST_ASSERT_FALSE(is_error(second));
+   free(second);
+   TEST_ASSERT_EQUAL_INT(1, g_nanswered);
+   TEST_ASSERT_EQUAL_UINT32(first_turn, g_answered[0]);
+}
+
+/* Every slot at the gateway busy: the job is queued, and the model says so
+ * (it starts by itself when the running task finishes). */
+static void test_delegate_queued_when_the_agent_is_busy(void) {
+   g_start_queued = true;
+   char *preview = call("delegate", "{\"repo\":\"dawn\",\"task\":\"fix the oracle\"}");
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   free(preview);
+   g_turn++;
+   char *r = call("confirm_delegate", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "Queued coding job #42"), r);
+   TEST_ASSERT_NOT_NULL(strstr(r, "starts by itself when a running task finishes"));
+   TEST_ASSERT_EQUAL_STRING("queued", g_status); /* running once the gateway starts it */
+   free(r);
+}
+
+/* A cancel made while the start was asked reached no task (it didn't exist
+ * yet): a queued answer then stops it. */
+static void test_queued_start_after_a_cancel_is_stopped(void) {
+   g_start_queued = true;
+   char *preview = call("delegate", "{\"repo\":\"dawn\",\"task\":\"fix the oracle\"}");
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   free(preview);
+   g_turn++;
+   g_cancel_during_start = true;
+   char *r = call("confirm_delegate", args);
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+   TEST_ASSERT_EQUAL_STRING("task_cancel", g_calls[atomic_load(&g_ncalls) - 1]);
+   free(r);
+}
+
+/* The user's own title and description: checked, shown whole with the
+ * gateway's footer, sent instead of the agent's (no description hash to bind);
+ * refused with no pull request, or when the job already has one. */
+static void test_publish_with_own_text(void) {
+   coding_job();
+   snprintf(g_status, sizeof(g_status), "done");
+   g_task_status = "completed";
+   g_unpublished = 1;
+   char *r = call("publish", "{\"job\":42,\"pr\":false,\"title\":\"Mine\"}");
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+   free(r);
+   r = call("publish", "{\"job\":42,\"title\":\"bad\\u0007title\"}");
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+   free(r);
+   r = call("publish", "{\"job\":42,\"description\":\"  \\n \"}");
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+   free(r);
+   char *preview = call("publish", "{\"job\":42,\"title\":\"  Fix   the\\noracle \","
+                                   "\"description\":\"My words.\"}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
+   TEST_ASSERT_NOT_NULL(strstr(preview, "Pull request title:\nFix the oracle\n"));
+   TEST_ASSERT_NOT_NULL(strstr(preview, "Pull request description:\nMy words.\n\nMade here.\n"));
+   TEST_ASSERT_NOT_NULL(strstr(preview, "are the ones given with this publish"));
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   free(preview);
+   g_turn++;
+   char out[512];
+   int valid = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         g_meta.describe_call("confirm_publish", args, out, sizeof(out), &valid));
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, ", titled \"Fix the oracle\""), out);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "description of 9 bytes that begins \"My words.\""),
+                                out);
+   char *done = call("confirm_publish", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
+   free(done);
+   const int c = last_call("task_publish");
+   TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"pr_title\": \"Fix the oracle\""));
+   TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"pr_description\": \"My words.\""));
+   TEST_ASSERT_NULL(strstr(g_args[c], "expect_body_sha256"));
+
+   /* The click: an edited description needs no hash; a bad title is refused. */
+   char *url = NULL;
+   r = coding_publish_click(5, 42, FULL_HEAD, NULL, "two\x01", NULL, &url);
+   TEST_ASSERT_TRUE_MESSAGE(tool_result_is_error(r), r);
+   free(r);
+   r = coding_publish_click(5, 42, FULL_HEAD, NULL, NULL, "Edited.", &url);
+   TEST_ASSERT_FALSE_MESSAGE(tool_result_is_error(r), r);
+   free(r);
+   free(url);
+   TEST_ASSERT_NOT_NULL(
+       strstr(g_args[last_call("task_publish")], "\"pr_description\": \"Edited.\""));
+}
+
+/* The gateway lost the task (its state was reset): a close records it closed,
+ * with nothing to stop or lose, so the job can be deleted. */
+static void test_close_when_the_gateway_lost_the_task(void) {
+   coding_job();
+   snprintf(g_status, sizeof(g_status), "done");
+   g_task_gone = true;
+   char *r = call("close", "{\"job\":42}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
+   free(r);
+   TEST_ASSERT_EQUAL_STRING("closed", g_recorded);
+   TEST_ASSERT_EQUAL_INT(-1, last_call("task_close")); /* nothing asked of the gateway */
+
+   /* The viewer: Close stays until DAWN recorded the close, then it reads closed. */
+   g_holder = 42;
+   char *err = NULL;
+   struct json_object *v = coding_view_fetch(5, 42, false, "", "diff", &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(v, err);
+   TEST_ASSERT_FALSE(json_object_get_boolean(
+       json_object_object_get(json_object_object_get(v, "job_state"), "closed")));
+   json_object_put(v);
+   g_holder = 0;
+   v = coding_view_fetch(5, 42, false, "", "diff", &err);
+   TEST_ASSERT_NOT_NULL_MESSAGE(v, err);
+   TEST_ASSERT_TRUE(json_object_get_boolean(
+       json_object_object_get(json_object_object_get(v, "job_state"), "closed")));
+   json_object_put(v);
+}
+
 int main(void) {
    g_session = calloc(1, sizeof(session_t));
    g_session->type = SESSION_TYPE_WEBUI;
@@ -1812,6 +2232,9 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_client_ref_names_one_job);
    RUN_TEST(test_delegate_then_confirm_starts_in_order);
+   RUN_TEST(test_delegate_queued_when_the_agent_is_busy);
+   RUN_TEST(test_queued_start_after_a_cancel_is_stopped);
+   RUN_TEST(test_replaced_preview_counts_as_answered);
    RUN_TEST(test_confirm_needs_a_later_turn_and_the_id);
    RUN_TEST(test_confirm_in_a_later_turn);
    RUN_TEST(test_unknown_repo_is_refused_before_staging);
@@ -1849,8 +2272,14 @@ int main(void) {
    RUN_TEST(test_needs_the_gateway_grant);
    RUN_TEST(test_cancel_hook_ends_the_row_and_asks_the_gateway);
    RUN_TEST(test_publish_then_confirm);
+   RUN_TEST(test_publish_with_own_text);
    RUN_TEST(test_publish_when_nothing_is_new_or_closed);
    RUN_TEST(test_close);
+   RUN_TEST(test_close_when_the_gateway_lost_the_task);
+   RUN_TEST(test_publish_and_close_texts);
+   RUN_TEST(test_publish_buttons);
+   RUN_TEST(test_close_buttons);
+   RUN_TEST(test_agent_written_title);
    RUN_TEST(test_no_publish_confirm_in_a_turn_that_read_the_agent);
    RUN_TEST(test_pr_url_check);
    RUN_TEST(test_publish_again_and_closed_revise);

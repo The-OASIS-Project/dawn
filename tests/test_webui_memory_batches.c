@@ -188,6 +188,7 @@ void test_the_batch_object_carries_ops_counts_and_actions(void) {
    json_object *b = webui_memory_batch_json(s_user, batch);
    TEST_ASSERT_NOT_NULL(b);
    TEST_ASSERT_EQUAL_INT64(s_conv, json_object_get_int64(get(b, "conversation_id")));
+   TEST_ASSERT_EQUAL_STRING("Chat", str(b, "conversation_title"));
    TEST_ASSERT_EQUAL_INT64(3, json_object_get_int64(get(b, "from_message_id")));
    TEST_ASSERT_EQUAL_INT64(9, json_object_get_int64(get(b, "after_message_id")));
    TEST_ASSERT_EQUAL_STRING("applied", str(b, "status"));
@@ -204,6 +205,13 @@ void test_the_batch_object_carries_ops_counts_and_actions(void) {
                             str(json_object_array_get_idx(sources, 0), "text"));
    json_object_put(b);
    TEST_ASSERT_NULL(webui_memory_batch_json(s_other_user, batch)); /* not theirs */
+
+   /* The title is the conversation's current one, read when the frame is built. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_rename(s_conv, s_user, "Renamed"));
+   b = webui_memory_batch_json(s_user, batch);
+   TEST_ASSERT_NOT_NULL(b);
+   TEST_ASSERT_EQUAL_STRING("Renamed", str(b, "conversation_title"));
+   json_object_put(b);
 }
 
 void test_a_dropped_candidate_offers_keep(void) {

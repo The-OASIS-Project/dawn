@@ -136,6 +136,12 @@ struct json_object;
 /** An agent event's longest kept string, in bytes. */
 #define EVENT_AGENT_TEXT_CAP 4096
 
+/** An agent-gateway event's payload key for its kind, and the kind saying its
+ *  task was closed: read back in SQL (conv_db_job_holds_agent_work), so one
+ *  definition. */
+#define EVENT_PAYLOAD_GW_KEY "gw"
+#define EVENT_GW_CLOSED "closed"
+
 /**
  * @brief Build a payload from one agent-gateway event:
  *        {"gw": <its kind>, "gw_seq": <its number>, "gw_ts": <when, epoch s>,
