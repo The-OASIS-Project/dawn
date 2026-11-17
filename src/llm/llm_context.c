@@ -1133,8 +1133,7 @@ int llm_context_fit_reply(int max_tokens,
    if (window <= 0 || max_tokens <= LLM_REPLY_ROOM_MIN) {
       return max_tokens;
    }
-   const int estimate = (history ? llm_context_estimate_tokens(history) : 0) +
-                        llm_compaction_question_tokens(history, input_text);
+   const int estimate = llm_compaction_request_estimate(history, input_text);
    const int tool_tokens = tools ? (int)(strlen(json_object_to_json_string(tools)) / 4) : 0;
    /* Measured by its session only when it is that session's own conversation
     * request.  A side call (extraction, compaction, a briefing, a summarizer)

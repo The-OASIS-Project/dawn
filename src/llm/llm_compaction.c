@@ -361,6 +361,14 @@ int llm_compaction_question_tokens(struct json_object *history, const char *inpu
    return (int)(strlen(input_text) / 4);
 }
 
+int llm_compaction_request_estimate(struct json_object *history, const char *input_text) {
+   const int n = history && json_object_is_type(history, json_type_array)
+                     ? (int)json_object_array_length(history)
+                     : 0;
+   return (n > 0 ? llm_compaction_estimate_range(history, 0, n) : 0) +
+          llm_compaction_question_tokens(history, input_text);
+}
+
 int llm_compaction_reply_input(const llm_compaction_calibration_t *cal,
                                int estimate,
                                int tool_tokens) {

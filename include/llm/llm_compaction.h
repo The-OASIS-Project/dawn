@@ -139,6 +139,16 @@ int llm_compaction_estimate_budget(const llm_compaction_calibration_t *cal, int 
 int llm_compaction_question_tokens(struct json_object *history, const char *input_text);
 
 /**
+ * @brief A request's size estimate as sent: @p history and @p input_text, the
+ *        question counted once (llm_compaction_question_tokens)
+ *
+ * The one rule for the calibration samples (the tool loop's) and the reply
+ * clamp: a sample that counted a question twice would teach the model's
+ * density too low, and every later estimate would fall short.
+ */
+int llm_compaction_request_estimate(struct json_object *history, const char *input_text);
+
+/**
  * @brief A request's input for the reply clamp: its history at @p estimate
  *        and @p tool_tokens of tool definitions
  *

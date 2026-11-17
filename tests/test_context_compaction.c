@@ -515,6 +515,37 @@ static void test_reply_input_counts_the_question_once(void) {
    json_object_put(hist);
 }
 
+/* A large question, then a tool iteration: both requests count the question
+ * once, so the samples that calibrate the density agree with each other (a
+ * first request that counted it twice taught the density too low). */
+static void test_request_estimate_counts_a_large_question_once(void) {
+   static char question[40001];
+   memset(question, 'q', sizeof(question) - 1);
+   question[sizeof(question) - 1] = '\0';
+   struct json_object *hist = json_object_new_array();
+   json_object_array_add(hist, make_msg("system", "You are DAWN."));
+   json_object_array_add(hist, make_msg("user", question)); /* the turn appended it */
+   const int in_history = llm_compaction_estimate_range(hist, 0, 2);
+   /* The first request also passes the question as input_text. */
+   const int first = llm_compaction_request_estimate(hist, question);
+   TEST_ASSERT_EQUAL_INT(in_history, first);
+   /* The tool iteration: the call and its result appended, no input_text. */
+   json_object_array_add(hist, make_msg("assistant", "Looking that up."));
+   json_object_array_add(hist, make_msg("tool", "The result."));
+   const int second = llm_compaction_request_estimate(hist, "");
+   TEST_ASSERT_EQUAL_INT(llm_compaction_estimate_range(hist, 0, 4), second);
+   /* It grew by the tool exchange alone (the range estimate rounds once over
+    * its whole span, so allow a token), not by the 10,000-token question. */
+   TEST_ASSERT_INT_WITHIN(1, llm_compaction_estimate_range(hist, 2, 4), second - first);
+   /* A call whose history doesn't hold the question counts it beside it. */
+   struct json_object *bare = json_object_new_array();
+   json_object_array_add(bare, make_msg("system", "You are DAWN."));
+   TEST_ASSERT_EQUAL_INT(llm_compaction_estimate_range(bare, 0, 1) + 10000,
+                         llm_compaction_request_estimate(bare, question));
+   json_object_put(bare);
+   json_object_put(hist);
+}
+
 /* Tool definitions count until a measured request (which carried them) says
  * what the conversation weighs. */
 static void test_reply_input_adds_the_tools_until_measured(void) {
@@ -558,6 +589,7 @@ int main(void) {
    RUN_TEST(test_compact_deterministic_basic);
    RUN_TEST(test_reply_room_holds_the_ceiling_to_the_window);
    RUN_TEST(test_reply_input_counts_the_question_once);
+   RUN_TEST(test_request_estimate_counts_a_large_question_once);
    RUN_TEST(test_reply_input_adds_the_tools_until_measured);
    RUN_TEST(test_compact_deterministic_budget);
    RUN_TEST(test_compact_deterministic_empty);
