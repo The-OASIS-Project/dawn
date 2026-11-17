@@ -1216,6 +1216,7 @@ messages: they never appear in `messages`, the history, or what the model is sen
 {
    "batch_id": 412,
    "conversation_id": 1703,
+   "conversation_title": "Trip planning",
    "from_message_id": 26230,
    "after_message_id": 26244,
    "created_at": 1793000000,
@@ -1233,6 +1234,10 @@ messages: they never appear in `messages`, the history, or what the model is sen
 - `conversation_id`: the conversation whose messages hold `after_message_id`: the one the batch
   read, never the root of a continuation chain (a continued conversation is its own and gets its
   own batches); `null` for a batch with none.
+- `conversation_title`: that conversation's title as it is when the frame is built (at most 255
+  bytes; may be `""`); `null` when `conversation_id` is `null` or the conversation is gone.  A
+  rename sends no `memory_batch`: update shown batches from `conversation_renamed`.  Absent on
+  daemons before 2026-11-16.
 - `from_message_id`: the first message the batch learned from.
 - `after_message_id`: place the marker after this.  It may name a row the client doesn't render
   as a bubble (a tool row, an intermediate assistant row of a tool loop, a request-context row);

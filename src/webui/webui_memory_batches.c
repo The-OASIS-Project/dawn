@@ -166,6 +166,18 @@ static json_object *batch_object(const memory_consolidation_batch_row_t *b,
    return j;
 }
 
+/* The conversation's title as it is now, for the batch's heading: null when
+ * the batch has no conversation, or it is gone or not @p user_id's. */
+static json_object *conversation_title(int user_id, int64_t conversation_id) {
+   conversation_t conv;
+   if (conversation_id <= 0 || conv_db_get(conversation_id, user_id, &conv) != AUTH_DB_SUCCESS) {
+      return NULL;
+   }
+   json_object *title = json_object_new_string(conv.title);
+   conv_free(&conv);
+   return title;
+}
+
 /* @p b as the batch object, its ops read into @p rows (MEMORY_CONSOLIDATION_OPS_MAX). */
 static json_object *batch_json_with(int user_id,
                                     const memory_consolidation_batch_row_t *b,
@@ -177,6 +189,10 @@ static json_object *batch_json_with(int user_id,
    }
    json_object *j = batch_object(b, rows, n);
    memory_db_consolidation_ops_free(rows, n);
+   if (j) {
+      json_object_object_add(j, "conversation_title",
+                             conversation_title(user_id, b->conversation_id));
+   }
    return j;
 }
 
