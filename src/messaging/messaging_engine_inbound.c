@@ -530,68 +530,6 @@ static inbound_outcome_t process_inbound(inbound_item_t *item) {
       return INBOUND_RAN;
    }
 
-   /* Cross-channel staleness check.  An external writer (WebUI
-    * conversation panel, voice session, MCP) may have appended to
-    * this conv between our turns — the cached session_t holds frozen
-    * in-memory history while the DB has fresher state.  Without this
-    * reload, the LLM would respond without context of the
-    * external-channel turns, producing a visibly-divergent
-    * conversation from what the user sees in the WebUI.
-    *
-    * Universal across SMS / Telegram / future Discord/Slack — every
-    * channel funnels through here.  Skipped when conv_id <= 0 (DB
-    * persistence failed for this turn; degraded mode). */
-   reload_session_history_if_stale(session, item->provider, item->provider_address, conv_id,
-                                   item->ref.user_id);
-
-   /* Build the per-turn channel hint, including a truncation-feedback
-    * note when the prior assistant reply was cut.  The truncation
-    * marker lives in the assistant history (we replaced it
-    * post-truncation in the previous turn), so detecting prior
-    * truncation is just a substring check — no separate per-session
-    * "was-truncated" state needed. */
-   provider_outbound_t cfg = provider_outbound_for(item->provider);
-   char channel_hint_buf[MESSAGING_CHANNEL_HINT_BUF_SIZE] = { 0 };
-   const char *channel_hint = cfg.channel_hint;
-   if (channel_hint) {
-      char *last_assistant = session_get_last_message_content(session, "assistant");
-      /* Anchor the truncation-detect on the exact marker the
-       * truncator emits at the END of an oversized message (see
-       * truncate_outbound_in_place).  Suffix-match (not strstr) so
-       * user content containing the literal "[truncated]" mid-text
-       * doesn't trip the guardrail. */
-      static const char trunc_marker[] = " ... [truncated]";
-      bool prev_truncated = false;
-      if (last_assistant) {
-         size_t la_len = strlen(last_assistant);
-         size_t mk_len = sizeof(trunc_marker) - 1;
-         if (la_len >= mk_len && strcmp(last_assistant + la_len - mk_len, trunc_marker) == 0) {
-            prev_truncated = true;
-         }
-      }
-      free(last_assistant);
-      if (prev_truncated) {
-         snprintf(channel_hint_buf, sizeof(channel_hint_buf),
-                  "%s  IMPORTANT: your previous reply OVERFLOWED and was truncated "
-                  "mid-sentence — the user got only the text before the [truncated] marker "
-                  "visible in your last assistant message above.  This is the failure mode "
-                  "the constraints above are meant to prevent.  Your reply this turn MUST be "
-                  "1-2 sentences max, even if it means deferring detail to the WebUI.",
-                  channel_hint);
-         channel_hint = channel_hint_buf;
-      }
-   }
-
-   text_input_dispatch_opts_t opts = {
-      .conversation_id = conv_id,
-      .auth_user_id = item->ref.user_id,
-      .sentence_cb = NULL,
-      .sentence_userdata = NULL,
-      .on_user_msg_added = NULL,
-      .user_msg_added_ctx = NULL,
-      .channel_hint = channel_hint,
-   };
-
    /* Typing-indicator keepalive.  If the driver supports `send_typing`,
     * spawn a background thread that fires the typing call once and
     * re-fires every ~4s while the LLM is processing — so the user sees
@@ -653,6 +591,56 @@ static inbound_outcome_t process_inbound(inbound_item_t *item) {
       session_release(session);
       return INBOUND_RAN;
    }
+   /* Built once the turn has begun: its start brought the history up to date
+    * with what other sessions wrote, so "the previous reply" is the latest.
+    * Build the per-turn channel hint, including a truncation-feedback
+    * note when the prior assistant reply was cut.  The truncation
+    * marker lives in the assistant history (we replaced it
+    * post-truncation in the previous turn), so detecting prior
+    * truncation is just a substring check — no separate per-session
+    * "was-truncated" state needed. */
+   provider_outbound_t cfg = provider_outbound_for(item->provider);
+   char channel_hint_buf[MESSAGING_CHANNEL_HINT_BUF_SIZE] = { 0 };
+   const char *channel_hint = cfg.channel_hint;
+   if (channel_hint) {
+      char *last_assistant = session_get_last_message_content(session, "assistant");
+      /* Anchor the truncation-detect on the exact marker the
+       * truncator emits at the END of an oversized message (see
+       * truncate_outbound_in_place).  Suffix-match (not strstr) so
+       * user content containing the literal "[truncated]" mid-text
+       * doesn't trip the guardrail. */
+      static const char trunc_marker[] = " ... [truncated]";
+      bool prev_truncated = false;
+      if (last_assistant) {
+         size_t la_len = strlen(last_assistant);
+         size_t mk_len = sizeof(trunc_marker) - 1;
+         if (la_len >= mk_len && strcmp(last_assistant + la_len - mk_len, trunc_marker) == 0) {
+            prev_truncated = true;
+         }
+      }
+      free(last_assistant);
+      if (prev_truncated) {
+         snprintf(channel_hint_buf, sizeof(channel_hint_buf),
+                  "%s  IMPORTANT: your previous reply OVERFLOWED and was truncated "
+                  "mid-sentence — the user got only the text before the [truncated] marker "
+                  "visible in your last assistant message above.  This is the failure mode "
+                  "the constraints above are meant to prevent.  Your reply this turn MUST be "
+                  "1-2 sentences max, even if it means deferring detail to the WebUI.",
+                  channel_hint);
+         channel_hint = channel_hint_buf;
+      }
+   }
+
+   text_input_dispatch_opts_t opts = {
+      .conversation_id = conv_id,
+      .auth_user_id = item->ref.user_id,
+      .sentence_cb = NULL,
+      .sentence_userdata = NULL,
+      .on_user_msg_added = NULL,
+      .user_msg_added_ctx = NULL,
+      .channel_hint = channel_hint,
+   };
+
    /* A reply code runs the action it approves in this turn; the model is
     * handed the outcome (DAWN's words, saved as request context), not the
     * code, and only reports it: no tools in that turn. */
@@ -760,12 +748,6 @@ static inbound_outcome_t process_inbound(inbound_item_t *item) {
       free(stored);
       if (rc == AUTH_DB_SUCCESS && assistant_msg_id > 0) {
          session_stamp_last_message_id(session, "assistant", assistant_msg_id);
-         /* Bump slot's last_known_msg_id to the assistant message.
-          * msg_ids are monotonic per conv, so this id is strictly
-          * greater than the just-persisted user message's id — one
-          * bump covers both writes for the cross-channel staleness
-          * check on the next inbound. */
-         slot_bump_last_known_msg_id(session, assistant_msg_id);
          /* Notify any open WebUI session viewing this conversation
           * that new messages landed.  Weak-symbol no-op when the
           * WebUI layer isn't linked; the strong override in
