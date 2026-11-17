@@ -85,6 +85,9 @@
                // A background turn's state (thinking/speaking/idle for a conversation
                // not on screen) must not drive the pill. Untagged states (no
                // conversation_id — global: idle-at-rest, listening) always apply.
+               if (msg.payload && msg.payload.state === 'idle' && window.DawnTurnWait) {
+                  DawnTurnWait.handleIdle(msg.payload);
+               }
                if (isForeignConvFrame(msg.payload)) break;
                updateState(msg.payload.state, msg.payload.detail, msg.payload.tools);
                break;
@@ -217,6 +220,9 @@
                      pendingVisualsForSave = [];
                   }
 
+                  if (!msg.payload.replay && window.DawnTurnWait) {
+                     DawnTurnWait.handleUserEcho(msg.payload);
+                  }
                   // Pass message_id (present on server-persisted echoes) so the bubble is
                   // stamped and a fanned-out message_appended for the same row dedups (§12c).
                   DawnTranscript.addEntry(
@@ -488,6 +494,13 @@
                         msg.payload.features.includes('memory_batches')
                   );
                }
+               // A turn may wait for another on its conversation, and say so.
+               if (window.DawnTurnWait) {
+                  DawnTurnWait.setEnabled(
+                     Array.isArray(msg.payload.features) &&
+                        msg.payload.features.includes('turn_wait')
+                  );
+               }
                if (msg.payload.audio_chunk_ms) {
                   DawnAudioCapture.setAudioChunkMs(msg.payload.audio_chunk_ms);
                   console.log('Audio chunk size set to:', msg.payload.audio_chunk_ms, 'ms');
@@ -658,7 +671,17 @@
                DawnMetricsPanel.handleResponse(msg.payload);
                break;
             case 'stream_start':
+               if (window.DawnTurnWait) DawnTurnWait.handleReplyStart(msg.payload);
                DawnStreaming.handleStart(msg.payload);
+               break;
+            case 'turn_waiting':
+               if (window.DawnTurnWait) DawnTurnWait.handleWaiting(msg.payload);
+               break;
+            case 'turn_unsent':
+               if (window.DawnTurnWait) DawnTurnWait.handleUnsent(msg.payload);
+               break;
+            case 'stop_other_reply_response':
+               if (window.DawnTurnWait) DawnTurnWait.handleStopResponse(msg.payload);
                break;
             case 'stream_delta':
                DawnStreaming.handleDelta(msg.payload);
@@ -692,6 +715,10 @@
                }
                break;
             case 'message_appended':
+               // The sender's own copy of its question also ends its held bubble.
+               if (window.DawnTurnWait && msg.payload && msg.payload.client_ref) {
+                  DawnTurnWait.handleUserEcho(msg.payload);
+               }
                // Phase-0 cross-viewer fan-out (server-authoritative persistence §6a):
                // a reply persisted for THIS conversation. The origin (which streamed
                // it) adopts the message_id onto its bubble; a second viewer of the
@@ -1538,8 +1565,10 @@
       // (someone else's text) and builds the inlined form the transcript shows.
       const messageText = text;
       let attachments = null;
+      let sentDocs = [];
       if (!fromVisual && typeof DawnDocuments !== 'undefined') {
          const docs = DawnDocuments.getAndClearDocuments();
+         sentDocs = docs;
          if (docs.length > 0) {
             attachments = docs.map((d) => {
                const a = { filename: d.filename, size: d.size, content: d.content };
@@ -1591,6 +1620,18 @@
       // client skips its own save. An id the daemon can't use (gone, another
       // user's) fails the turn with an error frame; nothing is sent without it.
       const pendingImageIds = fromVisual ? [] : DawnVision.getPendingImageIds();
+      // What a held turn gives back to the composer if it is stopped unsent.
+      const clientRef = window.DawnTurnWait
+         ? DawnTurnWait.noteSent({
+              text: messageText,
+              images: pendingImageIds.length > 0 ? DawnState.visionState.pendingImages.slice() : [],
+              documents: attachments ? sentDocs : [],
+              fromVisual: fromVisual,
+           })
+         : null;
+      if (clientRef) {
+         msg.payload.client_ref = clientRef;
+      }
       if (pendingImageIds.length > 0) {
          msg.payload.image_ids = pendingImageIds;
          // Retained only for local display of the just-sent turn (no longer a save key).
@@ -1655,6 +1696,8 @@
          if (typeof DawnCalendarAccounts !== 'undefined') {
             DawnCalendarAccounts.clearPendingSyncs();
          }
+         // A held turn's frames can't arrive now either.
+         if (window.DawnTurnWait) DawnTurnWait.reset();
       }
       DawnElements.connectionStatus.className = status;
       DawnElements.connectionStatus.title = ''; // Clear any previous tooltip
@@ -2051,6 +2094,7 @@
    function handleCancel() {
       console.log('Cancel button clicked - sending cancel');
       DawnWS.send({ type: 'cancel' });
+      if (window.DawnTurnWait) DawnTurnWait.noteStop();
       // Finalize any active stream immediately on the client side
       DawnStreaming.finalize();
    }

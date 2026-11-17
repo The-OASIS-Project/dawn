@@ -521,6 +521,17 @@
    }
 
    /**
+    * Put documents back as pending (a message that was never sent), up to the limit.
+    */
+   function restoreDocuments(docs) {
+      const state = DawnState.documentState;
+      const room = Math.max(0, state.maxDocuments - state.pendingDocuments.length);
+      docs.slice(0, room).forEach((d) => state.pendingDocuments.push(d));
+      rebuildChips();
+      updateCounter();
+   }
+
+   /**
     * Check if there are pending documents
     */
    function hasPendingDocuments() {
@@ -677,6 +688,7 @@
       init,
       processMultipleDocuments,
       getAndClearDocuments,
+      restoreDocuments,
       hasPendingDocuments,
       isAllowedExtension,
       parseDocumentMarkers,
