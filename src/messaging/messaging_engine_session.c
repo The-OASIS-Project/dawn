@@ -200,13 +200,16 @@ void reload_session_history_if_stale(session_t *session,
              provider, provider_address, (long long)db_max, (long long)slot_last_known);
 
    size_t restored_chars = 0;
+   /* Read before the load, so the turn's own catch-up finds it current. */
+   conv_sync_point_t at;
+   const bool at_ok = conv_db_sync_point_get(conv_id, user_id, &at) == AUTH_DB_SUCCESS;
    struct json_object *loaded = memory_history_load_for_llm(conv_id, user_id, &restored_chars);
    if (!loaded) {
       return;
    }
    size_t restored_count = (size_t)json_object_array_length(loaded);
 
-   session_replace_history(session, loaded, conv_id);
+   session_replace_history_at(session, loaded, conv_id, user_id, at_ok ? &at : NULL);
 
    int64_t new_high = history_array_max_msg_id(loaded);
    slot_bump_last_known_msg_id(session, new_high);
@@ -450,6 +453,8 @@ session_t *get_or_create_messaging_session(const channel_ref_t *ref,
    int64_t restored_max_msg_id = 0;
    if (conversation_id > 0 && user_id > 0) {
       size_t restored_chars = 0;
+      conv_sync_point_t at;
+      const bool at_ok = conv_db_sync_point_get(conversation_id, user_id, &at) == AUTH_DB_SUCCESS;
       struct json_object *loaded = memory_history_load_for_llm(conversation_id, user_id,
                                                                &restored_chars);
       if (loaded) {
@@ -460,7 +465,7 @@ session_t *get_or_create_messaging_session(const channel_ref_t *ref,
              * last_known_msg_id so the cross-channel staleness check
              * in process_inbound knows what we've seen. */
             restored_max_msg_id = history_array_max_msg_id(loaded);
-            session_replace_history(s, loaded, conversation_id);
+            session_replace_history_at(s, loaded, conversation_id, user_id, at_ok ? &at : NULL);
             OLOG_INFO("messaging: restored %zu messages (%zu chars) into session %u from conv %lld",
                       restored_count, restored_chars, s->session_id, (long long)conversation_id);
          } else {

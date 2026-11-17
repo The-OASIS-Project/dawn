@@ -18,7 +18,8 @@
  *
  * A tool exchange as the tool loop appends it to a conversation's history
  * (llm_tool_loop.c): the assistant's call message in the history's format,
- * with the turn's blocks, then the tool results.
+ * with the turn's blocks, then the tool results; and the rows they are saved
+ * as.
  */
 
 #ifndef LLM_TOOL_HISTORY_H
@@ -33,6 +34,7 @@ extern "C" {
 #endif
 
 struct json_object;
+struct session;
 
 /**
  * @brief The response's blocks with their tool calls replaced by the calls
@@ -62,6 +64,29 @@ void llm_tool_history_append_claude(struct json_object *history,
                                     const llm_tool_response_t *response,
                                     const tool_result_list_t *results,
                                     const char *carrier);
+
+/**
+ * @brief Save the messages a tool iteration appended to @p history, from
+ *        index @p before_len to its end, through the session's tool-persist
+ *        hook, and tell the turn's observers of each call and result.
+ *
+ * Each message is saved as the rows llm_history_rows_append makes of it: an
+ * assistant row with its tool calls, stored blocks and @p reasoning_json; a
+ * loop note with its kind; a role="tool" row with its images and whether its
+ * call failed (from @p results, which may be NULL).  Each message the hook
+ * saved is stamped with its row's id, as a reload of the conversation holds
+ * it (a Claude message of results: each result's part with its own, the
+ * message with its last).  Runs with no lock held.
+ *
+ * @param s The session the turn runs on (the caller holds a reference)
+ * @param iteration The tool loop's iteration, for the observers' events
+ */
+void llm_tool_history_persist(struct session *s,
+                              struct json_object *history,
+                              int before_len,
+                              const char *reasoning_json,
+                              int iteration,
+                              const tool_result_list_t *results);
 
 #ifdef __cplusplus
 }

@@ -372,9 +372,21 @@ void webui_jobs_handle_action(ws_connection_t *conn, json_object *payload) {
        * caller forge log lines (and flood them, since this fires on every probe). */
       const char *safe = (strcmp(action, "cancel") == 0)   ? "cancel"
                          : (strcmp(action, "resume") == 0) ? "resume"
+                         : (strcmp(action, "delete") == 0) ? "delete"
                                                            : "unknown";
       OLOG_WARNING("webui_jobs: user %d denied '%s' on conv %lld (rc=%d)", conn->auth_user_id, safe,
                    (long long)conv_id, grc);
+      return;
+   }
+
+   if (strcmp(action, "delete") == 0) {
+      /* The conversation delete's own checks (still running; a coding job whose
+       * work the gateway holds), then every tab drops the row. */
+      const char *err = webui_delete_conversation(conn, conv_id);
+      send_action_result(conn, action, conv_id, err == NULL, err ? err : "Deleted.");
+      if (err == NULL) {
+         webui_broadcast_jobs_invalidate(conn->auth_user_id);
+      }
       return;
    }
 

@@ -77,6 +77,18 @@ static void test_same_session_replaces(void) {
    TEST_ASSERT_EQUAL_STRING("222", b->number);
    item_t *c = stage(7, 1, KIND_TEXT, "333", 1002);
    TEST_ASSERT_NOT_EQUAL(b, c);
+   TEST_ASSERT_EQUAL_UINT32(0, c->hdr.replaced_turn); /* replaced nothing */
+}
+
+/* A replacing item says which turn's item it replaced (that preview won't be
+ * answered now); a fresh one says none. */
+static void test_replacement_names_the_turn(void) {
+   const turn_origin_t t3 = origin(7, 300, 3), t5 = origin(7, 500, 5);
+   item_t *a = (item_t *)pending_slots_stage(&s_slots, &t3, 1, KIND_CALL, 1000, NULL);
+   TEST_ASSERT_EQUAL_UINT32(0, a->hdr.replaced_turn);
+   item_t *b = (item_t *)pending_slots_stage(&s_slots, &t5, 1, KIND_CALL, 1001, NULL);
+   TEST_ASSERT_EQUAL_PTR(a, b);
+   TEST_ASSERT_EQUAL_UINT32(3, b->hdr.replaced_turn);
 }
 
 /* Another session's item is never replaced, and never found from here. */
@@ -312,6 +324,7 @@ int main(void) {
    RUN_TEST(test_valid_for_counts_down_from_the_ttl);
    RUN_TEST(test_tool_messages_name_the_item);
    RUN_TEST(test_same_session_replaces);
+   RUN_TEST(test_replacement_names_the_turn);
    RUN_TEST(test_other_session_untouched);
    RUN_TEST(test_other_user_not_found);
    RUN_TEST(test_full_refuses_then_reuses_expired);

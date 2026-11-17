@@ -1410,23 +1410,17 @@ static void *audio_worker_thread(void *arg) {
       OLOG_INFO("WebUI: Audio session disconnected or request superseded, aborting");
       if (session) {
          session_turn_end(session); /* begun at dequeue; never ran */
-         session_release(session);  /* pre-increment exit: bare release, no turn_in_flight */
+         atomic_fetch_sub(&session->turn_in_flight, 1);
+         session_release(session);
       }
       free(audio_data);
       free(work);
       return NULL;
    }
 
-   /* Passed the supersede check — this turn is now in flight.  Guards
-    * session_cleanup_expired from reaping a still-generating voice turn and makes
-    * conv_has_turn_in_flight see it (parity with text_worker_thread).  Every exit
-    * BELOW this point releases via audio_worker_end (decrement-then-release).
-    * Its input is voice, flagged before it counts as in flight (always-on's
-    * watchdog reads the two together; the prompt builder's ASR hint reads the
-    * flag).  Correctness relies on per-session turn serialization; atomic_bool
-    * guards visibility, not logical interleave. */
-   session->input_was_voice = true;
-   atomic_fetch_add(&session->turn_in_flight, 1);
+   /* In flight since before its wait for the conversation
+    * (audio_turn_thread_entry).  Every exit BELOW this point releases via
+    * audio_worker_end (decrement-then-release). */
 
    OLOG_INFO("WebUI: Processing audio for session %u (%zu bytes, %s)", session->session_id,
              audio_len, work->use_opus ? "opus" : "pcm");
@@ -1540,6 +1534,14 @@ static void *audio_worker_thread(void *arg) {
    }
    if (turn_conv > 0) {
       session_turn_set_conversation(session, turn_conv, true); /* also tags the stream */
+      if (session_turn_unsent(session)) {
+         /* Stopped while another turn had the conversation: the transcript was
+          * never saved (the client was told). */
+         audio_worker_end(session);
+         free(transcript);
+         free(work);
+         return NULL;
+      }
    }
 
    /* Add user message to session history immediately (before LLM call can be cancelled) */
@@ -1677,10 +1679,14 @@ static void *audio_worker_thread(void *arg) {
       if (max_tokens > 0) {
          webui_send_context(session, current_tokens, max_tokens, threshold);
       }
-   } else if (!superseded) {
-      /* Genuine failure: no reply and not superseded. */
-      OLOG_WARNING("WebUI: LLM call failed");
-      webui_send_error(session, "LLM_ERROR", "Failed to get response");
+   } else {
+      /* No reply (failed, stopped or superseded): the tool changes no model
+       * answered go back, as for a typed turn. */
+      (void)session_prefix_take_back_changes(session);
+      if (!superseded) {
+         OLOG_WARNING("WebUI: LLM call failed");
+         webui_send_error(session, "LLM_ERROR", "Failed to get response");
+      }
    }
 
    webui_send_state(session, "idle");
@@ -1735,8 +1741,26 @@ static void *audio_turn_thread_entry(void *arg) {
          turn_queue_turn_done(sid);
          return NULL;
       }
+      /* Fresh flags for THIS turn (G2), before it may wait for its
+       * conversation: a Stop pressed during that wait must count. */
+      session_begin_turn_flags(work->session);
+      /* In flight from before the wait: guards session_cleanup_expired from
+       * reaping a waiting or still-generating voice turn and makes
+       * conv_has_turn_in_flight see it.  Its input is voice, flagged before it
+       * counts as in flight (always-on's watchdog reads the two together; the
+       * prompt builder's ASR hint reads the flag). */
+      work->session->input_was_voice = true;
+      atomic_fetch_add(&work->session->turn_in_flight, 1);
       session_turn_begin(work->session, work->conv_id, (int)work->session->metrics.user_id);
-      session_begin_turn_flags(work->session); /* fresh flags for THIS turn (G2) */
+      if (session_turn_unsent(work->session)) {
+         /* Stopped while another turn had the conversation: nothing ran or was
+          * saved (the client was told). */
+         session_turn_end(work->session);
+         atomic_fetch_sub(&work->session->turn_in_flight, 1);
+         audio_turn_free(work);
+         turn_queue_turn_done(sid);
+         return NULL;
+      }
    }
    audio_worker_thread(work); /* existing turn body — frees work, releases session */
    turn_queue_turn_done(sid); /* chain the next queued turn for this session */

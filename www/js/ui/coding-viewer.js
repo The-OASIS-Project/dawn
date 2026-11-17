@@ -40,6 +40,7 @@
    const PICTO_END = new RegExp('\\p{Extended_Pictographic}$', 'u');
    const HUNK = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
    const NARROW = '(max-width: 759px)';
+   const SHORT_HEAD = 12; /* characters of a commit hash shown */
 
    let dlg = null;
    let ui = {};
@@ -49,8 +50,13 @@
    let escToken = null;
    let cache = new Map(); /* 'path|view' -> the gateway's answer, for this open */
    let nonceSeq = 0;
-   let latest = ''; /* only the newest request's answer renders */
-   let pending = null; /* the file request in flight: {nonce, path, view} */
+   let latest = ''; /* only the newest file request's answer renders */
+   let pending = null; /* the file request in flight: {nonce, seq, path, view} */
+   let changesNonce = ''; /* the changes request in flight (apart from a file's) */
+   let changesSeq = 0;
+   let listed = false; /* the open's first listing has come */
+   let loadedHead = ''; /* the full head of the work listed */
+   let acts = null; /* publish and close (coding-viewer-actions.js) */
    let downOnBackdrop = false;
    let current = null; /* the file shown: {path, added, removed, protected} */
    let view = 'diff';
@@ -100,20 +106,27 @@
       ui.pane.removeAttribute('aria-busy');
    }
 
+   /* A changes request and a file request each have their own nonce: asking
+    * for the job's facts again doesn't drop the file being loaded. */
    function send(what, path) {
-      latest = ''; /* whatever was asked before is for something else now */
-      pending = null;
-      if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) {
-         if (what === 'changes') {
-            ui.list.replaceChildren(elem('div', 'cv-note', 'Not connected.'));
-         } else {
+      const connected = typeof DawnWS !== 'undefined' && DawnWS.isConnected();
+      const nonce = 'v' + ++nonceSeq;
+      if (what === 'changes') {
+         changesNonce = connected ? nonce : '';
+         changesSeq = nonceSeq;
+      } else {
+         latest = connected ? nonce : ''; /* whatever was asked before is for something else now */
+         pending = connected ? { nonce: nonce, seq: nonceSeq, path: path, view: view } : null;
+      }
+      if (!connected) {
+         if (what === 'file') {
             note('Not connected.');
+         } else if (!listed) {
+            ui.list.replaceChildren(elem('div', 'cv-note', 'Not connected.'));
          }
          return;
       }
-      latest = 'v' + ++nonceSeq;
-      pending = what === 'file' ? { nonce: latest, path: path, view: view } : null;
-      const payload = { job: job, what: what, nonce: latest };
+      const payload = { job: job, what: what, nonce: nonce };
       if (what === 'file') {
          payload.path = path;
          payload.view = view;
@@ -150,9 +163,42 @@
       ui.pane.tabIndex = 0;
       side.append(ui.bar, ui.banner, ui.pane);
       ui.body.append(ui.list, side);
+      ui.action = elem('section', 'cv-action');
+      ui.action.setAttribute('aria-labelledby', 'cv-action-title');
+      /* A group, not a <footer>: inside the dialog that would be a second page footer. */
+      ui.actions = elem('div', 'cv-actions');
+      ui.actions.setAttribute('role', 'group');
+      ui.actions.setAttribute('aria-label', 'Job actions');
+      ui.actions.hidden = true;
       ui.status = elem('div', 'sr-only');
       ui.status.setAttribute('role', 'status');
-      dlg.append(head, ui.body, ui.status);
+      dlg.append(head, ui.body, ui.action, ui.actions, ui.status);
+      if (typeof DawnCodingViewerActions !== 'undefined') {
+         acts = DawnCodingViewerActions.create({
+            dlg: dlg,
+            panel: ui.action,
+            footer: ui.actions,
+            elem: elem,
+            appendShown: appendShown,
+            shownPath: shownPath,
+            say: say,
+            shortHead: SHORT_HEAD,
+            job: function () {
+               return job;
+            },
+            head: function () {
+               return loadedHead;
+            },
+            isOpen: function () {
+               return !!dlg && dlg.open;
+            },
+            refresh: function () {
+               send('changes');
+            },
+            home: home,
+            close: close,
+         });
+      }
       document.body.appendChild(dlg);
       closeBtn.addEventListener('click', close);
       ui.back.addEventListener('click', backToFiles);
@@ -177,8 +223,18 @@
       if (sel) sel.focus();
    }
 
-   /* Escape or a phone's back: from a file on a phone, back to the list. */
+   /* Where focus goes when the footer has nothing to take it. */
+   function home() {
+      const sel = ui.list.querySelector('[aria-current="true"]') || ui.list.querySelector('button');
+      /* An empty pane says nothing: the dialog's close button then. */
+      const empty = !ui.pane.childNodes.length;
+      (sel || (empty ? dlg.querySelector('.dawn-dialog-close') : ui.pane)).focus();
+   }
+
+   /* Escape or a phone's back: the publish or close panel first, then from a
+    * file on a phone back to the list, then the dialog. */
    function dismiss() {
+      if (acts && acts.dismiss()) return;
       if (dlg.classList.contains('show-file') && window.matchMedia(NARROW).matches) {
          backToFiles();
       } else {
@@ -196,6 +252,11 @@
       cache = new Map();
       current = null;
       view = 'diff';
+      latest = '';
+      pending = null;
+      listed = false;
+      loadedHead = '';
+      if (acts) acts.reset();
       ui.title.replaceChildren();
       appendShown(ui.title, 'Job #' + job + (name ? ': ' + name : ''));
       ui.head.textContent = '';
@@ -224,6 +285,8 @@
       cache = new Map();
       latest = '';
       pending = null;
+      changesNonce = '';
+      if (acts) acts.reset(); /* an answer still on its way becomes a toast */
       /* The button that opened it, or its row's rebuilt one. */
       const again =
          opener && opener.isConnected
@@ -231,7 +294,13 @@
             : (openerRoot || document).querySelector(
                  '[data-action="changes"][data-job-id="' + String(job) + '"]'
               );
-      if (again) again.focus();
+      if (again) {
+         again.focus();
+      } else {
+         /* Its row went with the close: the jobs button, always there signed in. */
+         const btn = document.getElementById('jobs-btn');
+         if (btn) btn.focus();
+      }
    }
 
    /* ---- the listing ------------------------------------------------------ */
@@ -267,8 +336,42 @@
       return b;
    }
 
-   function renderChanges(r) {
-      ui.head.textContent = r.head ? String(r.head).slice(0, 12) : '';
+   /* @p first: the open's own listing (focus goes to it); later ones only
+    * update the job's facts, and the listing when the work changed. */
+   /* Forget the file shown and every file read: they may read differently now. */
+   function dropFiles() {
+      cache = new Map();
+      current = null;
+      latest = '';
+      pending = null;
+      dlg.classList.remove('show-file');
+      ui.bar.replaceChildren();
+      ui.banner.hidden = true;
+   }
+
+   function renderChanges(r, first) {
+      const head = r.head ? String(r.head) : '';
+      if (acts) acts.render(r.job_state);
+      if (r.job_state && r.job_state.closed) {
+         /* Its clone and branch are gone: nothing left to list (the footer says Closed). */
+         listed = true;
+         loadedHead = '';
+         dropFiles();
+         ui.head.textContent = '';
+         ui.list.replaceChildren(elem('div', 'cv-note', 'Closed: its clone and branch are gone.'));
+         ui.pane.replaceChildren();
+         ui.pane.removeAttribute('aria-busy');
+         return;
+      }
+      if (!first && head === loadedHead) return;
+      listed = true;
+      loadedHead = head;
+      if (!first) {
+         dropFiles();
+         note('The work changed since you opened it.');
+         say('The work changed since you opened it.');
+      }
+      ui.head.textContent = head.slice(0, SHORT_HEAD);
       const files = Array.isArray(r.files) ? r.files : [];
       const commits = Array.isArray(r.commits) ? r.commits : [];
       ui.list.replaceChildren();
@@ -306,8 +409,8 @@
       });
       ui.list.appendChild(ol);
       ui.taskId = r.task_id || '';
-      const first = ui.list.querySelector('.cv-filebtn');
-      if (first) first.focus();
+      const btn = ui.list.querySelector('.cv-filebtn');
+      if (btn && first) btn.focus();
    }
 
    /* ---- one file --------------------------------------------------------- */
@@ -491,34 +594,70 @@
 
    /* ---- answers ---------------------------------------------------------- */
 
-   function handleResponse(p) {
-      if (!dlg || !dlg.open || !p || p.nonce !== latest || Number(p.job) !== job) {
-         return; /* closed, or an older request */
-      }
+   /* The gateway serves one request of a user's at a time, and a newer one
+    * replaces one still waiting, so when one of this tab's requests is
+    * answered, an earlier one of the other kind still unanswered was replaced:
+    * it is asked again. */
+   function handleChanges(p) {
+      changesNonce = '';
+      const first = !listed;
       if (!p.ok) {
          const msg = p.error || 'The coding agent didn’t answer.';
-         if (p.what === 'changes') {
-            ui.list.replaceChildren(elem('div', 'cv-note', msg));
-         } else {
-            note(msg);
-         }
+         if (first) ui.list.replaceChildren(elem('div', 'cv-note', msg));
+         say(msg);
+      } else {
+         renderChanges(p.result || {}, first);
+      }
+      if (pending && pending.seq < changesSeq && current) show(current);
+   }
+
+   function handleResponse(p) {
+      if (!dlg || !dlg.open || !p || Number(p.job) !== job) return; /* closed */
+      if (p.what === 'changes') {
+         if (p.nonce === changesNonce) handleChanges(p);
+         return;
+      }
+      if (p.nonce !== latest || !pending || pending.nonce !== p.nonce) return; /* an older one */
+      const asked = pending;
+      pending = null;
+      if (changesNonce && changesSeq < asked.seq) send('changes');
+      if (!p.ok) {
+         const msg = p.error || 'The coding agent didn’t answer.';
+         note(msg);
          say(msg);
          return;
       }
       const r = p.result || {};
-      if (p.what === 'changes') {
-         renderChanges(r);
-         return;
+      cache.set(asked.path + '|' + asked.view, r);
+      if (current && current.path === asked.path && view === asked.view) {
+         renderFile(r); /* only under the file and view it is for */
       }
-      if (!pending || pending.nonce !== p.nonce) return;
-      cache.set(pending.path + '|' + pending.view, r);
-      const shown = current && current.path === pending.path && view === pending.view;
-      pending = null;
-      if (shown) renderFile(r); /* only under the file and view it is for */
+   }
+
+   /* Publish and close answers, to this tab only. */
+   function handleActionResponse(type, p) {
+      if (acts) acts.handle(type, p);
+   }
+
+   /* The socket came back: whatever was waiting may never be answered. */
+   function reconnected() {
+      if (!dlg || !dlg.open) return;
+      if (acts) acts.reconnected();
+      send('changes');
+      if (pending && current) show(current);
+   }
+
+   /* A job_update row: the open job's status changed, so ask for its facts. */
+   function onJobUpdate(row) {
+      if (!dlg || !dlg.open || !row || Number(row.conversation_id) !== job) return;
+      if (!acts || row.status !== acts.status()) send('changes');
    }
 
    global.DawnCodingViewer = {
       open: open,
       handleResponse: handleResponse,
+      handleActionResponse: handleActionResponse,
+      reconnected: reconnected,
+      onJobUpdate: onJobUpdate,
    };
 })(window);

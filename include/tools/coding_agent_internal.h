@@ -19,7 +19,8 @@
  * The coding_agent tool's parts (coding_agent_tool.c: the callback, the
  * reads and these helpers; coding_agent_delegate.c: starting a task;
  * coding_agent_requests.c: answering what a task waits on;
- * coding_agent_watch.c: the gateway's events) and what they share.  Not for
+ * coding_agent_watch.c: the gateway's events; coding_agent_github.c: reading
+ * GitHub pull requests) and what they share.  Not for
  * use outside the tool.
  */
 
@@ -49,6 +50,13 @@ char *coding_agent_error(const char *text);
 /** Room for a repo's name at the gateway. */
 #define CODING_AGENT_REPO_MAX 64
 
+/** Whether a gateway task with @p status is still open: waiting its turn,
+ *  working, or waiting on the user (a close stops it first). */
+bool coding_task_status_open(const char *status);
+
+/** The gateway lists at most this many of a task's commits (its COMMITS_CAP). */
+#define CODING_COMMITS_LISTED 100
+
 /** Whether @p repo is a gateway repo name DAWN shows and grants for (letters,
  *  digits, '.', '_', '-'; not "." or ".."). */
 bool coding_agent_repo_name_ok(const char *repo);
@@ -63,6 +71,12 @@ void coding_agent_mark_read(void);
 /** A report posted as message @p msg_id of @p conv_id carries a take on the
  *  agent's words: the turn it is told to reads them (coding_agent_turn_read). */
 void coding_agent_note_take(int64_t conv_id, int64_t msg_id);
+
+/** A preview staged over this session's earlier one of the same kind, made in
+ *  turn @p replaced_turn (the slot's replaced_turn; 0: none): that one won't be
+ *  answered now, so it no longer holds DAWN's own questions back.  Call with no
+ *  tool lock held. */
+void coding_agent_preview_replaced(uint32_t replaced_turn);
 
 /** Whether the turn @p o returned the agent's words (coding_agent_mark_read), or
  *  was told a report with a take on them. */
@@ -203,6 +217,20 @@ void coding_requests_drop_unasked(uint32_t id);
  *  confirm and no turn check, on purpose: an answer only goes back to the
  *  sandboxed agent and allows it nothing. */
 char *coding_requests_answer(struct json_object *details, int user_id);
+
+/* ---- coding_agent_github.c ---- */
+
+/** pr_status: a pull request's state, its blockers in plain words first.
+ *  {ref, repo?} or {job}.  Result: caller frees. */
+char *coding_github_pr_status(struct json_object *details, int user_id);
+
+/** pr_threads: its unresolved review threads (with all: every one), by
+ *  comment_id.  {ref, repo?, all?} or {job}.  Result: caller frees. */
+char *coding_github_pr_threads(struct json_object *details, int user_id);
+
+/** pr_log: an excerpt of one check's log.  {ref, repo?, check} or {job, check}.
+ *  Result: caller frees. */
+char *coding_github_pr_log(struct json_object *details, int user_id);
 
 #ifdef __cplusplus
 }

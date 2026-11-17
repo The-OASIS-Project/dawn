@@ -1783,6 +1783,50 @@ static void test_an_unanswered_envelope_is_retracted(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_DUPLICATE, conv_db_retract_envelope(conv, alice_id, env2));
 }
 
+/* A tool change saved with @p question. */
+static int64_t add_change_of(int64_t conv, int64_t question) {
+   const conv_message_row_t row = { .role = "system",
+                                    .content = "{\"rendered\":\"inline\",\"tools\":[]}",
+                                    .kind = "tool_change",
+                                    .context_of = question };
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, alice_id, &row, &id));
+   return id;
+}
+
+/* A failed turn's tool change no model answered goes; its question stays, and
+ * so does a change a model answered.  Only the conversation's owner's. */
+static void test_a_failed_turn_retracts_its_unanswered_tool_change(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   const int64_t q1 = add_row(conv, "user", "Q1", NULL);
+   const int64_t answered = add_change_of(conv, q1);
+   add_row(conv, "assistant", "A1", NULL);
+   const int64_t q2 = add_row(conv, "user", "Q2", NULL);
+   add_change_of(conv, q2);
+   const int64_t count = message_count(conv);
+   conv_turn_save_t save = { .retract_changes_of = q1 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_save_turn(conv, alice_id, &save, NULL));
+   save.retract_changes_of = q2;
+   TEST_ASSERT_NOT_EQUAL(AUTH_DB_SUCCESS, conv_db_save_turn(conv, bob_id, &save, NULL));
+   sqlite3 *db = raw_open(TEST_DB);
+   char sql[160];
+   snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = %lld AND kind = 'tool_change'",
+            (long long)conv);
+   TEST_ASSERT_EQUAL_INT64(2, raw_int(db, sql));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_save_turn(conv, alice_id, &save, NULL));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, sql));
+   snprintf(sql, sizeof(sql),
+            "SELECT id FROM messages WHERE conversation_id = %lld AND kind = 'tool_change'",
+            (long long)conv);
+   TEST_ASSERT_EQUAL_INT64(answered, raw_int(db, sql));
+   snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM messages WHERE id = %lld", (long long)q2);
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, sql));
+   sqlite3_close(db);
+   TEST_ASSERT_EQUAL_INT64(count, message_count(conv));
+}
+
 /* ---- citation handles ---- */
 
 typedef struct {
@@ -1912,6 +1956,7 @@ int main(void) {
    RUN_TEST(test_kind_triggers_agree_with_message_kind_h);
    RUN_TEST(test_images_only_on_tool_rows_as_a_json_array);
    RUN_TEST(test_an_unanswered_envelope_is_retracted);
+   RUN_TEST(test_a_failed_turn_retracts_its_unanswered_tool_change);
    RUN_TEST(test_handles_are_stable_per_conversation);
    RUN_TEST(test_handles_check_the_owner_and_input);
    RUN_TEST(test_deleting_a_conversation_drops_its_handles);

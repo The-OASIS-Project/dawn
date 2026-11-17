@@ -186,6 +186,12 @@ void session_turn_set_conversation(session_t *session, int64_t conv_id, bool may
    (void)may_load;
 }
 
+static bool s_unsent;
+bool session_turn_unsent(session_t *session) {
+   (void)session;
+   return s_unsent;
+}
+
 void session_turn_set_pending(session_t *session, const char *role, const char *persist_text) {
    (void)session;
    (void)role;
@@ -202,6 +208,7 @@ void setUp(void) {
    s_llm_calls = 0;
    s_persisted[0] = '\0';
    s_persisted_ref[0] = '\0';
+   s_unsent = false;
    s_session = calloc(1, sizeof(*s_session));
    TEST_ASSERT_NOT_NULL(s_session);
 }
@@ -225,6 +232,16 @@ static void test_empty_text_without_a_question_is_refused(void) {
    const text_input_dispatch_opts_t opts = { .conversation_id = 3, .auth_user_id = 1 };
    TEST_ASSERT_NULL(core_text_input_dispatch(s_session, "", &opts));
    TEST_ASSERT_NULL(core_text_input_dispatch(s_session, "", NULL));
+   TEST_ASSERT_EQUAL_INT(0, s_added_objects + s_added_text + s_llm_calls);
+   TEST_ASSERT_EQUAL_STRING("", s_persisted);
+}
+
+/* A turn that stopped waiting for its conversation runs nothing and saves
+ * nothing. */
+static void test_an_unsent_turn_is_refused(void) {
+   s_unsent = true;
+   const text_input_dispatch_opts_t opts = { .conversation_id = 3, .auth_user_id = 1 };
+   TEST_ASSERT_NULL(core_text_input_dispatch(s_session, "hello", &opts));
    TEST_ASSERT_EQUAL_INT(0, s_added_objects + s_added_text + s_llm_calls);
    TEST_ASSERT_EQUAL_STRING("", s_persisted);
 }
@@ -298,6 +315,7 @@ int main(void) {
    RUN_TEST(test_empty_text_without_a_question_is_refused);
    RUN_TEST(test_image_only_turn_runs);
    RUN_TEST(test_null_text_is_refused);
+   RUN_TEST(test_an_unsent_turn_is_refused);
    RUN_TEST(test_from_visual_marks_the_turn);
    RUN_TEST(test_a_failed_attach_refuses_the_turn);
    return UNITY_END();

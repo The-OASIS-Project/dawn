@@ -169,8 +169,8 @@
 /* Background-jobs "running" indicator — styled to MATCH the composer "working"
  * pill (#composer-busy): same rounded, mono, shadowed pill so it reads as a
  * sibling status indicator.  The per-conversation instance floats above the
- * composer beside the working pill; the global instance sits inline in the
- * header.  Pulses gently while jobs run.  Display-only. */
+ * composer beside the working pill; the global instance is a badge over the
+ * header's jobs button.  Pulses gently while jobs run.  Display-only. */
 /* Background-jobs count badge — the OASIS arc reactor: the same circle +
  * inscribed inverted triangle as the web icon (favicon.svg), in amber, with the
  * running-job count in the core.  The SVG is DOM-built by jobs-activity.js;

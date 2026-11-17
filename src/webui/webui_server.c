@@ -94,6 +94,7 @@
 #include "auth/auth_db.h"
 #include "core/buf_printf.h"
 #include "memory/memory_context.h"
+#include "memory/memory_history_loader.h"
 #include "webui/webui_doc_library.h"
 #ifdef DAWN_ENABLE_CALENDAR_TOOL
 #include "webui/webui_calendar.h"
@@ -548,7 +549,18 @@ int generate_session_token(char token_out[WEBUI_SESSION_TOKEN_LEN]) {
 /* Queue a JSON response for delivery via the response queue.
  * Safe to call from any context — the JSON is serialized and copied. */
 void send_json_response(ws_connection_t *conn, json_object *response) {
+   /* Sent while handling a request of this connection's that carried `req`: echo
+    * it.  Taken off again after, since some callers send one cached object to
+    * many requests (safe unlocked only because such a request is handled on the
+    * service thread alone). */
+   struct json_object *payload = NULL;
+   json_object_object_get_ex(response, "payload", &payload);
+   bool stamped = webui_protocol_request_stamp(conn->wsi, payload, false);
    const char *json_str = json_object_to_json_string(response);
+   char *copy = json_str ? strdup(json_str) : NULL;
+   if (stamped) {
+      json_object_object_del(payload, "req");
+   }
    if (!json_str) {
       OLOG_ERROR("WebUI: Failed to serialize JSON response");
       return;
@@ -557,7 +569,7 @@ void send_json_response(ws_connection_t *conn, json_object *response) {
    ws_response_t resp = { 0 };
    resp.session = conn->session;
    resp.type = WS_RESP_JSON;
-   resp.generic_json.json = strdup(json_str);
+   resp.generic_json.json = copy;
    if (!resp.generic_json.json) {
       OLOG_ERROR("WebUI: Failed to allocate JSON response string");
       return;
@@ -733,6 +745,29 @@ bool handle_smart_home_message(ws_connection_t *conn,
 
 /* Forward declaration — defined after handle_text_message */
 static bool webui_conn_create_session(ws_connection_t *conn);
+
+/* Note a whole JSON text frame as the request being handled (see
+ * webui_protocol_request_begin); a binary frame, a fragment or anything that
+ * doesn't parse notes nothing.  The caller ends it. */
+static void request_note_frame(ws_connection_t *conn, struct lws *wsi, const char *in, size_t len) {
+   if (lws_frame_is_binary(wsi) || !lws_is_final_fragment(wsi) || conn->text_buffer_len != 0 ||
+       len > INT_MAX) {
+      return;
+   }
+   struct json_tokener *tok = json_tokener_new();
+   struct json_object *root = tok ? json_tokener_parse_ex(tok, in, (int)len) : NULL;
+   struct json_object *type_obj = NULL, *payload = NULL;
+   if (root && json_object_object_get_ex(root, "type", &type_obj) &&
+       json_object_is_type(type_obj, json_type_string) &&
+       strlen(json_object_get_string(type_obj)) == (size_t)json_object_get_string_len(type_obj)) {
+      json_object_object_get_ex(root, "payload", &payload);
+      webui_protocol_request_begin(wsi, json_object_get_string(type_obj), payload);
+   }
+   json_object_put(root);
+   if (tok) {
+      json_tokener_free(tok);
+   }
+}
 
 /* Connections still in the registry: every socket is registered when it's
  * established and unregistered when it closes, whether or not it was counted
@@ -986,7 +1021,11 @@ static int callback_websocket(struct lws *wsi,
             }
             if (conn->authenticated) {
                OLOG_INFO("WebUI: Session expired for authenticated connection, auto-creating");
-               if (!webui_conn_create_session(conn)) {
+               /* A refusal here drops the message: name it, as dispatch would. */
+               request_note_frame(conn, wsi, (const char *)in, len);
+               bool created = webui_conn_create_session(conn);
+               webui_protocol_request_end();
+               if (!created) {
                   break; /* Error already sent to client */
                }
                /* Fall through to normal message handling below */
@@ -2093,8 +2132,10 @@ int webui_server_init(int port, const char *www_path) {
    }
 
    /* A turn that finds another conversation loaded reloads its own through the
-    * canonical restore (see session_turn_begin). */
+    * canonical restore (see session_turn_begin); one on the conversation it
+    * holds appends what was written there since (session_catch_up). */
    session_set_history_loader(webui_turn_history_loader);
+   session_set_history_tail_loader(memory_history_request_tail);
 
    OLOG_INFO("WebUI: Server started successfully on port %d", port);
 
@@ -2123,6 +2164,7 @@ void webui_server_shutdown(void) {
    pthread_mutex_unlock(&s_mutex);
 
    session_set_history_loader(NULL);
+   session_set_history_tail_loader(NULL);
 
    /* Tear down silent-observe listener so post-shutdown calls don't dispatch
     * into freed/closing connection state.  Pairs with the registration in

@@ -482,6 +482,10 @@ void coding_watch_apply(struct json_object *event) {
          break;
       }
    }
+   if (strcmp(kind, "started") == 0 && strcmp(rec.job_status, "queued") == 0 &&
+       conv_db_job_set_running(job, time(NULL)) == AUTH_DB_SUCCESS) {
+      job_update_emit(job, user_id); /* its turn came at the gateway */
+   }
    char asks[CODING_GATEWAY_REQUEST_LINE_MAX] = "";
    char repo[CODING_AGENT_REPO_MAX] = "";
    struct json_object *first = NULL;
@@ -587,9 +591,10 @@ static int reconcile_job(const job_record_t *rec) {
       /* Its end event is gone; the task record holds the same facts. */
       end_job(rec->id, rec->user_id, coding_gateway_jstr(task, "status"), task,
               0); /* the task's state now, not a replay */
-   } else if (queued) {
+   } else if (queued && strcmp(coding_gateway_jstr(task, "status"), "queued") != 0) {
       /* It started, but DAWN stopped before recording it: the start path that
-       * would have is gone, so the watcher does. */
+       * would have is gone, so the watcher does.  (Still queued at the gateway:
+       * its "started" event will.) */
       conv_db_job_set_running(rec->id, time(NULL));
       job_update_emit(rec->id, rec->user_id);
    }

@@ -259,6 +259,17 @@ window.DawnJobsActivity = (function () {
          plural(n) + (need > 0 ? ', ' + need + ' need' + (need === 1 ? 's' : '') + ' you' : '')
       );
       if (pill) pill.classList.toggle('needs-you', need > 0);
+      /* It sits inside the jobs button: the button carries what it says (the
+       * badge keeps no tooltip of its own, which would hide the button's). */
+      var btn = document.getElementById('jobs-btn');
+      if (btn && pill) {
+         var label = n > 0 ? 'Background jobs: ' + pill.title : 'Open background jobs';
+         pill.removeAttribute('title');
+         pill.removeAttribute('aria-label');
+         btn.classList.toggle('has-jobs', n > 0);
+         btn.setAttribute('aria-label', label);
+         btn.title = n > 0 ? label : 'Background Jobs';
+      }
    }
 
    function renderAll() {
@@ -315,6 +326,16 @@ window.DawnJobsActivity = (function () {
       // it can move it into History in place (no reset/refetch).
       if (trackedWentTerminal && typeof DawnJobs !== 'undefined' && DawnJobs.onJobTerminal) {
          DawnJobs.onJobTerminal(job);
+      }
+      // The other way across: a resume from chat or another tab takes a finished
+      // job back into the active set, so its History row goes.
+      if (
+         job.resumed &&
+         isActive(job.status) &&
+         typeof DawnJobs !== 'undefined' &&
+         DawnJobs.onJobResumed
+      ) {
+         DawnJobs.onJobResumed(job);
       }
       // Patch just the affected conversation's sidebar badge (no list re-render).
       // A job's parent never changes, so the row carries the right parent whether
@@ -378,6 +399,9 @@ window.DawnJobsActivity = (function () {
       }
       if (typeof DawnCodingGrants !== 'undefined') {
          DawnCodingGrants.reconnected();
+      }
+      if (typeof DawnCodingViewer !== 'undefined') {
+         DawnCodingViewer.reconnected();
       }
       if (typeof DawnWS !== 'undefined') {
          // A snapshot request opens a fresh reconciliation window, so drop the

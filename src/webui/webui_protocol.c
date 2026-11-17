@@ -66,6 +66,15 @@ static const char *const s_features[] = {
     * connecting socket closed with 1013; a shutdown closes sockets with 1012
     * first.  So UNAUTHORIZED, authenticated:false and 4002 mean it ended. */
    "login_unavailable",
+   /* A message may carry `req` in its payload: every error and every reply
+    * sent as a JSON response to that connection while the message is handled
+    * echoes it, and an error also names the message's type as request_type. */
+   "request_refs",
+   /* One turn per conversation: a turn sent while another runs on its
+    * conversation waits (turn_waiting, then the reply; or turn_unsent if
+    * stopped first, nothing saved), and stop_other_reply stops the turn it
+    * waits for. */
+   "turn_wait",
 };
 
 /* The email panel's check (webui_email_panel.c); a build without the panel has
@@ -230,27 +239,36 @@ bool webui_protocol_payload_req(struct json_object *payload,
    return true;
 }
 
-char *webui_protocol_unknown_type_json(const char *type, const char *req) {
-   struct json_object *obj = json_object_new_object();
-   struct json_object *payload = json_object_new_object();
-   if (!obj || !payload) {
-      json_object_put(obj);
-      json_object_put(payload);
-      return NULL;
-   }
-   json_object_object_add(payload, "code", json_object_new_string("UNKNOWN_TYPE"));
-   json_object_object_add(payload, "message",
-                          json_object_new_string("This server doesn't handle that message type"));
-   json_object_object_add(payload, "severity", json_object_new_string("error"));
-   json_object_object_add(payload, "recoverable", json_object_new_boolean(1));
-   if (webui_protocol_echo_ok(type))
-      json_object_object_add(payload, "request_type", json_object_new_string(type));
-   if (webui_protocol_echo_ok(req))
-      json_object_object_add(payload, "req", json_object_new_string(req));
-   json_object_object_add(obj, "type", json_object_new_string("error"));
-   json_object_object_add(obj, "payload", payload);
-   const char *json = json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PLAIN);
-   char *out = json ? strdup(json) : NULL;
-   json_object_put(obj);
-   return out;
+/* The request this thread is handling (see webui_protocol_request_begin). */
+static __thread const void *t_request_owner;
+static __thread char t_request_type[WEBUI_REQ_MAX + 1];
+static __thread char t_request_req[WEBUI_REQ_MAX + 1];
+static __thread bool t_request_has_type; /* an empty one is echoed too */
+static __thread bool t_request_has_req;
+
+void webui_protocol_request_begin(const void *owner,
+                                  const char *type,
+                                  struct json_object *payload) {
+   t_request_owner = owner;
+   t_request_has_type = webui_protocol_echo_ok(type);
+   snprintf(t_request_type, sizeof(t_request_type), "%s", t_request_has_type ? type : "");
+   t_request_has_req = webui_protocol_payload_req(payload, WEBUI_REQ_MAX, t_request_req,
+                                                  sizeof(t_request_req));
+}
+
+void webui_protocol_request_end(void) {
+   t_request_owner = NULL;
+   t_request_has_type = false;
+   t_request_has_req = false;
+}
+
+bool webui_protocol_request_stamp(const void *owner, struct json_object *payload, bool with_type) {
+   if (!owner || owner != t_request_owner || !json_object_is_type(payload, json_type_object))
+      return false;
+   if (with_type && t_request_has_type && !json_object_object_get_ex(payload, "request_type", NULL))
+      json_object_object_add(payload, "request_type", json_object_new_string(t_request_type));
+   if (!t_request_has_req || json_object_object_get_ex(payload, "req", NULL))
+      return false;
+   json_object_object_add(payload, "req", json_object_new_string(t_request_req));
+   return true;
 }

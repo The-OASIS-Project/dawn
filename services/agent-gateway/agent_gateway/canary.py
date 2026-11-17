@@ -176,7 +176,8 @@ async def run_canary(cfg, claude_bin: str) -> dict:
                               "max_concurrent_tasks": 1})
       store = st.Store(os.path.join(tmp, "canary.db"))
       repos = Repos(ccfg.repos, mirrors, ccfg.work_dir, ccfg.run_as, ccfg.agent_home,
-                    ccfg.agent_gitconfig, (ccfg.git_name, ccfg.git_email))
+                    ccfg.agent_gitconfig, (ccfg.git_name, ccfg.git_email),
+                    [ccfg.state_dir, *ccfg.deny_read])
       runner = Runner(ccfg, store, repos)
       t = await runner.start(0, "canary", prompt(cfg.port, state_probe), None, None)
       tid, asked = t["id"], False

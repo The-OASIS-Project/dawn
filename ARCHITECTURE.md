@@ -143,7 +143,7 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 | **Phone & SMS** (`src/tools/phone_*.c`) | Cellular calls and SMS via the external **ECHO** modem daemon (SIM7600G-H) over MQTT. `phone_tool.c` is the LLM interface; `phone_service.c` runs the call state machine (RINGING/ANSWERING/ACTIVE, atomic first-wins answer claim) + TTS announcements + HUD/WebUI banner; `phone_db.c` logs calls/SMS. Incoming-call context is posted to every interactive session via `session_broadcast_notice()` (rendered into each turn's volatile prompt block for 10 minutes, never written into a conversation history); a WebUI incoming-call banner + persistent in-call panel let any surface answer/reject/hang up. Two-way call **audio** bridge (Phase 5) is not yet shipped. | [PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md) |
 | **OAuth 2.0 & Crypto** | Shared OAuth client with PKCE S256 and `crypto_store.c` (libsodium `crypto_secretbox`) for encrypted token and password storage. Used by email and calendar. | [oauth-crypto.md](docs/arch/subsystems/oauth-crypto.md) |
 | **Robot body (Reachy Mini)** (`src/core/dawn_events.c`, `src/core/component_status.c`, `services/reachy-bridge/`) | Gives the local voice surface a body. DAWN publishes what the voice loop is doing on MQTT `dawn/events` (state, wake word, speaking start/end, and the expression the model chose with an inline `[emote:name]` tag, stripped before speech and storage). It never drives the robot: a separate Python bridge does, through Pollen's SDK. While the bridge reports `reachy/status` online, the local session's standing directions add the expression directive, and the session is told in a notice when the body goes or comes back. | [OASIS_COMMUNICATIONS_PROTOCOL.md](docs/OASIS_COMMUNICATIONS_PROTOCOL.md), [services/reachy-bridge/README.md](services/reachy-bridge/README.md) |
-| **Coding agents** (`services/agent-gateway/`) | Lets DAWN hand coding work to Claude Code without running it. A separate Python gateway (user `dawn`, MCP on 127.0.0.1 with a bearer token) runs each task as the less privileged `dawn-agent` user in Claude Code's bubblewrap sandbox, in its own clone of a gateway-owned mirror. The gateway never runs git in the agent's clone outside a jail; work comes back as a bundle, and publishing (push of `agent/*`, PR) happens from the mirror on the user's confirmation. Questions, hosts and tools the agent needs are requests the operator answers (per task, per repo or always); whether to ask is decided in code. Events are read by long-poll from any sequence number. In DAWN, the `coding_agent` tool starts and checks tasks (each a job of kind `coding`) and answers what they wait on (allowing a host or tool needs the user's yes to a preview DAWN renders), one watcher thread (`coding_agent_watch.c`) carries the gateway's events onto those jobs, and a job's end is reported back into the conversation it came from (`coding_agent_report.c`, with deep research's helpers in `core/job_report.c`); the tool and the watcher reach the gateway through `coding_agent_gateway.c`. Finished work is published (push of its branch and a pull request, on a preview DAWN renders and the user's yes) or closed (its clone and branch dropped; asked first when unpublished commits or uncommitted edits would be lost); the gateway closes a task itself once its pull request merges with everything published. In the WebUI, a coding job's view shows its steps and report, and a card on its jobs-panel row and in its view answers what it waits on with a click (`webui_coding.c`, `www/js/ui/coding-events.js`), checked by the server against the live request; the jobs panel lists the standing approvals with Revoke (`coding-grants.js`), and a changes viewer shows a job's files and diffs from the gateway's mirror, never through the model (`coding-viewer.js`). | [services/agent-gateway/README.md](services/agent-gateway/README.md) |
+| **Coding agents** (`services/agent-gateway/`) | Lets DAWN hand coding work to Claude Code without running it. A separate Python gateway (user `dawn`, MCP on 127.0.0.1 with a bearer token) runs each task as the less privileged `dawn-agent` user in Claude Code's bubblewrap sandbox, in its own clone of a gateway-owned mirror. The gateway never runs git in the agent's clone outside a jail; work comes back as a bundle, and publishing (push of `agent/*`, PR) happens from the mirror on the user's confirmation. Questions, hosts and tools the agent needs are requests the operator answers (per task, per repo or always); whether to ask is decided in code. Events are read by long-poll from any sequence number. In DAWN, the `coding_agent` tool starts and checks tasks (each a job of kind `coding`) and answers what they wait on (allowing a host or tool needs the user's yes to a preview DAWN renders), one watcher thread (`coding_agent_watch.c`) carries the gateway's events onto those jobs, and a job's end is reported back into the conversation it came from (`coding_agent_report.c`, with deep research's helpers in `core/job_report.c`); the tool and the watcher reach the gateway through `coding_agent_gateway.c`. A pull request on any repo the gateway's token reaches can be read too (its state and checks, its review threads, a failing check's log; `coding_agent_github.c`, framed as web content). Finished work is published (push of its branch and a pull request, on a preview DAWN renders and the user's yes) or closed (its clone and branch dropped; asked first when unpublished commits or uncommitted edits would be lost); the gateway closes a task itself once its pull request merges with everything published. In the WebUI, a coding job's view shows its steps and report, and a card on its jobs-panel row and in its view answers what it waits on with a click (`webui_coding.c`, `www/js/ui/coding-events.js`), checked by the server against the live request; the jobs panel lists the standing approvals with Revoke (`coding-grants.js`), and a changes viewer shows a job's files and diffs from the gateway's mirror, never through the model (`coding-viewer.js`); its Publish and Close buttons, where the click is the confirm on what DAWN shows, live in `coding-viewer-actions.js`, with the handlers in `webui_coding.c`. | [services/agent-gateway/README.md](services/agent-gateway/README.md) |
 | **Scheduler** | Timers, alarms, reminders, and scheduled tool execution. Background thread polls every second, fires with chime audio + WebUI banner notifications, supports recurrence and snooze/dismiss. | [scheduler.md](docs/arch/subsystems/scheduler.md) |
 | **Home Assistant** | REST API client with entity cache, fuzzy name matching, and satellite area-awareness (a satellite's Home Assistant area sent with its standing directions). 16 tool actions spanning lights, climate, locks, covers, media, scenes, scripts, automations. | [homeassistant.md](docs/arch/subsystems/homeassistant.md) |
 | **Per-User Settings** | Persona, location, timezone, units, theme — stored in `user_settings` and injected into the LLM system prompt at session start so every session is personalized to the authenticated user. | [user-settings.md](docs/arch/subsystems/user-settings.md) |
@@ -180,6 +180,9 @@ Layer 1 (Core infrastructure) — deps: Layer 0
 ├── include/core/turn_origin.h  Where a pending action was made; a confirm carries it out only in the same
 │                               session, in a later turn (the next one, or one of the next few where a
 │                               table allows it), and never in a turn carrying an email the user attached
+├── src/core/conv_turn_lease.c  One turn per conversation at a time: a turn takes its conversation's lease, waiting
+│                               FIFO behind the holder; a post from outside a turn never waits (written now, or
+│                               queued and written by the holder's release before the next turn starts)
 ├── src/core/pending_slots.c    What a tool staged for the user's confirm: one item per session and kind, each
 │                               with a new id its confirm must name; never evicts another session's item
 ├── src/core/tool_call_challenge.c  An action asked for by text, waiting for its reply code: one per channel,
@@ -194,6 +197,8 @@ Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 │                               llm_third_party.c frames an email's or a page's text as someone else's
 ├── src/core/ services          Session unit (below), focus framework (src/core/focus/), prompt prefix
 │                               (prefix_*), embeddings, crypto store, scheduler, tool-result store, OTA, images
+├── src/core/conv_post.c        Every row written into a conversation from outside a turn (a job's report, a channel
+│                               message DAWN sent) goes through conv_post_unprompted(), through the lease
 ├── src/core/tool_call_policy.c Who may make a tool call: the caller's kind of turn (user, unverified sender,
 │                               background job, unattended, a user turn carrying an attached email) against the
 │                               action's kind; decided once per call
@@ -242,6 +247,8 @@ Layer 4 (Application) — deps: everything below
 
 **The session unit.** `session_manager.c` (the dispatch), `session_history.c` (history lifecycle),
 `session_prefix.c` (the append-only request: frozen prefix, appended changes and turn context, live withdrawal),
+`session_catchup.c` (a turn's history brought up to date with its conversation),
+`session_turn_lease.c` (a turn's wait for its conversation's lease, and what others may ask of the turn holding it),
 `session_compaction.c`, `session_focus.c`, `session_posts.c`, `prompt_builder.c` and `session_image_hold.c`
 call into each other: read them as one Layer-2 unit, not as separate modules with a direction between them.
 
@@ -263,7 +270,10 @@ call into each other: read them as one Layer-2 unit, not as separate modules wit
 | `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |
 | `src/memory/memory_consolidate.c`, `memory_consolidation_undo.c` (a batch recorded, undone or kept) | `webui_broadcasts.c` (`memory_batch` to every tab of the user) | weak `memory_consolidation_batch_notify` |
 | `src/core/job_manager.c` (cancel a job whose work runs outside DAWN) | `coding_agent_tool.c` (asks the agent gateway to stop a coding job's task) | `job_manager_register_kind_cancel` |
-| `src/core/job_report.c` (a job's report posted into a conversation) | the WebUI, which tells the tabs viewing it to refetch | `webui_broadcast_conversation_messages_appended` (strong in `webui_broadcasts.c`, a no-op in `webui_absent.c`) |
+| `src/core/conv_post.c` (a post into a conversation) | the WebUI, which tells the tabs viewing it to refetch | `webui_broadcast_conversation_messages_appended` (strong in `webui_broadcasts.c`, a no-op in `webui_absent.c`) |
+| `src/core/conv_turn_lease.c` (a queued post written at the holder's release) | `conv_post.c`'s writer | `conv_turn_lease_set_writer`, at startup |
+| `src/core/session_turn_lease.c` (a turn waits for its conversation, gets it, or stops waiting) | the waiting session's client (`webui_turn_wait.c`) | weak `session_turn_waiting_notice` |
+| `src/core/session_catchup.c` (a turn brings its session's history up to date with its conversation) | the history loader and the tail loader (`memory_history_request_tail`), registered by the WebUI server | `session_set_history_loader`, `session_set_history_tail_loader`, at startup |
 
 \* **Orchestration-unit note.** `job_worker.c` and `research_worker.c` physically live in
 `src/core/` but are **application-orchestration units**: each is a detached top-of-stack sequencer
@@ -351,7 +361,9 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │  WebUI audio     — per-connection ASR/TTS pipeline     │
 │  Messaging recv  — per-provider listener (Telegram/    │
 │                    Slack/Discord WS or poll)           │
-│  Messaging work  — inbound dispatch + async outbound   │
+│  Messaging work  — inbound dispatch + async outbound;  │
+│                    one worker for every channel, never │
+│                    waits for a held conversation       │
 │  Job worker      — detached per background job (ASR-   │
 │                    less LLM tool loop on a pool session)│
 │  Reinvoke worker — detached per re-engagement (runs a  │
@@ -420,11 +432,14 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │  Coding card     — transient, one per WebUI card ask   │
 │                    (coding_pending) or click           │
 │                    (coding_reply, one per job at a     │
-│                    time), grants list, or changes      │
-│                    viewer request (coding_view, one    │
-│                    per user, newest wins): asks the    │
-│                    gateway, answers the user's tabs    │
-│                    (a view: the asking tab only);      │
+│                    time), grants list, changes viewer  │
+│                    request (coding_view, one per user, │
+│                    newest wins), or the viewer's       │
+│                    publish preview, Publish or Close   │
+│                    (one per job at a time, with the    │
+│                    card's replies): asks the gateway,  │
+│                    answers the user's tabs (a view or  │
+│                    a button: the asking tab only);     │
 │                    waited for by the tool's stop       │
 │  Email fan-out   — transient, one per enabled account  │
 │                    (≤16) for an all-accounts email     │
@@ -443,6 +458,27 @@ backlog at once), then the scheduler, whose first pass fires the events missed w
 thread waits a fixed time for another to be ready. Shutdown mirrors it: once the WebUI has stopped taking
 requests and the LLM thread is joined, the tools' `stop` runs (last registered first), before
 background jobs, the database and MQTT go; the tools' `cleanup` comes last.
+
+**One turn per conversation.** The turn queue serializes turns per session; the conversation lease
+(`conv_turn_lease.c`) serializes them per conversation, so two sessions on one conversation (a tab and
+another client app, a tab and a job or a channel) never run turns on it at once. A turn on a held
+conversation waits on its own thread (a text, voice or job worker), telling its
+client (`turn_waiting`), and counts as in flight while it waits (the idle sweep never reaps its session);
+a Stop or a teardown wakes the wait at once and ends it before anything of the turn is saved, and a
+turn whose client is gone stops waiting after `[jobs] max_runtime_sec`. The messaging worker, one thread
+for every channel, never waits: it takes a channel's conversation with a try (`conv_turn_lease_try_acquire`)
+and, while it is held, keeps the message on its own list (`messaging_engine_parked.c`, at most 16 per
+channel and 64 in all), looks again every 250 ms and runs a channel's messages in arrival order. Posts from outside a turn
+(`conv_post.c`: a job's report, a channel message DAWN sent) never wait: the holder's release writes
+them before the next turn starts. Each turn releases its lease at its end; the session's free releases
+any lease still naming it, with an ERROR, unless that lease's holder is releasing it right then (its
+release hands it on). Holding the lease, a turn brings its session's history up to
+date with the conversation (`session_catchup.c`): each session records the conversation's stored state
+its history was built at (newest row, watermark, reasoning floor, frozen prompt, tool set, in-force
+record; one indexed read), set where it is loaded and where a turn holding it ends; at the next turn's
+start, rows only added since are appended as a reload renders them, and any other change builds the
+history again as a restore does. A catch-up that fails leaves the history's state unknown at the turn's
+end, so the next turn builds it again.
 
 **Turn serialization (background-jobs era).** All WebUI LLM turns — user text, push-to-talk
 voice, and background-job re-engagements — funnel through the per-session **turn queue**
@@ -522,6 +558,17 @@ During PROCESSING the LLM call runs on a worker thread. The main thread continue
 **CRITICAL**: to prevent deadlocks, the codebase follows a strict acquisition order when multiple locks are needed. Mutexes fall into three categories by scope:
 
 ```
+Conversation turn lease (src/core/conv_turn_lease.c) — OUTERMOST for a turn:
+  a turn takes its conversation's lease (session_turn_begin, or its bind to one) with NO lock held
+  (no history_mutex, session registry, auth_db, turn-queue or job-pool lock), on its own thread, and
+  waits for at most one conversation.  The WebSocket thread and the messaging worker never wait on
+  it: the first only claims a conversation it just created and posts, the second only tries
+  (conv_turn_lease_try_acquire) and keeps a message for a held conversation on its own list.  The lease's own s_mutex is a LEAF:
+  held only to update the table, never across the post writer, a stop check or a log line; any lock
+  may be held while taking it (session_cancel_turn and session_teardown_flags wake a waiting turn
+  through it, under the job pool lock, the session registry or history_mutex).  A post
+  (conv_post.c) never waits, so two turns can't deadlock posting into each other's conversations
+
 Global daemon locks (src/dawn.c):
   llm_mutex              — LLM worker thread ↔ main thread buffer transfer
   tts_mutex              — TTS engine (Piper) serialization

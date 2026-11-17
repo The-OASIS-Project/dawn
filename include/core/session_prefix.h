@@ -134,6 +134,22 @@ struct session_prefix_turn *session_prefix_take_back_locked(struct session *sess
 void session_prefix_save_taken(struct session *session, struct session_prefix_turn *turn);
 
 /**
+ * @brief A running turn that failed (no reply, not stopped) takes back the
+ *        tool changes it appended that no model answered, live and stored
+ *
+ * Left after its question, such a change would sit in front of the next
+ * turn's question, no longer in place, and fold into the request's tools
+ * (dropping the conversation's replayed reasoning).  Taken back, the next
+ * seam finds it again and appends it after that question.  Its question
+ * stays; a change a model answered (a tool exchange followed it) stays too.
+ * The change budgets get back what it counted.  For the turn's own code,
+ * before it ends; takes the history lock.
+ *
+ * @return How many changes were taken back
+ */
+int session_prefix_take_back_changes(struct session *session);
+
+/**
  * @brief Before a voice session saves its whole history: a withdrawal kept
  *        for its next turn applies now, so what the user forgot isn't saved
  *

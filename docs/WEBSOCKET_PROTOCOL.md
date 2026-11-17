@@ -105,6 +105,8 @@ When to add what:
 | `image_turns_by_id` | 2026-10-01 | A `text` turn takes images only through `image_ids`; `images[]` is ignored. A malformed, missing or foreign id, or too many, refuses the whole turn with `IMAGE_UNAVAILABLE` / `IMAGE_LIMIT` / `IMAGE_ERROR` and saves nothing (see `text`). Without it, send `images[]` with `image_ids` as before: older daemons send the model only `images[]`. |
 | `app_logins` | 2026-09-30 | One login per app: `"app"` on login, `?app=` on every other request, a cookie per app (see Connection Lifecycle). Without it, all front-ends in a browser share one login. |
 | `login_unavailable` | 2026-10-30 | A login the daemon couldn't check is never reported as ended: `SERVICE_UNAVAILABLE` on the socket (still logged in), `503` over HTTP, `1013` for a socket connecting then, and `1012` for every socket when a shutdown begins (see Transport, When the login can't be checked). So `UNAUTHORIZED`, `"authenticated":false` and `4002` mean the login ended. Without it, a daemon restart can look like a revoke: re-check `/api/auth/status` before signing out. |
+| `request_refs` | 2026-11-16 | Any message may carry `req` in its payload (an opaque id: at most 64 bytes of valid UTF-8, no control characters; anything else is ignored). While the daemon handles the message, every `error` it sends to that connection carries the same `req` and `request_type` (the message's `type`, with or without a `req`), and every `*_response` it sends there carries `req`. So a refusal such as `UNAUTHORIZED`, `SERVICE_UNAVAILABLE` or `FORBIDDEN` names the request it refused, whatever order frames arrive in. Not covered: frames that aren't a `*_response` (`session` and the rest of the `init` / `reconnect` batch, `state`, `pong`, `music_state`), `restart_response`, a `text` turn's errors (queued, and matched by `client_ref`: flag `turn_refs`), and a reply sent later from another thread, which carries `req` only where its verb says so (the email verbs). Without the flag, match replies by type and order. |
+| `turn_wait` | 2026-11-16 | One turn runs on a conversation at a time. A turn sent while another (another tab, another app, a background job, a messaging channel) runs on the same conversation waits for it: the sender gets `turn_waiting` (`waiting: true`) and then `turn_waiting` (`waiting: false`) when its turn starts, or `turn_unsent` if it was stopped first (nothing of it was saved). `stop_other_reply` stops the turn it waits for. Without the flag a client still gets a `state` `thinking` with a `detail` (`Finishing the reply already in progress…`) while it waits, then the normal stream; ignore the unknown frames. |
 | `logout_closes_sockets` | 2026-09-30 | `POST /api/auth/logout` with the socket open is safe: the login's connections get `force_logout` and close with `4002`, the server closes the music socket, and the reply comes at once with the cookie cleared (see Connection Lifecycle, Logging out). Without it, close the socket before logging out. |
 
 A client says who it is in its `init` / `reconnect` payload:
@@ -218,6 +220,27 @@ Cancel the current LLM operation for this session.
 ```json
 {"type": "cancel"}
 ```
+A turn still waiting for another turn on its conversation (`turn_waiting`, flag `turn_wait`)
+stops waiting: it ends with `turn_unsent` and nothing of it is saved.
+
+#### `stop_other_reply`
+Stop the turn this session's turn waits for (flag `turn_wait`): the one holding the
+conversation, run by another session of the same user (another tab or app, a background job, a
+messaging channel).
+```json
+{"type": "stop_other_reply", "payload": {"conversation_id": 123}}
+```
+Answered with `stop_other_reply_response` once the stop is asked for, not when that turn ends:
+```json
+{"type": "stop_other_reply_response",
+ "payload": {"conversation_id": 123, "success": true}}
+```
+- `error` (with `success: false`): `NOT_RUNNING` (no turn of the user's holds the conversation,
+  including another user's, which answers the same, or the turn ended before the stop reached
+  it) or `FORBIDDEN` (the turn holding it is this session's own: use `cancel`).
+- A background job's own turn is cancelled as the job (recorded as cancelled); any other turn
+  is stopped as `cancel` stops it. A turn inside a tool call stops when the call returns; the
+  waiting turn then starts.
 
 #### `reconnect`
 Reconnect to an existing session using a stored token.
@@ -296,7 +319,7 @@ clamped server-side (default 25, max 50). Response: `list_jobs_response`.
 ```
 
 #### `job_action`
-Cancel or resume one background job. Ownership is checked against the connection's
+Cancel, resume or delete one background job. Ownership is checked against the connection's
 authenticated user **before** acting; a job belonging to someone else and a job
 that does not exist give the same answer, so this cannot be used to probe for
 other users' job ids. Always answered with `job_action_response`.
@@ -307,6 +330,11 @@ other users' job ids. Always answered with `job_action_response`.
 - `resume` — re-dispatches an `interrupted` or `failed` job, continuing its
   existing transcript. Counts as a spawn against the job caps. Refused for
   `done` (it has an answer), `cancelled` (stopped deliberately), and `running`.
+- `delete` — deletes a finished job's conversation, as `delete_conversation` does
+  (its child jobs and images go with it), then sends `jobs_invalidate`. Refused while
+  the job is queued or running, and for a coding job whose task the agent gateway may
+  still hold (its trail has gateway events and none saying the task was closed): close
+  it first. `delete_conversation` refuses the same two.
 
 #### `coding_pending`
 What coding jobs wait on (built with the coding agent only). Asks the agent gateway,
@@ -326,7 +354,44 @@ per user at a time; a newer one replaces one still waiting. Answered with
 `coding_view_response`, to the asking tab only; `nonce` (optional, up to 39
 characters) is echoed so the tab renders only its latest.
 ```json
-{ "type": "coding_view", "payload": { "job": 1987, "what": "file", "path": "src/a.c", "view": "diff", "nonce": "v3" } }
+{ "type": "coding_view", "payload": { "job": 42, "what": "file", "path": "src/a.c", "view": "diff", "nonce": "v3" } }
+```
+
+#### `coding_publish_preview`
+The changes viewer's **Publish…**: DAWN's own preview of what publishing the coding job
+would push and open, built with the same checks as the coding agent tool's publish. The
+user's own coding job only. Answered with `coding_publish_preview_response`, to the
+asking tab only; `nonce` (up to 39 characters) is echoed.
+```json
+{ "type": "coding_publish_preview", "payload": { "job": 42, "nonce": "a1" } }
+```
+
+#### `coding_publish`
+Publish a coding job from the preview the user saw: `head` (the preview's full commit
+hash) and `pr_body_sha256` (the preview's) bind the click to that preview; the gateway
+refuses when the branch moved or the description changed since. The user's own coding
+job, finished (`done`). The title is the agent's, else the job's name (set by the server).
+Optional `pr_title` and `pr_description` are the user's own text for a new pull request,
+sent instead of the agent's: the title as one line (up to 120 bytes), the description up
+to 5900 bytes with the preview's `pr_footer` appended by the gateway; with
+`pr_description`, `pr_body_sha256` may be left out. The user's own text is refused when
+the job already has an open pull request (its text is edited on GitHub); its new commits
+still go there. On success DAWN
+posts its line to the job's parent conversation and drops any publish staged in chat for
+that job. Answered with `coding_publish_response`, to the asking tab only.
+```json
+{ "type": "coding_publish", "payload": { "job": 42, "head": "4f1c…(40 hex)", "pr_body_sha256": "9a0b…", "nonce": "a2" } }
+```
+
+#### `coding_close`
+Close a coding job (its clone and branch go; it can't be revised afterwards). Without
+`confirm`: closes when nothing would be lost, and otherwise answers with
+`needs_confirm`. With `confirm: true` ("Close anyway"): closes with `head`, the head the
+`needs_confirm` answer showed (`""` when only uncommitted edits would be lost); refused
+when the work changed since. The `confirm` key, not an empty head, tells the two apart.
+Answered with `coding_close_response`, to the asking tab only.
+```json
+{ "type": "coding_close", "payload": { "job": 42, "nonce": "a3", "confirm": true, "head": "" } }
 ```
 
 #### `coding_grants`
@@ -1173,6 +1238,7 @@ messages: they never appear in `messages`, the history, or what the model is sen
 {
    "batch_id": 412,
    "conversation_id": 1703,
+   "conversation_title": "Trip planning",
    "from_message_id": 26230,
    "after_message_id": 26244,
    "created_at": 1793000000,
@@ -1190,6 +1256,10 @@ messages: they never appear in `messages`, the history, or what the model is sen
 - `conversation_id`: the conversation whose messages hold `after_message_id`: the one the batch
   read, never the root of a continuation chain (a continued conversation is its own and gets its
   own batches); `null` for a batch with none.
+- `conversation_title`: that conversation's title as it is when the frame is built (at most 255
+  bytes; may be `""`); `null` when `conversation_id` is `null` or the conversation is gone.  A
+  rename sends no `memory_batch`: update shown batches from `conversation_renamed`.  Absent on
+  daemons before 2026-11-17.
 - `from_message_id`: the first message the batch learned from.
 - `after_message_id`: place the marker after this.  It may name a row the client doesn't render
   as a bubble (a tool row, an intermediate assistant row of a tool loop, a request-context row);
@@ -2203,13 +2273,61 @@ through the assistant: "follow up on job 1977: ...").
 `base`, `task_id` (the job's branch is `refs/agent/<task_id>` in the gateway's
 mirror), `files` ({`path`, `added`, `removed`, `protected`}; `added`/`removed` null
 for a binary file; protected first, at most 2000) with `files_total`, and `commits`
-({`hash`, `subject`}, at most 100). For `file`: `path`, `view`, and `text` (a unified
+({`hash`, `subject`}, at most 100), plus `job_state`, DAWN's facts about the job (the
+viewer's Publish and Close buttons come only from these): `status`, `closed` (bool),
+`pr_url` (checked; absent when none), `unpublished_commits` (int, `-1` when unknown) and
+`published` (bool). For `file`: `path`, `view`, and `text` (a unified
 diff, or the file), or `too_large` (bytes), `binary` or `missing`. Paths, subjects
 and text are the agent's: show them as text, and show invisible and
 direction-changing characters (bidi controls, zero-width characters) visibly, since
 this is where the user checks the work before publishing it.
 ```json
-{ "type": "coding_view_response", "payload": { "job": 1987, "what": "file", "nonce": "v3", "ok": true, "result": { "path": "src/a.c", "view": "diff", "text": "@@ -1 +1 @@\n-a\n+b\n" } } }
+{ "type": "coding_view_response", "payload": { "job": 42, "what": "file", "nonce": "v3", "ok": true, "result": { "path": "src/a.c", "view": "diff", "text": "@@ -1 +1 @@\n-a\n+b\n" } } }
+```
+
+#### `coding_publish_preview_response`
+`ok` with `preview`, or `error`. `preview`: `head` (full hash), `repo`, `branch`,
+`base`, `commits` (count listed) with `commits_more` (true: 100 or more), `files` (count
+listed) with `files_total`, `protected` (paths), `history_only` ({`path`, `protected`}:
+paths changed by the job's commits but not in its final diff, public in the branch's
+history), `workflows` (true: the work changes `.github/workflows`, which the gateway's
+token can't push; offer no Publish), `pr_title` (the title the agent wrote when
+`pr_title_by_agent`, else the job's name), `pr_body` (exactly the description the
+gateway will send) with `pr_body_sha256`, `mentions` (@handles in it), `closes` (issues
+its closing keywords close on merge), `pr_footer` (what the gateway appends to a
+description the user writes), and `pr_url` (an open pull request the job already
+has; absent if none). The strings are raw, and the paths, title and description are the
+agent's: show them as text, with invisible and direction-changing characters visible.
+```json
+{
+   "type": "coding_publish_preview_response",
+   "payload": {
+      "job": 42, "nonce": "a1", "ok": true,
+      "preview": {
+         "head": "4f1c…", "repo": "owner/repo", "branch": "agent/42-fix", "base": "main",
+         "commits": 2, "commits_more": false, "files": 3, "files_total": 3,
+         "protected": [], "history_only": [ { "path": "notes.txt", "protected": false } ],
+         "workflows": false, "pr_title": "Fix the parser", "pr_title_by_agent": true, "pr_body": "…", "pr_body_sha256": "9a0b…",
+         "mentions": [], "closes": [ "#41" ]
+      }
+   }
+}
+```
+
+#### `coding_publish_response`
+`ok: true` with `message` (DAWN's line: what was pushed) and, when a pull request is
+open, `pr_url`; or `ok: false` with `error` (why it wasn't published).
+```json
+{ "type": "coding_publish_response", "payload": { "job": 42, "nonce": "a2", "ok": true, "message": "Published coding job #42 …", "pr_url": "https://github.com/owner/repo/pull/12" } }
+```
+
+#### `coding_close_response`
+`ok: true` with `closed` (bool) and `message`; when closing would delete unpublished
+work, `closed` is false and `needs_confirm`: {`commits`, `files` (with uncommitted
+changes), `branch`, `head` (`""` when there are no commits)} says what, to be sent back
+with `confirm: true`. A refusal is `ok: false` with `error`, and no `closed`.
+```json
+{ "type": "coding_close_response", "payload": { "job": 42, "nonce": "a3", "ok": true, "closed": false, "message": "Closing coding job #42 (\"Fix the parser\") deletes its 3 unpublished commits and 2 files with uncommitted changes; nothing else has them.", "needs_confirm": { "commits": 3, "files": 2, "branch": "agent/42-fix", "head": "4f1c…" } } }
 ```
 
 #### `coding_grants_response`
@@ -2368,6 +2486,42 @@ WebUI configuration (sent after session).
 - `protocol`, `features`: the protocol version and feature flags (see
   [Protocol version and feature flags](#protocol-version-and-feature-flags)).
 
+#### `turn_waiting`
+Flag `turn_wait`.  The turn this session just sent waits for another turn running on the same
+conversation, and later starts; sent to the waiting session's connection only.
+```json
+{"type": "turn_waiting",
+ "payload": {"conversation_id": 123, "client_ref": "17", "waiting": true,
+             "holder": "turn", "stop_after_ms": 5000}}
+```
+```json
+{"type": "turn_waiting",
+ "payload": {"conversation_id": 123, "client_ref": "17", "waiting": false}}
+```
+- `client_ref`: the waiting turn's, when it was sent with one (typed turns); voice turns have
+  none.
+- `holder`: what holds the conversation: `turn` (another tab or app of the user), `job` (a
+  background job's turn) or `channel` (a messaging channel's turn).
+- `stop_after_ms`: how long to show the wait before offering to stop the other reply
+  (`stop_other_reply`).
+- With `waiting: true` comes a `state` `thinking` whose `detail` says what it waits for (for
+  clients without the flag). `waiting: false` is followed by the turn's normal frames.
+- The other turn's rows arrive as `message_appended` meanwhile.
+- A reconnect while the turn waits doesn't send `turn_waiting` again; the turn's frames follow
+  when it starts.
+- A turn whose connection is gone keeps waiting for up to the daemon's stale-turn time
+  (`[jobs] max_runtime_sec`), then stops (`turn_unsent`).
+
+#### `turn_unsent`
+Flag `turn_wait`.  The waiting turn stopped before it started (`cancel`, its connection gone
+past the stale-turn time, or the daemon shutting down): its question was never saved. Followed by
+`state` `idle`.  Not sent for a turn the client didn't send (a background job's result
+re-engaging the conversation): that one is tried again later.
+```json
+{"type": "turn_unsent",
+ "payload": {"conversation_id": 123, "client_ref": "17", "text_saved": false}}
+```
+
 #### `state`
 State machine update.
 ```json
@@ -2423,12 +2577,16 @@ Error or informational notification.
   each refusal is one frame.
 - `client_ref`: on an error raised for a `text` turn that carried one (flag `turn_refs`), the
   same string, unchanged; absent otherwise.
+- `request_type`, `req`: on an error sent while a message from this connection is being
+  handled (flag `request_refs`): the message's `type`, and its payload's `req` when it had
+  one, each only when it is at most 64 bytes of valid UTF-8 with no control characters. An
+  error raised later (a turn failing as it runs) or for no message has neither. An error is
+  sent at once, so it can arrive before replies to earlier requests: match it by `req`, not
+  by order.
 - A message whose `type` this daemon doesn't handle (older daemon, or a feature not compiled
   in) is answered with `UNKNOWN_TYPE`, severity `"error"`, so a client can fail at once instead
-  of waiting out its timeout. The frame carries `request_type` (the type sent) and `req` (the
-  payload's `req`), each only when it is at most 64 bytes of valid UTF-8 with no control
-  characters. Daemons before this answer nothing; no feature flag marks it. The error is sent
-  at once, so it can arrive before replies to earlier requests: match it by `req`, not by order.
+  of waiting out its timeout. It carries `request_type` and `req` as above, and did before
+  `request_refs`. Daemons before `UNKNOWN_TYPE` answer nothing; no feature flag marks it.
 
 #### `force_logout`
 This connection's login ended: a logout (from this or another tab), a login over it
@@ -3019,6 +3177,18 @@ returns at once with `queued: true` and this follows when the sync ends, to the 
 { "type": "calendar_sync_done", "payload": { "id": 3, "success": true } }
 ```
 
+#### `conversation_renamed`
+A conversation's title changed: the daemon titled it after its first exchange, or the user
+renamed it from any client (`rename_conversation`; sent for a manual rename since 2026-11-17,
+before that only for the daemon's own title).  Sent to every client of the owning user, the
+renaming one included; that client may get it before its `rename_conversation_response`, so
+don't rely on their order.
+```json
+{ "type": "conversation_renamed", "payload": { "conversation_id": 1234, "title": "Trip planning" } }
+```
+Update the title wherever the client shows it: the conversation list, an open conversation's
+header, a memory batch's `conversation_title`.
+
 #### `conversation_list_changed`
 The user's conversation list changed — a conversation was **created** or its
 last-activity was **bumped** — from any interface (a second browser tab, a messaging
@@ -3093,6 +3263,7 @@ Satellites also receive the same streaming messages as WebUI clients:
 | Request | Response |
 |---------|----------|
 | `get_config` | `get_config_response` |
+| `stop_other_reply` | `stop_other_reply_response` |
 | `email_list_accounts` | `email_list_accounts_response` |
 | `email_add_account` | `email_add_account_response` |
 | `email_update_account` | `email_update_account_response` |

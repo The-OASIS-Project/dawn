@@ -334,7 +334,9 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    } else {
       struct json_object *payload = NULL;
       json_object_object_get_ex(root, "payload", &payload);
+      webui_protocol_request_begin(conn->wsi, json_object_get_string(type_obj), payload);
       dispatch_message(conn, json_object_get_string(type_obj), payload);
+      webui_protocol_request_end();
    }
    json_object_put(root);
    free(json_str);
@@ -1703,6 +1705,21 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
       if (!conn_require_auth(conn))
          return;
       webui_coding_handle_view(conn, payload);
+   } else if (strcmp(type, "coding_publish_preview") == 0) {
+      /* The viewer's Publish and Close: the click is the user's confirm.  The
+       * job's owner is checked inside; the gateway binds the push to what was
+       * shown. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_publish_preview(conn, payload);
+   } else if (strcmp(type, "coding_publish") == 0) {
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_publish(conn, payload);
+   } else if (strcmp(type, "coding_close") == 0) {
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_close(conn, payload);
    } else if (strcmp(type, "coding_grants") == 0) {
       if (!conn_require_auth(conn))
          return;
@@ -1713,6 +1730,11 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          return;
       webui_coding_handle_grant_revoke(conn, payload);
 #endif
+   } else if (strcmp(type, "stop_other_reply") == 0) {
+      /* Same user only, checked inside against the turn holding the conversation. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_handle_stop_other_reply(conn, payload);
    } else if (strcmp(type, "job_action") == 0) {
       /* cancel | resume.  Ownership is checked inside, against conn->auth_user_id. */
       if (!conn_require_auth(conn))
@@ -1902,13 +1924,9 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          OLOG_DEBUG("WebUI: Ignoring %s message (feature not compiled in)", shown);
       else
          OLOG_WARNING("WebUI: Unknown message type: %s", shown);
-      char req[WEBUI_REQ_MAX + 1];
-      char *reply = webui_protocol_unknown_type_json(
-          type, webui_protocol_payload_req(payload, WEBUI_REQ_MAX, req, sizeof(req)) ? req : NULL);
-      if (reply) {
-         send_json_message(conn->wsi, reply);
-         free(reply);
-      }
+      /* Names the type and the req, as every error sent for a request does. */
+      send_error_frame(conn->wsi, "UNKNOWN_TYPE", "This server doesn't handle that message type",
+                       WS_SEVERITY_ERROR, NULL);
    }
 }
 

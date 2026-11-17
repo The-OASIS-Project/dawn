@@ -69,6 +69,16 @@ void conv_prefix_free(conv_prefix_t *p);
  */
 int conv_db_prefix_get(int64_t conv_id, int user_id, conv_prefix_t *out);
 
+/**
+ * Read one stored prompt blob (a frozen prompt, tool set or in-force record)
+ * by its hash, checked against it.
+ *
+ * @param out Receives the bytes (heap; free()), NULL on failure
+ * @return AUTH_DB_SUCCESS, AUTH_DB_INVALID (missing, mismatched, or no hash)
+ *         or AUTH_DB_FAILURE
+ */
+int conv_db_prompt_blob_get(const char *hash, char **out);
+
 /** What a turn's prompt added to its conversation, saved together. */
 typedef struct {
    const conv_message_row_t *rows; /**< Request-context rows (each with a kind), in order */
@@ -90,6 +100,9 @@ typedef struct {
    int64_t compaction_first_id;
    int64_t compaction_last_id;
    int compaction_level;
+   /** A failed turn's question: the tool changes saved with it that no
+    *  assistant row follows (no model answered them) go, or 0 */
+   int64_t retract_changes_of;
 } conv_turn_save_t;
 
 /**

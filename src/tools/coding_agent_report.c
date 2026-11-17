@@ -324,11 +324,11 @@ static void *report_thread(void *arg) {
          fixed_line(line, sizeof(line), w, title ? title : rec.title);
          strbuf_append(&post, line);
       }
-      int64_t msg_id = 0;
-      if (!strbuf_oom(&post) &&
-          job_report_post_ex(rec.parent_id, w->user_id, strbuf_str(&post), &msg_id) == SUCCESS &&
-          take != NULL) {
-         coding_agent_note_take(rec.parent_id, msg_id);
+      /* A take is noted once its row exists (now, or at the end of a turn
+       * running there). */
+      if (!strbuf_oom(&post)) {
+         (void)job_report_post_ex(rec.parent_id, w->user_id, strbuf_str(&post),
+                                  take != NULL ? coding_agent_note_take : NULL);
       }
       strbuf_free(&post);
       free(title);
