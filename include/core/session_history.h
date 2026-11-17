@@ -185,6 +185,72 @@ typedef struct json_object *(*session_history_loader_fn)(int user_id,
 /** Register the loader session_turn_begin() uses (NULL to unregister). */
 void session_set_history_loader(session_history_loader_fn loader);
 
+/** The registered loader (NULL = none). */
+session_history_loader_fn session_history_loader_get(void);
+
+/**
+ * @brief A conversation's rows after a row, as a reload renders them there
+ *
+ * The contract of memory_history_request_tail(): an owned array (empty when
+ * there are none), or NULL with *@p rebuild_out set when the rows can't be
+ * appended on their own (the history must be built again) or clear on a read
+ * failure.
+ */
+typedef struct json_object *(*session_history_tail_loader_fn)(int64_t conv_id,
+                                                              int user_id,
+                                                              int64_t after_id,
+                                                              bool *rebuild_out);
+
+/** Register the tail loader a turn's catch-up uses (NULL to unregister). */
+void session_set_history_tail_loader(session_history_tail_loader_fn loader);
+
+/**
+ * @brief session_replace_history() for a history loaded from the database,
+ *        recording the point it was loaded at
+ *
+ * Read @p at (conv_db_sync_point_get) before loading the history; it is read
+ * again here, with no lock held, and recorded only when nothing changed in
+ * between (else the next turn builds the history again).  NULL @p at records
+ * nothing.
+ *
+ * @param session Session
+ * @param history New history array (ownership transferred)
+ * @param conv_id Conversation the history holds
+ * @param user_id Its owner
+ * @param at      The point read before the load, or NULL
+ */
+void session_replace_history_at(session_t *session,
+                                struct json_object *history,
+                                int64_t conv_id,
+                                int user_id,
+                                const conv_sync_point_t *at);
+
+/**
+ * @brief Bring the live history up to date with @p conv_id for the turn
+ *        starting or binding on this thread
+ *
+ * Session unit: called by session_turn_begin() and
+ * session_turn_set_conversation() once the turn holds the conversation's
+ * lease, with no lock held.  When the live history holds @p conv_id, the
+ * conversation's sync point is compared with the one the history was built
+ * at: the same, nothing; only rows added, they are appended as a reload has
+ * them (the tail loader); anything else, the history is built again (the
+ * loader) as a restore builds it.  A turn pinned on the live history moves
+ * with it.  Does nothing without the loaders, or when the turn already wrote
+ * into the live history.
+ */
+void session_catch_up(session_t *session, int64_t conv_id, int user_id);
+
+/**
+ * @brief Install @p history as the live history holding @p conv_id
+ *
+ * Session unit: session_replace_history()'s step, with history_mutex held.
+ * Ownership of @p history is taken.
+ */
+void session_install_history_locked(session_t *session,
+                                    struct json_object *history,
+                                    int64_t conv_id);
+
 /**
  * @brief Start a turn: pin the history it runs on
  *

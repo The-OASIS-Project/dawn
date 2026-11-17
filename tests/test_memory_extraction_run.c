@@ -25,7 +25,8 @@
  * memory recovery's progress check on a count stored in older units.  The
  * session unit is linked too, so a test can run a turn on a session (the real
  * dispatch, prefix and history, a fake model) and then extract its
- * conversation in the same process.
+ * conversation in the same process, or two sessions on one conversation
+ * taking turns, each caught up at its turn's start.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -58,6 +59,7 @@
 #include "llm/llm_tools.h"
 #include "memory/memory_db.h"
 #include "memory/memory_extraction.h"
+#include "memory/memory_history_loader.h"
 #include "memory/memory_recovery.h"
 #include "tools/tool_registry.h"
 #include "unity.h"
@@ -595,10 +597,10 @@ void test_recovery_counts_a_falling_count_as_progress(void) {
 
 /* ---- a turn, then its extraction ---- */
 
-static session_t *new_session(int64_t conv) {
+static session_t *new_session_id(int64_t conv, uint32_t id) {
    session_t *s = calloc(1, sizeof(*s));
    TEST_ASSERT_NOT_NULL(s);
-   s->session_id = 3;
+   s->session_id = id;
    s->type = SESSION_TYPE_WEBUI;
    s->metrics.user_id = (uint32_t)s_user;
    pthread_mutex_init(&s->history_mutex, NULL);
@@ -608,6 +610,10 @@ static session_t *new_session(int64_t conv) {
    s->conversation_history = json_object_new_array();
    session_bind_history_conversation(s, conv);
    return s;
+}
+
+static session_t *new_session(int64_t conv) {
+   return new_session_id(conv, 3);
 }
 
 static void free_session(session_t *s) {
@@ -712,6 +718,103 @@ void test_a_tool_exchange_is_extracted_once(void) {
    free_session(s);
 }
 
+
+/* ---- two sessions on one conversation ---- */
+
+/* The turn loader the WebUI registers: the conversation as a reload builds it. */
+static struct json_object *reload_loader(int user_id,
+                                         int64_t conv_id,
+                                         const session_llm_config_t *base,
+                                         session_llm_config_t *cfg_out,
+                                         bool *has_cfg_out) {
+   (void)base, (void)cfg_out;
+   *has_cfg_out = false;
+   return memory_history_load_for_llm(conv_id, user_id, NULL);
+}
+
+static int occurrences(const char *hay, const char *needle) {
+   int n = 0;
+   for (const char *p = hay ? strstr(hay, needle) : NULL; p; p = strstr(p + 1, needle)) {
+      n++;
+   }
+   return n;
+}
+
+/* Session A runs a turn, then B (caught up from the conversation); A, idle
+ * meanwhile, is extracted with the history it has: the cursor stops at what
+ * that batch read, and B's extraction then reads B's rows, once. */
+void test_an_idle_session_extracts_the_other_sessions_rows(void) {
+   session_set_history_loader(reload_loader);
+   session_set_history_tail_loader(memory_history_request_tail);
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Shared", &conv));
+   session_t *a = new_session_id(conv, 3);
+   session_t *b = new_session_id(conv, 4);
+   const int64_t a_reply = run_turn(a, conv, "MARK-A1-Q placeholder question",
+                                    "MARK-A1-R placeholder answer", NULL);
+   const int64_t b_reply = run_turn(b, conv, "MARK-B-Q placeholder question",
+                                    "MARK-B-R placeholder answer", NULL);
+   pthread_mutex_lock(&b->history_mutex);
+   TEST_ASSERT_EQUAL_INT(1, occurrences(json_object_to_json_string(b->conversation_history),
+                                        "MARK-A1-Q"));
+   pthread_mutex_unlock(&b->history_mutex);
+
+   extract_session(a, conv);
+   TEST_ASSERT_EQUAL_INT(1, s_calls);
+   TEST_ASSERT_EQUAL_INT(1, occurrences(s_prompt, "MARK-A1-Q"));
+   TEST_ASSERT_EQUAL_INT(0, occurrences(s_prompt, "MARK-B-Q"));
+   TEST_ASSERT_EQUAL_INT64(a_reply, id_cursor(conv)); /* not past what it read */
+
+   extract_session(b, conv);
+   TEST_ASSERT_EQUAL_INT(2, s_calls);
+   TEST_ASSERT_EQUAL_INT(1, occurrences(s_prompt, "MARK-B-Q"));
+   TEST_ASSERT_EQUAL_INT(1, occurrences(s_prompt, "MARK-B-R"));
+   TEST_ASSERT_EQUAL_INT(0, occurrences(s_prompt, "MARK-A1-Q"));
+   TEST_ASSERT_EQUAL_INT64(b_reply, id_cursor(conv));
+   free_session(a);
+   free_session(b);
+   session_set_history_loader(NULL);
+   session_set_history_tail_loader(NULL);
+}
+
+/* A's next turn begins after B's: caught up, A's history holds B's rows once,
+ * and its extraction reads every row once; B's stale history then has nothing
+ * past the cursor to send. */
+void test_a_caught_up_session_extracts_every_row_once(void) {
+   session_set_history_loader(reload_loader);
+   session_set_history_tail_loader(memory_history_request_tail);
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Shared", &conv));
+   session_t *a = new_session_id(conv, 3);
+   session_t *b = new_session_id(conv, 4);
+   run_turn(a, conv, "MARK-A1-Q placeholder question", "MARK-A1-R placeholder answer", NULL);
+   run_turn(b, conv, "MARK-B-Q placeholder question", "MARK-B-R placeholder answer",
+            "MARK-B-TOOL placeholder result");
+   const int64_t a_reply = run_turn(a, conv, "MARK-A2-Q placeholder question",
+                                    "MARK-A2-R placeholder answer", NULL);
+   pthread_mutex_lock(&a->history_mutex);
+   const char *live = json_object_to_json_string(a->conversation_history);
+   TEST_ASSERT_EQUAL_INT(1, occurrences(live, "MARK-B-Q"));
+   TEST_ASSERT_EQUAL_INT(1, occurrences(live, "MARK-B-TOOL"));
+   pthread_mutex_unlock(&a->history_mutex);
+
+   extract_session(a, conv);
+   TEST_ASSERT_EQUAL_INT(1, s_calls);
+   TEST_ASSERT_EQUAL_INT(1, occurrences(s_prompt, "MARK-A1-Q"));
+   TEST_ASSERT_EQUAL_INT(1, occurrences(s_prompt, "MARK-B-Q"));
+   TEST_ASSERT_EQUAL_INT(1, occurrences(s_prompt, "MARK-B-TOOL"));
+   TEST_ASSERT_EQUAL_INT(1, occurrences(s_prompt, "MARK-A2-R"));
+   TEST_ASSERT_EQUAL_INT64(a_reply, id_cursor(conv));
+
+   extract_session(b, conv);
+   TEST_ASSERT_EQUAL_INT(1, s_calls); /* nothing past the cursor */
+   TEST_ASSERT_EQUAL_INT64(a_reply, id_cursor(conv));
+   free_session(a);
+   free_session(b);
+   session_set_history_loader(NULL);
+   session_set_history_tail_loader(NULL);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_history_lacking_another_sessions_rows_sends_them);
@@ -720,5 +823,7 @@ int main(void) {
    RUN_TEST(test_recovery_counts_a_falling_count_as_progress);
    RUN_TEST(test_a_turn_on_a_session_then_its_extraction);
    RUN_TEST(test_a_tool_exchange_is_extracted_once);
+   RUN_TEST(test_an_idle_session_extracts_the_other_sessions_rows);
+   RUN_TEST(test_a_caught_up_session_extracts_every_row_once);
    return UNITY_END();
 }

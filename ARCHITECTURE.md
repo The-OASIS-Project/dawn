@@ -247,6 +247,7 @@ Layer 4 (Application) — deps: everything below
 
 **The session unit.** `session_manager.c` (the dispatch), `session_history.c` (history lifecycle),
 `session_prefix.c` (the append-only request: frozen prefix, appended changes and turn context, live withdrawal),
+`session_catchup.c` (a turn's history brought up to date with its conversation),
 `session_turn_lease.c` (a turn's wait for its conversation's lease, and what others may ask of the turn holding it),
 `session_compaction.c`, `session_focus.c`, `session_posts.c`, `prompt_builder.c` and `session_image_hold.c`
 call into each other: read them as one Layer-2 unit, not as separate modules with a direction between them.
@@ -272,6 +273,7 @@ call into each other: read them as one Layer-2 unit, not as separate modules wit
 | `src/core/conv_post.c` (a post into a conversation) | the WebUI, which tells the tabs viewing it to refetch | `webui_broadcast_conversation_messages_appended` (strong in `webui_broadcasts.c`, a no-op in `webui_absent.c`) |
 | `src/core/conv_turn_lease.c` (a queued post written at the holder's release) | `conv_post.c`'s writer | `conv_turn_lease_set_writer`, at startup |
 | `src/core/session_turn_lease.c` (a turn waits for its conversation, gets it, or stops waiting) | the waiting session's client (`webui_turn_wait.c`) | weak `session_turn_waiting_notice` |
+| `src/core/session_catchup.c` (a turn brings its session's history up to date with its conversation) | the history loader and the tail loader (`memory_history_request_tail`), registered by the WebUI server | `session_set_history_loader`, `session_set_history_tail_loader`, at startup |
 
 \* **Orchestration-unit note.** `job_worker.c` and `research_worker.c` physically live in
 `src/core/` but are **application-orchestration units**: each is a detached top-of-stack sequencer
@@ -467,7 +469,13 @@ channel and 64 in all), looks again every 250 ms and runs a channel's messages i
 (`conv_post.c`: a job's report, a channel message DAWN sent) never wait: the holder's release writes
 them before the next turn starts. Each turn releases its lease at its end; the session's free releases
 any lease still naming it, with an ERROR, unless that lease's holder is releasing it right then (its
-release hands it on).
+release hands it on). Holding the lease, a turn brings its session's history up to
+date with the conversation (`session_catchup.c`): each session records the conversation's stored state
+its history was built at (newest row, watermark, reasoning floor, frozen prompt, tool set, in-force
+record; one indexed read), set where it is loaded and where a turn holding it ends; at the next turn's
+start, rows only added since are appended as a reload renders them, and any other change builds the
+history again as a restore does. A catch-up that fails leaves the history's state unknown at the turn's
+end, so the next turn builds it again.
 
 **Turn serialization (background-jobs era).** All WebUI LLM turns — user text, push-to-talk
 voice, and background-job re-engagements — funnel through the per-session **turn queue**

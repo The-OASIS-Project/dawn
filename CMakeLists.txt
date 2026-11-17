@@ -849,6 +849,7 @@ list(APPEND DAWN_SOURCES
     src/core/session_voice_save.c
     src/core/session_image_hold.c
     src/core/session_history.c
+    src/core/session_catchup.c
     src/core/session_turn_lease.c
     src/core/turn_queue.c
     src/core/session_manager_llm.c

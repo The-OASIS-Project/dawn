@@ -827,6 +827,7 @@ dawn_add_unit_test(test_suit_service
 dawn_add_unit_test(test_session_history
    SOURCES test_session_history.c
            ${SRC_ROOT}/src/core/session_history.c
+           ${SRC_ROOT}/src/core/session_catchup.c
            ${SRC_ROOT}/src/core/session_turn_lease.c
            ${SRC_ROOT}/src/core/conv_turn_lease.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
@@ -890,11 +891,13 @@ dawn_add_unit_test(test_history_reload
    SOURCES test_history_reload.c
            ${SRC_ROOT}/src/llm/llm_tool_history.c
            ${SRC_ROOT}/src/core/job_dispatch.c
+           ${SRC_ROOT}/src/core/conv_post.c
            ${SRC_ROOT}/src/llm/llm_tools_results.c
            ${SRC_ROOT}/src/llm/llm_tool_images.c
            ${SRC_ROOT}/src/core/text_input_dispatch.c
            ${SRC_ROOT}/src/core/session_manager_llm.c
            ${SRC_ROOT}/src/core/session_history.c
+           ${SRC_ROOT}/src/core/session_catchup.c
            ${SRC_ROOT}/src/core/session_turn_lease.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
            ${SRC_ROOT}/src/llm/llm_claude_tools.c
@@ -3220,6 +3223,7 @@ dawn_add_unit_test(test_memory_extraction_run
            ${SRC_ROOT}/src/core/text_input_dispatch.c
            ${SRC_ROOT}/src/core/session_manager_llm.c
            ${SRC_ROOT}/src/core/session_history.c
+           ${SRC_ROOT}/src/core/session_catchup.c
            ${SRC_ROOT}/src/core/session_turn_lease.c
            ${SRC_ROOT}/src/llm/llm_tool_history.c
            ${SRC_ROOT}/src/llm/llm_tools_results.c

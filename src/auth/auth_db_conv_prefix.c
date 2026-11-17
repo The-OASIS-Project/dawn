@@ -85,12 +85,8 @@ int conv_prompt_blob_put_locked(const char *bytes, char hash_out[DAWN_SHA256_HEX
  * are missing or don't match. Caller holds the lock. */
 int conv_prompt_blob_get_locked(const char *hash, char **out) {
    *out = NULL;
-   sqlite3_stmt *st = NULL;
-   if (sqlite3_prepare_v2(s_db.db, "SELECT bytes FROM prompt_blobs WHERE hash = ?", -1, &st,
-                          NULL) != SQLITE_OK) {
-      OLOG_ERROR("conv_prefix: prepare blob read failed: %s", sqlite3_errmsg(s_db.db));
-      return AUTH_DB_FAILURE;
-   }
+   sqlite3_stmt *st = s_db.stmt_prompt_blob_get;
+   sqlite3_reset(st);
    sqlite3_bind_text(st, 1, hash, -1, SQLITE_STATIC);
    int result = AUTH_DB_FAILURE;
    if (sqlite3_step(st) == SQLITE_ROW) {
@@ -111,7 +107,21 @@ int conv_prompt_blob_get_locked(const char *hash, char **out) {
       OLOG_ERROR("conv_prefix: stored prompt %.12s... is missing", hash);
       result = AUTH_DB_INVALID;
    }
-   sqlite3_finalize(st);
+   sqlite3_reset(st);
+   return result;
+}
+
+int conv_db_prompt_blob_get(const char *hash, char **out) {
+   if (!out) {
+      return AUTH_DB_FAILURE;
+   }
+   *out = NULL;
+   if (!hash || !hash[0]) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   const int result = conv_prompt_blob_get_locked(hash, out);
+   AUTH_DB_UNLOCK();
    return result;
 }
 

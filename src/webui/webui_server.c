@@ -94,6 +94,7 @@
 #include "auth/auth_db.h"
 #include "core/buf_printf.h"
 #include "memory/memory_context.h"
+#include "memory/memory_history_loader.h"
 #include "webui/webui_doc_library.h"
 #ifdef DAWN_ENABLE_CALENDAR_TOOL
 #include "webui/webui_calendar.h"
@@ -2131,8 +2132,10 @@ int webui_server_init(int port, const char *www_path) {
    }
 
    /* A turn that finds another conversation loaded reloads its own through the
-    * canonical restore (see session_turn_begin). */
+    * canonical restore (see session_turn_begin); one on the conversation it
+    * holds appends what was written there since (session_catch_up). */
    session_set_history_loader(webui_turn_history_loader);
+   session_set_history_tail_loader(memory_history_request_tail);
 
    OLOG_INFO("WebUI: Server started successfully on port %d", port);
 
@@ -2161,6 +2164,7 @@ void webui_server_shutdown(void) {
    pthread_mutex_unlock(&s_mutex);
 
    session_set_history_loader(NULL);
+   session_set_history_tail_loader(NULL);
 
    /* Tear down silent-observe listener so post-shutdown calls don't dispatch
     * into freed/closing connection state.  Pairs with the registration in

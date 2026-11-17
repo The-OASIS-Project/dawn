@@ -24,6 +24,10 @@
  * WebUI does, and the live history and
  * memory_history_request_context() are rendered by the Claude and OpenAI
  * Responses request builders and compared byte for byte.
+ *
+ * Two sessions on one conversation take turns of every kind, with posts,
+ * compactions and boundaries between them: each, once caught up at its turn's
+ * start, holds what a reload of the conversation builds.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -38,8 +42,11 @@
 #include "auth/auth_db_conv_prefix.h"
 #include "auth/auth_db_internal.h"
 #include "auth/auth_db_messages.h"
+#include "auth/auth_db_withdraw.h"
 #include "blob_store.h"
 #include "config/dawn_config.h"
+#include "core/conv_post.h"
+#include "core/conv_turn_lease.h"
 #include "core/job_dispatch.h"
 #include "core/llm_response_finalize.h"
 #include "core/ocp_helpers.h"
@@ -91,11 +98,18 @@ typedef struct {
    bool parallel;         /* a second call runs beside the first (its id + "b") */
    bool cancel_after;     /* the user's stop lands once the answer is complete */
    bool cancel_during;    /* the stop lands mid-stream: no answer */
+   const char *post;      /* DAWN posts this into the conversation mid-turn */
+   bool boundary;         /* the turn declares a boundary: reasoning so far left behind */
 } script_t;
 
 static script_t s_script;
-static session_t *s;
+static session_t *s; /* the session running the turn (one of s_sessions) */
 static int s_user;
+static int64_t s_conv;
+
+/* The sessions on the conversation. */
+#define SESSIONS_MAX 2
+static session_t *s_sessions[SESSIONS_MAX];
 
 static struct json_object *signed_blocks(const char *text) {
    struct json_object *blocks = llm_turn_blocks_new();
@@ -189,6 +203,21 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
                                                 void *callback_userdata,
                                                 const llm_resolved_config_t *config) {
    (void)input_text, (void)chunk_callback, (void)callback_userdata, (void)config;
+   if (s_script.post) {
+      /* A job's report or a channel post while the turn runs: its row waits
+       * for the turn's end. */
+      TEST_ASSERT_EQUAL_INT(SUCCESS, conv_post_unprompted(s_conv, s_user, s_script.post));
+   }
+   if (s_script.boundary) {
+      /* What a declared boundary does outside a turn record
+       * (session_prefix_inline_tools_rejected): the reasoning so far replays no
+       * more, live and stored. */
+      pthread_mutex_lock(&s->history_mutex);
+      (void)llm_history_drop_turn_blocks(conversation_history);
+      pthread_mutex_unlock(&s->history_mutex);
+      const conv_turn_save_t save = { .floor_at_rows = true };
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_save_turn(s_conv, s_user, &save, NULL));
+   }
    if (s_script.tool_call) {
       run_tool_exchange(conversation_history, &s_script);
    }
@@ -285,10 +314,19 @@ void session_get_llm_config(session_t *session, session_llm_config_t *config) {
    memset(config, 0, sizeof(*config));
 }
 void session_manager_for_each_session_any(void (*fn)(session_t *session, void *ctx), void *ctx) {
-   fn(s, ctx);
+   for (int i = 0; i < SESSIONS_MAX; i++) {
+      if (s_sessions[i]) {
+         fn(s_sessions[i], ctx);
+      }
+   }
 }
 void job_manager_for_each_session(void (*fn)(session_t *session, void *ctx), void *ctx) {
    (void)fn, (void)ctx;
+}
+
+/* A post's tabs are told by the WebUI: none here. */
+void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id) {
+   (void)user_id, (void)conv_id;
 }
 
 /* No turn queue, and no posts from DAWN into the conversation. */
@@ -577,23 +615,71 @@ static void persist_reply(int64_t conv, const char *body) {
    session_stamp_last_message_id(s, "assistant", id);
 }
 
+/* The newest id of a request-context row of @p kind. */
+static int64_t newest_of_kind(const char *kind) {
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_prepare_v2(s_db.db,
+                                                       "SELECT MAX(id) FROM messages WHERE "
+                                                       "conversation_id = ?1 AND kind = ?2",
+                                                       -1, &st, NULL));
+   sqlite3_bind_int64(st, 1, s_conv);
+   sqlite3_bind_text(st, 2, kind, -1, SQLITE_STATIC);
+   const int64_t id = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int64(st, 0) : 0;
+   sqlite3_finalize(st);
+   return id;
+}
+
 /* The question's kind (an envelope for a re-engagement), and whether a turn
- * with no reply takes its question back as a re-engagement does. */
+ * with no reply takes its question back as a re-engagement does: by the turn's
+ * question id, or by the envelope's row (once a re-engagement knows it). */
 static message_kind_t s_question_kind = MESSAGE_KIND_NONE;
 static bool s_retract_unanswered;
+static bool s_retract_envelope_row;
+/* The turn starts before its conversation is known (a voice turn), and binds
+ * it in dispatch. */
+static bool s_begin_unbound;
+/* A new chat's first message: its conversation is created once the turn's
+ * first tool call is saved, and its question written then. */
+static bool s_new_chat;
+
+/* As the WebUI's tool persist hook with a new chat's first message: the
+ * conversation, created for the turn and claimed in its name, binds; the
+ * question is written (persist_pending_user_row); then the row. */
+static int64_t new_chat_persist_cb(void *userdata, const session_tool_row_t *row) {
+   char *pending = NULL;
+   if (session_turn_conversation(s) <= 0) {
+      const uint64_t claim = session_turn_claim_token(s, true);
+      TEST_ASSERT_TRUE(conv_turn_lease_claim_new(s_conv, s->session_id, claim));
+      session_turn_set_conversation(s, s_conv, true);
+      int64_t conv = 0;
+      pending = session_turn_take_pending(s, "user", &conv);
+      TEST_ASSERT_NOT_NULL(pending);
+      int64_t id = 0;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                            conv_db_add_message_ex(conv, s_user, "user", pending, &id));
+      session_stamp_last_message_id(s, "user", id);
+      session_prefix_question_saved(s, conv, s_user, id);
+   }
+   free(pending);
+   return job_dispatch_tool_persist_cb(userdata, row);
+}
 
 static void run_turn(int64_t conv, const char *question, script_t script) {
    s_script = script;
    atomic_store(&s->cancel_requested, false);
-   session_turn_begin(s, conv, s_user);
+   session_turn_begin(s, s_begin_unbound || s_new_chat ? 0 : conv, s_user);
+   if (s_new_chat) {
+      session_turn_await_conversation(s);
+   }
    /* The job worker's hook: every field of a row into the conversation. */
    job_persist_ctx_t persist_ctx = { .conv_id = conv, .user_id = s_user };
-   s->tool_persist_cb = job_dispatch_tool_persist_cb;
+   s->tool_persist_cb = s_new_chat ? new_chat_persist_cb : job_dispatch_tool_persist_cb;
    s->tool_persist_userdata = &persist_ctx;
    atomic_store(&s->will_persist_turn, true);
-   const text_input_dispatch_opts_t opts = { .conversation_id = conv,
+   const text_input_dispatch_opts_t opts = { .conversation_id = s_new_chat ? 0 : conv,
                                              .auth_user_id = s_user,
-                                             .question_kind = s_question_kind };
+                                             .question_kind = s_question_kind,
+                                             .await_conversation = s_new_chat };
    char *reply = core_text_input_dispatch(s, question, &opts);
    atomic_store(&s->will_persist_turn, false);
    s->tool_persist_cb = NULL;
@@ -619,6 +705,9 @@ static void run_turn(int64_t conv, const char *question, script_t script) {
       if (envelope > 0 && conv_db_retract_envelope(conv, s_user, envelope) == AUTH_DB_SUCCESS) {
          (void)session_rollback_turn(s);
       }
+   } else if (s_retract_envelope_row) {
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                            conv_db_retract_envelope(conv, s_user, newest_of_kind("envelope")));
    }
    free(reply);
    session_turn_end(s);
@@ -723,7 +812,61 @@ static bool saved_reply_has(int64_t conv, const char *content) {
 
 /* ---- setup ---- */
 
-static int64_t s_conv;
+/* The turn loader the WebUI registers (webui_turn_history_loader): the
+ * conversation's request as a reload builds it. */
+static int s_reloads; /* histories the turn loader built */
+
+static struct json_object *reload_loader(int user_id,
+                                         int64_t conv_id,
+                                         const session_llm_config_t *base,
+                                         session_llm_config_t *cfg_out,
+                                         bool *has_cfg_out) {
+   (void)base, (void)cfg_out;
+   *has_cfg_out = false;
+   s_reloads++;
+   conversation_t c = { 0 };
+   struct json_object *h = NULL;
+   if (conv_db_get(conv_id, user_id, &c) == AUTH_DB_SUCCESS) {
+      h = memory_history_request_context(conv_id, user_id, c.context_watermark_msg_id,
+                                         c.compaction_summary, NULL, NULL);
+   }
+   conv_free(&c);
+   return h;
+}
+
+/* A WebUI session holding the conversation, opened before it had a turn. */
+static session_t *new_session(uint32_t id) {
+   session_t *x = calloc(1, sizeof(*x));
+   x->session_id = id;
+   x->type = SESSION_TYPE_WEBUI;
+   x->metrics.user_id = (uint32_t)s_user;
+   pthread_mutex_init(&x->history_mutex, NULL);
+   pthread_mutex_init(&x->llm_config_mutex, NULL);
+   pthread_mutex_init(&x->metrics_mutex, NULL);
+   pthread_mutex_init(&x->tools_mutex, NULL);
+   x->conversation_history = json_object_new_array();
+   struct json_object *sys = json_object_new_object();
+   json_object_object_add(sys, "role", json_object_new_string("system"));
+   json_object_object_add(sys, "content", json_object_new_string("start"));
+   json_object_array_add(x->conversation_history, sys);
+   session_bind_history_conversation(x, s_conv);
+   return x;
+}
+
+static void free_session(session_t *x) {
+   free(x->pending_visual);
+   free(x->cancelled_final_response);
+   session_final_answer_clear(x);
+   session_compaction_teardown(x);
+   session_prefix_turn_free(x->prefix_turn);
+   json_object_put(x->withdraw_pending);
+   json_object_put(x->conversation_history);
+   pthread_mutex_destroy(&x->history_mutex);
+   pthread_mutex_destroy(&x->llm_config_mutex);
+   pthread_mutex_destroy(&x->metrics_mutex);
+   pthread_mutex_destroy(&x->tools_mutex);
+   free(x);
+}
 
 void setUp(void) {
    s_over = false;
@@ -734,40 +877,28 @@ void setUp(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user("alice", &u));
    s_user = u.id;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "c", &s_conv));
-
-   s = calloc(1, sizeof(*s));
-   s->session_id = 7;
-   s->type = SESSION_TYPE_WEBUI;
-   s->metrics.user_id = (uint32_t)s_user;
-   pthread_mutex_init(&s->history_mutex, NULL);
-   pthread_mutex_init(&s->llm_config_mutex, NULL);
-   pthread_mutex_init(&s->metrics_mutex, NULL);
-   pthread_mutex_init(&s->tools_mutex, NULL);
-   s->conversation_history = json_object_new_array();
-   struct json_object *sys = json_object_new_object();
-   json_object_object_add(sys, "role", json_object_new_string("system"));
-   json_object_object_add(sys, "content", json_object_new_string("start"));
-   json_object_array_add(s->conversation_history, sys);
-   session_bind_history_conversation(s, s_conv);
+   /* The loaders the WebUI registers: every turn here catches up first. */
+   session_set_history_loader(reload_loader);
+   session_set_history_tail_loader(memory_history_request_tail);
+   conv_post_init();
+   s_sessions[0] = new_session(7);
+   s = s_sessions[0];
    s_persona = "P1";
    s_directive = "D1";
    s_time = "09:00";
 }
 
 void tearDown(void) {
-   free(s->pending_visual);
-   free(s->cancelled_final_response);
-   session_final_answer_clear(s);
-   session_compaction_teardown(s);
-   session_prefix_turn_free(s->prefix_turn);
-   json_object_put(s->withdraw_pending);
-   json_object_put(s->conversation_history);
-   pthread_mutex_destroy(&s->history_mutex);
-   pthread_mutex_destroy(&s->llm_config_mutex);
-   pthread_mutex_destroy(&s->metrics_mutex);
-   pthread_mutex_destroy(&s->tools_mutex);
-   free(s);
+   for (int i = 0; i < SESSIONS_MAX; i++) {
+      if (s_sessions[i]) {
+         free_session(s_sessions[i]);
+         s_sessions[i] = NULL;
+      }
+   }
    s = NULL;
+   session_set_history_loader(NULL);
+   session_set_history_tail_loader(NULL);
+   conv_turn_lease_set_writer(NULL, NULL);
    auth_db_shutdown();
 }
 
@@ -970,6 +1101,330 @@ static void test_a_compaction_at_the_seam(void) {
    assert_live_is_reload(s_conv, "A7");
 }
 
+
+/* ---- two sessions on one conversation ---- */
+
+/* Session @p x runs the turns from here. */
+static void as(session_t *x) {
+   s = x;
+}
+
+/* What is in force, on the live history's frozen prompt and on a reload's. */
+static void assert_same_in_force(void) {
+   struct json_object *reloaded = reload(s_conv);
+   struct json_object *want = llm_history_in_force(llm_history_prefix(reloaded), false);
+   pthread_mutex_lock(&s->history_mutex);
+   struct json_object *have = llm_history_in_force(llm_history_prefix(s->conversation_history),
+                                                   false);
+   char *live = have ? strdup(json_object_to_json_string_ext(have, FLAGS)) : NULL;
+   pthread_mutex_unlock(&s->history_mutex);
+   TEST_ASSERT_EQUAL_STRING(want ? json_object_to_json_string_ext(want, FLAGS) : "(none)",
+                            live ? live : "(none)");
+   free(live);
+   json_object_put(reloaded);
+}
+
+/* @p x's next turn starts: caught up, it holds what a reload builds (with
+ * @p carries in its Claude request).  No one holds the conversation between
+ * turns. */
+static void caught_up(session_t *x, const char *carries) {
+   as(x);
+   TEST_ASSERT_FALSE(conv_turn_lease_holder(s_conv, NULL, NULL, NULL));
+   session_turn_begin(x, s_conv, s_user);
+   uint32_t holder = 0;
+   TEST_ASSERT_TRUE(conv_turn_lease_holder(s_conv, &holder, NULL, NULL));
+   TEST_ASSERT_EQUAL_UINT32(x->session_id, holder);
+   assert_live_is_reload(s_conv, carries);
+   assert_same_in_force();
+   session_turn_end(x);
+   TEST_ASSERT_FALSE(conv_turn_lease_holder(s_conv, NULL, NULL, NULL));
+}
+
+/* A turn on @p x, whose surface has @p directive, then its history checked. */
+static void turn_on(session_t *x, const char *directive, const char *q, script_t sc) {
+   as(x);
+   s_directive = directive;
+   run_turn(s_conv, q, sc);
+   assert_live_is_reload(s_conv, NULL);
+   TEST_ASSERT_FALSE(conv_turn_lease_holder(s_conv, NULL, NULL, NULL));
+}
+
+static session_t *second_session(void) {
+   s_sessions[1] = new_session(8);
+   return s_sessions[1];
+}
+
+/* Alternating turns of every kind, each surface with its own directions:
+ * every catch-up appends the other's rows (none builds the history again). */
+static void test_two_sessions_alternate_turns_of_every_kind(void) {
+   session_t *a = s_sessions[0];
+   session_t *b = second_session();
+   turn_on(a, "DA", "Q1", (script_t){ .reply = "A1" });
+   caught_up(b, "A1"); /* opened before any turn: built from the conversation */
+   const int reloads = s_reloads;
+   turn_on(b, "DB", "Q2", (script_t){ .reply = "A2", .thinking = true, .tool_call = "toolu_b1" });
+   caught_up(a, "toolu_b1");
+   turn_on(
+       a, "DA", "Q3",
+       (script_t){ .reply = "A3", .tool_call = "call_a1", .openai = true, .tool_reasoning = true });
+   caught_up(b, "call_a1");
+   turn_on(b, "DB", "Q4", (script_t){ .reply = "A4", .tool_call = "toolu_p", .parallel = true });
+   caught_up(a, "toolu_pb");
+   turn_on(a, "DA", "Q5",
+           (script_t){ .reply = "A5", .tool_call = "call_p", .openai = true, .parallel = true });
+   caught_up(b, "call_pb");
+   turn_on(b, "DB", "Q6", (script_t){ .reply = "A6", .thinking = true });
+   caught_up(a, SIGNED);
+   turn_on(a, "DA", "Q7", (script_t){ .reply = "A7", .cancel_after = true });
+   caught_up(b, "A7");
+   turn_on(b, "DB", "Q8", (script_t){ .cancel_during = true });
+   caught_up(a, "Q8");
+   turn_on(a, "DA", "Q9", (script_t){ .tool_call = "toolu_s", .cancel_during = true });
+   caught_up(b, "toolu_s");
+   s_question_kind = MESSAGE_KIND_ENVELOPE;
+   turn_on(b, "DB", "A job finished: E1", (script_t){ .reply = "It did." });
+   s_question_kind = MESSAGE_KIND_NONE;
+   caught_up(a, "E1");
+   turn_on(a, "DA", "Q10",
+           (script_t){ .reply = "Here it is.", .tool_call = "toolu_v", .visual = VISUAL });
+   caught_up(b, "Here it is.");
+   /* One that learns its conversation in dispatch catches up there. */
+   turn_on(b, "DB", "Q11", (script_t){ .reply = "A11" });
+   s_begin_unbound = true;
+   turn_on(a, "DA", "Q12", (script_t){ .reply = "A12", .thinking = true });
+   s_begin_unbound = false;
+   TEST_ASSERT_NOT_NULL(strstr(json_object_to_json_string(a->conversation_history), "A11"));
+   caught_up(b, "A12");
+   TEST_ASSERT_EQUAL_INT(reloads, s_reloads);
+}
+
+/* A tool result's image, rebuilt from the store on either side. */
+static void test_two_sessions_share_a_tool_result_image(void) {
+   char dir[] = "/tmp/dawn_shared_img_XXXXXX";
+   TEST_ASSERT_NOT_NULL(mkdtemp(dir));
+   image_store_config_t cfg = { .max_size = 4 * 1024 * 1024, .max_per_user = 100, .data_dir = dir };
+   TEST_ASSERT_EQUAL_INT(IMAGE_STORE_SUCCESS, image_store_init(&cfg));
+   g_config.vision.max_image_size_kb = 4096;
+   session_t *a = s_sessions[0];
+   session_t *b = second_session();
+   turn_on(a, "DA", "Q1",
+           (script_t){ .reply = "A cat.", .tool_call = "toolu_i", .tool_image = true });
+   caught_up(b, PNG_BASE64_HEAD);
+   const int reloads = s_reloads;
+   turn_on(
+       b, "DB", "Q2",
+       (script_t){ .reply = "A dog.", .tool_call = "call_i", .openai = true, .tool_image = true });
+   caught_up(a, PNG_BASE64_HEAD);
+   TEST_ASSERT_EQUAL_INT(reloads, s_reloads);
+   g_config.vision.max_image_size_kb = 0;
+   image_store_shutdown();
+   blob_store_shutdown();
+}
+
+/* The number of rows DAWN posted into the conversation. */
+static int posted_rows(void) {
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_prepare_v2(s_db.db,
+                                            "SELECT COUNT(*) FROM message_unprompted p JOIN "
+                                            "messages m ON m.id = p.message_id WHERE "
+                                            "m.conversation_id = ?1",
+                                            -1, &st, NULL));
+   sqlite3_bind_int64(st, 1, s_conv);
+   const int n = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int(st, 0) : -1;
+   sqlite3_finalize(st);
+   return n;
+}
+
+/* A post made while a turn runs is written at its end, after its rows; both
+ * sessions, the one whose turn it was too, take it in at their next turn. */
+static void test_a_post_deferred_while_a_turn_runs(void) {
+   session_t *a = s_sessions[0];
+   session_t *b = second_session();
+   turn_on(a, "DA", "Q1", (script_t){ .reply = "A1" });
+   caught_up(b, "A1");
+   const int reloads = s_reloads;
+   turn_on(b, "DB", "Q2", (script_t){ .reply = "A2", .post = "Your report is ready." });
+   TEST_ASSERT_EQUAL_INT(1, posted_rows()); /* written at the turn's end */
+   caught_up(a, "A2");
+   caught_up(b, "A2");
+   /* One posted while no turn runs: written at once. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, conv_post_unprompted(s_conv, s_user, "A briefing."));
+   TEST_ASSERT_EQUAL_INT(2, posted_rows());
+   caught_up(a, NULL);
+   turn_on(a, "DA", "Q3", (script_t){ .reply = "A3" });
+   caught_up(b, "A3");
+   TEST_ASSERT_EQUAL_INT(reloads, s_reloads);
+}
+
+/* A compaction the other session applied rewrites what a reload builds: the
+ * history is built again, with its summary. */
+static void test_a_compaction_by_the_other_session(void) {
+   session_t *a = s_sessions[0];
+   session_t *b = second_session();
+   turn_on(a, "DA", "Q1", (script_t){ .reply = "A1" });
+   caught_up(b, "A1");
+   turn_on(b, "DB", "Q2", (script_t){ .reply = "A2", .thinking = true, .tool_call = "toolu_1" });
+   caught_up(a, "toolu_1");
+   turn_on(a, "DA", "Q3", (script_t){ .reply = "A3" });
+   caught_up(b, "A3");
+   turn_on(b, "DB", "Q4", (script_t){ .reply = "A4" });
+   caught_up(a, "A4");
+   turn_on(a, "DA", "Q5", (script_t){ .reply = "A5" });
+   caught_up(b, "A5");
+   s_over = true;
+   s_summary = "They talked about Q1 and Q2.";
+   turn_on(b, "DB", "Q6", (script_t){ .reply = "A6" });
+   s_over = false;
+   s_summary = NULL;
+   const int reloads = s_reloads;
+   caught_up(a, "They talked about Q1 and Q2.");
+   TEST_ASSERT_EQUAL_INT(reloads + 1, s_reloads);
+   turn_on(a, "DA", "Q7", (script_t){ .reply = "A7" });
+   caught_up(b, "A7");
+   TEST_ASSERT_EQUAL_INT(reloads + 1, s_reloads);
+}
+
+/* A boundary the other session declared leaves the reasoning before it
+ * behind: the history is built again without it. */
+static void test_a_boundary_by_the_other_session(void) {
+   session_t *a = s_sessions[0];
+   session_t *b = second_session();
+   turn_on(a, "DA", "Q1", (script_t){ .reply = "A1", .thinking = true });
+   caught_up(b, SIGNED);
+   turn_on(b, "DB", "Q2", (script_t){ .reply = "A2", .boundary = true });
+   const int reloads = s_reloads;
+   caught_up(a, "A2");
+   TEST_ASSERT_EQUAL_INT(reloads + 1, s_reloads);
+   struct json_object *reloaded = reload(s_conv);
+   char *claude = claude_request(reloaded);
+   TEST_ASSERT_NULL(strstr(claude, SIGNED)); /* A1's reasoning stays behind */
+   free(claude);
+   json_object_put(reloaded);
+   turn_on(a, "DA", "Q3", (script_t){ .reply = "A3", .thinking = true });
+   caught_up(b, SIGNED);
+}
+
+/* A re-engagement with no reply, its take-back tried as the code does it, and
+ * one whose envelope's row is taken back inside its own turn (as a
+ * re-engagement does once it knows the row): the other session never holds
+ * that envelope, and appends what the turn left. */
+static void test_a_retraction_by_the_other_session(void) {
+   session_t *a = s_sessions[0];
+   session_t *b = second_session();
+   turn_on(a, "DA", "Q1", (script_t){ .reply = "A1" });
+   caught_up(b, "A1");
+   const int reloads = s_reloads;
+   s_question_kind = MESSAGE_KIND_ENVELOPE;
+   s_retract_unanswered = true;
+   turn_on(b, "DB", "A job finished: E1", (script_t){ .reply = NULL });
+   s_retract_unanswered = false;
+   caught_up(a, "E1");
+   as(b);
+   s_retract_envelope_row = true;
+   run_turn(s_conv, "A job finished: E2", (script_t){ .reply = NULL });
+   s_retract_envelope_row = false;
+   s_question_kind = MESSAGE_KIND_NONE;
+   caught_up(a, NULL);
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(a->conversation_history), "E2"));
+   TEST_ASSERT_EQUAL_INT(reloads, s_reloads);
+}
+
+/* A new chat's first message, its conversation created after its first
+ * Claude tool call: the question itself gets its row's id (not the tool
+ * results that came after it), and the history is what a reload builds. */
+static void test_a_new_chats_first_question_saved_after_a_tool_call(void) {
+   session_clear_history(s);
+   s_new_chat = true;
+   run_turn(s_conv, "Q1", (script_t){ .reply = "A1", .tool_call = "toolu_n" });
+   s_new_chat = false;
+   pthread_mutex_lock(&s->history_mutex);
+   struct json_object *question = NULL;
+   for (size_t i = 0; i < json_object_array_length(s->conversation_history); i++) {
+      struct json_object *m = json_object_array_get_idx(s->conversation_history, i);
+      if (llm_history_is_question(m)) {
+         question = m;
+      }
+   }
+   const bool stamped = question && json_object_object_get_ex(question, "id", NULL);
+   pthread_mutex_unlock(&s->history_mutex);
+   TEST_ASSERT_TRUE(stamped);
+   assert_live_is_reload(s_conv, "toolu_n");
+}
+
+/* A row as another surface's turn stored it. */
+static int64_t add_stored(const char *role, const char *content, const char *kind, int64_t of) {
+   const conv_message_row_t row = { .role = role,
+                                    .content = content,
+                                    .kind = kind,
+                                    .context_of = of };
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(s_conv, s_user, &row, &id));
+   return id;
+}
+
+/* A withdrawal (a forgotten memory) made from the other session rewrites
+ * stored context and leaves the reasoning behind: the history is built
+ * again, without what was forgotten. */
+static void test_a_withdrawal_by_the_other_session(void) {
+   session_t *a = s_sessions[0];
+   session_t *b = second_session();
+   const int64_t q = add_stored("user", "Q0", NULL, 0);
+   add_stored("user", "--- USER MEMORY (t) ---\n- food: tacos\n--- END USER MEMORY (t) ---\n",
+              "memory", q);
+   add_stored("assistant", "A0", NULL, 0);
+   caught_up(a, "tacos");
+   caught_up(b, "tacos");
+   turn_on(a, "DA", "Q1", (script_t){ .reply = "A1", .thinking = true });
+   caught_up(b, SIGNED);
+   const int reloads = s_reloads;
+   conv_withdrawn_t w;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_withdraw(s_user, true, &w));
+   TEST_ASSERT_EQUAL_INT(1, w.n_convs);
+   conv_withdrawn_free(&w);
+   caught_up(a, "A1");
+   TEST_ASSERT_EQUAL_INT(reloads + 1, s_reloads);
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(a->conversation_history), "tacos"));
+   caught_up(b, "A1");
+   TEST_ASSERT_EQUAL_INT(reloads + 2, s_reloads);
+}
+
+/* Rows the other surface saved with a tool change among them (its tool set
+ * changed for its turn): appended as a reload has them, no rebuild. */
+static void test_a_tail_carrying_a_tool_change(void) {
+   session_t *a = s_sessions[0];
+   session_t *b = second_session();
+   turn_on(a, "DA", "Q1", (script_t){ .reply = "A1" });
+   caught_up(b, "A1");
+   const int reloads = s_reloads;
+   const int64_t q = add_stored("user", "Q2", NULL, 0);
+   add_stored("system",
+              "{\"rendered\":\"inline\",\"tools\":[{\"name\":\"weather\",\"description\":"
+              "\"The weather.\",\"input_schema\":{\"type\":\"object\"}}]}",
+              "tool_change", q);
+   add_stored("assistant", "A2", NULL, 0);
+   caught_up(a, "A2");
+   caught_up(b, "A2");
+   TEST_ASSERT_EQUAL_INT(reloads, s_reloads);
+}
+
+/* The rows of a conversation that was empty when the history was built are
+ * all its tail. */
+static void test_a_tail_from_an_empty_conversation(void) {
+   bool rebuild = true;
+   struct json_object *tail = memory_history_request_tail(s_conv, s_user, 0, &rebuild);
+   TEST_ASSERT_NOT_NULL(tail);
+   TEST_ASSERT_FALSE(rebuild);
+   TEST_ASSERT_EQUAL_INT(0, (int)json_object_array_length(tail));
+   json_object_put(tail);
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_message_ex(s_conv, s_user, "user", "Q", &id));
+   tail = memory_history_request_tail(s_conv, s_user, 0, &rebuild);
+   TEST_ASSERT_NOT_NULL(tail);
+   TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(tail));
+   json_object_put(tail);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_plain_turns);
@@ -986,5 +1441,15 @@ int main(void) {
    RUN_TEST(test_a_tool_result_with_an_image);
    RUN_TEST(test_a_reply_with_a_rendered_visual);
    RUN_TEST(test_a_compaction_at_the_seam);
+   RUN_TEST(test_two_sessions_alternate_turns_of_every_kind);
+   RUN_TEST(test_two_sessions_share_a_tool_result_image);
+   RUN_TEST(test_a_post_deferred_while_a_turn_runs);
+   RUN_TEST(test_a_compaction_by_the_other_session);
+   RUN_TEST(test_a_boundary_by_the_other_session);
+   RUN_TEST(test_a_retraction_by_the_other_session);
+   RUN_TEST(test_a_new_chats_first_question_saved_after_a_tool_call);
+   RUN_TEST(test_a_withdrawal_by_the_other_session);
+   RUN_TEST(test_a_tail_carrying_a_tool_change);
+   RUN_TEST(test_a_tail_from_an_empty_conversation);
    return UNITY_END();
 }

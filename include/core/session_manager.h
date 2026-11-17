@@ -35,6 +35,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/conv_sync_point.h"
 #include "core/conv_turn_lease.h"
 #include "core/prompt_parts.h"  // For composed_prompt_t
 #include "core/text_filter.h"   // For cited_tag_filter_state_t
@@ -561,6 +562,15 @@ typedef struct session {
    // session, or a fresh chat before its first turn).
    _Atomic int64_t history_conversation_id;
 
+   // The stored state of that conversation the live history was built at
+   // (conv_sync_point.h): set where a history is loaded from the database or a
+   // turn holding the conversation ends on it, compared when a turn begins.
+   // Valid only while history_sync_conv is history_conversation_id (0 =
+   // unknown: the next turn builds the history again).  Guarded by
+   // history_mutex.
+   conv_sync_point_t history_sync;
+   int64_t history_sync_conv;
+
    // The running turn's own history (owned ref, guarded by history_mutex) and the
    // conversation it belongs to.  Set by session_turn_begin(): the turn pins the
    // live history when it holds the turn's conversation, and otherwise that
@@ -588,6 +598,7 @@ typedef struct session {
    uint64_t turn_lease_token;
    int64_t turn_lease_conv;
    bool turn_unsent;
+   bool turn_stale_history;   // its catch-up failed: the history's sync point is unknown at its end
    bool turn_context_reset;   // the live history it wrote was reset under it (a clear)
    char *turn_pending_user;   // persisted form of a user message not yet written
    char *turn_pending_reply;  // the reply, likewise

@@ -121,6 +121,18 @@ static const auth_db_stmt_def_t s_msg_stmts[] = {
      "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 AND m.kind IS NULL "
      "ORDER BY m.id DESC LIMIT ?4",
      &s_db.stmt_msg_posted_after },
+   /* kind-rows: the replay reads every row, so its newest is any row's.
+    * What a reload of the conversation is built from: its newest row (through
+    * idx_messages_conversation) and the columns the replay reads. */
+   { "conv_sync_point",
+     "SELECT (SELECT COALESCE(MAX(m.id), 0) FROM messages m WHERE m.conversation_id = c.id), "
+     "c.context_watermark_msg_id, c.reasoning_floor_msg_id, c.reasoning_floor_pending, "
+     "c.prefix_hash, c.tools_hash, c.in_force_hash FROM conversations c "
+     "WHERE c.id = ?1 AND c.user_id = ?2",
+     &s_db.stmt_conv_sync_point },
+   /* A frozen prompt, tool set or in-force record, by its hash. */
+   { "prompt_blob_get", "SELECT bytes FROM prompt_blobs WHERE hash = ?",
+     &s_db.stmt_prompt_blob_get },
    /* The v67 watermark, with a monotonic guard so a stale async compaction
     * can't rewind one a later pass already advanced. */
    { "conv_set_watermark",
@@ -884,6 +896,41 @@ void conv_db_posted_free(conv_posted_row_t *rows, int n) {
       free(rows[i].content);
       rows[i].content = NULL;
    }
+}
+
+/* A nullable hash column into @p out ("" when NULL). */
+static void hash_column(sqlite3_stmt *st, int col, char out[DAWN_SHA256_HEX_LEN]) {
+   const char *v = (const char *)sqlite3_column_text(st, col);
+   snprintf(out, DAWN_SHA256_HEX_LEN, "%s", v ? v : "");
+}
+
+int conv_db_sync_point_get(int64_t conv_id, int user_id, conv_sync_point_t *out) {
+   if (!out) {
+      return AUTH_DB_INVALID;
+   }
+   memset(out, 0, sizeof(*out));
+   if (conv_id <= 0 || user_id <= 0) {
+      return AUTH_DB_NOT_FOUND;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = s_db.stmt_conv_sync_point;
+   sqlite3_reset(st);
+   sqlite3_bind_int64(st, 1, conv_id);
+   sqlite3_bind_int(st, 2, user_id);
+   const int rc = sqlite3_step(st);
+   if (rc == SQLITE_ROW) {
+      out->max_id = sqlite3_column_int64(st, 0);
+      out->watermark = sqlite3_column_int64(st, 1);
+      out->floor = sqlite3_column_int64(st, 2);
+      out->floor_pending = sqlite3_column_int64(st, 3);
+      hash_column(st, 4, out->prefix_hash);
+      hash_column(st, 5, out->tools_hash);
+      hash_column(st, 6, out->in_force_hash);
+   }
+   sqlite3_reset(st);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_ROW ? AUTH_DB_SUCCESS
+                           : (rc == SQLITE_DONE ? AUTH_DB_NOT_FOUND : AUTH_DB_FAILURE);
 }
 
 /* Clear stored blocks at or below @p watermark in @p conv_id, a batch per lock

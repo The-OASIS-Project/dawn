@@ -617,9 +617,12 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
                                   int n_fired) {
    /* Hydrate the parent conversation's history so the model reacts in context. */
    size_t restored = 0;
+   /* Read before the load: the turn's catch-up pulls what lands after. */
+   conv_sync_point_t at;
+   const bool at_ok = conv_db_sync_point_get(w->parent_conv, w->user_id, &at) == AUTH_DB_SUCCESS;
    struct json_object *hist = memory_history_load_for_llm(w->parent_conv, w->user_id, &restored);
    if (hist != NULL) {
-      session_replace_history(s, hist, w->parent_conv);
+      session_replace_history_at(s, hist, w->parent_conv, w->user_id, at_ok ? &at : NULL);
    }
 
    job_persist_ctx_t pctx = { w->parent_conv, w->user_id };

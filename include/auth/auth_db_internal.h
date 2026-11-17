@@ -495,6 +495,8 @@ typedef struct {
    sqlite3_stmt *stmt_msg_get_llm;      /* replay read with llm_blocks (auth_db_messages.c) */
    sqlite3_stmt *stmt_msg_llm_sizes;    /* block sizes for the per-load budget */
    sqlite3_stmt *stmt_msg_posted_after; /* DAWN's posts after a row (conv_db_posted_after) */
+   sqlite3_stmt *stmt_conv_sync_point;  /* what a reload is built from (conv_db_sync_point_get) */
+   sqlite3_stmt *stmt_prompt_blob_get;  /* a stored prompt blob's bytes, by hash */
    sqlite3_stmt *stmt_msg_gc_blocks;    /* blocks dropped below the watermark */
    sqlite3_stmt *stmt_msg_sweep_blocks; /* the same, across conversations */
    sqlite3_stmt *stmt_msg_bind_images;  /* a row's images made permanent with it */
@@ -777,7 +779,7 @@ typedef struct {
 } auth_db_stmt_def_t;
 
 /** How many statements auth_db_messages.c's table holds (checked there). */
-#define AUTH_DB_MESSAGES_STMT_COUNT 10
+#define AUTH_DB_MESSAGES_STMT_COUNT 12
 
 /**
  * @brief Prepare each statement in @p defs, in order.

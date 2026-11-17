@@ -31,6 +31,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "auth/auth_db_messages.h"
 #include "core/conv_turn_lease.h"
 #include "core/focus/focus_handles.h"
 #include "core/session_compaction.h"
@@ -697,6 +698,16 @@ void session_stamp_last_message_id(session_t *session, const char *role, int64_t
       }
       goto unlock;
    }
+   const bool question = strcmp(role, "user") == 0;
+   /* The turn's own question is stamped where it is: a tool-results message
+    * (role "user" too, not yet saved) can sit after it. */
+   if (question && session->turn_active && session->turn_user_msg &&
+       llm_history_is_question(session->turn_user_msg) &&
+       !json_object_object_get_ex(session->turn_user_msg, "id", NULL)) {
+      json_object_object_add(session->turn_user_msg, "id", json_object_new_int64(msg_id));
+      session->last_user_msg_id = msg_id;
+      goto unlock;
+   }
    int len = (int)json_object_array_length(hist);
    const int lowest = (strcmp(role, "assistant") == 0) ? len - 1 : 0;
    for (int i = len - 1; i >= lowest && i >= 0; i--) {
@@ -710,6 +721,8 @@ void session_stamp_last_message_id(session_t *session, const char *role, int64_t
          continue;
       /* A message's row, never a piece of request context's */
       if (llm_history_is_context(entry))
+         continue;
+      if (question && !llm_history_is_question(entry))
          continue;
       /* Skip entries that already have an ID stamped */
       if (json_object_object_get_ex(entry, "id", NULL))
@@ -908,6 +921,7 @@ void session_new_context_locked(session_t *session, const char *system_prompt) {
       }
    }
    atomic_store(&session->history_conversation_id, 0);
+   session->history_sync_conv = 0;
    session->context_started_at = time(NULL);
    /* The new context has none of the old one's visual guidelines, nor its
     * unsaved exchange or waiting facts.  (Which retrieved items it shows is
@@ -946,6 +960,13 @@ void session_replace_history(session_t *session, struct json_object *history, in
       return;
    }
    pthread_mutex_lock(&session->history_mutex);
+   session_install_history_locked(session, history, conv_id);
+   pthread_mutex_unlock(&session->history_mutex);
+}
+
+void session_install_history_locked(session_t *session,
+                                    struct json_object *history,
+                                    int64_t conv_id) {
    llm_cache_monitor_history_rewritten(session->session_id);
    if (session->conversation_history) {
       json_object_put(session->conversation_history);
@@ -961,7 +982,7 @@ void session_replace_history(session_t *session, struct json_object *history, in
    session_compaction_reset_locked(session);
    tool_result_store_reset_locked(session);
    atomic_store(&session->history_conversation_id, conv_id > 0 ? conv_id : 0);
-   pthread_mutex_unlock(&session->history_mutex);
+   session->history_sync_conv = 0; /* its caller records the point it was loaded at */
 }
 
 void session_bind_history_conversation(session_t *session, int64_t conv_id) {
@@ -969,6 +990,9 @@ void session_bind_history_conversation(session_t *session, int64_t conv_id) {
       return;
    }
    pthread_mutex_lock(&session->history_mutex);
+   if (atomic_load(&session->history_conversation_id) != conv_id) {
+      session->history_sync_conv = 0; /* not loaded from it: its point is unknown */
+   }
    atomic_store(&session->history_conversation_id, conv_id > 0 ? conv_id : 0);
    pthread_mutex_unlock(&session->history_mutex);
 }
@@ -977,6 +1001,10 @@ static _Atomic(session_history_loader_fn) s_history_loader;
 
 void session_set_history_loader(session_history_loader_fn loader) {
    atomic_store(&s_history_loader, loader);
+}
+
+session_history_loader_fn session_history_loader_get(void) {
+   return atomic_load(&s_history_loader);
 }
 
 /* True when @p hist holds nothing but system messages, request context and
@@ -1121,6 +1149,8 @@ static void pin_own_copy_locked(session_t *session,
  * sees the other's messages.  Loads outside history_mutex, then re-decides under
  * it: the live history may have been replaced meanwhile. */
 static void pin_turn_for_conversation(session_t *session, int64_t conv_id, int user_id) {
+   /* What other sessions wrote to it since this history was built. */
+   session_catch_up(session, conv_id, user_id);
    pthread_mutex_lock(&session->history_mutex);
    const bool pinned = atomic_load(&session->history_conversation_id) == conv_id &&
                        try_pin_live_locked(session, conv_id, false);
@@ -1202,6 +1232,7 @@ static void turn_begin_impl(session_t *session,
    session->turn_history_conv = conv_id > 0 ? conv_id : 0;
    session->turn_awaits_conversation = false;
    session->turn_background = background;
+   session->turn_stale_history = false;
    session->turn_from_visual = false;
    free(session->turn_attached);
    session->turn_attached = NULL;
@@ -1408,6 +1439,11 @@ void session_turn_set_conversation(session_t *session, int64_t conv_id, bool may
    int count = 0;
    int owner = 0;
    set_conversation_impl(session, conv_id, may_load, facts, &count, &owner);
+   if (took) {
+      /* Just got the conversation: the live history that holds it is brought
+       * up to date first (a turn that began holding it was, at its start). */
+      session_catch_up(session, conv_id, owner);
+   }
    /* What the turn saved before it knew its conversation. */
    session_record_fact_sources(facts, count, conv_id, owner);
    (void)focus_handles_flush(session, conv_id, 0);
@@ -2048,6 +2084,33 @@ static bool history_holds_reply(struct json_object *hist,
    return false;
 }
 
+/* Caller holds history_mutex.  Whether ending the turn first hands its
+ * caller messages to write (see turn_end_impl). */
+static bool writes_unsaved_locked(const session_t *session, bool caller_writes) {
+   return session->turn_active && caller_writes && session->turn_history_conv > 0 &&
+          (session->turn_pending_user || session->turn_pending_reply || session->turn_prior_user ||
+           session->turn_prior_reply);
+}
+
+/* The sync point of the conversation the turn ending on this thread holds,
+ * read while it still holds it and once it has nothing left to write: every
+ * row of the conversation is then one its history has (the turn's own, and
+ * what was there when it began).  Posts queued meanwhile are written by the
+ * release after this, so every session reading it later appends them.
+ * Returns the conversation (0 = nothing read). */
+static int64_t turn_end_sync_point(session_t *session, bool caller_writes, conv_sync_point_t *out) {
+   pthread_mutex_lock(&session->history_mutex);
+   const bool ending = session->turn_active && session_turn_token() == session->turn_owner_token &&
+                       !writes_unsaved_locked(session, caller_writes);
+   const int64_t conv = ending ? session->turn_lease_conv : 0;
+   const int user = session->turn_user_id;
+   pthread_mutex_unlock(&session->history_mutex);
+   if (conv <= 0 || user <= 0 || conv_db_sync_point_get(conv, user, out) != AUTH_DB_SUCCESS) {
+      return 0;
+   }
+   return conv;
+}
+
 /* Ends the turn, or hands out what it has yet to write; see
  * session_turn_finish().  @p out may be NULL (the caller writes nothing). */
 static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
@@ -2057,6 +2120,8 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
    if (!session) {
       return SESSION_TURN_ENDED;
    }
+   conv_sync_point_t end_point;
+   const int64_t end_conv = turn_end_sync_point(session, out != NULL, &end_point);
    pthread_mutex_lock(&session->history_mutex);
    if (session->turn_active && session_turn_token() != session->turn_owner_token) {
       /* Not this thread's turn: ending it would pull the history out from under
@@ -2066,9 +2131,7 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
                    session->session_id);
       return SESSION_TURN_ENDED;
    }
-   if (session->turn_active && out && session->turn_history_conv > 0 &&
-       (session->turn_pending_user || session->turn_pending_reply || session->turn_prior_user ||
-        session->turn_prior_reply)) {
+   if (writes_unsaved_locked(session, out != NULL)) {
       /* The conversation is known and messages wait for it: the caller writes
        * them while the turn is still open, so their row ids are stamped on the
        * turn's own history, then finishes again. */
@@ -2111,6 +2174,7 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
          json_object_put(session->conversation_history);
          session->conversation_history = json_object_get(own);
          session->visual_modules_loaded[0] = '\0';
+         session->history_sync_conv = 0; /* recorded below, from this turn's end */
          /* No re-telling of device events: the copy was told them. */
          atomic_store(&session->history_conversation_id, viewed_conv);
          OLOG_INFO("Session %u: adopted conversation %lld's history as the session history",
@@ -2132,6 +2196,7 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
          json_object_put(session->conversation_history);
          session->conversation_history = json_object_get(own);
          session->visual_modules_loaded[0] = '\0';
+         session->history_sync_conv = 0; /* recorded below, from this turn's end */
          /* No re-telling of device events: the copy was told them. */
       } else if (reply && !history_holds_reply(live, reply, session->turn_reply_mirror)) {
          struct json_object *copy = NULL;
@@ -2143,6 +2208,21 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
    const bool wrote_unbound_live = session->turn_history &&
                                    session->turn_history == session->conversation_history &&
                                    live_unbound_locked(session);
+   /* The history the turn ran on is the live one, holding its conversation:
+    * it has every row the point read at its end counts. */
+   if (session->turn_stale_history) {
+      /* It ran on a history its catch-up couldn't bring up to date: unknown,
+       * so the next turn builds it again.  A history loaded for another
+       * conversation meanwhile keeps the point that load recorded. */
+      if (session->history_sync_conv == end_conv) {
+         session->history_sync_conv = 0;
+      }
+   } else if (end_conv > 0 && session->turn_history &&
+              session->turn_history == session->conversation_history &&
+              atomic_load(&session->history_conversation_id) == end_conv) {
+      session->history_sync = end_point;
+      session->history_sync_conv = end_conv;
+   }
    if (session->turn_history) {
       json_object_put(session->turn_history);
       session->turn_history = NULL;
