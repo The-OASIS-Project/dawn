@@ -1029,7 +1029,7 @@ def test_close_collects_before_counting(store, tmp_path):
             raise GitError("bundle failed")
          self.calls.append(keep_on_empty)
          return {**await super().collect(name, task_id, branch, base), "uncommitted": 0}
-   from agent_gateway.repos import GitError
+   from agent_gateway.github import GitError
    r = runner(store)
    r.repos = Recording()
    finished_with_clone(store, tmp_path)            # completed: collected as it finished
@@ -1054,7 +1054,7 @@ def test_close_collects_before_counting(store, tmp_path):
 
 def test_prune_collects_before_removing_and_keeps_what_it_cant(store, tmp_path):
    """A cancelled run's clone is collected before it goes; unreadable, it stays."""
-   from agent_gateway.repos import GitError
+   from agent_gateway.github import GitError
 
    class Recording(FakeRepos):
       fail = False
@@ -1267,7 +1267,7 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    assert out["protected"] == ["g"] and out["protected_count"] == 1
    assert git("-C", str(tmp_path / "mirrors/r.git"), "log", "-1", "--format=%s",
               "refs/agent/aaaa0001") == "agent work"
-   from agent_gateway.repos import GitError
+   from agent_gateway.github import GitError
    with pytest.raises(GitError, match="github.com"):
       asyncio.run(repos.publish("r", "aaaa0001", "agent/aaaa0001-x", "main", "tok", False,
                                 "t", "b"))
@@ -1822,7 +1822,9 @@ class GitHub:
          answer = {"login": self.login}
       else:
          answer = self.prs
-      return io.BytesIO(json.dumps(answer).encode())
+      resp = io.BytesIO(json.dumps(answer).encode())
+      resp.status, resp.headers = 200, {}
+      return resp
 
 
 EXISTS = (422, {"message": "Validation Failed", "errors": [
@@ -1831,13 +1833,13 @@ EXISTS = (422, {"message": "Validation Failed", "errors": [
 
 
 def publish_against(tmp_path, monkeypatch, gh, earlier=None):
-   from agent_gateway import repos as repos_mod
+   from agent_gateway import github, repos as repos_mod
 
    async def pushed(argv, **kw):
       return b""
    monkeypatch.setattr(repos_mod, "run", pushed)
-   monkeypatch.setattr(repos_mod.urllib.request, "urlopen", gh)
-   monkeypatch.setattr(repos_mod, "_token_logins", {})
+   monkeypatch.setattr(github.urllib.request, "urlopen", gh)
+   monkeypatch.setattr(github, "_token_logins", {})
    repos = Repos({"r": {"url": "https://github.com/o/r", "base": "main"}},
                  str(tmp_path), str(tmp_path), [], str(tmp_path), str(tmp_path / "g"))
    return asyncio.run(repos.publish("r", "abc", "agent/t1", "main", "tok", True, "t", "b",
@@ -1845,7 +1847,7 @@ def publish_against(tmp_path, monkeypatch, gh, earlier=None):
 
 
 def test_existing_pull_request_is_adopted_only_when_ours(tmp_path, monkeypatch):
-   from agent_gateway.repos import GitError
+   from agent_gateway.github import GitError
    mine = [{"html_url": "https://github.com/o/r/pull/7", "user": {"login": "Dawn-Bot"}}]
    gh = GitHub(EXISTS, mine)
    assert publish_against(tmp_path, monkeypatch, gh)["pr_url"] == \
@@ -1879,7 +1881,7 @@ def test_error_text_never_raises():
    import http.client
    import io
    import urllib.error
-   from agent_gateway.repos import error_text
+   from agent_gateway.github import error_text
 
    class Cut(io.BytesIO):
       def read(self, *a):

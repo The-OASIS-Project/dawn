@@ -20,6 +20,7 @@
 # JSON replies), each needing DAWN's bearer token.  DAWN pulls events with a
 # long-poll; nothing here ever calls DAWN.
 
+import asyncio
 import functools
 import hmac
 import json
@@ -35,7 +36,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
-from .repos import GitError
+from . import github
+from .github import GitError
 from .runner import PR_FOOTER, body_sha256, pr_body
 
 MAX_WAIT_S = 25
@@ -260,6 +262,66 @@ def build(runner, cfg) -> MCPServer:
       t = task_of(dawn_user_id, task_id, client_ref)
       closed_check(t)
       return await runner.repos.tree(t["repo"], t["id"], t["base"], path)
+
+   # --- reading GitHub pull requests: any repo the token can read ---
+
+   def github_token() -> str:
+      if not runner.cfg.github_token:
+         raise ValueError("the gateway has no GitHub token (AGENT_GATEWAY_GITHUB_TOKEN)")
+      return runner.cfg.github_token
+
+   def pull_request(dawn_user_id: int, ref: str | None, repo: str | None,
+                    client_ref: str | None) -> tuple[str, str, int]:
+      """The pull request a call names: `ref` (with `repo`), or the one the task
+      `client_ref` published."""
+      if client_ref:
+         t = task_of(dawn_user_id, None, client_ref)
+         ref = (json.loads(t["published"]) if t["published"] else {}).get("pr_url")
+         if not ref:
+            raise ValueError("that job hasn't opened a pull request")
+      return github.parse_pr_ref(ref, repo, runner.cfg.repos)
+
+   def pr_context(dawn_user_id: int, owner: str, name: str, number: int) -> dict:
+      """The configured repo it is in (the agent can work on it) and the user's
+      task that published it (its client_ref), or null."""
+      url = f"{github.GITHUB_WEB}{owner}/{name}/pull/{number}".lower()
+      # A closed task can't be revised, so it isn't the one to work on it.
+      job = next((ref for ref, published in store.published_tasks(dawn_user_id)
+                  if str(json.loads(published).get("pr_url") or "").lower() == url), None)
+      return {"configured_repo": github.configured_repo(owner, name, runner.cfg.repos),
+              "job": job}
+
+   @tool
+   async def pr_status(dawn_user_id: int, ref: str | None = None, repo: str | None = None,
+                       client_ref: str | None = None) -> dict:
+      """A GitHub pull request's state: ref is a github.com URL, owner/repo#N, or N with
+      repo (a configured repo or owner/repo; alone when one repo is configured), or
+      client_ref names the task that published it.  Checks (failing required first),
+      behind its base, reviews, requested reviewers, copilot (requested, reviewed_head,
+      reviewed_earlier or
+      none), thread counts; configured_repo and job say whether the agent can work on it."""
+      owner, name, number = pull_request(dawn_user_id, ref, repo, client_ref)
+      res = await asyncio.to_thread(github.pr_status, owner, name, number, github_token())
+      return {**res, **pr_context(dawn_user_id, owner, name, number)}
+
+   @tool
+   async def pr_threads(dawn_user_id: int, ref: str | None = None, repo: str | None = None,
+                        client_ref: str | None = None, all: bool = False) -> dict:
+      """A pull request's unresolved review threads (all: resolved ones too), each keyed
+      by comment_id (its first comment's id; n is for display), its reviews with a body
+      and its newest conversation comments.  The pull request is named as for pr_status."""
+      owner, name, number = pull_request(dawn_user_id, ref, repo, client_ref)
+      return await asyncio.to_thread(github.pr_threads, owner, name, number, github_token(),
+                                     all)
+
+   @tool
+   async def pr_check_log(dawn_user_id: int, check: str, ref: str | None = None,
+                          repo: str | None = None, client_ref: str | None = None) -> dict:
+      """An excerpt of a pull request's GitHub Actions check log (its error lines, then
+      its end): check is a check's name or job_id as pr_status lists it."""
+      owner, name, number = pull_request(dawn_user_id, ref, repo, client_ref)
+      return await asyncio.to_thread(github.pr_check_log, owner, name, number, check,
+                                     github_token())
 
    @tool
    async def grants_list(dawn_user_id: int) -> dict:

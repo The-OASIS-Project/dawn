@@ -38,8 +38,8 @@ import os
 import re
 import tempfile
 import urllib.error
-import urllib.parse
-import urllib.request
+
+from .github import GitError, adopt_pull_request, error_text, github_url, open_pull_request
 
 log = logging.getLogger("agent-gateway")
 
@@ -67,15 +67,6 @@ FILES_CAP = 2000          # changed files in one changes listing (protected firs
 TREE_CAP = 2000           # entries in one folder listing
 COMMITS_CAP = 100
 CLAUDE_MD_CAP = 64 * 1024
-
-GITHUB_API = "https://api.github.com"
-GITHUB_API_VERSION = "2022-11-28"
-GITHUB_TIMEOUT_S = 30
-
-
-class GitError(Exception):
-   pass
-
 
 async def run(argv: list[str], cwd: str | None = None, env: dict | None = None,
               stdin: str | None = None) -> bytes:
@@ -473,10 +464,10 @@ class Repos:
       mirror to `branch`; optionally open a PR.  The token goes in a header, never
       in argv; no force push."""
       url = self.repos[name]["url"]
-      m = re.match(r"https://github\.com/([^/]+)/([^/.]+?)(\.git)?$", url)
-      if not m:
+      found = github_url(url)
+      if not found or found[2] is not None:
          raise GitError("publishing needs an https://github.com/owner/repo URL")
-      owner, repo = m.group(1), m.group(2)
+      owner, repo = found[0], found[1]
       basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
       env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.mirrors_dir,
              "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": "1",
@@ -514,88 +505,3 @@ class Repos:
                raise
             result["pr_url"] = earlier_pr
       return result
-
-
-def github_headers(token: str) -> dict:
-   return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-           "X-GitHub-Api-Version": GITHUB_API_VERSION}
-
-
-def open_pull_request(owner, repo, token, head, base, title, body) -> str:
-   req = urllib.request.Request(
-      f"{GITHUB_API}/repos/{owner}/{repo}/pulls", method="POST",
-      data=json.dumps({"title": title, "head": head, "base": base, "body": body}).encode(),
-      headers=github_headers(token))
-   with urllib.request.urlopen(req, timeout=GITHUB_TIMEOUT_S) as resp:
-      return json.load(resp)["html_url"]
-
-
-def github_get(path: str, token: str) -> dict | list:
-   """GET `path` from GitHub's API, parsed from JSON."""
-   req = urllib.request.Request(f"{GITHUB_API}{path}", headers=github_headers(token))
-   with urllib.request.urlopen(req, timeout=GITHUB_TIMEOUT_S) as resp:
-      return json.load(resp)
-
-
-def error_text(e: urllib.error.HTTPError) -> str:
-   """GitHub's error answer, lowercased; "" when it can't be read."""
-   try:
-      return e.read().decode(errors="replace").lower()
-   except Exception:  # a cut-off body raises IncompleteRead, not an OSError
-      return ""
-
-
-_token_logins: dict[str, str] = {}  # token -> its user's login, for the life of the process
-
-
-def token_login(token: str) -> str:
-   """The token's user's login, lowercased; asked of GitHub once per process."""
-   if token not in _token_logins:
-      login = github_get("/user", token).get("login")
-      if not login:
-         raise GitError("GitHub didn't say whose the token is")
-      _token_logins[token] = login.lower()  # logins ignore case
-   return _token_logins[token]
-
-
-def adopt_pull_request(owner, repo, token, branch, base, earlier_pr) -> str:
-   """The open pull request GitHub says the branch already has, when this token's
-   user opened it; anyone else's is refused by name, never taken over."""
-   q = urllib.parse.urlencode({"head": f"{owner}:{branch}", "base": base, "state": "open"})
-   try:
-      prs = github_get(f"/repos/{owner}/{repo}/pulls?{q}", token)
-   except (OSError, ValueError):
-      if earlier_pr:
-         return earlier_pr
-      raise
-   if not prs:
-      if earlier_pr:
-         return earlier_pr
-      raise GitError("GitHub says a pull request for the branch already exists, but none "
-                     "is open for it")
-   pr = prs[0]
-   url = pr.get("html_url")
-   if not url:
-      raise GitError("GitHub listed the branch's pull request without its address")
-   try:
-      mine = str((pr.get("user") or {}).get("login") or "").lower() == token_login(token)
-   except (OSError, ValueError):
-      if earlier_pr:  # who the token is couldn't be read: the PR this task knew
-         return earlier_pr
-      raise
-   if not mine:
-      raise GitError(f"the branch already has a pull request opened by someone else: {url}")
-   return url
-
-
-def pr_state(pr_url: str, token: str) -> str | None:
-   """The pull request at `pr_url` (https://github.com/o/r/pull/N): "open",
-   "merged" or "closed", or None when it can't be read."""
-   m = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)$", pr_url)
-   if not m:
-      return None
-   try:
-      pr = github_get(f"/repos/{m.group(1)}/{m.group(2)}/pulls/{m.group(3)}", token)
-   except (OSError, ValueError):
-      return None
-   return "merged" if pr.get("merged_at") else pr.get("state")
