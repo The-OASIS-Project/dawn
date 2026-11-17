@@ -147,12 +147,19 @@ static int webui_restore_session_context(session_t *session,
    if (count_out) {
       *count_out = 0;
    }
+   /* The point the history is built at: read first, and only when @p conv
+    * (read by the caller before it) still has its compaction, whose summary
+    * the build uses. */
+   conv_sync_point_t at;
+   const bool at_ok = conv_db_sync_point_get(conv_id, user_id, &at) == AUTH_DB_SUCCESS &&
+                      at.watermark == conv->context_watermark_msg_id;
    int count = 0;
    json_object *hist = webui_build_conversation_context(user_id, conv, conv_id, &count);
    if (!hist) {
       return FAILURE;
    }
-   session_replace_history(session, hist, conv_id); /* a new context: its dedup state too */
+   /* A new context (its dedup state too), and the point it was built at. */
+   session_replace_history_at(session, hist, conv_id, user_id, at_ok ? &at : NULL);
    webui_apply_conversation_llm_config(session, conv);
    if (count_out) {
       *count_out = count;

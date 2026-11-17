@@ -974,6 +974,19 @@
    }
 
    /**
+    * Put images back as pending (a message that was never sent), up to the limit.
+    * @param {Object[]} images - pendingImages entries ({id, mimeType, previewUrl})
+    */
+   function restoreImages(images) {
+      const state = DawnState.visionState;
+      const room = Math.max(0, state.maxImages - state.pendingImages.length);
+      images.slice(0, room).forEach((img) => state.pendingImages.push(img));
+      rebuildPreviews();
+      updateCounter();
+      return images.slice(room); // the ones the limit left no room for
+   }
+
+   /**
     * Update vision limits from server config
     * Called when config response is received with vision_limits
     * @param {Object} limits - Server-provided limits
@@ -1250,6 +1263,7 @@
       init,
       clearImage, // Legacy alias
       clearImages,
+      restoreImages,
       checkVisionSupport,
       updateLimits,
       // Multi-image API

@@ -36,6 +36,7 @@
 
 #include "auth/auth_db_conv_prefix.h"
 #include "auth/auth_db_internal.h"
+#include "core/conv_turn_lease.h"
 #include "core/outside_kind.h"
 #include "llm/llm_context_text.h"
 #include "logging.h"
@@ -127,6 +128,18 @@ int conv_db_create_ex(int user_id,
                       const char *origin,
                       bool is_private,
                       int64_t *conv_id_out) {
+   return conv_db_create_claimed(user_id, title, origin, is_private, NULL, conv_id_out);
+}
+
+int conv_db_create_claimed(int user_id,
+                           const char *title,
+                           const char *origin,
+                           bool is_private,
+                           conv_create_claim_t *claim,
+                           int64_t *conv_id_out) {
+   if (claim) {
+      claim->claimed = false;
+   }
    if (user_id <= 0 || !conv_id_out) {
       return AUTH_DB_INVALID;
    }
@@ -193,6 +206,10 @@ int conv_db_create_ex(int user_id,
 
    AUTH_DB_UNLOCK();
 
+   /* Before the list is told: a turn begun from it then waits for the creator. */
+   if (claim) {
+      claim->claimed = conv_turn_lease_claim_new(*conv_id_out, claim->session, claim->token);
+   }
    OLOG_INFO("Created %s%s conversation %lld for user %d", is_private ? "private " : "",
              safe_origin, (long long)*conv_id_out, user_id);
    conversation_list_changed_notify(user_id, *conv_id_out, CONV_LIST_CHANGE_CREATED);

@@ -1258,6 +1258,30 @@ int conv_db_create_ex(int user_id,
                       bool is_private,
                       int64_t *conv_id_out);
 
+/** A lease to take on a conversation as it is created (conv_db_create_claimed). */
+typedef struct {
+   uint32_t session; /* the holder's session id, for diagnostics */
+   uint64_t token;   /* from conv_turn_lease_new_token() */
+   bool claimed;     /* out: taken; release it with @c token once its rows are written */
+} conv_create_claim_t;
+
+/**
+ * @brief conv_db_create_ex(), taking the new conversation's turn lease
+ *        (conv_turn_lease.h) before anyone is told it exists
+ *
+ * For a creator that writes the new conversation's first rows itself (or a
+ * turn that will): no turn begun from the conversation list can come in
+ * between.  The claim never waits (nothing else knows the id).
+ *
+ * @param claim In: who claims; out: claimed (may be NULL: no claim)
+ */
+int conv_db_create_claimed(int user_id,
+                           const char *title,
+                           const char *origin,
+                           bool is_private,
+                           conv_create_claim_t *claim,
+                           int64_t *conv_id_out);
+
 /**
  * @brief Reassign a conversation to a different user (admin only)
  *

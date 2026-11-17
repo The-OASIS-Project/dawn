@@ -70,6 +70,11 @@ static const char *const s_features[] = {
     * sent as a JSON response to that connection while the message is handled
     * echoes it, and an error also names the message's type as request_type. */
    "request_refs",
+   /* One turn per conversation: a turn sent while another runs on its
+    * conversation waits (turn_waiting, then the reply; or turn_unsent if
+    * stopped first, nothing saved), and stop_other_reply stops the turn it
+    * waits for. */
+   "turn_wait",
 };
 
 /* The email panel's check (webui_email_panel.c); a build without the panel has

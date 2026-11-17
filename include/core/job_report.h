@@ -27,6 +27,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "core/conv_post.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -51,13 +53,17 @@ char *job_report_take(struct session *s, const char *system_prompt, const char *
 /**
  * @brief Post @p text into conversation @p parent_conv as DAWN's own message:
  *        an unprompted assistant row (shown and replayed, never extracted),
- *        and tell its open tabs.
- * @return SUCCESS or FAILURE.
+ *        and tell its open tabs (conv_post_unprompted(): queued while a turn
+ *        runs there, written at its end).
+ * @return SUCCESS (written or queued) or FAILURE.
  */
 int job_report_post(int64_t parent_conv, int user_id, const char *text);
 
-/** job_report_post(), giving the posted message's id in @p msg_id_out. */
-int job_report_post_ex(int64_t parent_conv, int user_id, const char *text, int64_t *msg_id_out);
+/** job_report_post(), calling @p on_written (may be NULL) with the row's id once written. */
+int job_report_post_ex(int64_t parent_conv,
+                       int user_id,
+                       const char *text,
+                       conv_post_written_fn on_written);
 
 #ifdef __cplusplus
 }

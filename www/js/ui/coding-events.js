@@ -510,7 +510,11 @@
       if (!reqs.length) {
          if (focused) {
             // The card is answered: focus the trail's latest line instead.
-            const last = t.lastElementChild;
+            let last = t.lastElementChild;
+            // A held question (DawnTurnWait) sits last; the trail ends above it.
+            if (last && last.classList.contains('turn-wait-entry')) {
+               last = last.previousElementSibling;
+            }
             if (last) {
                last.setAttribute('tabindex', '-1');
                last.focus();
@@ -699,14 +703,18 @@
       const tool = el.classList.contains('coding-step');
       if (!tool && !el.classList.contains('coding-note')) return false;
       const cards = transcript.querySelector('.coding-cards');
-      let group = cards ? cards.previousElementSibling : transcript.lastElementChild;
+      // Steps go above the answer cards, and above a held question (DawnTurnWait)
+      // that stays last in the transcript.
+      const tail = transcript.lastElementChild;
+      const anchor = cards || (tail && tail.classList.contains('turn-wait-entry') ? tail : null);
+      let group = anchor ? anchor.previousElementSibling : tail;
       if (!group || !group.classList.contains('coding-steps')) {
          group = elem('details', 'coding-steps agent-event agent-event-line');
          const head = elem('summary', 'coding-steps-head');
          head.appendChild(elem('span', 'coding-steps-count'));
          head.appendChild(elem('span', 'coding-steps-last'));
          group.appendChild(head);
-         transcript.insertBefore(group, cards);
+         transcript.insertBefore(group, anchor);
       }
       group.appendChild(el);
       const n = group.querySelectorAll('.coding-step').length;

@@ -35,6 +35,7 @@
 #include "core/conv_event.h"
 #include "core/conv_images.h"
 #include "core/conv_stream.h"
+#include "core/conv_turn_lease.h"
 #include "core/image_rehydrate.h"
 #include "core/job_manager.h"
 #include "core/ocp_helpers.h"
@@ -430,11 +431,12 @@ static void extract_history_before_replace(ws_connection_t *conn, const char *wh
 static int webui_conv_create_bind(ws_connection_t *conn,
                                   const char *title,
                                   const char *log_detail,
+                                  conv_create_claim_t *claim,
                                   int64_t *conv_id_out) {
    /* Private from its first row when the user turned private on before it existed:
     * the first turn (typed or voice) runs in a private conversation. */
    const bool is_private = atomic_exchange(&conn->pending_private, false);
-   int rc = conv_db_create_ex(conn->auth_user_id, title, NULL, is_private, conv_id_out);
+   int rc = conv_db_create_claimed(conn->auth_user_id, title, NULL, is_private, claim, conv_id_out);
    if (rc != AUTH_DB_SUCCESS) {
       if (is_private) {
          atomic_store(&conn->pending_private, true); /* the next create gets it */
@@ -481,8 +483,16 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
       }
    }
 
+   /* Claimed before anyone can open it: in the name of a turn waiting for a
+    * conversation (it adopts this one), else this thread's while it writes an
+    * ended turn's exchange into it. */
+   const uint64_t turn_token = conn->session ? session_turn_claim_token(conn->session, false) : 0;
+   conv_create_claim_t claim = {
+      .session = conn->session ? conn->session->session_id : CONV_TURN_LEASE_POST_SESSION,
+      .token = turn_token ? turn_token : conv_turn_lease_new_token(),
+   };
    int64_t conv_id = 0;
-   int result = webui_conv_create_bind(conn, title, "New conversation", &conv_id);
+   int result = webui_conv_create_bind(conn, title, "New conversation", &claim, &conv_id);
 
    if (result == AUTH_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
@@ -554,6 +564,13 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
             OLOG_INFO("WebUI: in-flight turn adopted new conversation %lld", (long long)conv_id);
          }
       }
+      /* The adopting turn keeps the claim to its end; otherwise it is let go
+       * now that the rows written here are in. */
+      if (claim.claimed &&
+          !(conn->session &&
+            session_turn_keep_created_lease(conn->session, conv_id, claim.token))) {
+         (void)conv_turn_lease_release(conv_id, claim.token);
+      }
    } else if (result == AUTH_DB_LIMIT_EXCEEDED) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
@@ -615,8 +632,16 @@ int64_t webui_ensure_active_conversation(ws_connection_t *conn, const char *titl
       sanitize_utf8_for_json(title);
    }
 
+   /* Created for the turn running on this thread: claimed in its name, so no
+    * turn begun from the conversation list comes first (the turn takes it over
+    * as it binds, session_turn_set_conversation).  From any other thread the
+    * turn it's for hasn't begun; it takes the lease when it does. */
+   const uint64_t turn_token = conn->session ? session_turn_claim_token(conn->session, true) : 0;
+   conv_create_claim_t claim = { .session = conn->session ? conn->session->session_id : 0,
+                                 .token = turn_token };
    int64_t conv_id = 0;
-   int rc = webui_conv_create_bind(conn, title[0] ? title : NULL, "Conversation (auto)", &conv_id);
+   int rc = webui_conv_create_bind(conn, title[0] ? title : NULL, "Conversation (auto)",
+                                   turn_token ? &claim : NULL, &conv_id);
    if (rc != AUTH_DB_SUCCESS || conv_id <= 0) {
       OLOG_WARNING("WebUI: conversation auto-create for a turn failed (rc=%d)", rc);
       return 0;

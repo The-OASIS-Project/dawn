@@ -35,6 +35,10 @@ struct json_object;
  *  array, tool rows only): saved in messages.images. */
 #define LLM_HISTORY_ROW_IMAGES_KEY "_images"
 
+/** Key on a Claude tool_result part of a history message holding its own
+ *  row's id: such a message is a row per result, and its "id" is only one. */
+#define LLM_HISTORY_PART_ROW_ID_KEY "_row_id"
+
 /**
  * @brief Append the rows @p msg is saved as to @p out
  *

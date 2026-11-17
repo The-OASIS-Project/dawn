@@ -41,6 +41,7 @@
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/conv_event.h"
+#include "core/conv_turn_lease.h"
 #include "core/event_payload.h"
 #include "core/job_report.h"
 #include "core/memory_filter.h" /* memory_filter_check_injection_commands (critic gap gate) */
@@ -392,14 +393,33 @@ static char *research_assemble_report(const char *prose, const char *evidence, c
    return NULL;
 }
 
+/* A cancelled or reaped run stops waiting for its conversation. */
+static bool research_report_wait_should_stop(void *ctx) {
+   const session_t *s = ctx;
+   return atomic_load(&s->cancel_requested);
+}
+
 /* Persist the finished report to the job's OWN conversation as an assistant message
  * so the WebUI job viewer shows the answer instead of a blank transcript (the
- * research worker otherwise writes no messages there).  Best-effort. */
-static void research_persist_report_to_job_conv(const research_run_t *run0, const char *body) {
+ * research worker otherwise writes no messages there).  Best-effort.  Written
+ * holding the conversation's lease, like any turn's rows (this worker thread
+ * may wait for it); without one (the run cancelled while it waited, shut down,
+ * table full) it is written anyway. */
+static void research_persist_report_to_job_conv(const session_t *s,
+                                                const research_run_t *run0,
+                                                const char *body) {
+   const uint64_t token = conv_turn_lease_new_token();
+   const bool leased = conv_turn_lease_acquire(run0->conversation_id, s->session_id, token,
+                                               research_report_wait_should_stop,
+                                               (void *)s) == CONV_TURN_LEASE_GRANTED;
    int64_t msg_id = 0;
    /* no-blocks: the report DAWN compiled from its evidence ledger. */
-   if (conv_db_add_message_with_tools(run0->conversation_id, run0->user_id, "assistant", body, NULL,
-                                      NULL, NULL, &msg_id) != AUTH_DB_SUCCESS) {
+   const int rc = conv_db_add_message_with_tools(run0->conversation_id, run0->user_id, "assistant",
+                                                 body, NULL, NULL, NULL, &msg_id);
+   if (leased) {
+      (void)conv_turn_lease_release(run0->conversation_id, token);
+   }
+   if (rc != AUTH_DB_SUCCESS) {
       OLOG_WARNING("research: failed to persist report to job conv %lld",
                    (long long)run0->conversation_id);
       return;
@@ -891,7 +911,7 @@ const char *research_run_execute(struct session *s,
          /* Job-conversation copy so the WebUI viewer shows the answer, not a blank
           * transcript.  With prose, the chat bubble carries just the answer (the full
           * evidence lives in the note); otherwise the whole report. */
-         research_persist_report_to_job_conv(run0, (prose && prose[0]) ? prose : report);
+         research_persist_report_to_job_conv(s, run0, (prose && prose[0]) ? prose : report);
       }
       free(report);
    } else {

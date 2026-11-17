@@ -106,6 +106,7 @@ When to add what:
 | `app_logins` | 2026-09-30 | One login per app: `"app"` on login, `?app=` on every other request, a cookie per app (see Connection Lifecycle). Without it, all front-ends in a browser share one login. |
 | `login_unavailable` | 2026-10-30 | A login the daemon couldn't check is never reported as ended: `SERVICE_UNAVAILABLE` on the socket (still logged in), `503` over HTTP, `1013` for a socket connecting then, and `1012` for every socket when a shutdown begins (see Transport, When the login can't be checked). So `UNAUTHORIZED`, `"authenticated":false` and `4002` mean the login ended. Without it, a daemon restart can look like a revoke: re-check `/api/auth/status` before signing out. |
 | `request_refs` | 2026-11-16 | Any message may carry `req` in its payload (an opaque id: at most 64 bytes of valid UTF-8, no control characters; anything else is ignored). While the daemon handles the message, every `error` it sends to that connection carries the same `req` and `request_type` (the message's `type`, with or without a `req`), and every `*_response` it sends there carries `req`. So a refusal such as `UNAUTHORIZED`, `SERVICE_UNAVAILABLE` or `FORBIDDEN` names the request it refused, whatever order frames arrive in. Not covered: frames that aren't a `*_response` (`session` and the rest of the `init` / `reconnect` batch, `state`, `pong`, `music_state`), `restart_response`, a `text` turn's errors (queued, and matched by `client_ref`: flag `turn_refs`), and a reply sent later from another thread, which carries `req` only where its verb says so (the email verbs). Without the flag, match replies by type and order. |
+| `turn_wait` | 2026-11-16 | One turn runs on a conversation at a time. A turn sent while another (another tab, another app, a background job, a messaging channel) runs on the same conversation waits for it: the sender gets `turn_waiting` (`waiting: true`) and then `turn_waiting` (`waiting: false`) when its turn starts, or `turn_unsent` if it was stopped first (nothing of it was saved). `stop_other_reply` stops the turn it waits for. Without the flag a client still gets a `state` `thinking` with a `detail` (`Finishing the reply already in progress…`) while it waits, then the normal stream; ignore the unknown frames. |
 | `logout_closes_sockets` | 2026-09-30 | `POST /api/auth/logout` with the socket open is safe: the login's connections get `force_logout` and close with `4002`, the server closes the music socket, and the reply comes at once with the cookie cleared (see Connection Lifecycle, Logging out). Without it, close the socket before logging out. |
 
 A client says who it is in its `init` / `reconnect` payload:
@@ -219,6 +220,27 @@ Cancel the current LLM operation for this session.
 ```json
 {"type": "cancel"}
 ```
+A turn still waiting for another turn on its conversation (`turn_waiting`, flag `turn_wait`)
+stops waiting: it ends with `turn_unsent` and nothing of it is saved.
+
+#### `stop_other_reply`
+Stop the turn this session's turn waits for (flag `turn_wait`): the one holding the
+conversation, run by another session of the same user (another tab or app, a background job, a
+messaging channel).
+```json
+{"type": "stop_other_reply", "payload": {"conversation_id": 123}}
+```
+Answered with `stop_other_reply_response` once the stop is asked for, not when that turn ends:
+```json
+{"type": "stop_other_reply_response",
+ "payload": {"conversation_id": 123, "success": true}}
+```
+- `error` (with `success: false`): `NOT_RUNNING` (no turn of the user's holds the conversation,
+  including another user's, which answers the same, or the turn ended before the stop reached
+  it) or `FORBIDDEN` (the turn holding it is this session's own: use `cancel`).
+- A background job's own turn is cancelled as the job (recorded as cancelled); any other turn
+  is stopped as `cancel` stops it. A turn inside a tool call stops when the call returns; the
+  waiting turn then starts.
 
 #### `reconnect`
 Reconnect to an existing session using a stored token.
@@ -2464,6 +2486,42 @@ WebUI configuration (sent after session).
 - `protocol`, `features`: the protocol version and feature flags (see
   [Protocol version and feature flags](#protocol-version-and-feature-flags)).
 
+#### `turn_waiting`
+Flag `turn_wait`.  The turn this session just sent waits for another turn running on the same
+conversation, and later starts; sent to the waiting session's connection only.
+```json
+{"type": "turn_waiting",
+ "payload": {"conversation_id": 123, "client_ref": "17", "waiting": true,
+             "holder": "turn", "stop_after_ms": 5000}}
+```
+```json
+{"type": "turn_waiting",
+ "payload": {"conversation_id": 123, "client_ref": "17", "waiting": false}}
+```
+- `client_ref`: the waiting turn's, when it was sent with one (typed turns); voice turns have
+  none.
+- `holder`: what holds the conversation: `turn` (another tab or app of the user), `job` (a
+  background job's turn) or `channel` (a messaging channel's turn).
+- `stop_after_ms`: how long to show the wait before offering to stop the other reply
+  (`stop_other_reply`).
+- With `waiting: true` comes a `state` `thinking` whose `detail` says what it waits for (for
+  clients without the flag). `waiting: false` is followed by the turn's normal frames.
+- The other turn's rows arrive as `message_appended` meanwhile.
+- A reconnect while the turn waits doesn't send `turn_waiting` again; the turn's frames follow
+  when it starts.
+- A turn whose connection is gone keeps waiting for up to the daemon's stale-turn time
+  (`[jobs] max_runtime_sec`), then stops (`turn_unsent`).
+
+#### `turn_unsent`
+Flag `turn_wait`.  The waiting turn stopped before it started (`cancel`, its connection gone
+past the stale-turn time, or the daemon shutting down): its question was never saved. Followed by
+`state` `idle`.  Not sent for a turn the client didn't send (a background job's result
+re-engaging the conversation): that one is tried again later.
+```json
+{"type": "turn_unsent",
+ "payload": {"conversation_id": 123, "client_ref": "17", "text_saved": false}}
+```
+
 #### `state`
 State machine update.
 ```json
@@ -3205,6 +3263,7 @@ Satellites also receive the same streaming messages as WebUI clients:
 | Request | Response |
 |---------|----------|
 | `get_config` | `get_config_response` |
+| `stop_other_reply` | `stop_other_reply_response` |
 | `email_list_accounts` | `email_list_accounts_response` |
 | `email_add_account` | `email_add_account_response` |
 | `email_update_account` | `email_update_account_response` |

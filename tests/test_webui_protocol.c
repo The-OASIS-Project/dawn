@@ -67,6 +67,7 @@ static void test_the_members_are_the_version_and_the_flags(void) {
    bool visual_guard = false;
    bool attachments = false;
    bool login_unavailable = false;
+   bool turn_wait = false;
    for (size_t i = 0; i < json_object_array_length(features); i++) {
       const char *f = json_object_get_string(json_object_array_get_idx(features, i));
       logout = logout || strcmp(f, "logout_closes_sockets") == 0;
@@ -77,6 +78,7 @@ static void test_the_members_are_the_version_and_the_flags(void) {
       visual_guard = visual_guard || strcmp(f, "visual_prompt_guard") == 0;
       attachments = attachments || strcmp(f, "document_attachments") == 0;
       login_unavailable = login_unavailable || strcmp(f, "login_unavailable") == 0;
+      turn_wait = turn_wait || strcmp(f, "turn_wait") == 0;
    }
    TEST_ASSERT_TRUE(logout);
    TEST_ASSERT_TRUE(app_logins);
@@ -86,6 +88,7 @@ static void test_the_members_are_the_version_and_the_flags(void) {
    TEST_ASSERT_TRUE(visual_guard);
    TEST_ASSERT_TRUE(attachments);
    TEST_ASSERT_TRUE(login_unavailable);
+   TEST_ASSERT_TRUE(turn_wait);
    json_object_put(root);
 }
 

@@ -112,10 +112,14 @@ static void job_worker_run(job_work_t *work) {
    if (work->resume) {
       bool continued = false;
       size_t restored = 0;
+      /* Read before the load: the turn's catch-up pulls what lands after. */
+      conv_sync_point_t at;
+      const bool at_ok = conv_db_sync_point_get(work->conv_id, work->user_id, &at) ==
+                         AUTH_DB_SUCCESS;
       struct json_object *hist = memory_history_load_for_llm(work->conv_id, work->user_id,
                                                              &restored);
       if (hist != NULL && restored > 0) {
-         session_replace_history(s, hist, work->conv_id);
+         session_replace_history_at(s, hist, work->conv_id, work->user_id, at_ok ? &at : NULL);
          continued = true;
          OLOG_INFO("job_worker: resuming conv %lld with %zu bytes of history — continuing",
                    (long long)work->conv_id, restored);

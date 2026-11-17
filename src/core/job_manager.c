@@ -575,7 +575,7 @@ int job_manager_cancel(int64_t conv_id, int user_id) {
              * worker cannot otherwise tell a human's Cancel from the daemon
              * pulling the rug — and the two want opposite dispositions. */
             s_slots[i].user_cancelled = true;
-            session_cancel_turn(s); /* atomic store — safe under the pool lock */
+            session_cancel_turn(s); /* a flag and a leaf-lock wake: safe under the pool lock */
             rc = JOB_MGR_OK;
          }
          break;
@@ -782,7 +782,7 @@ int job_manager_reap_overdue(time_t now) {
           * ignores it. */
          s_slots[i].reaped_at = now;
          s_slots[i].nag_at = now;
-         session_cancel_turn(s); /* atomic store — safe under the pool lock */
+         session_cancel_turn(s); /* a flag and a leaf-lock wake: safe under the pool lock */
          n_reaped++;
          if (n_notes < JOB_REAP_LOG_MAX_PER_TICK) {
             notes[n_notes++] = (job_reap_note_t){ REAP_NOTE_FIRST,

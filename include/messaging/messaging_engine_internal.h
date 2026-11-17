@@ -41,6 +41,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "core/rate_limiter.h"
 #include "core/session_manager.h"
@@ -58,6 +59,15 @@ struct json_object;
 
 #define MESSAGING_INBOUND_QUEUE_DEPTH 32
 #define MESSAGING_MAX_SESSIONS 64
+
+/* Messages that wait on the worker while their conversation is held by
+ * another session's turn (messaging_engine_parked.c): at most this many per
+ * channel, and in all.  One more is dropped with a WARNING, as a full inbound
+ * queue drops one. */
+#define MESSAGING_PARKED_PER_CHANNEL_MAX 16
+#define MESSAGING_PARKED_MAX 64
+/* How often the worker looks again at a held conversation's waiting messages. */
+#define MESSAGING_PARKED_RECHECK_MS 250
 
 /* Stack buffer for per-provider address_json blob construction
  * (build_address_json_for).  Sized for Telegram chat_id + SMS phone_e164 +
@@ -95,7 +105,7 @@ typedef enum {
    INBOUND_STOP,        /* STOP / CANCEL while a code waits: drops the waiting action */
 } inbound_kind_t;
 
-typedef struct {
+typedef struct inbound_item {
    char provider[16];
    char provider_address[128];
    char sender_display[64];
@@ -103,7 +113,20 @@ typedef struct {
    int64_t timestamp;
    channel_ref_t ref; /* resolved at enqueue time */
    inbound_kind_t kind;
+   /* While it waits for a held conversation (worker thread only). */
+   struct inbound_item *next;
+   int64_t busy_conv;         /* the conversation it waits for */
+   struct timespec parked_at; /* CLOCK_MONOTONIC; tv_sec 0 = never waited */
 } inbound_item_t;
+
+/* What running an inbound item did. */
+typedef enum {
+   INBOUND_RAN = 0, /* handled (answered, refused or dropped): the caller frees it */
+   INBOUND_PARKED,  /* its conversation is held by another turn: busy_conv set, nothing done */
+} inbound_outcome_t;
+
+/** Runs one inbound item on the worker thread (process_inbound). */
+typedef inbound_outcome_t (*inbound_run_fn)(inbound_item_t *item);
 
 typedef struct {
    int64_t channel_id; /* the messaging_channels row this session serves */
@@ -352,6 +375,30 @@ int handle_link_command(const char *provider,
 /* inbound (dispatch + worker drain) */
 int engine_inbound_dispatch(const messaging_inbound_t *msg);
 void *messaging_worker_thread(void *arg);
+
+/* parked (messaging_engine_parked.c): messages whose conversation another
+ * session's turn holds wait here, so the one worker thread never waits for a
+ * conversation and keeps answering every other channel.  A channel's messages
+ * run in arrival order: one arriving while earlier ones of its channel wait
+ * goes behind them (a STOP excepted: it runs no turn and refers to an action
+ * already shown).  Worker thread only: no lock. */
+
+/** Free an inbound item, wiping a reply code's body. */
+void inbound_item_free(inbound_item_t *item);
+/**
+ * @brief Run a newly dequeued item, or queue it behind its channel's waiting
+ *        ones; one that finds its conversation held waits too.  Takes the item.
+ */
+void inbound_parked_submit(inbound_item_t *item, inbound_run_fn run);
+/**
+ * @brief Run, in arrival order, the waiting items whose conversation is free
+ *        again; a channel whose head still finds it held keeps all of its own
+ */
+void inbound_parked_retry(inbound_run_fn run);
+/** How many items wait. */
+size_t inbound_parked_count(void);
+/** Shutdown: drop every waiting item (one WARNING with the count). */
+void inbound_parked_drop_all(void);
 
 /* session (slot map + staleness reload) */
 void evict_session_slot(int64_t channel_id);

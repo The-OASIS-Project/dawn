@@ -23,10 +23,15 @@
 
 #include <json-c/json.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "auth/auth_db_conv_prefix.h"
+#include "auth/auth_db_messages.h"
+#include "core/conv_turn_lease.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_history_kind.h"
@@ -78,6 +83,64 @@ static struct json_object *fake_loader(int user_id,
       *has_cfg_out = true;
    }
    return make_history(conv_id, s_stored[conv_id]);
+}
+
+/* The fake database's sync point for each conversation (conv_sync_point.h):
+ * its newest row is the last make_history() gives it; the rest set by tests. */
+static int64_t s_watermark[100];
+static int64_t s_floor[100];
+static char s_in_force_hash[100][DAWN_SHA256_HEX_LEN];
+static const char *s_in_force_json;
+static int s_point_reads;
+static int s_tail_calls;
+static bool s_tail_rebuild; /* the tail can't stand alone */
+static bool s_tail_fail;    /* the tail can't be read */
+
+static int64_t newest_stored(int64_t conv) {
+   return s_stored[conv] > 0 ? conv * 1000 + s_stored[conv] - 1 : 0;
+}
+
+int conv_db_sync_point_get(int64_t conv_id, int user_id, conv_sync_point_t *out) {
+   (void)user_id;
+   memset(out, 0, sizeof(*out));
+   s_point_reads++;
+   if (conv_id <= 0 || conv_id >= 100) {
+      return AUTH_DB_NOT_FOUND;
+   }
+   out->max_id = newest_stored(conv_id);
+   out->watermark = s_watermark[conv_id];
+   out->floor = s_floor[conv_id];
+   snprintf(out->in_force_hash, sizeof(out->in_force_hash), "%s", s_in_force_hash[conv_id]);
+   return AUTH_DB_SUCCESS;
+}
+
+int conv_db_prompt_blob_get(const char *hash, char **out) {
+   (void)hash;
+   *out = s_in_force_json ? strdup(s_in_force_json) : NULL;
+   return *out ? AUTH_DB_SUCCESS : AUTH_DB_INVALID;
+}
+
+/* The stored rows after @p after_id, as make_history() has them. */
+static struct json_object *fake_tail_loader(int64_t conv_id,
+                                            int user_id,
+                                            int64_t after_id,
+                                            bool *rebuild_out) {
+   (void)user_id;
+   s_tail_calls++;
+   *rebuild_out = s_tail_rebuild;
+   if (s_tail_rebuild || s_tail_fail) {
+      return NULL;
+   }
+   struct json_object *all = make_history(conv_id, s_stored[conv_id]);
+   struct json_object *tail = json_object_new_array();
+   for (size_t i = 1; i < json_object_array_length(all); i++) {
+      struct json_object *m = json_object_array_get_idx(all, i);
+      if (json_object_get_int64(json_object_object_get(m, "id")) > after_id) {
+         json_object_array_add(tail, json_object_get(m));
+      }
+   }
+   json_object_put(all);
+   return tail;
 }
 
 /* session_manager.c is not linked: its turn-token and command-context
@@ -208,6 +271,14 @@ static const char *model_seen_with(uint64_t token) {
 void setUp(void) {
    memset(s_stored, 0, sizeof(s_stored));
    memset(s_conv_model, 0, sizeof(s_conv_model));
+   memset(s_watermark, 0, sizeof(s_watermark));
+   memset(s_floor, 0, sizeof(s_floor));
+   memset(s_in_force_hash, 0, sizeof(s_in_force_hash));
+   s_in_force_json = NULL;
+   s_point_reads = 0;
+   s_tail_calls = 0;
+   s_tail_rebuild = false;
+   s_tail_fail = false;
    s_loader_calls = 0;
    s_loader_fail = false;
    s = calloc(1, sizeof(*s));
@@ -217,6 +288,7 @@ void setUp(void) {
    s->session_id = 7;
    s->conversation_history = make_history(0, 0);
    session_set_history_loader(fake_loader);
+   session_set_history_tail_loader(fake_tail_loader);
 }
 
 void tearDown(void) {
@@ -234,6 +306,7 @@ void tearDown(void) {
    free(s);
    s = NULL;
    session_set_history_loader(NULL);
+   session_set_history_tail_loader(NULL);
 }
 
 static int len(struct json_object *a) {
@@ -258,7 +331,9 @@ static int64_t bound(void) {
 /* Session holds conversation 3 (with n stored messages). */
 static void load_live(int64_t conv, int n) {
    s_stored[conv] = n;
-   session_replace_history(s, make_history(conv, n), conv);
+   conv_sync_point_t at;
+   const bool at_ok = conv_db_sync_point_get(conv, 1, &at) == AUTH_DB_SUCCESS;
+   session_replace_history_at(s, make_history(conv, n), conv, 1, at_ok ? &at : NULL);
 }
 
 /* ---- tests ---------------------------------------------------------------- */
@@ -1482,6 +1557,531 @@ void test_snapshot_keeps_request_context(void) {
    json_object_put(copy);
 }
 
+/* ---- one turn per conversation -------------------------------------------- */
+
+/* What the session unit told clients about waits, in order. */
+static pthread_mutex_t s_events_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char s_events[256];
+
+static void note_event(const char *what) {
+   pthread_mutex_lock(&s_events_mutex);
+   const size_t used = strlen(s_events);
+   snprintf(s_events + used, sizeof(s_events) - used, "%s ", what);
+   pthread_mutex_unlock(&s_events_mutex);
+}
+
+static void clear_events(void) {
+   pthread_mutex_lock(&s_events_mutex);
+   s_events[0] = '\0';
+   pthread_mutex_unlock(&s_events_mutex);
+}
+
+/* Replaces the session unit's weak hook (the WebUI's, in the daemon). */
+void session_turn_waiting_notice(session_t *session, int64_t conv_id, int what, uint32_t holder) {
+   (void)session;
+   (void)conv_id;
+   (void)holder;
+   note_event(what == SESSION_TURN_WAIT_BEGIN     ? "waiting"
+              : what == SESSION_TURN_WAIT_GRANTED ? "granted"
+                                                  : "unsent");
+}
+
+static session_t *new_session(uint32_t id) {
+   session_t *n = calloc(1, sizeof(*n));
+   pthread_mutex_init(&n->history_mutex, NULL);
+   pthread_mutex_init(&n->llm_config_mutex, NULL);
+   n->session_id = id;
+   n->conversation_history = make_history(0, 0);
+   return n;
+}
+
+static void free_session(session_t *n) {
+   json_object_put(n->turn_user_msg);
+   json_object_put(n->conversation_history);
+   pthread_mutex_destroy(&n->history_mutex);
+   pthread_mutex_destroy(&n->llm_config_mutex);
+   free(n);
+}
+
+/* A turn run on its own thread: begun, held until told to end, then ended. */
+typedef struct {
+   session_t *session;
+   int64_t conv;
+   sem_t begun;
+   sem_t end;
+   bool unsent;
+   int history_len; /* its history's length once begun */
+} turn_thread_t;
+
+static void *run_turn(void *arg) {
+   turn_thread_t *t = arg;
+   session_turn_begin(t->session, t->conv, 1);
+   t->unsent = session_turn_unsent(t->session);
+   t->history_len = len(t->session->conversation_history);
+   note_event("begun");
+   sem_post(&t->begun);
+   sem_wait(&t->end);
+   session_turn_end(t->session);
+   return NULL;
+}
+
+static void start_turn(turn_thread_t *t, pthread_t *th, session_t *session, int64_t conv) {
+   memset(t, 0, sizeof(*t));
+   t->session = session;
+   t->conv = conv;
+   sem_init(&t->begun, 0, 0);
+   sem_init(&t->end, 0, 0);
+   TEST_ASSERT_EQUAL_INT(0, pthread_create(th, NULL, run_turn, t));
+}
+
+/* A failure guard only: the test proceeds as soon as the turn waits. */
+#define WAIT_GUARD_POLLS 2000
+#define WAIT_GUARD_POLL_US 1000
+
+static void until_waiting(int64_t conv, int n) {
+   for (int i = 0; i < WAIT_GUARD_POLLS && conv_turn_lease_waiters(conv) < n; i++) {
+      usleep(WAIT_GUARD_POLL_US);
+   }
+   TEST_ASSERT_EQUAL_INT(n, conv_turn_lease_waiters(conv));
+}
+
+static bool held(int64_t conv) {
+   return conv_turn_lease_holder(conv, NULL, NULL, NULL);
+}
+
+/* Wait until the events read @p want: a waiter is counted a moment before its
+ * session is told it waits. */
+static void until_events(const char *want) {
+   for (int i = 0; i < WAIT_GUARD_POLLS; i++) {
+      pthread_mutex_lock(&s_events_mutex);
+      const bool same = strcmp(s_events, want) == 0;
+      pthread_mutex_unlock(&s_events_mutex);
+      if (same) {
+         return;
+      }
+      usleep(WAIT_GUARD_POLL_US);
+   }
+   TEST_ASSERT_EQUAL_STRING(want, s_events);
+}
+
+/* A turn on a conversation another session's turn holds waits for that turn's
+ * end, and is told so; then it runs. */
+void test_turn_waits_for_another_turn_on_its_conversation(void) {
+   clear_events();
+   load_live(5, 2);
+   session_turn_begin(s, 5, 1);
+   session_t *b = new_session(8);
+   turn_thread_t t;
+   pthread_t th;
+   start_turn(&t, &th, b, 5);
+   until_waiting(5, 1);
+   until_events("waiting ");
+   TEST_ASSERT_EQUAL_INT(0, sem_trywait(&t.begun) == 0 ? 1 : 0); /* still waiting */
+   session_turn_end(s);
+   sem_wait(&t.begun);
+   TEST_ASSERT_FALSE(t.unsent);
+   uint32_t holder = 0;
+   TEST_ASSERT_TRUE(conv_turn_lease_holder(5, &holder, NULL, NULL));
+   TEST_ASSERT_EQUAL_UINT32(8, holder);
+   sem_post(&t.end);
+   pthread_join(th, NULL);
+   TEST_ASSERT_FALSE(held(5));
+   TEST_ASSERT_EQUAL_STRING("waiting granted begun ", s_events);
+   free_session(b);
+}
+
+/* A Stop while waiting ends the turn unsent: nothing loaded, nothing added. */
+void test_stop_while_waiting_leaves_the_turn_unsent(void) {
+   clear_events();
+   load_live(5, 2);
+   session_turn_begin(s, 5, 1);
+   session_t *b = new_session(8);
+   const int loads = s_loader_calls;
+   turn_thread_t t;
+   pthread_t th;
+   start_turn(&t, &th, b, 5);
+   until_waiting(5, 1);
+   until_events("waiting ");
+   atomic_store(&b->cancel_requested, true); /* the user's Stop */
+   sem_wait(&t.begun);
+   TEST_ASSERT_TRUE(t.unsent);
+   TEST_ASSERT_EQUAL_INT(1, t.history_len); /* the system prompt alone */
+   TEST_ASSERT_EQUAL_INT(loads, s_loader_calls);
+   uint32_t holder = 0;
+   TEST_ASSERT_TRUE(conv_turn_lease_holder(5, &holder, NULL, NULL));
+   TEST_ASSERT_EQUAL_UINT32(7, holder); /* still the first turn's */
+   sem_post(&t.end);
+   pthread_join(th, NULL);
+   TEST_ASSERT_EQUAL_STRING("waiting unsent begun ", s_events);
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+   free_session(b);
+}
+
+/* A turn whose client is gone waits no longer than a holder counts as
+ * stale: then it stops, unsent, and frees its session. */
+void test_a_disconnected_waiter_stops_after_the_stale_time(void) {
+   load_live(5, 2);
+   session_turn_begin(s, 5, 1);
+   session_t *b = new_session(8);
+   atomic_store(&b->disconnected, true);
+   conv_turn_lease_set_stale_after(1);
+   turn_thread_t t;
+   pthread_t th;
+   start_turn(&t, &th, b, 5);
+   sem_wait(&t.begun);
+   conv_turn_lease_set_stale_after(0);
+   TEST_ASSERT_TRUE(t.unsent);
+   sem_post(&t.end);
+   pthread_join(th, NULL);
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+   free_session(b);
+}
+
+/* Every kind of turn lets its conversation go when it ends. */
+void test_no_lease_outlives_its_turn(void) {
+   load_live(5, 2);
+   /* Text. */
+   session_turn_begin(s, 5, 1);
+   TEST_ASSERT_TRUE(held(5));
+   session_add_turn_message(s, "user", "hi");
+   session_add_turn_message(s, "assistant", "hello");
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+   /* A tool exchange. */
+   session_turn_begin(s, 5, 1);
+   session_add_turn_message(s, "user", "look it up");
+   struct json_object *call = json_tokener_parse(
+       "{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c1\",\"type\":"
+       "\"function\",\"function\":{\"name\":\"t\",\"arguments\":\"{}\"}}]}");
+   TEST_ASSERT_TRUE(session_add_turn_message_object(s, call));
+   struct json_object *result = json_tokener_parse(
+       "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"done\"}");
+   TEST_ASSERT_TRUE(session_add_turn_message_object(s, result));
+   session_add_turn_message(s, "assistant", "found it");
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+   /* Stopped by the user. */
+   session_turn_begin(s, 5, 1);
+   session_add_turn_message(s, "user", "and then");
+   (void)session_stop_turn(s, "(stopped)");
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+   /* Rolled back. */
+   session_turn_begin(s, 5, 1);
+   session_add_turn_message(s, "user", "never mind");
+   (void)session_rollback_turn(s);
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+   /* Bound to an existing conversation mid-turn. */
+   session_turn_begin(s, 0, 1);
+   session_turn_set_conversation(s, 6, true);
+   uint32_t holder = 0;
+   TEST_ASSERT_TRUE(conv_turn_lease_holder(6, &holder, NULL, NULL));
+   TEST_ASSERT_EQUAL_UINT32(7, holder);
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(6));
+   /* A conversation created for it: claimed in its name, kept through the bind. */
+   session_turn_begin(s, 0, 1);
+   session_turn_await_conversation(s);
+   const uint64_t token = session_turn_claim_token(s, false);
+   TEST_ASSERT_TRUE(token != 0);
+   TEST_ASSERT_TRUE(conv_turn_lease_claim_new(9, 7, token));
+   TEST_ASSERT_TRUE(adopt(9));
+   TEST_ASSERT_TRUE(session_turn_keep_created_lease(s, 9, token));
+   TEST_ASSERT_TRUE(held(9));
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(9));
+   /* Taken with a try before the turn: the turn owns it and its end releases it. */
+   const uint64_t tried = conv_turn_lease_new_token();
+   TEST_ASSERT_EQUAL_INT(CONV_TURN_LEASE_GRANTED, conv_turn_lease_try_acquire(5, 7, tried));
+   session_turn_begin_leased(s, 5, 1, tried);
+   TEST_ASSERT_FALSE(session_turn_unsent(s));
+   TEST_ASSERT_TRUE(session_turn_holds_lease(s, 5, tried, NULL));
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+}
+
+/* The lease's writer, standing in for the post funnel. */
+typedef struct {
+   conv_lease_item_t link;
+   const char *name;
+} test_post_t;
+
+static bool write_test_post(conv_lease_item_t *link) {
+   note_event(((test_post_t *)link)->name);
+   return true;
+}
+
+/* A post into a conversation a turn holds is written at that turn's end,
+ * before the next turn on it begins. */
+void test_post_into_a_held_conversation_waits_for_the_turn_end(void) {
+   clear_events();
+   conv_turn_lease_set_writer(write_test_post, NULL);
+   load_live(5, 2);
+   session_turn_begin(s, 5, 1);
+   test_post_t post = { .name = "post" };
+   TEST_ASSERT_EQUAL_INT(CONV_TURN_LEASE_DEFERRED, conv_turn_lease_post_or_defer(5, &post.link));
+   session_t *b = new_session(8);
+   turn_thread_t t;
+   pthread_t th;
+   start_turn(&t, &th, b, 5);
+   until_waiting(5, 1);
+   until_events("waiting "); /* told it waits; the post not written yet */
+   session_turn_end(s);
+   sem_wait(&t.begun);
+   sem_post(&t.end);
+   pthread_join(th, NULL);
+   TEST_ASSERT_EQUAL_STRING("waiting post granted begun ", s_events);
+   conv_turn_lease_set_writer(NULL, NULL);
+   free_session(b);
+}
+
+/* A post into a free conversation is written at once. */
+void test_post_into_a_free_conversation_is_written_at_once(void) {
+   clear_events();
+   conv_turn_lease_set_writer(write_test_post, NULL);
+   test_post_t post = { .name = "post" };
+   TEST_ASSERT_EQUAL_INT(CONV_TURN_LEASE_WRITTEN, conv_turn_lease_post_or_defer(5, &post.link));
+   TEST_ASSERT_EQUAL_STRING("post ", s_events);
+   TEST_ASSERT_FALSE(held(5));
+   conv_turn_lease_set_writer(NULL, NULL);
+}
+
+
+/* ---- catch-up: the live history follows its conversation ------------------ */
+
+/* The ids of @p hist's stored messages, in order, as "3000 3001 ...". */
+static const char *ids_of(struct json_object *hist) {
+   static char out[512];
+   out[0] = '\0';
+   size_t used = 0;
+   for (int i = 0; i < len(hist) && used < sizeof(out); i++) {
+      struct json_object *id = NULL;
+      if (json_object_object_get_ex(json_object_array_get_idx(hist, i), "id", &id)) {
+         const int n = snprintf(out + used, sizeof(out) - used, "%s%lld", used ? " " : "",
+                                (long long)json_object_get_int64(id));
+         used = n > 0 ? used + (size_t)n : used;
+      }
+   }
+   return out;
+}
+
+/* Nothing changed since the history was loaded: no load, one read at the
+ * turn's start and one at its end. */
+void test_catch_up_finds_nothing_to_do(void) {
+   load_live(3, 2);
+   const int reads = s_point_reads;
+   session_turn_begin(s, 3, 1);
+   session_turn_end(s);
+   session_turn_begin(s, 3, 1);
+   session_turn_end(s);
+   TEST_ASSERT_EQUAL_INT(0, s_loader_calls);
+   TEST_ASSERT_EQUAL_INT(0, s_tail_calls);
+   TEST_ASSERT_EQUAL_INT(reads + 4, s_point_reads);
+   TEST_ASSERT_EQUAL_STRING("3000 3001", ids_of(s->conversation_history));
+}
+
+/* Rows another session wrote are appended once, in order, before the turn. */
+void test_catch_up_appends_rows_written_elsewhere(void) {
+   load_live(3, 2);
+   s_stored[3] = 5; /* another session's turn: three rows */
+   session_turn_begin(s, 3, 1);
+   TEST_ASSERT_EQUAL_INT(1, s_tail_calls);
+   TEST_ASSERT_EQUAL_INT(0, s_loader_calls);
+   TEST_ASSERT_TRUE(turn() == s->conversation_history);
+   TEST_ASSERT_EQUAL_STRING("3000 3001 3002 3003 3004", ids_of(s->conversation_history));
+   session_turn_end(s);
+   session_turn_begin(s, 3, 1); /* nothing new: nothing appended again */
+   session_turn_end(s);
+   TEST_ASSERT_EQUAL_INT(1, s_tail_calls);
+   TEST_ASSERT_EQUAL_STRING("3000 3001 3002 3003 3004", ids_of(s->conversation_history));
+}
+
+/* A turn's own rows are what the point at its end counts: the next turn has
+ * nothing to append. */
+void test_point_at_turn_end_covers_the_turns_rows(void) {
+   load_live(3, 2);
+   session_turn_begin(s, 3, 1);
+   session_add_turn_message(s, "user", "q");
+   session_stamp_last_message_id(s, "user", 3002);
+   session_add_turn_message(s, "assistant", "a");
+   session_stamp_last_message_id(s, "assistant", 3003);
+   s_stored[3] = 4; /* its two rows, saved */
+   session_turn_end(s);
+   session_turn_begin(s, 3, 1);
+   session_turn_end(s);
+   TEST_ASSERT_EQUAL_INT(0, s_tail_calls);
+   TEST_ASSERT_EQUAL_INT(0, s_loader_calls);
+   TEST_ASSERT_EQUAL_INT(5, len(s->conversation_history));
+}
+
+/* A compaction, a reasoning floor or a new frozen prompt elsewhere changes
+ * rows a reload already has: the history is built again, as a restore. */
+static void expect_rebuild_after(int64_t *field, int64_t value) {
+   load_live(3, 2);
+   *field = value;
+   s_stored[3] = 4;
+   const int rewritten = s_rewritten;
+   session_turn_begin(s, 3, 1);
+   TEST_ASSERT_EQUAL_INT(1, s_loader_calls);
+   TEST_ASSERT_EQUAL_INT(0, s_tail_calls);
+   TEST_ASSERT_TRUE(turn() == s->conversation_history); /* the turn runs on the new one */
+   TEST_ASSERT_EQUAL_INT(rewritten + 1, s_rewritten);
+   TEST_ASSERT_EQUAL_STRING("3000 3001 3002 3003", ids_of(s->conversation_history));
+   session_turn_end(s);
+   session_turn_begin(s, 3, 1); /* built at the new point: nothing more */
+   session_turn_end(s);
+   TEST_ASSERT_EQUAL_INT(1, s_loader_calls);
+}
+
+void test_catch_up_rebuilds_after_a_compaction(void) {
+   expect_rebuild_after(&s_watermark[3], 3001);
+}
+
+void test_catch_up_rebuilds_after_a_reasoning_floor(void) {
+   expect_rebuild_after(&s_floor[3], 3001);
+}
+
+void test_catch_up_rebuilds_after_a_new_frozen_prompt(void) {
+   load_live(3, 2);
+   conv_sync_point_t was = s->history_sync;
+   snprintf(was.prefix_hash, sizeof(was.prefix_hash), "p1"); /* built under another prompt */
+   s->history_sync = was;
+   session_turn_begin(s, 3, 1);
+   TEST_ASSERT_EQUAL_INT(1, s_loader_calls);
+   session_turn_end(s);
+}
+
+/* A history whose point is unknown (bound without a load, or after a clear)
+ * is built again, unless its conversation has no rows yet. */
+void test_unknown_point_rebuilds(void) {
+   load_live(3, 2);
+   session_clear_history(s);
+   session_bind_history_conversation(s, 3);
+   session_turn_begin(s, 3, 1);
+   TEST_ASSERT_EQUAL_INT(1, s_loader_calls);
+   TEST_ASSERT_EQUAL_STRING("3000 3001", ids_of(s->conversation_history));
+   session_turn_end(s);
+   /* A new conversation with nothing in it: this history is its state. */
+   session_clear_history(s);
+   session_bind_history_conversation(s, 8);
+   session_turn_begin(s, 8, 1);
+   TEST_ASSERT_EQUAL_INT(1, s_loader_calls);
+   session_turn_end(s);
+}
+
+/* A pinned turn on a history whose point is unknown: one load, and the turn
+ * runs on the history it built. */
+void test_unknown_point_with_a_pinned_turn_loads_once(void) {
+   load_live(3, 2);
+   session_clear_history(s);
+   session_bind_history_conversation(s, 3);
+   s_stored[3] = 3;
+   session_turn_begin(s, 3, 1);
+   TEST_ASSERT_EQUAL_INT(1, s_loader_calls);
+   TEST_ASSERT_TRUE(turn() == s->conversation_history);
+   TEST_ASSERT_EQUAL_STRING("3000 3001 3002", ids_of(turn()));
+   session_turn_end(s);
+}
+
+/* A catch-up that fails leaves the turn on its old history and the point
+ * unknown at its end: the next turn builds the history again. */
+void test_failed_catch_up_leaves_the_point_unknown(void) {
+   load_live(3, 2);
+   s_stored[3] = 4;
+   s_tail_fail = true;
+   session_turn_begin(s, 3, 1);
+   TEST_ASSERT_EQUAL_INT(1, s_tail_calls);
+   TEST_ASSERT_EQUAL_STRING("3000 3001", ids_of(turn()));
+   session_turn_end(s);
+   s_tail_fail = false;
+   session_turn_begin(s, 3, 1);
+   TEST_ASSERT_EQUAL_INT(1, s_loader_calls);
+   TEST_ASSERT_EQUAL_STRING("3000 3001 3002 3003", ids_of(s->conversation_history));
+   session_turn_end(s);
+   /* A rebuild that fails, likewise. */
+   s_watermark[3] = 3001;
+   s_loader_fail = true;
+   session_turn_begin(s, 3, 1);
+   TEST_ASSERT_EQUAL_INT(2, s_loader_calls);
+   session_turn_end(s);
+   s_loader_fail = false;
+   session_turn_begin(s, 3, 1);
+   TEST_ASSERT_EQUAL_INT(3, s_loader_calls);
+   session_turn_end(s);
+}
+
+/* Rows that can't be appended on their own, or a history already holding a
+ * row newer than its point: built again. */
+void test_tail_that_cannot_stand_alone_rebuilds(void) {
+   load_live(3, 2);
+   s_stored[3] = 4;
+   s_tail_rebuild = true;
+   session_turn_begin(s, 3, 1);
+   TEST_ASSERT_EQUAL_INT(1, s_tail_calls);
+   TEST_ASSERT_EQUAL_INT(1, s_loader_calls);
+   session_turn_end(s);
+   s_tail_rebuild = false;
+   load_live(3, 4);
+   session_add_message(s, "assistant", "a copy");
+   session_stamp_last_message_id(s, "assistant", 3009);
+   s_stored[3] = 6;
+   session_turn_begin(s, 3, 1);
+   TEST_ASSERT_EQUAL_INT(1, s_tail_calls);
+   TEST_ASSERT_EQUAL_INT(2, s_loader_calls);
+   session_turn_end(s);
+}
+
+/* What is in force moved with the rows: the frozen prompt takes it on. */
+void test_tail_takes_on_what_is_in_force(void) {
+   load_live(3, 2);
+   pthread_mutex_lock(&s->history_mutex);
+   llm_history_set_kind(json_object_array_get_idx(s->conversation_history, 0), MESSAGE_KIND_PREFIX);
+   pthread_mutex_unlock(&s->history_mutex);
+   s_stored[3] = 4;
+   snprintf(s_in_force_hash[3], sizeof(s_in_force_hash[3]), "f2");
+   s_in_force_json = "{\"directives\":\"D2\"}";
+   session_turn_begin(s, 3, 1);
+   TEST_ASSERT_EQUAL_INT(0, s_loader_calls);
+   struct json_object *rec = llm_history_in_force(llm_history_prefix(s->conversation_history),
+                                                  false);
+   TEST_ASSERT_NOT_NULL(rec);
+   TEST_ASSERT_EQUAL_STRING("D2",
+                            json_object_get_string(json_object_object_get(rec, "directives")));
+   session_turn_end(s);
+   /* With no frozen prompt to carry it, the history is built again. */
+   load_live(4, 2);
+   s_stored[4] = 4;
+   snprintf(s_in_force_hash[4], sizeof(s_in_force_hash[4]), "f2");
+   session_turn_begin(s, 4, 1);
+   TEST_ASSERT_EQUAL_INT(1, s_loader_calls);
+   session_turn_end(s);
+}
+
+/* A turn begun before its conversation was known binds the one the live
+ * history holds: brought up to date before it writes, the pin with it. */
+void test_mid_turn_bind_catches_up(void) {
+   load_live(3, 2);
+   session_turn_begin(s, 0, 1);
+   s_stored[3] = 4;
+   session_turn_set_conversation(s, 3, true);
+   TEST_ASSERT_EQUAL_INT(1, s_tail_calls);
+   TEST_ASSERT_TRUE(turn() == s->conversation_history);
+   TEST_ASSERT_EQUAL_STRING("3000 3001 3002 3003", ids_of(s->conversation_history));
+   session_turn_end(s);
+   /* Built again when anything else changed: the pin moves too. */
+   session_turn_begin(s, 0, 1);
+   s_watermark[3] = 3001;
+   session_turn_set_conversation(s, 3, true);
+   TEST_ASSERT_EQUAL_INT(1, s_loader_calls);
+   TEST_ASSERT_TRUE(turn() == s->conversation_history);
+   TEST_ASSERT_TRUE(session_add_turn_message(s, "user", "q"));
+   TEST_ASSERT_EQUAL_INT(6, len(s->conversation_history));
+   session_turn_end(s);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_turn_on_loaded_conversation_uses_live_history);
@@ -1554,5 +2154,23 @@ int main(void) {
    RUN_TEST(test_stop_keeps_the_question_with_a_note);
    RUN_TEST(test_stop_without_its_question_leaves_it_to_rollback);
    RUN_TEST(test_snapshot_keeps_request_context);
+   RUN_TEST(test_turn_waits_for_another_turn_on_its_conversation);
+   RUN_TEST(test_stop_while_waiting_leaves_the_turn_unsent);
+   RUN_TEST(test_a_disconnected_waiter_stops_after_the_stale_time);
+   RUN_TEST(test_no_lease_outlives_its_turn);
+   RUN_TEST(test_post_into_a_held_conversation_waits_for_the_turn_end);
+   RUN_TEST(test_post_into_a_free_conversation_is_written_at_once);
+   RUN_TEST(test_catch_up_finds_nothing_to_do);
+   RUN_TEST(test_catch_up_appends_rows_written_elsewhere);
+   RUN_TEST(test_point_at_turn_end_covers_the_turns_rows);
+   RUN_TEST(test_catch_up_rebuilds_after_a_compaction);
+   RUN_TEST(test_catch_up_rebuilds_after_a_reasoning_floor);
+   RUN_TEST(test_catch_up_rebuilds_after_a_new_frozen_prompt);
+   RUN_TEST(test_unknown_point_rebuilds);
+   RUN_TEST(test_unknown_point_with_a_pinned_turn_loads_once);
+   RUN_TEST(test_failed_catch_up_leaves_the_point_unknown);
+   RUN_TEST(test_tail_that_cannot_stand_alone_rebuilds);
+   RUN_TEST(test_tail_takes_on_what_is_in_force);
+   RUN_TEST(test_mid_turn_bind_catches_up);
    return UNITY_END();
 }

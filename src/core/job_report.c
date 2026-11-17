@@ -26,8 +26,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "auth/auth_db.h"
-#include "auth/auth_db_messages.h"
 #include "core/session_manager.h"
 #include "core/text_input_dispatch.h"
 #include "dawn_error.h"
@@ -35,11 +33,6 @@
 #include "llm/llm_command_parser.h"
 #include "logging.h"
 #include "utils/string_utils.h"
-
-/* Defined in webui_broadcasts.c (webui_absent.c without the WebUI): tells an open
- * chat that a conversation has new messages.  Declared here, not by including
- * webui_server.h, which is a layer above. */
-void webui_broadcast_conversation_messages_appended(int user_id, int64_t conv_id);
 
 void job_report_persona(char *out, size_t out_len) {
    llm_persona_effective(out, out_len);
@@ -79,19 +72,11 @@ int job_report_post(int64_t parent_conv, int user_id, const char *text) {
    return job_report_post_ex(parent_conv, user_id, text, NULL);
 }
 
-int job_report_post_ex(int64_t parent_conv, int user_id, const char *text, int64_t *msg_id_out) {
-   int64_t msg_id = 0;
-   /* no-blocks: DAWN's report on a finished job (a take written in a turn with no
-    * tools, or a fixed line), not a turn to replay; unprompted, so memory extraction
-    * leaves it out. */
-   const conv_message_row_t row = { .role = "assistant", .content = text, .unprompted = true };
-   if (conv_db_add_row(parent_conv, user_id, &row, &msg_id) != AUTH_DB_SUCCESS) {
-      OLOG_WARNING("job_report: couldn't post to conversation %lld", (long long)parent_conv);
-      return FAILURE;
-   }
-   webui_broadcast_conversation_messages_appended(user_id, parent_conv);
-   if (msg_id_out != NULL) {
-      *msg_id_out = msg_id;
-   }
-   return SUCCESS;
+int job_report_post_ex(int64_t parent_conv,
+                       int user_id,
+                       const char *text,
+                       conv_post_written_fn on_written) {
+   /* DAWN's report on a finished job (a take written in a turn with no tools,
+    * or a fixed line), not a turn to replay. */
+   return conv_post_unprompted_ex(parent_conv, user_id, text, on_written);
 }

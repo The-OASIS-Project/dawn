@@ -42,6 +42,7 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_messages.h"
+#include "core/conv_turn_lease.h"
 #include "core/job_dispatch.h"
 #include "core/memory_filter.h"
 #include "core/rate_limiter.h"
@@ -448,7 +449,7 @@ static void *typing_keepalive_thread(void *arg) {
    return NULL;
 }
 
-static void process_inbound(inbound_item_t *item) {
+static inbound_outcome_t process_inbound(inbound_item_t *item) {
    /* Forever-binding: every messaging-backed exchange persists into one
     * conversations row per channel row (several DAWN users may each link
     * one chat).  First inbound
@@ -473,13 +474,13 @@ static void process_inbound(inbound_item_t *item) {
    int64_t conv_id = resolve_channel_conversation_id(&item->ref, item->provider,
                                                      item->provider_address, &gone);
    if (gone) {
-      return;
+      return INBOUND_RAN;
    }
 
    /* STOP drops the channel's waiting action (messaging_engine_codes.c). */
    if (item->kind == INBOUND_STOP) {
       engine_cancel_reply_code(item);
-      return;
+      return INBOUND_RAN;
    }
 
    session_t *session = get_or_create_messaging_session(&item->ref, item->provider,
@@ -491,14 +492,42 @@ static void process_inbound(inbound_item_t *item) {
          /* The code stays good: it wasn't taken. */
          engine_reply_busy(item);
       }
-      return;
+      return INBOUND_RAN;
+   }
+   /* One turn per conversation.  While another session's turn holds this one
+    * the message waits on the worker's list (messaging_engine_parked.c) rather
+    * than the worker waiting, so every other channel is still answered.  Taken
+    * before the reply code is: a message that waits has used nothing up. */
+   uint64_t lease_token = 0;
+   if (conv_id > 0) {
+      const uint64_t token = conv_turn_lease_new_token();
+      const int lrc = conv_turn_lease_try_acquire(conv_id, session->session_id, token);
+      if (lrc == CONV_TURN_LEASE_BUSY) {
+         session_release(session);
+         /* Once, when it first waits: the sender sees it was received. */
+         const messaging_driver_t *drv = item->busy_conv == 0 ? find_driver(item->provider) : NULL;
+         if (drv && drv->send_typing) {
+            char address_json[MESSAGING_ADDRESS_JSON_BUF_SIZE];
+            build_address_json_for(item->provider, item->provider_address, address_json,
+                                   sizeof(address_json));
+            drv->send_typing(item->ref.user_id, item->provider_address, address_json);
+         }
+         item->busy_conv = conv_id;
+         return INBOUND_PARKED;
+      }
+      if (lrc == CONV_TURN_LEASE_GRANTED) {
+         lease_token = token;
+      } /* else shut down or no table entry: session_turn_begin decides, as for any turn */
    }
    /* A reply code is taken once there's a session to run it in, before any
     * turn: a wrong one opens none. */
    tool_redeemed_t taken = { 0 };
    if (item->kind == INBOUND_CODE && !engine_take_reply_code(item, &taken)) {
+      if (lease_token != 0) {
+         (void)conv_turn_lease_release(conv_id, lease_token);
+      }
       session_release(session);
-      return;
+      return INBOUND_RAN;
    }
 
    /* Cross-channel staleness check.  An external writer (WebUI
@@ -603,8 +632,27 @@ static void process_inbound(inbound_item_t *item) {
    if (conv_id > 0) {
       session_set_tool_persist_hook(session, job_dispatch_tool_persist_cb, &pctx);
    }
-   /* The turn belongs to the channel's conversation (see session_turn_begin). */
-   session_turn_begin(session, conv_id, item->ref.user_id);
+   /* Fresh flags: a Stop aimed at this session's last turn (stop_other_reply
+    * from the WebUI) must not stop this one. */
+   session_begin_turn_flags(session);
+   /* The turn belongs to the channel's conversation, and owns its lease from
+    * here (released by session_turn_end). */
+   session_turn_begin_leased(session, conv_id, item->ref.user_id, lease_token);
+   if (session_turn_unsent(session)) {
+      /* Stopped waiting (shutdown): nothing ran, and nothing was taken. */
+      OLOG_WARNING("messaging: inbound message for conversation %lld not answered: the wait "
+                   "for its conversation was stopped",
+                   (long long)conv_id);
+      session_set_tool_persist_hook(session, NULL, NULL);
+      if (ka_started) {
+         atomic_store(&ka_ctx->stop, true);
+         pthread_join(ka_thread, NULL);
+         free(ka_ctx);
+      }
+      session_turn_end(session);
+      session_release(session);
+      return INBOUND_RAN;
+   }
    /* A reply code runs the action it approves in this turn; the model is
     * handed the outcome (DAWN's words, saved as request context), not the
     * code, and only reports it: no tools in that turn. */
@@ -620,7 +668,7 @@ static void process_inbound(inbound_item_t *item) {
          }
          session_turn_end(session);
          session_release(session);
-         return;
+         return INBOUND_RAN;
       }
       opts.question_kind = MESSAGE_KIND_ENVELOPE;
    }
@@ -654,7 +702,7 @@ static void process_inbound(inbound_item_t *item) {
       session_release(session);
       free(response);
       engine_send_reply_code(item);
-      return;
+      return INBOUND_RAN;
    }
 
    /* Provider-side truncation safety net for any provider that opts
@@ -821,6 +869,7 @@ static void process_inbound(inbound_item_t *item) {
 
    /* The code for an action this turn held, after the reply that explains it. */
    engine_send_reply_code(item);
+   return INBOUND_RAN;
 }
 
 void *messaging_worker_thread(void *arg) {
@@ -829,28 +878,39 @@ void *messaging_worker_thread(void *arg) {
 
    while (!atomic_load(&s_shutdown_requested)) {
       pthread_mutex_lock(&s_inbound_mutex);
-      while (s_inbound_count == 0 && !atomic_load(&s_shutdown_requested)) {
-         pthread_cond_wait(&s_inbound_cond, &s_inbound_mutex);
+      bool recheck = false;
+      while (s_inbound_count == 0 && !atomic_load(&s_shutdown_requested) && !recheck) {
+         if (inbound_parked_count() == 0) {
+            pthread_cond_wait(&s_inbound_cond, &s_inbound_mutex);
+            continue;
+         }
+         /* Messages wait for a held conversation: look again in a moment. */
+         struct timespec until;
+         clock_gettime(CLOCK_REALTIME, &until);
+         until.tv_nsec += (long)MESSAGING_PARKED_RECHECK_MS * 1000000L;
+         until.tv_sec += until.tv_nsec / 1000000000L;
+         until.tv_nsec %= 1000000000L;
+         recheck = pthread_cond_timedwait(&s_inbound_cond, &s_inbound_mutex, &until) != 0;
       }
       if (atomic_load(&s_shutdown_requested)) {
          pthread_mutex_unlock(&s_inbound_mutex);
          break;
       }
-      inbound_item_t *item = s_inbound_queue[s_inbound_head];
-      s_inbound_queue[s_inbound_head] = NULL;
-      s_inbound_head = (s_inbound_head + 1) % MESSAGING_INBOUND_QUEUE_DEPTH;
-      s_inbound_count--;
+      inbound_item_t *item = NULL;
+      if (s_inbound_count > 0) {
+         item = s_inbound_queue[s_inbound_head];
+         s_inbound_queue[s_inbound_head] = NULL;
+         s_inbound_head = (s_inbound_head + 1) % MESSAGING_INBOUND_QUEUE_DEPTH;
+         s_inbound_count--;
+      }
       pthread_mutex_unlock(&s_inbound_mutex);
 
       if (item) {
-         process_inbound(item);
-         if (item->kind == INBOUND_CODE && item->body) {
-            sodium_memzero(item->body, strlen(item->body)); /* a reply code */
-         }
-         free(item->body);
-         free(item);
+         inbound_parked_submit(item, process_inbound);
       }
+      inbound_parked_retry(process_inbound);
    }
+   inbound_parked_drop_all();
 
    OLOG_INFO("messaging: worker thread exiting");
    return NULL;

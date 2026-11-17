@@ -612,6 +612,8 @@ set(DAWN_SOURCES
     src/core/wake_word.c
     src/core/utterance_dedup.c
     src/core/pending_slots.c          # pure: what a tool staged for the user's confirm
+    src/core/conv_turn_lease.c        # one turn per conversation at a time
+    src/core/conv_post.c              # posts into a conversation from outside a turn
     src/core/tool_call_policy.c       # who may make a tool call
     src/core/tool_call_challenge.c    # actions from a text waiting for the user's reply code
     src/core/reply_code.c             # codes texted to a number and texted back
@@ -776,6 +778,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_broadcasts.c
         src/webui/webui_events.c
         src/webui/webui_jobs.c
+        src/webui/webui_turn_wait.c
         src/webui/webui_message_dispatch.c
         src/webui/webui_send.c
         src/webui/webui_turn_ref.c
@@ -846,6 +849,8 @@ list(APPEND DAWN_SOURCES
     src/core/session_voice_save.c
     src/core/session_image_hold.c
     src/core/session_history.c
+    src/core/session_catchup.c
+    src/core/session_turn_lease.c
     src/core/turn_queue.c
     src/core/session_manager_llm.c
     src/core/job_manager.c
@@ -888,6 +893,7 @@ if(ENABLE_WEBUI)
         src/messaging/messaging_engine_read.c
         src/messaging/messaging_engine_link.c
         src/messaging/messaging_engine_inbound.c
+        src/messaging/messaging_engine_parked.c
         src/messaging/messaging_engine_codes.c
         src/messaging/messaging_telegram.c
         src/messaging/messaging_telegram_parse.c

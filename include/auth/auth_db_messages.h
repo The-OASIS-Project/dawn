@@ -34,6 +34,7 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "core/conv_sync_point.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -207,6 +208,19 @@ int conv_db_posted_after(int64_t conv_id,
 
 /** Free the contents conv_db_posted_after() filled in. */
 void conv_db_posted_free(conv_posted_row_t *rows, int n);
+
+/**
+ * @brief The state a reload of @p conv_id is built from (conv_sync_point.h):
+ *        its newest row and the conversation's watermark, reasoning floor,
+ *        frozen prompt, tool set and in-force record
+ *
+ * One read, only when the conversation belongs to @p user_id.  Takes the
+ * database lock (a leaf): never call it holding a session lock.
+ *
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND (missing or not @p user_id's),
+ *         AUTH_DB_INVALID or AUTH_DB_FAILURE (*@p out zeroed)
+ */
+int conv_db_sync_point_get(int64_t conv_id, int user_id, conv_sync_point_t *out);
 
 /**
  * @brief Bind the images @p conv_id's rows name: the user's unbound captures

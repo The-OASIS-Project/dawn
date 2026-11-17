@@ -180,6 +180,9 @@ Layer 1 (Core infrastructure) — deps: Layer 0
 ├── include/core/turn_origin.h  Where a pending action was made; a confirm carries it out only in the same
 │                               session, in a later turn (the next one, or one of the next few where a
 │                               table allows it), and never in a turn carrying an email the user attached
+├── src/core/conv_turn_lease.c  One turn per conversation at a time: a turn takes its conversation's lease, waiting
+│                               FIFO behind the holder; a post from outside a turn never waits (written now, or
+│                               queued and written by the holder's release before the next turn starts)
 ├── src/core/pending_slots.c    What a tool staged for the user's confirm: one item per session and kind, each
 │                               with a new id its confirm must name; never evicts another session's item
 ├── src/core/tool_call_challenge.c  An action asked for by text, waiting for its reply code: one per channel,
@@ -194,6 +197,8 @@ Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 │                               llm_third_party.c frames an email's or a page's text as someone else's
 ├── src/core/ services          Session unit (below), focus framework (src/core/focus/), prompt prefix
 │                               (prefix_*), embeddings, crypto store, scheduler, tool-result store, OTA, images
+├── src/core/conv_post.c        Every row written into a conversation from outside a turn (a job's report, a channel
+│                               message DAWN sent) goes through conv_post_unprompted(), through the lease
 ├── src/core/tool_call_policy.c Who may make a tool call: the caller's kind of turn (user, unverified sender,
 │                               background job, unattended, a user turn carrying an attached email) against the
 │                               action's kind; decided once per call
@@ -242,6 +247,8 @@ Layer 4 (Application) — deps: everything below
 
 **The session unit.** `session_manager.c` (the dispatch), `session_history.c` (history lifecycle),
 `session_prefix.c` (the append-only request: frozen prefix, appended changes and turn context, live withdrawal),
+`session_catchup.c` (a turn's history brought up to date with its conversation),
+`session_turn_lease.c` (a turn's wait for its conversation's lease, and what others may ask of the turn holding it),
 `session_compaction.c`, `session_focus.c`, `session_posts.c`, `prompt_builder.c` and `session_image_hold.c`
 call into each other: read them as one Layer-2 unit, not as separate modules with a direction between them.
 
@@ -263,7 +270,10 @@ call into each other: read them as one Layer-2 unit, not as separate modules wit
 | `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |
 | `src/memory/memory_consolidate.c`, `memory_consolidation_undo.c` (a batch recorded, undone or kept) | `webui_broadcasts.c` (`memory_batch` to every tab of the user) | weak `memory_consolidation_batch_notify` |
 | `src/core/job_manager.c` (cancel a job whose work runs outside DAWN) | `coding_agent_tool.c` (asks the agent gateway to stop a coding job's task) | `job_manager_register_kind_cancel` |
-| `src/core/job_report.c` (a job's report posted into a conversation) | the WebUI, which tells the tabs viewing it to refetch | `webui_broadcast_conversation_messages_appended` (strong in `webui_broadcasts.c`, a no-op in `webui_absent.c`) |
+| `src/core/conv_post.c` (a post into a conversation) | the WebUI, which tells the tabs viewing it to refetch | `webui_broadcast_conversation_messages_appended` (strong in `webui_broadcasts.c`, a no-op in `webui_absent.c`) |
+| `src/core/conv_turn_lease.c` (a queued post written at the holder's release) | `conv_post.c`'s writer | `conv_turn_lease_set_writer`, at startup |
+| `src/core/session_turn_lease.c` (a turn waits for its conversation, gets it, or stops waiting) | the waiting session's client (`webui_turn_wait.c`) | weak `session_turn_waiting_notice` |
+| `src/core/session_catchup.c` (a turn brings its session's history up to date with its conversation) | the history loader and the tail loader (`memory_history_request_tail`), registered by the WebUI server | `session_set_history_loader`, `session_set_history_tail_loader`, at startup |
 
 \* **Orchestration-unit note.** `job_worker.c` and `research_worker.c` physically live in
 `src/core/` but are **application-orchestration units**: each is a detached top-of-stack sequencer
@@ -351,7 +361,9 @@ DAWN keeps the thread count small. The main thread owns the voice state machine,
 │  WebUI audio     — per-connection ASR/TTS pipeline     │
 │  Messaging recv  — per-provider listener (Telegram/    │
 │                    Slack/Discord WS or poll)           │
-│  Messaging work  — inbound dispatch + async outbound   │
+│  Messaging work  — inbound dispatch + async outbound;  │
+│                    one worker for every channel, never │
+│                    waits for a held conversation       │
 │  Job worker      — detached per background job (ASR-   │
 │                    less LLM tool loop on a pool session)│
 │  Reinvoke worker — detached per re-engagement (runs a  │
@@ -447,6 +459,27 @@ thread waits a fixed time for another to be ready. Shutdown mirrors it: once the
 requests and the LLM thread is joined, the tools' `stop` runs (last registered first), before
 background jobs, the database and MQTT go; the tools' `cleanup` comes last.
 
+**One turn per conversation.** The turn queue serializes turns per session; the conversation lease
+(`conv_turn_lease.c`) serializes them per conversation, so two sessions on one conversation (a tab and
+another client app, a tab and a job or a channel) never run turns on it at once. A turn on a held
+conversation waits on its own thread (a text, voice or job worker), telling its
+client (`turn_waiting`), and counts as in flight while it waits (the idle sweep never reaps its session);
+a Stop or a teardown wakes the wait at once and ends it before anything of the turn is saved, and a
+turn whose client is gone stops waiting after `[jobs] max_runtime_sec`. The messaging worker, one thread
+for every channel, never waits: it takes a channel's conversation with a try (`conv_turn_lease_try_acquire`)
+and, while it is held, keeps the message on its own list (`messaging_engine_parked.c`, at most 16 per
+channel and 64 in all), looks again every 250 ms and runs a channel's messages in arrival order. Posts from outside a turn
+(`conv_post.c`: a job's report, a channel message DAWN sent) never wait: the holder's release writes
+them before the next turn starts. Each turn releases its lease at its end; the session's free releases
+any lease still naming it, with an ERROR, unless that lease's holder is releasing it right then (its
+release hands it on). Holding the lease, a turn brings its session's history up to
+date with the conversation (`session_catchup.c`): each session records the conversation's stored state
+its history was built at (newest row, watermark, reasoning floor, frozen prompt, tool set, in-force
+record; one indexed read), set where it is loaded and where a turn holding it ends; at the next turn's
+start, rows only added since are appended as a reload renders them, and any other change builds the
+history again as a restore does. A catch-up that fails leaves the history's state unknown at the turn's
+end, so the next turn builds it again.
+
 **Turn serialization (background-jobs era).** All WebUI LLM turns — user text, push-to-talk
 voice, and background-job re-engagements — funnel through the per-session **turn queue**
 (`src/core/turn_queue.c`), which guarantees at most one turn runs on a given `session_t` at a
@@ -525,6 +558,17 @@ During PROCESSING the LLM call runs on a worker thread. The main thread continue
 **CRITICAL**: to prevent deadlocks, the codebase follows a strict acquisition order when multiple locks are needed. Mutexes fall into three categories by scope:
 
 ```
+Conversation turn lease (src/core/conv_turn_lease.c) — OUTERMOST for a turn:
+  a turn takes its conversation's lease (session_turn_begin, or its bind to one) with NO lock held
+  (no history_mutex, session registry, auth_db, turn-queue or job-pool lock), on its own thread, and
+  waits for at most one conversation.  The WebSocket thread and the messaging worker never wait on
+  it: the first only claims a conversation it just created and posts, the second only tries
+  (conv_turn_lease_try_acquire) and keeps a message for a held conversation on its own list.  The lease's own s_mutex is a LEAF:
+  held only to update the table, never across the post writer, a stop check or a log line; any lock
+  may be held while taking it (session_cancel_turn and session_teardown_flags wake a waiting turn
+  through it, under the job pool lock, the session registry or history_mutex).  A post
+  (conv_post.c) never waits, so two turns can't deadlock posting into each other's conversations
+
 Global daemon locks (src/dawn.c):
   llm_mutex              — LLM worker thread ↔ main thread buffer transfer
   tts_mutex              — TTS engine (Piper) serialization
