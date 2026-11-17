@@ -97,6 +97,9 @@
    const pushedWhileLoading = new Map(); /* batch_id → batch */
    let liveRegion = null;
 
+   /* What a conversation with an empty title is called. */
+   const UNTITLED = 'Untitled conversation';
+
    function connected() {
       return typeof DawnWS !== 'undefined' && DawnWS.isConnected();
    }
@@ -290,6 +293,21 @@
       /* In the marker the summary line says it; the title stays as the name. */
       title.className = 'memory-batch-title' + (where === 'marker' ? ' sr-only' : '');
       title.id = headId;
+      /* Which conversation it came from, and a way there.  Not in the marker:
+       * that sits in the conversation.  Absent on a daemon that sends no title. */
+      if (
+         where !== 'marker' &&
+         batch.conversation_id != null &&
+         typeof batch.conversation_title === 'string'
+      ) {
+         const open = document.createElement('button');
+         open.type = 'button';
+         open.className = 'btn-link memory-batch-conversation';
+         open.dataset.conversationId = String(batch.conversation_id);
+         open.textContent = batch.conversation_title || UNTITLED;
+         open.title = 'Open this conversation';
+         title.appendChild(open);
+      }
       const when = formatWhen(batch.created_at);
       if (when) {
          const time = document.createElement('time');
@@ -710,10 +728,37 @@
       syncLoadMore();
    }
 
+   /** A conversation got a new title: the batches shown from it follow. */
+   function handleConversationRenamed(payload) {
+      const id = payload && Number(payload.conversation_id);
+      if (!Number.isInteger(id) || id <= 0 || typeof payload.title !== 'string') return;
+      document
+         .querySelectorAll(
+            '.memory-batch-conversation[data-conversation-id="' + CSS.escape(String(id)) + '"]'
+         )
+         .forEach((el) => {
+            el.textContent = payload.title || UNTITLED;
+         });
+   }
+
+   function openConversation(btn) {
+      const id = Number(btn.dataset.conversationId);
+      if (!Number.isInteger(id) || id <= 0) return;
+      if (typeof DawnHistory === 'undefined' || !DawnHistory.loadConversation) return;
+      DawnHistory.loadConversation(id);
+      if (typeof DawnMemory !== 'undefined' && DawnMemory.close) DawnMemory.close();
+   }
+
    function init() {
       document.addEventListener('click', (e) => {
-         const btn = e.target.closest && e.target.closest('.memory-batch-action[data-action]');
-         if (btn && !btn.disabled) act(btn);
+         if (!e.target.closest) return;
+         const btn = e.target.closest('.memory-batch-action[data-action]');
+         if (btn && !btn.disabled) {
+            act(btn);
+            return;
+         }
+         const conv = e.target.closest('.memory-batch-conversation[data-conversation-id]');
+         if (conv) openConversation(conv);
       });
    }
 
@@ -736,6 +781,7 @@
       handleUndoResponse,
       handleKeepResponse,
       handleFactDeleted,
+      handleConversationRenamed,
    };
 
    if (document.readyState === 'loading') {

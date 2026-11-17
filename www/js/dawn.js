@@ -1386,6 +1386,9 @@
                break;
             case 'conversation_renamed':
                DawnHistory.handleConversationRenamed(msg.payload);
+               if (window.DawnMemoryBatches) {
+                  DawnMemoryBatches.handleConversationRenamed(msg.payload);
+               }
                break;
             case 'conversation_messages_appended':
                DawnHistory.handleConversationMessagesAppended(msg.payload);
