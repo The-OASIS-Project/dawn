@@ -90,10 +90,11 @@ Agent SDK with your Claude plan" on support.claude.com before relying on it.
 List the repos the agent may work in under `[[repos]]` in
 `/usr/local/etc/agent-gateway/agent-gateway.toml`, then `sudo systemctl restart agent-gateway`.
 
-### Publishing (optional): a GitHub token
+### Publishing and pull requests (optional): a GitHub token
 
-Publishing pushes a task's `agent/*` branch and opens a pull request; it needs a fine-grained
-GitHub token. Without one, publishing is off and everything else works.
+Publishing pushes a task's `agent/*` branch and opens a pull request, and the `pr_*` tools read a
+pull request's state, review threads and check logs; both need a fine-grained GitHub token.
+Without one, publishing and those reads are off and everything else works.
 
 1. On GitHub: Settings, Developer settings, Personal access tokens, Fine-grained tokens, Generate
    new token.
@@ -103,12 +104,20 @@ GitHub token. Without one, publishing is off and everything else works.
    (the organization's Settings, Personal access tokens).
 3. **Expiration**: GitHub requires one. When the token expires, publishing fails until a new one
    replaces it (step 6).
-4. **Repository access**: only select repositories, the ones the gateway works on.
+4. **Repository access**: "Only select repositories", the ones the gateway works on. A
+   fine-grained token has one resource owner, and the choice here is about that owner's repos:
+   public repos of anyone are readable whatever is ticked, so the `pr_*` reads work on any public
+   pull request, while pushing works only on the repos ticked. "All repositories" adds reads of the
+   owner's private repos but also gives the token push access (Contents: read and write) to every
+   one of them; the gateway publishes only to configured repos, so that matters only if the
+   gateway itself is compromised.
 5. **Permissions**, under Repository permissions:
    - **Contents**: read and write (the push).
    - **Pull requests**: read and write (opening the PR, and the hourly check that closes a task
      whose PR merged).
    - **Metadata**: read-only. GitHub adds it on its own, and it is required.
+   - **Actions**: read-only, and **Commit statuses**: read-only, only for private repos: a pull
+     request's checks and a check's log. Public repos are read without them. Issues isn't needed.
    - **Workflows**: leave at no access. Pushing a change to `.github/workflows/` runs it with the
      repo's secrets before anyone reviews it; a token without that permission makes GitHub refuse
      such a push, and DAWN then says to publish that work yourself.
@@ -121,6 +130,9 @@ GitHub token. Without one, publishing is off and everything else works.
 
 To check it, ask DAWN to publish a finished coding job: it shows a preview, and after your yes it
 answers with the pull request's link. Without a token it says publishing is off.
+
+An existing token can be edited (Settings, Developer settings, Fine-grained tokens, the token,
+Edit); its value doesn't change. Without a permission a read needs, DAWN names the one it needs.
 
 ### Connecting DAWN
 
@@ -197,6 +209,13 @@ is collected there whenever a run stops, so work in progress can be looked at to
 | `task_file {dawn_user_id, task, path, view}` | one file: `diff`, `new` (after) or `old` (before); too large, binary or missing are reported, not sent |
 | `task_tree {dawn_user_id, task, path?}` | one folder of the repo at the task's latest collected commit |
 | `grants_list {dawn_user_id}` / `grant_revoke {dawn_user_id, grant_id}` | standing grants |
+| `pr_status {dawn_user_id, ref \| client_ref, repo?}` | a GitHub pull request on any repo the token can read: `ref` is its URL, `owner/repo#N`, or `N` with `repo` (a configured repo's name or `owner/repo`; alone when one repo is configured); `client_ref` names the task that published it. Answers `pr` (`owner`, `repo`, `number`, `url`, `title`, `author`, `state`, `draft`, `merged`, `mergeable`, `merge_state`, `behind`, `base`, `head_ref`, `head_sha`, `review_decision`), `checks` (`[{name, required, status, conclusion, failed, job_id, app, url}]`, failing required first, at most 50) with `checks_total` and `checks_note` when they can't be read, `reviews` (the latest per reviewer, with its `commit`), `requested`, `copilot` (`requested`, `reviewed_head` (its review covers the current head), `reviewed_earlier` or `none`), `threads` counts, `configured_repo` (the gateway repo it is in, or null) and `job` (the `client_ref` of the user's task that published it, or null) |
+| `pr_threads {dawn_user_id, ref \| client_ref, repo?, all?}` | its unresolved review threads (`all`: resolved too), each keyed by `comment_id` (its first comment's id; `n` is for display), with `path`, `line`, `outdated`, `resolved`, its first and last 5 comments and `comments_total`; `reviews` with a body, the newest 10 conversation `comments`, `as_login` (the token's user), `head_sha`, `total`, `truncated` (about 64 KB at most) |
+| `pr_check_log {dawn_user_id, ref \| client_ref, repo?, check}` | one GitHub Actions check's log (`check`: its name, its `job_id` from `pr_status`, or both as `pr_status` lists them): `name`, `conclusion`, `url`, `excerpt` (its error lines nearest the end with 2 lines around each, at most 40, then its last 200 lines; colours and timestamps stripped; at most 12 KB), `excerpt_bytes`, `log_bytes_read`, `truncated` (only the log's last 16 MB was kept, or reading stopped at 256 MB or 30 s) |
+
+Text a `pr_*` tool returns was written by anyone who can comment on the pull request: each
+string is cut to a cap (a comment's body to 2000 characters), NULs and control characters other
+than tab and newline are dropped, and links other than `https://github.com/` ones are left out.
 
 A tool's answer is a JSON object in the result's first text content
 (`result.content[0].text`); `structuredContent` is not set. A refused call returns
