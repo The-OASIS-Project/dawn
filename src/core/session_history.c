@@ -817,15 +817,22 @@ bool session_add_turn_message_object(session_t *session, struct json_object *mes
    return true;
 }
 
-void session_stamp_message_id(session_t *session, struct json_object *message, int64_t row_id) {
-   if (!session || !message || row_id <= 0) {
+void session_stamp_row_id(session_t *session,
+                          struct json_object *obj,
+                          const char *key,
+                          int64_t row_id) {
+   if (!session || !obj || !key || row_id <= 0) {
       return;
    }
    pthread_mutex_lock(&session->history_mutex);
-   if (!json_object_object_get_ex(message, "id", NULL)) {
-      json_object_object_add(message, "id", json_object_new_int64(row_id));
+   if (!json_object_object_get_ex(obj, key, NULL)) {
+      json_object_object_add(obj, key, json_object_new_int64(row_id));
    }
    pthread_mutex_unlock(&session->history_mutex);
+}
+
+void session_stamp_message_id(session_t *session, struct json_object *message, int64_t row_id) {
+   session_stamp_row_id(session, message, "id", row_id);
 }
 
 struct json_object *session_get_history(session_t *session) {

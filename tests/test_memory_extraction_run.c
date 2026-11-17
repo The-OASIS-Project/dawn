@@ -54,6 +54,8 @@
 #include "core/text_input_dispatch.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_third_party.h"
+#include "llm/llm_tool_history.h"
+#include "llm/llm_tools.h"
 #include "memory/memory_db.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_recovery.h"
@@ -115,17 +117,59 @@ char *__wrap_llm_chat_completion_with_config(struct json_object *conversation_hi
 }
 
 /* The turn's model (the session unit's call, wrapped like the extraction's):
- * the answer it gives. */
+ * the answer it gives, after a tool exchange when s_turn_tool names its
+ * result (run on s_turn_session, saved through its persist hook). */
 static const char *s_turn_reply;
+static const char *s_turn_tool;
+static session_t *s_turn_session;
+
+/* A tool exchange as the tool loop appends and saves it, on a Claude path:
+ * the call, then its result in a user message. */
+static void run_tool_exchange(struct json_object *history) {
+   const int before = (int)json_object_array_length(history);
+   llm_tool_response_t response;
+   memset(&response, 0, sizeof(response));
+   response.text = "Checking.";
+   response.tool_calls.count = 1;
+   response.has_tool_calls = true;
+   snprintf(response.tool_calls.calls[0].id, LLM_TOOLS_ID_LEN, "toolu_1");
+   snprintf(response.tool_calls.calls[0].name, LLM_TOOLS_NAME_LEN, "weather");
+   snprintf(response.tool_calls.calls[0].arguments, LLM_TOOLS_ARGS_LEN, "{}");
+   tool_result_list_t *results = calloc(1, sizeof(*results));
+   TEST_ASSERT_NOT_NULL(results);
+   results->count = 1;
+   snprintf(results->results[0].tool_call_id, LLM_TOOLS_ID_LEN, "toolu_1");
+   snprintf(results->results[0].result, sizeof(results->results[0].result), "%s", s_turn_tool);
+   results->results[0].success = true;
+   llm_tool_history_append_claude(history, &response, results, "api.anthropic.com#0");
+   llm_tool_history_persist(s_turn_session, history, before, NULL, 1, results);
+   free(results);
+}
 
 char *__wrap_llm_chat_completion_streaming_with_config(struct json_object *conversation_history,
                                                        const char *input_text,
                                                        llm_text_chunk_callback chunk_callback,
                                                        void *callback_userdata,
                                                        const llm_resolved_config_t *config) {
-   (void)conversation_history, (void)input_text, (void)chunk_callback, (void)callback_userdata;
+   (void)input_text, (void)chunk_callback, (void)callback_userdata;
    (void)config;
+   if (s_turn_tool) {
+      run_tool_exchange(conversation_history);
+   }
    return s_turn_reply ? strdup(s_turn_reply) : NULL;
+}
+
+/* The turn's persist hook: each row into the conversation, its id back. */
+static int64_t persist_row(void *userdata, const session_tool_row_t *row) {
+   const conv_message_row_t db_row = { .role = row->role,
+                                       .content = row->content,
+                                       .tool_calls = row->tool_calls,
+                                       .tool_call_id = row->tool_call_id,
+                                       .llm_blocks = row->llm_blocks,
+                                       .kind = row->kind };
+   int64_t id = 0;
+   return conv_db_add_row(*(const int64_t *)userdata, s_user, &db_row, &id) == AUTH_DB_SUCCESS ? id
+                                                                                               : 0;
 }
 
 /* ---- the runtime a turn calls besides the session unit, stubbed ---- */
@@ -254,6 +298,8 @@ void setUp(void) {
    s_entered = false;
    s_open = false;
    s_turn_reply = NULL;
+   s_turn_tool = NULL;
+   s_turn_session = NULL;
 }
 
 void tearDown(void) {
@@ -549,12 +595,7 @@ void test_recovery_counts_a_falling_count_as_progress(void) {
 
 /* ---- a turn, then its extraction ---- */
 
-/* A turn run on a session (the question saved by the dispatch, the reply by
- * the surface), then the session's history handed to extraction: the model is
- * sent both, and the cursor ends at the reply. */
-void test_a_turn_on_a_session_then_its_extraction(void) {
-   int64_t conv = 0;
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Turn", &conv));
+static session_t *new_session(int64_t conv) {
    session_t *s = calloc(1, sizeof(*s));
    TEST_ASSERT_NOT_NULL(s);
    s->session_id = 3;
@@ -566,30 +607,10 @@ void test_a_turn_on_a_session_then_its_extraction(void) {
    pthread_mutex_init(&s->tools_mutex, NULL);
    s->conversation_history = json_object_new_array();
    session_bind_history_conversation(s, conv);
+   return s;
+}
 
-   s_turn_reply = "MARK-TURN-R placeholder answer";
-   session_turn_begin(s, conv, s_user);
-   const text_input_dispatch_opts_t opts = { .conversation_id = conv, .auth_user_id = s_user };
-   char *reply = core_text_input_dispatch(s, "MARK-TURN-Q placeholder question", &opts);
-   TEST_ASSERT_NOT_NULL(reply);
-   const conv_message_row_t row = { .role = "assistant", .content = reply };
-   int64_t reply_id = 0;
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &reply_id));
-   session_stamp_last_message_id(s, "assistant", reply_id);
-   free(reply);
-   session_turn_end(s);
-
-   pthread_mutex_lock(&s->history_mutex);
-   struct json_object *history = NULL;
-   TEST_ASSERT_EQUAL_INT(0, json_object_deep_copy(s->conversation_history, &history, NULL));
-   pthread_mutex_unlock(&s->history_mutex);
-   extract(conv, history, (int)json_object_array_length(history));
-
-   TEST_ASSERT_EQUAL_INT(1, s_calls);
-   prompt_has("MARK-TURN-Q");
-   prompt_has("MARK-TURN-R");
-   TEST_ASSERT_EQUAL_INT64(reply_id, id_cursor(conv));
-
+static void free_session(session_t *s) {
    session_final_answer_clear(s);
    session_compaction_teardown(s);
    session_prefix_turn_free(s->prefix_turn);
@@ -602,6 +623,95 @@ void test_a_turn_on_a_session_then_its_extraction(void) {
    free(s);
 }
 
+/* A turn on @p s: the question saved by the dispatch, a tool exchange (with
+ * @p tool_result) through the session's persist hook, the reply by the
+ * surface.  Returns the reply's row id. */
+static int64_t run_turn(session_t *s,
+                        int64_t conv,
+                        const char *question,
+                        const char *answer,
+                        const char *tool_result) {
+   s_turn_reply = answer;
+   s_turn_tool = tool_result;
+   s_turn_session = s;
+   int64_t hook_conv = conv;
+   s->tool_persist_cb = persist_row;
+   s->tool_persist_userdata = &hook_conv;
+   session_turn_begin(s, conv, s_user);
+   const text_input_dispatch_opts_t opts = { .conversation_id = conv, .auth_user_id = s_user };
+   char *reply = core_text_input_dispatch(s, question, &opts);
+   TEST_ASSERT_NOT_NULL(reply);
+   const conv_message_row_t row = { .role = "assistant", .content = reply };
+   int64_t reply_id = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &reply_id));
+   session_stamp_last_message_id(s, "assistant", reply_id);
+   free(reply);
+   session_turn_end(s);
+   s->tool_persist_cb = NULL;
+   s->tool_persist_userdata = NULL;
+   return reply_id;
+}
+
+/* The session's history as extraction is handed it. */
+static void extract_session(session_t *s, int64_t conv) {
+   pthread_mutex_lock(&s->history_mutex);
+   struct json_object *history = NULL;
+   TEST_ASSERT_EQUAL_INT(0, json_object_deep_copy(s->conversation_history, &history, NULL));
+   pthread_mutex_unlock(&s->history_mutex);
+   extract(conv, history, (int)json_object_array_length(history));
+}
+
+/* A turn run on a session (the question saved by the dispatch, the reply by
+ * the surface), then the session's history handed to extraction: the model is
+ * sent both, and the cursor ends at the reply. */
+void test_a_turn_on_a_session_then_its_extraction(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Turn", &conv));
+   session_t *s = new_session(conv);
+
+   const int64_t reply_id = run_turn(s, conv, "MARK-TURN-Q placeholder question",
+                                     "MARK-TURN-R placeholder answer", NULL);
+   extract_session(s, conv);
+
+   TEST_ASSERT_EQUAL_INT(1, s_calls);
+   prompt_has("MARK-TURN-Q");
+   prompt_has("MARK-TURN-R");
+   TEST_ASSERT_EQUAL_INT64(reply_id, id_cursor(conv));
+   free_session(s);
+}
+
+/* A turn with a tool exchange, extracted, then a plain turn on the same
+ * session, extracted: the exchange is sent with its own batch only (its rows'
+ * ids are on the live history, so the second batch drops them), and the
+ * second batch is its two rows. */
+void test_a_tool_exchange_is_extracted_once(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Tools", &conv));
+   session_t *s = new_session(conv);
+
+   const int64_t first = run_turn(s, conv, "MARK-Q1 placeholder question",
+                                  "MARK-R1 placeholder answer", "MARK-TOOL placeholder result");
+   extract_session(s, conv);
+   TEST_ASSERT_EQUAL_INT(1, s_calls);
+   prompt_has("MARK-Q1");
+   prompt_has("MARK-TOOL");
+   TEST_ASSERT_EQUAL_INT64(first, id_cursor(conv));
+
+   const int64_t second = run_turn(s, conv, "MARK-Q2 placeholder question",
+                                   "MARK-R2 placeholder answer", NULL);
+   extract_session(s, conv);
+   TEST_ASSERT_EQUAL_INT(2, s_calls);
+   prompt_has("MARK-Q2");
+   prompt_has("MARK-R2");
+   prompt_lacks("MARK-TOOL");
+   prompt_lacks("MARK-Q1");
+   TEST_ASSERT_EQUAL_INT64(second, id_cursor(conv));
+   TEST_ASSERT_EQUAL_INT64(2, q1("SELECT message_count FROM memory_summaries WHERE "
+                                 "source_conversation_id = ?1 ORDER BY id DESC LIMIT 1",
+                                 conv));
+   free_session(s);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_history_lacking_another_sessions_rows_sends_them);
@@ -609,5 +719,6 @@ int main(void) {
    RUN_TEST(test_another_sessions_web_result_taints_a_model_batch);
    RUN_TEST(test_recovery_counts_a_falling_count_as_progress);
    RUN_TEST(test_a_turn_on_a_session_then_its_extraction);
+   RUN_TEST(test_a_tool_exchange_is_extracted_once);
    return UNITY_END();
 }

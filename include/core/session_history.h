@@ -114,6 +114,13 @@ bool session_add_turn_message_object(session_t *session, struct json_object *mes
  *  has one. */
 void session_stamp_message_id(session_t *session, struct json_object *message, int64_t row_id);
 
+/** Stamp @p obj (a message in the session's history, or a part of one) with
+ *  its row's id under @p key, unless it has one. */
+void session_stamp_row_id(session_t *session,
+                          struct json_object *obj,
+                          const char *key,
+                          int64_t row_id);
+
 /** history_conversation_id value: the history holds more than one conversation's turns */
 #define SESSION_HISTORY_CONV_MIXED ((int64_t)-1)
 

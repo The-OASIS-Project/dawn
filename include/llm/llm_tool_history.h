@@ -73,7 +73,10 @@ void llm_tool_history_append_claude(struct json_object *history,
  * Each message is saved as the rows llm_history_rows_append makes of it: an
  * assistant row with its tool calls, stored blocks and @p reasoning_json; a
  * loop note with its kind; a role="tool" row with its images and whether its
- * call failed (from @p results, which may be NULL).  Runs with no lock held.
+ * call failed (from @p results, which may be NULL).  Each message the hook
+ * saved is stamped with its row's id, as a reload of the conversation holds
+ * it (a Claude message of results: each result's part with its own, the
+ * message with its last).  Runs with no lock held.
  *
  * @param s The session the turn runs on (the caller holds a reference)
  * @param iteration The tool loop's iteration, for the observers' events

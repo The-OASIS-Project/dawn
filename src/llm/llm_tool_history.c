@@ -24,9 +24,12 @@
 #include "llm/llm_tool_history.h"
 
 #include <json-c/json.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "core/conv_event.h"
 #include "core/event_payload.h"
+#include "core/session_history.h"
 #include "core/session_manager.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_history_rows.h"
@@ -178,6 +181,33 @@ static const char *str_field(struct json_object *obj, const char *key) {
    return json_object_object_get_ex(obj, key, &v) ? json_object_get_string(v) : NULL;
 }
 
+/* A Claude message of tool results is a row per result: the result's part
+ * takes its row's id (LLM_HISTORY_PART_ROW_ID_KEY), so a request rebuilt from
+ * the live history names each row as a reload does. */
+static void stamp_result_part(session_t *s,
+                              struct json_object *msg,
+                              struct json_object *row,
+                              int64_t row_id) {
+   const char *call_id = str_field(row, "tool_call_id");
+   const char *role = str_field(msg, "role");
+   struct json_object *content = NULL;
+   if (row_id <= 0 || !call_id || (role && strcmp(role, "tool") == 0) ||
+       !json_object_object_get_ex(msg, "content", &content) ||
+       !json_object_is_type(content, json_type_array)) {
+      return;
+   }
+   const size_t n = json_object_array_length(content);
+   for (size_t i = 0; i < n; i++) {
+      struct json_object *part = json_object_array_get_idx(content, i);
+      const char *type = str_field(part, "type");
+      const char *use_id = str_field(part, "tool_use_id");
+      if (type && strcmp(type, "tool_result") == 0 && use_id && strcmp(use_id, call_id) == 0) {
+         session_stamp_row_id(s, part, LLM_HISTORY_PART_ROW_ID_KEY, row_id);
+         return;
+      }
+   }
+}
+
 /* Persist the tool messages just appended to @p history in [before_len, end) via
  * the session's tool-persist hook (if set), in OpenAI-canonical form.  Runs on the
  * worker thread with NO lock held, so conv_db (auth_db lock) is safe to call here.
@@ -216,9 +246,28 @@ void llm_tool_history_persist(session_t *s,
 
    /* The rows each appended message saves as (llm_history_rows_append): the
     * canonical shape the walk below reads, whatever the history's format, and
-    * for an assistant turn its stored blocks. */
+    * for an assistant turn its stored blocks.  owner[r] is row r's message,
+    * stamped with the row's id once saved (NULL: out of memory, none are). */
+   struct json_object **owner = NULL;
+   bool owned = cb != NULL;
    for (int i = before_len; i < after; i++) {
-      llm_history_rows_append(json_object_array_get_idx(history, i), canonical);
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      const size_t from = json_object_array_length(canonical);
+      const int added = llm_history_rows_append(msg, canonical);
+      if (owned && added > 0) {
+         struct json_object **grown = realloc(owner, (from + (size_t)added) * sizeof(*owner));
+         owned = grown != NULL;
+         owner = grown ? grown : owner;
+         for (int r = 0; grown && r < added; r++) {
+            owner[from + (size_t)r] = msg;
+         }
+      }
+   }
+   int64_t *row_ids = owned && owner ? calloc(json_object_array_length(canonical), sizeof(*row_ids))
+                                     : NULL;
+   if (!row_ids) {
+      free(owner);
+      owner = NULL;
    }
 
    /* The event log is conversation-scoped; the turn's conversation was captured
@@ -299,7 +348,10 @@ void llm_tool_history_persist(session_t *s,
                                              .reasoning = reasoning_json,
                                              .llm_blocks = str_field(m,
                                                                      LLM_HISTORY_ROW_STORED_KEY) };
-            (void)cb(ud, &row);
+            const int64_t row_id = cb(ud, &row);
+            if (row_ids) {
+               row_ids[i] = row_id;
+            }
          }
          /* One tool_call event per call in the batch: an iteration can invoke
           * several tools, and a tailer wants them individually, not as one blob. */
@@ -343,7 +395,10 @@ void llm_tool_history_persist(session_t *s,
             const session_tool_row_t row = { .role = role,
                                              .content = content ? content : "",
                                              .kind = message_kind_name(MESSAGE_KIND_LOOP_NOTE) };
-            (void)cb(ud, &row);
+            const int64_t row_id = cb(ud, &row);
+            if (row_ids) {
+               row_ids[i] = row_id;
+            }
          }
       } else if (json_object_object_get_ex(m, "tool_call_id", &tcid_obj)) {
          const char *tcid = json_object_get_string(tcid_obj);
@@ -366,7 +421,10 @@ void llm_tool_history_persist(session_t *s,
                .images = images ? json_object_to_json_string_ext(images, JSON_C_TO_STRING_PLAIN)
                                 : NULL
             };
-            (void)cb(ud, &row);
+            const int64_t row_id = cb(ud, &row);
+            if (row_ids) {
+               row_ids[i] = row_id;
+            }
          }
          if (ev_live) {
             /* Recover the tool name from the batch's tool_calls (mapped above) so
@@ -394,6 +452,16 @@ void llm_tool_history_persist(session_t *s,
       }
    }
 
+   for (int i = 0; row_ids && i < n; i++) {
+      stamp_result_part(s, owner[i], json_object_array_get_idx(canonical, i), row_ids[i]);
+   }
+   /* Last row first: a message holding several rows takes its last one's id
+    * (a cursor or a compaction past it is past all of them). */
+   for (int i = n - 1; row_ids && i >= 0; i--) {
+      session_stamp_message_id(s, owner[i], row_ids[i]);
+   }
+   free(row_ids);
+   free(owner);
    json_object_put(tcid_to_name);
    json_object_put(tcid_to_error);
    json_object_put(canonical);

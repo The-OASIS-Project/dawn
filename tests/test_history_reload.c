@@ -59,6 +59,7 @@
 #include "llm/llm_history_rows.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
+#include "llm/llm_openai_internal.h"
 #include "llm/llm_openai_responses_input.h"
 #include "llm/llm_tool_history.h"
 #include "llm/llm_tool_images.h"
@@ -73,6 +74,8 @@ dawn_config_t g_config;
 #define MODEL "claude-opus-5-5"
 #define OPENAI_CARRIER "api.openai.com#0123456789abcdef"
 #define OPENAI_MODEL "gpt-5.5"
+#define CHAT_CARRIER "127.0.0.1:8080#0123456789abcdef"
+#define CHAT_MODEL "local-model"
 #define FLAGS (JSON_C_TO_STRING_PLAIN | JSON_C_TO_STRING_NOSLASHESCAPE)
 
 /* ---- the model: one scripted response per call ---- */
@@ -85,6 +88,7 @@ typedef struct {
    const char *visual;    /* a visual the turn rendered (render_visual's pending_visual) */
    bool tool_image;       /* the tool's result carries an image (a capture) */
    bool tool_reasoning;   /* on an OpenAI path, the call comes with encrypted reasoning */
+   bool parallel;         /* a second call runs beside the first (its id + "b") */
    bool cancel_after;     /* the user's stop lands once the answer is complete */
    bool cancel_during;    /* the stop lands mid-stream: no answer */
 } script_t;
@@ -122,11 +126,13 @@ static void run_tool_exchange(struct json_object *history, const script_t *sc) {
    llm_tool_response_t response;
    memset(&response, 0, sizeof(response));
    response.text = "Checking.";
-   response.tool_calls.count = 1;
-   tool_call_t *tc = &response.tool_calls.calls[0];
-   snprintf(tc->id, sizeof(tc->id), "%s", call_id);
-   snprintf(tc->name, sizeof(tc->name), "weather");
-   snprintf(tc->arguments, sizeof(tc->arguments), "{\"city\":\"Paris\"}");
+   response.tool_calls.count = sc->parallel ? 2 : 1;
+   for (int i = 0; i < response.tool_calls.count; i++) {
+      tool_call_t *tc = &response.tool_calls.calls[i];
+      snprintf(tc->id, sizeof(tc->id), "%s%s", call_id, i ? "b" : "");
+      snprintf(tc->name, sizeof(tc->name), "weather");
+      snprintf(tc->arguments, sizeof(tc->arguments), "{\"city\":\"%s\"}", i ? "Rome" : "Paris");
+   }
    response.has_tool_calls = true;
    if (!sc->openai) {
       response.blocks = llm_turn_blocks_new();
@@ -134,7 +140,10 @@ static void run_tool_exchange(struct json_object *history, const script_t *sc) {
                                     json_tokener_parse("{\"type\":\"thinking\",\"thinking\":"
                                                        "\"A tool.\",\"signature\":\"TSIG\"}"));
       llm_turn_blocks_add_text(response.blocks, "Checking.");
-      llm_turn_blocks_add_tool_call(response.blocks, call_id, "weather", "{\"city\":\"Paris\"}");
+      for (int i = 0; i < response.tool_calls.count; i++) {
+         const tool_call_t *tc = &response.tool_calls.calls[i];
+         llm_turn_blocks_add_tool_call(response.blocks, tc->id, tc->name, tc->arguments);
+      }
    } else if (sc->tool_reasoning) {
       response.blocks = llm_turn_blocks_new();
       llm_turn_blocks_add_reasoning(response.blocks, OPENAI_CARRIER, LLM_FORMAT_OPENAI,
@@ -147,17 +156,19 @@ static void run_tool_exchange(struct json_object *history, const script_t *sc) {
    }
    tool_result_list_t *results = calloc(1, sizeof(*results));
    TEST_ASSERT_NOT_NULL(results);
-   results->count = 1;
-   tool_result_t *r = &results->results[0];
-   snprintf(r->tool_call_id, sizeof(r->tool_call_id), "%s", call_id);
-   if (sc->tool_image) {
-      TEST_ASSERT_TRUE(llm_tool_images_ingest(png_base64(call_id), r));
-      TEST_ASSERT_NOT_EQUAL('\0', r->vision_image_id[0]); /* stored, for the row to bind */
-      snprintf(r->result, sizeof(r->result), "Image captured successfully.");
-   } else {
-      snprintf(r->result, sizeof(r->result), "Sunny, 21C");
+   results->count = response.tool_calls.count;
+   for (int i = 0; i < results->count; i++) {
+      tool_result_t *r = &results->results[i];
+      snprintf(r->tool_call_id, sizeof(r->tool_call_id), "%s", response.tool_calls.calls[i].id);
+      if (sc->tool_image) {
+         TEST_ASSERT_TRUE(llm_tool_images_ingest(png_base64(r->tool_call_id), r));
+         TEST_ASSERT_NOT_EQUAL('\0', r->vision_image_id[0]); /* stored, for the row to bind */
+         snprintf(r->result, sizeof(r->result), "Image captured successfully.");
+      } else {
+         snprintf(r->result, sizeof(r->result), i ? "Rain, 15C" : "Sunny, 21C");
+      }
+      r->success = true;
    }
-   r->success = true;
    if (sc->openai) {
       llm_tool_history_append_openai(history, &response, results);
    } else {
@@ -166,7 +177,9 @@ static void run_tool_exchange(struct json_object *history, const script_t *sc) {
    json_object_put(response.blocks);
    /* The display-only reasoning the loop saves with the call's row. */
    llm_tool_history_persist(s, history, before, "{\"text\":\"A tool.\"}", 1, results);
-   free(r->vision_image);
+   for (int i = 0; i < results->count; i++) {
+      free(results->results[i].vision_image);
+   }
    free(results);
 }
 
@@ -638,6 +651,15 @@ static char *responses_request(struct json_object *history) {
    return out;
 }
 
+/* A Chat Completions request's messages (llama.cpp, Ollama, OpenRouter). */
+static char *chat_request(struct json_object *history) {
+   struct json_object *msgs = llm_openai_prepare_chat_history(history, CHAT_CARRIER, CHAT_MODEL);
+   TEST_ASSERT_NOT_NULL(msgs);
+   char *out = strdup(json_object_to_json_string_ext(msgs, FLAGS));
+   json_object_put(msgs);
+   return out;
+}
+
 static struct json_object *reload(int64_t conv) {
    conversation_t c = { 0 };
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get(conv, s_user, &c));
@@ -655,7 +677,7 @@ static void assert_live_is_reload(int64_t conv, const char *carries) {
    struct json_object *reloaded = reload(conv);
    struct json_object *live = json_object_get(s->conversation_history);
    struct json_object *both[2] = { live, reloaded };
-   char *claude[2], *responses[2];
+   char *claude[2], *responses[2], *chat[2];
    for (int i = 0; i < 2; i++) {
       struct json_object *next = json_object_new_object();
       json_object_object_add(next, "role", json_object_new_string("user"));
@@ -666,6 +688,7 @@ static void assert_live_is_reload(int64_t conv, const char *carries) {
       json_object_array_add(h, next);
       claude[i] = claude_request(h);
       responses[i] = responses_request(h);
+      chat[i] = chat_request(h);
       json_object_put(h);
    }
    TEST_ASSERT_EQUAL_STRING(claude[1], claude[0]);
@@ -673,9 +696,11 @@ static void assert_live_is_reload(int64_t conv, const char *carries) {
       TEST_ASSERT_NOT_NULL(strstr(claude[0], carries));
    }
    TEST_ASSERT_EQUAL_STRING(responses[1], responses[0]);
+   TEST_ASSERT_EQUAL_STRING(chat[1], chat[0]);
    for (int i = 0; i < 2; i++) {
       free(claude[i]);
       free(responses[i]);
+      free(chat[i]);
    }
    json_object_put(live);
    json_object_put(reloaded);
@@ -772,6 +797,18 @@ static void test_a_tool_exchange(void) {
    assert_live_is_reload(s_conv, "\"signature\":\"TSIG\"");
    run_turn(s_conv, "Q2", (script_t){ .reply = "A2", .thinking = true, .tool_call = "toolu_2" });
    assert_live_is_reload(s_conv, "toolu_2");
+}
+
+/* Two calls answered in one batch, on each path: on a Claude path one message
+ * holds both results, each saved as its own row. */
+static void test_parallel_tool_calls(void) {
+   run_turn(s_conv, "Q1",
+            (script_t){ .reply = "Sunny and rainy.", .tool_call = "toolu_p", .parallel = true });
+   assert_live_is_reload(s_conv, "toolu_pb");
+   run_turn(
+       s_conv, "Q2",
+       (script_t){ .reply = "Still.", .tool_call = "call_p", .openai = true, .parallel = true });
+   assert_live_is_reload(s_conv, "call_pb");
 }
 
 /* Turn context every turn, a directive change and a persona change (an
@@ -938,6 +975,7 @@ int main(void) {
    RUN_TEST(test_plain_turns);
    RUN_TEST(test_a_reply_with_its_reasoning);
    RUN_TEST(test_a_tool_exchange);
+   RUN_TEST(test_parallel_tool_calls);
    RUN_TEST(test_context_and_changed_directions);
    RUN_TEST(test_a_reply_stopped_after_it_completed);
    RUN_TEST(test_a_reasoned_reply_stopped_after_it_completed);

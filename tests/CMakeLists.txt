@@ -899,6 +899,7 @@ dawn_add_unit_test(test_history_reload
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/third_party/tomlc99/toml.c
            ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
+           ${SRC_ROOT}/src/llm/llm_openai_history.c
            ${SESSION_UNIT_TEST_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
@@ -3194,6 +3195,9 @@ dawn_add_unit_test(test_memory_extraction_run
            ${SRC_ROOT}/src/core/text_input_dispatch.c
            ${SRC_ROOT}/src/core/session_manager_llm.c
            ${SRC_ROOT}/src/core/session_history.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
+           ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tool_images.c
            ${SESSION_UNIT_TEST_SOURCES}
    LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
            unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}

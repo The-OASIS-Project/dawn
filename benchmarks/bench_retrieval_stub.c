@@ -433,6 +433,21 @@ __attribute__((weak)) void session_history_append(struct json_object *history,
                                                   struct json_object *msg) {
    json_object_array_add(history, msg);
 }
+/* A row's id on its history message, as the session unit stamps it. */
+__attribute__((weak)) void session_stamp_row_id(session_t *session,
+                                                struct json_object *obj,
+                                                const char *key,
+                                                int64_t row_id) {
+   (void)session;
+   if (obj && key && row_id > 0 && !json_object_object_get_ex(obj, key, NULL)) {
+      json_object_object_add(obj, key, json_object_new_int64(row_id));
+   }
+}
+__attribute__((weak)) void session_stamp_message_id(session_t *session,
+                                                    struct json_object *message,
+                                                    int64_t row_id) {
+   session_stamp_row_id(session, message, "id", row_id);
+}
 __attribute__((weak)) void session_history_replace_contents(struct json_object *history,
                                                             struct json_object *from) {
    for (int i = (int)json_object_array_length(history) - 1; i >= 0; i--) {
