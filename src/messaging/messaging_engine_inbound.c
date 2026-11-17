@@ -699,11 +699,9 @@ static inbound_outcome_t process_inbound(inbound_item_t *item) {
 
    if (!response || response[0] == '\0') {
       json_object_put(reply_blocks);
-      /* No reply: the tool changes no model answered go back, to be appended
-       * again after the next message. */
-      if (!atomic_load(&session->cancel_requested)) {
-         (void)session_prefix_take_back_changes(session);
-      }
+      /* No reply (failed, empty or stopped): the tool changes no model
+       * answered go back, to be appended again after the next message. */
+      (void)session_prefix_take_back_changes(session);
       session_turn_end(session);
       session_release(session);
       free(response);

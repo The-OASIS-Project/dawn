@@ -303,6 +303,13 @@ static void *satellite_worker_thread(void *arg) {
                                                                 : NULL,
                                                needs_server_tts ? session : NULL);
 
+   /* No reply (failed, empty, stopped or superseded): the tool changes no
+    * model answered go back.  A superseding query waits in the turn queue
+    * until this turn ends, so they're this turn's. */
+   if (!response || !response[0]) {
+      (void)session_prefix_take_back_changes(session);
+   }
+
    /* Check if request was superseded during LLM call.  A superseding query has
     * already spawned a successor worker that will emit the terminal frame, so
     * this worker stays SILENT — sending stream_end here would release the client
@@ -315,10 +322,6 @@ static void *satellite_worker_thread(void *arg) {
    }
 
    if (!response) {
-      /* Unless stopped, the tool changes no model answered go back. */
-      if (!atomic_load(&session->cancel_requested)) {
-         (void)session_prefix_take_back_changes(session);
-      }
       satellite_send_error(session, "LLM_ERROR", "Failed to get response from AI");
       satellite_send_stream_end(session, "error");
       terminal_sent = true;
