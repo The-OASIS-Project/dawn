@@ -3123,7 +3123,8 @@ returns at once with `queued: true` and this follows when the sync ends, to the 
 A conversation's title changed: the daemon titled it after its first exchange, or the user
 renamed it from any client (`rename_conversation`; sent for a manual rename since 2026-11-17,
 before that only for the daemon's own title).  Sent to every client of the owning user, the
-renaming one included, after `rename_conversation_response`.
+renaming one included; that client may get it before its `rename_conversation_response`, so
+don't rely on their order.
 ```json
 { "type": "conversation_renamed", "payload": { "conversation_id": 1234, "title": "Trip planning" } }
 ```
