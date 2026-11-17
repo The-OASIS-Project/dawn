@@ -418,3 +418,11 @@ def test_long_log_keeps_its_end(monkeypatch):
    hits = github.log_excerpt(("".join(f"error: {i}\n" for i in range(100)) +
                               "".join(f"ok {i}\n" for i in range(300))).encode())
    assert "error: 99" in hits and "error: 0\n" not in hits  # the nearest the end
+
+
+def test_excerpt_keeps_the_last_errors_when_they_overflow():
+   """Error lines past their half of the budget: the ones nearest the end stay."""
+   errs = "".join(f"error: e{i} " + "z" * 300 + "\n" for i in range(40))
+   ex = github.log_excerpt((errs + "".join(f"ok {i}\n" for i in range(300))).encode())
+   assert len(ex.encode()) <= github.EXCERPT_CAP
+   assert "error: e39 " in ex and "error: e0 " not in ex

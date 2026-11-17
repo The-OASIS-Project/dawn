@@ -634,8 +634,8 @@ def log_excerpt(raw: bytes, cut_start: bool = False) -> str:
    start = "\n".join(head)
    if len(start.encode()) + len(end.encode()) + 1 <= EXCERPT_CAP:
       return f"{start}\n{end}"
-   # Too long: the error lines take up to half, the log's end the rest.
-   start = _cut_bytes(start, EXCERPT_CAP // 2)
+   # Too long: the error lines nearest the end take up to half, the log's end the rest.
+   start = _cut_bytes(start, EXCERPT_CAP // 2, keep_end=True)
    room = EXCERPT_CAP - len(start.encode()) - len(CUT) - 2
    return f"{start}\n{CUT}\n{_cut_bytes(end, room, keep_end=True)}"
 

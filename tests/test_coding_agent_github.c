@@ -444,6 +444,17 @@ static void test_status_says_the_blockers(void) {
    TEST_ASSERT_NOT_NULL(strstr(out, "It isn't in a repo the coding agent works in."));
    free(out);
 
+   /* Blocked by something not listed (a ruleset, a required workflow): not "clear". */
+   g_answer = "{\"pr\":{\"owner\":\"x\",\"repo\":\"y\",\"number\":5,\"state\":\"open\","
+              "\"merge_state\":\"blocked\",\"base\":\"main\"},\"checks\":[],\"checks_total\":0,"
+              "\"copilot\":\"none\",\"threads\":{\"unresolved\":0,\"resolved\":0},"
+              "\"configured_repo\":null,\"job\":null}";
+   out = call("pr_status", "{\"ref\": \"x/y#5\"}");
+   TEST_ASSERT_NOT_NULL(
+       strstr(out, "GitHub's merge state is blocked, from a rule DAWN can't see.\n"));
+   TEST_ASSERT_NULL(strstr(out, "Nothing DAWN can see"));
+   free(out);
+
    /* Just after main moved: not yet known, and not said to be clear. */
    g_answer = "{\"pr\":{\"owner\":\"x\",\"repo\":\"y\",\"number\":4,\"state\":\"open\","
               "\"merge_state\":\"unknown\",\"mergeable\":\"unknown\",\"base\":\"main\"},"

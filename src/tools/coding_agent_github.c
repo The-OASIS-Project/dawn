@@ -163,14 +163,21 @@ static void append_blockers(strbuf_t *sb, struct json_object *ans) {
       strbuf_appendf(&b, "%d unresolved thread%s. ", open, open == 1 ? "" : "s");
    }
    /* Right after its base moves, GitHub takes a moment to work this out. */
-   if (strcmp(coding_gateway_jstr(pr, "merge_state"), "unknown") == 0) {
+   const char *merge_state = coding_gateway_jstr(pr, "merge_state");
+   if (strcmp(merge_state, "unknown") == 0) {
       strbuf_appendf(&b,
                      "GitHub is still working out whether it is behind %.*s or conflicts; "
                      "ask again in a moment. ",
                      CG_NAME_SHOWN, base);
    } else if (strbuf_len(&b) == 0) {
-      strbuf_appendf(&b, "Nothing DAWN can see blocks it (GitHub's merge state: %.*s). ",
-                     CG_NAME_SHOWN, coding_gateway_jstr(pr, "merge_state"));
+      /* Only these let it merge; "blocked" can come from a rule DAWN doesn't see. */
+      const bool mergeable = strcmp(merge_state, "clean") == 0 ||
+                             strcmp(merge_state, "unstable") == 0 ||
+                             strcmp(merge_state, "has_hooks") == 0;
+      strbuf_appendf(&b,
+                     mergeable ? "Nothing DAWN can see blocks it (GitHub's merge state: %.*s). "
+                               : "GitHub's merge state is %.*s, from a rule DAWN can't see. ",
+                     CG_NAME_SHOWN, merge_state);
    }
    /* Copilot's review isn't a blocker, so it comes after the verdict. */
    const char *copilot = coding_gateway_jstr(ans, "copilot");
