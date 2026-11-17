@@ -143,18 +143,6 @@ typedef struct {
     * returns + persistence completes, then performs the eviction +
     * conv_id clear there.  Reset by the worker after processing. */
    bool pending_reset;
-   /* Highest msg_id stamped on a message we (the messaging engine)
-    * have written or restored into this slot's session.  Used by the
-    * cross-channel staleness check in process_inbound — when an
-    * external writer (WebUI conversation panel, voice session, MCP)
-    * appends to the same conv between messaging turns, DB MAX(id)
-    * exceeds this value and we reload session->conversation_history
-    * from DB so the LLM doesn't operate on stale frozen context.
-    * Set: (a) during get_or_create_messaging_session's history
-    * restore, (b) after each successful conv_db_add_message_ex in
-    * process_inbound.  Zero means "no DB persistence yet" — the
-    * staleness check correctly no-ops in that case. */
-   int64_t last_known_msg_id;
 } session_slot_t;
 
 /* Per-provider outbound shaping policy.  `max_outbound_chars` is the
@@ -400,14 +388,8 @@ size_t inbound_parked_count(void);
 /** Shutdown: drop every waiting item (one WARNING with the count). */
 void inbound_parked_drop_all(void);
 
-/* session (slot map + staleness reload) */
+/* session (slot map) */
 void evict_session_slot(int64_t channel_id);
-void slot_bump_last_known_msg_id(session_t *session, int64_t msg_id);
-void reload_session_history_if_stale(session_t *session,
-                                     const char *provider,
-                                     const char *provider_address,
-                                     int64_t conv_id,
-                                     int user_id);
 bool mark_pending_reset_if_self(int64_t channel_id);
 session_t *get_or_create_messaging_session(const channel_ref_t *ref,
                                            const char *provider,
