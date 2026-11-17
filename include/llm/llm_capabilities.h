@@ -222,7 +222,8 @@ int llm_thinking_budget_size(const char *level);
  * model, a reply that doesn't reason, and a model with no max_output listed.
  *
  * @param thinking The setting the request sends (llm_thinking_resolve_current)
- * @param streamed The request is streamed
+ * @param streamed The request is sent streamed (the transport: an OpenAI
+ *                 Responses request always is, a bare completion included)
  */
 int llm_reply_max_tokens(llm_type_t type,
                          cloud_provider_t provider,

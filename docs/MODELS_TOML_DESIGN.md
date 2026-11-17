@@ -142,6 +142,9 @@ effort (`llm_reply_max_tokens`): low and minimal 16384, medium 32768, high
 row's `max_output`. Everything else keeps `[llm] max_tokens`: a call that isn't
 streamed (both vendors warn against a long reply on one idle connection), a
 reply that doesn't reason, a local model, and a row without `max_output`.
+"Streamed" is the transport: briefings and memory extraction aren't streamed on
+Claude or Chat Completions, but the OpenAI Responses API is always streamed (a
+bare completion collects the stream), so there they are sized by effort too.
 
 | prefix | max_output | source |
 |---|---|---|
@@ -181,11 +184,15 @@ tokens"). gpt-5.3 has no model page, so no `max_output`: it keeps
 **Held to the window.** Every cloud request's ceiling is then
 held to the room the model's context window leaves
 (`llm_context_fit_reply`): the window less the request's input and a safety
-margin, never below 1024. The input is estimated as the compaction check does,
-calibrated by the session's measured requests only when the request is that
-session's own conversation turn; a side call (memory extraction, compaction,
-a briefing, a summarizer) or a call with no session uses its own plain
-estimate, never the local session's or another conversation's count
+margin, never below 1024. It is set once the request's tools are attached. The
+input is the request as sent: its history, the question only when the history
+doesn't already end with it (no builder sends it twice), and its tools
+(`llm_compaction_reply_input`). It is calibrated by the session's measured
+requests only when the request is that session's own conversation turn, and a
+measured request carried its tools, so the calibrated count has them. A side
+call (memory extraction, compaction, a briefing, a summarizer), a call with no
+session, or a session not yet measured uses its plain estimate plus its tools,
+never the local session's or another conversation's count
 (`llm_cache_monitor_conversation_session`). The margin is 10% of the input
 (the estimate reads ~4 characters a token, and code, non-English text and
 images run denser) plus 2% of the window. Not every vendor needs it: on Claude 4.5+

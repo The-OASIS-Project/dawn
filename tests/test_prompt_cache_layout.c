@@ -826,11 +826,13 @@ static void test_stable_handles_items_sent_once(void) {
 int llm_context_fit_reply(int max_tokens,
                           struct json_object *history,
                           const char *input_text,
+                          struct json_object *tools,
                           llm_type_t type,
                           cloud_provider_t provider,
                           const char *model) {
    (void)history;
    (void)input_text;
+   (void)tools;
    (void)type;
    (void)provider;
    (void)model;

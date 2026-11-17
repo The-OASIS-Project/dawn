@@ -345,6 +345,32 @@ int llm_compaction_calibrated_tokens(const llm_compaction_calibration_t *cal, in
    return tokens > (float)INT_MAX ? INT_MAX : (int)tokens;
 }
 
+int llm_compaction_question_tokens(struct json_object *history, const char *input_text) {
+   if (!input_text) {
+      return 0;
+   }
+   const size_t n = history && json_object_is_type(history, json_type_array)
+                        ? json_object_array_length(history)
+                        : 0;
+   struct json_object *role = NULL;
+   if (n > 0 &&
+       json_object_object_get_ex(json_object_array_get_idx(history, n - 1), "role", &role) &&
+       strcmp(json_object_get_string(role), "user") == 0) {
+      return 0;
+   }
+   return (int)(strlen(input_text) / 4);
+}
+
+int llm_compaction_reply_input(const llm_compaction_calibration_t *cal,
+                               int estimate,
+                               int tool_tokens) {
+   if (usable(cal)) {
+      return llm_compaction_calibrated_tokens(cal, estimate);
+   }
+   const int input = estimate + tool_tokens;
+   return cal && cal->last_prompt > input ? cal->last_prompt : input;
+}
+
 int llm_compaction_reply_room(int max_tokens, int window, int input_tokens) {
    if (window <= 0 || max_tokens <= LLM_REPLY_ROOM_MIN) {
       return max_tokens;

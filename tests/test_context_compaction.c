@@ -502,6 +502,40 @@ static void test_a_request_is_fixed_part_plus_density(void) {
    TEST_ASSERT_EQUAL_INT(40000, llm_compaction_calibrated_tokens(NULL, 40000));
 }
 
+/* The question beside the history counts once: not when the history already
+ * ends with it (every bare completion passes it both ways). */
+static void test_reply_input_counts_the_question_once(void) {
+   struct json_object *hist = json_object_new_array();
+   json_object_array_add(hist, make_msg("system", "You are DAWN."));
+   TEST_ASSERT_EQUAL_INT(2, llm_compaction_question_tokens(hist, "12345678"));
+   json_object_array_add(hist, make_msg("user", "12345678"));
+   TEST_ASSERT_EQUAL_INT(0, llm_compaction_question_tokens(hist, "12345678"));
+   TEST_ASSERT_EQUAL_INT(0, llm_compaction_question_tokens(hist, NULL));
+   TEST_ASSERT_EQUAL_INT(2, llm_compaction_question_tokens(NULL, "12345678"));
+   json_object_put(hist);
+}
+
+/* Tool definitions count until a measured request (which carried them) says
+ * what the conversation weighs. */
+static void test_reply_input_adds_the_tools_until_measured(void) {
+   /* No conversation of its own: the estimate and the tools. */
+   TEST_ASSERT_EQUAL_INT(155000, llm_compaction_reply_input(NULL, 130000, 25000));
+   /* A conversation not yet measured: the same, or its last prompt if larger. */
+   llm_compaction_calibration_t cal = { 0 };
+   TEST_ASSERT_EQUAL_INT(155000, llm_compaction_reply_input(&cal, 130000, 25000));
+   cal.last_prompt = 170000;
+   TEST_ASSERT_EQUAL_INT(170000, llm_compaction_reply_input(&cal, 130000, 25000));
+   /* Measured: the calibrated count, which has the tools already. */
+   cal.known = true;
+   cal.last_prompt = 150000;
+   cal.last_estimate = 120000;
+   cal.last_factor = 1.0f;
+   cal.factor = 1.0f;
+   TEST_ASSERT_EQUAL_INT(llm_compaction_calibrated_tokens(&cal, 130000),
+                         llm_compaction_reply_input(&cal, 130000, 25000));
+   TEST_ASSERT_EQUAL_INT(160000, llm_compaction_reply_input(&cal, 130000, 25000));
+}
+
 static void test_reply_room_holds_the_ceiling_to_the_window(void) {
    /* Room enough: unchanged. */
    TEST_ASSERT_EQUAL_INT(65536, llm_compaction_reply_room(65536, 1000000, 500000));
@@ -523,6 +557,8 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_compact_deterministic_basic);
    RUN_TEST(test_reply_room_holds_the_ceiling_to_the_window);
+   RUN_TEST(test_reply_input_counts_the_question_once);
+   RUN_TEST(test_reply_input_adds_the_tools_until_measured);
    RUN_TEST(test_compact_deterministic_budget);
    RUN_TEST(test_compact_deterministic_empty);
    RUN_TEST(test_compact_deterministic_single);

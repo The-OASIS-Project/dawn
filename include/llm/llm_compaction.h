@@ -131,6 +131,26 @@ int llm_compaction_calibrated_tokens(const llm_compaction_calibration_t *cal, in
  */
 int llm_compaction_estimate_budget(const llm_compaction_calibration_t *cal, int tokens);
 
+/**
+ * @brief The tokens @p input_text adds to a request beside @p history: none
+ *        when the history already ends with the user's message (no builder
+ *        sends the question twice), else ~4 characters a token
+ */
+int llm_compaction_question_tokens(struct json_object *history, const char *input_text);
+
+/**
+ * @brief A request's input for the reply clamp: its history at @p estimate
+ *        and @p tool_tokens of tool definitions
+ *
+ * Calibrated when @p cal knows the conversation's density (a measured request
+ * carried its tools, so the count has them); else the estimate plus the tools,
+ * or the conversation's last measured prompt if larger.  @p cal NULL: a call
+ * with no conversation of its own, its plain estimate plus the tools.
+ */
+int llm_compaction_reply_input(const llm_compaction_calibration_t *cal,
+                               int estimate,
+                               int tool_tokens);
+
 /** The least room llm_compaction_reply_room() leaves a reply. */
 #define LLM_REPLY_ROOM_MIN 1024
 

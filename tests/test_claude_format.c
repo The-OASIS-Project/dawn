@@ -294,11 +294,13 @@ static const char *effort_of(json_object *req) {
 int llm_context_fit_reply(int max_tokens,
                           struct json_object *history,
                           const char *input_text,
+                          struct json_object *tools,
                           llm_type_t type,
                           cloud_provider_t provider,
                           const char *model) {
    (void)history;
    (void)input_text;
+   (void)tools;
    (void)type;
    (void)provider;
    (void)model;

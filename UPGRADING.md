@@ -39,7 +39,9 @@ end after its reasoning with no answer. A streamed reply that reasons, on Claude
 now gets a ceiling by its effort: low 16K, medium 32K, high 64K, xhigh and max 128K, up to the
 model's maximum (64K on Gemini). `[llm] max_tokens` is now the lowest ceiling these replies get,
 and stays the ceiling for everything else: replies without reasoning, local models, gpt-5.3, and
-calls that aren't streamed (briefings, memory extraction). Every cloud reply's ceiling is also held
+calls that aren't streamed (briefings and memory extraction on Claude and on models that use Chat
+Completions; on the OpenAI Responses API, gpt-5.4 and later, every call is streamed, so these get
+their effort's ceiling too). Every cloud reply's ceiling is also held
 to the room left in the model's context window, so a long conversation's reply never asks for more
 than fits.
 

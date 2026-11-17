@@ -1125,6 +1125,7 @@ bool llm_context_over_threshold(uint32_t session_id,
 int llm_context_fit_reply(int max_tokens,
                           struct json_object *history,
                           const char *input_text,
+                          struct json_object *tools,
                           llm_type_t type,
                           cloud_provider_t provider,
                           const char *model) {
@@ -1132,18 +1133,19 @@ int llm_context_fit_reply(int max_tokens,
    if (window <= 0 || max_tokens <= LLM_REPLY_ROOM_MIN) {
       return max_tokens;
    }
-   int estimate = history ? llm_context_estimate_tokens(history) : 0;
-   if (input_text) {
-      estimate += (int)(strlen(input_text) / 4);
-   }
+   const int estimate = (history ? llm_context_estimate_tokens(history) : 0) +
+                        llm_compaction_question_tokens(history, input_text);
+   const int tool_tokens = tools ? (int)(strlen(json_object_to_json_string(tools)) / 4) : 0;
    /* Measured by its session only when it is that session's own conversation
     * request.  A side call (extraction, compaction, a briefing, a summarizer)
     * or a call with no session is its own estimate: never the local session's
     * (id 0) or another conversation's count. */
    const session_t *session = llm_cache_monitor_conversation_session();
-   const int input = session ? llm_context_request_tokens(session->session_id, estimate, type,
-                                                          provider, model)
-                             : estimate;
+   llm_compaction_calibration_t cal = { 0 };
+   if (session) {
+      llm_context_calibration(session->session_id, type, provider, model, &cal);
+   }
+   const int input = llm_compaction_reply_input(session ? &cal : NULL, estimate, tool_tokens);
    const int fitted = llm_compaction_reply_room(max_tokens, window, input);
    if (fitted < max_tokens) {
       OLOG_INFO("llm_context: reply ceiling %d -> %d (~%d input tokens of a %d window)", max_tokens,
