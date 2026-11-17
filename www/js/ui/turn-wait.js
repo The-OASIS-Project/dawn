@@ -74,9 +74,14 @@
     */
    function noteSent(info) {
       if (!enabled || !info) return null;
-      // A new message from the user in this conversation retires an unsent one.
+      // A new message from the user in this conversation retires an unsent one,
+      // except attachments still waiting for room: this send makes the room.
       const conv = activeConv();
-      if (!info.fromVisual && conv !== null) forgetUnsent(conv);
+      if (!info.fromVisual && conv !== null) {
+         const unsent = unsentByConv.get(conv);
+         if (unsent && unsent.partial) unsent.shown = false;
+         else forgetUnsent(conv);
+      }
       const ref = Date.now().toString(36) + '-' + ++refSeq;
       notes.set(ref, {
          text: info.text || '',
@@ -258,6 +263,7 @@
       const left = putBack(entry.note);
       if (left.images.length || left.documents.length) {
          entry.note = left;
+         entry.partial = true;
          entry.shown = true;
          DawnToast.show(
             "Some attachments didn't fit. They'll be offered again once there's room.",
@@ -278,8 +284,14 @@
    function giveBack(conv, entry) {
       entry.shown = true;
       if (composerEmpty()) {
+         const rest = entry.partial;
          restoreUnsent(conv, entry);
-         DawnToast.show("Your message wasn't sent. It's back in the message box.", 'info');
+         DawnToast.show(
+            rest
+               ? "The attachments that didn't fit are back in the message box."
+               : "Your message wasn't sent. It's back in the message box.",
+            'info'
+         );
          return;
       }
       // The user has started something new: never overwrite it.  The unsent one
