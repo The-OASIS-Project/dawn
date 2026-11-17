@@ -426,3 +426,10 @@ def test_excerpt_keeps_the_last_errors_when_they_overflow():
    ex = github.log_excerpt((errs + "".join(f"ok {i}\n" for i in range(300))).encode())
    assert len(ex.encode()) <= github.EXCERPT_CAP
    assert "error: e39 " in ex and "error: e0 " not in ex
+
+
+def test_pr_status_conflicting_is_behind(monkeypatch):
+   gh = GitHub(status=pr(mergeable="CONFLICTING", mergeStateStatus="DIRTY"))
+   monkeypatch.setattr(github, "_request", gh)
+   p = github.pr_status("o", "dawn", 115, "tok")["pr"]
+   assert p["behind"] is True and p["merge_state"] == "dirty" and p["mergeable"] == "conflicting"

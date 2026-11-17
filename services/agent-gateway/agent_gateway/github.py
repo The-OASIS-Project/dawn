@@ -472,7 +472,8 @@ def pr_status(owner: str, repo: str, number: int, token: str) -> dict:
                  "state": "merged" if pr.get("merged") else lower(pr.get("state")),
                  "draft": bool(pr.get("isDraft")), "merged": bool(pr.get("merged")),
                  "mergeable": lower(pr.get("mergeable")), "merge_state": merge_state,
-                 "behind": merge_state == "behind",
+                 # A conflict with the base means the base has commits the head lacks.
+                 "behind": merge_state == "behind" or lower(pr.get("mergeable")) == "conflicting",
                  "base": clean(pr.get("baseRefName"), NAME_CAP),
                  "head_ref": clean(pr.get("headRefName"), NAME_CAP),
                  "head_sha": clean(pr.get("headRefOid"), NAME_CAP),
