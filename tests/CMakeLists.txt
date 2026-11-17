@@ -559,6 +559,14 @@ dawn_add_unit_test(test_email_account_lease
    DEFINES NDEBUG
    LABEL   ci)
 
+# One turn per conversation: the lease's FIFO handover, re-entry, a stopped
+# wait, posts queued and written in order at release, capacity and shutdown.
+dawn_add_unit_test(test_conv_turn_lease
+   SOURCES test_conv_turn_lease.c
+           ${SRC_ROOT}/src/core/conv_turn_lease.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 # The WebUI email executor: admission per slot, and the executor under load
 # with the real lease (stub account work and sender).
 dawn_add_unit_test(test_webui_email_exec_policy

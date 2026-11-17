@@ -612,6 +612,7 @@ set(DAWN_SOURCES
     src/core/wake_word.c
     src/core/utterance_dedup.c
     src/core/pending_slots.c          # pure: what a tool staged for the user's confirm
+    src/core/conv_turn_lease.c        # one turn per conversation at a time
     src/core/tool_call_policy.c       # who may make a tool call
     src/core/tool_call_challenge.c    # actions from a text waiting for the user's reply code
     src/core/reply_code.c             # codes texted to a number and texted back
