@@ -391,6 +391,28 @@ static int compaction_locked(int64_t conv_id, int user_id, const conv_turn_save_
    return AUTH_DB_SUCCESS;
 }
 
+/* A failed turn's tool changes no model answered: those saved with
+ * @p question_id that no assistant row follows.  Caller holds the lock and the
+ * transaction. */
+static int retract_changes_locked(int64_t conv_id, int64_t question_id) {
+   sqlite3_stmt *st = NULL;
+   /* kind-rows: tool_change rows of the question, unanswered. */
+   if (sqlite3_prepare_v2(s_db.db,
+                          "DELETE FROM messages WHERE conversation_id = ?1 AND context_of = ?2 "
+                          "AND kind = 'tool_change' AND NOT EXISTS (SELECT 1 FROM messages a "
+                          "WHERE a.conversation_id = ?1 AND a.id > messages.id AND "
+                          "a.role = 'assistant')",
+                          -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("conv_prefix: prepare change retract failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   sqlite3_bind_int64(st, 2, question_id);
+   const int rc = sqlite3_step(st);
+   sqlite3_finalize(st);
+   return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
 int conv_db_save_turn(int64_t conv_id,
                       int user_id,
                       const conv_turn_save_t *save,
@@ -436,6 +458,9 @@ int conv_db_save_turn(int64_t conv_id,
    if (result == AUTH_DB_SUCCESS && first_id > 0) {
       result = conv_db_withdraw_saved_locked(conv_id, user_id, first_id, save->built_at,
                                              save->built_seq, &withdrawn);
+   }
+   if (result == AUTH_DB_SUCCESS && save->retract_changes_of > 0) {
+      result = retract_changes_locked(conv_id, save->retract_changes_of);
    }
    if (result == AUTH_DB_SUCCESS) {
       result = turn_prefix_locked(conv_id, user_id, save);

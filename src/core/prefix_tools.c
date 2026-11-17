@@ -639,6 +639,41 @@ void prefix_tools_apply(struct json_object *hist,
    }
 }
 
+void prefix_tools_refund(struct json_object *hist, struct json_object *change) {
+   struct json_object *rec = llm_history_in_force(llm_history_prefix(hist), false);
+   if (!rec) {
+      return;
+   }
+   const int total = int_of(rec, "tool_changes", 0);
+   if (total > 0) {
+      json_object_object_add(rec, "tool_changes", json_object_new_int(total - 1));
+   }
+   /* Each server bounded() counted for it, once. */
+   struct json_object *servers = NULL;
+   if (!json_object_object_get_ex(rec, "tool_change_servers", &servers)) {
+      return;
+   }
+   struct json_object *defs = llm_tool_change_defs(change);
+   struct json_object *done = json_object_new_object();
+   const size_t n = defs ? json_object_array_length(defs) : 0;
+   for (size_t i = 0; done && i < n; i++) {
+      char server[96];
+      llm_tool_def_server(json_object_array_get_idx(defs, i), server, sizeof(server));
+      struct json_object *e = NULL;
+      if (json_object_object_get_ex(done, server, NULL) ||
+          !json_object_object_get_ex(servers, server, &e)) {
+         continue;
+      }
+      json_object_object_add(done, server, json_object_new_boolean(1));
+      const int count = int_of(e, "n", 0);
+      if (count > 0) {
+         json_object_object_add(e, "n", json_object_new_int(count - 1));
+      }
+   }
+   json_object_put(done);
+   json_object_put(defs);
+}
+
 bool prefix_tools_mark_rejected(struct json_object *hist) {
    struct json_object *prefix = llm_history_prefix(hist);
    if (!prefix || llm_tool_defs_inline_rejected(hist)) {

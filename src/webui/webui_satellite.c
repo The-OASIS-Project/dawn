@@ -38,6 +38,7 @@
 #include "core/ota_db.h"
 #include "core/rate_limiter.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "core/turn_queue.h"
 #include "core/utterance_dedup.h"
 #include "llm/llm_command_parser.h"
@@ -301,6 +302,13 @@ static void *satellite_worker_thread(void *arg) {
                                                needs_server_tts ? webui_sentence_audio_callback
                                                                 : NULL,
                                                needs_server_tts ? session : NULL);
+
+   /* No reply (failed, empty, stopped or superseded): the tool changes no
+    * model answered go back.  A superseding query waits in the turn queue
+    * until this turn ends, so they're this turn's. */
+   if (!response || !response[0]) {
+      (void)session_prefix_take_back_changes(session);
+   }
 
    /* Check if request was superseded during LLM call.  A superseding query has
     * already spawned a successor worker that will emit the terminal frame, so
