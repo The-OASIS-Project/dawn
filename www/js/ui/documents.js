@@ -529,6 +529,7 @@
       docs.slice(0, room).forEach((d) => state.pendingDocuments.push(d));
       rebuildChips();
       updateCounter();
+      return docs.slice(room); // the ones the limit left no room for
    }
 
    /**

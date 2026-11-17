@@ -236,15 +236,35 @@
          input.value = draft.trim() ? draft.replace(/\s+$/, '') + '\n\n' + note.text : note.text;
          input.dispatchEvent(new Event('input', { bubbles: true }));
       }
-      if (note.images.length && typeof DawnVision !== 'undefined' && DawnVision.restoreImages) {
-         DawnVision.restoreImages(note.images);
+      // What the composer's limits leave no room for stays with the note.
+      let images = note.images;
+      let documents = note.documents;
+      if (images.length && typeof DawnVision !== 'undefined' && DawnVision.restoreImages) {
+         images = DawnVision.restoreImages(images) || [];
       }
       if (
-         note.documents.length &&
+         documents.length &&
          typeof DawnDocuments !== 'undefined' &&
          DawnDocuments.restoreDocuments
       ) {
-         DawnDocuments.restoreDocuments(note.documents);
+         documents = DawnDocuments.restoreDocuments(documents) || [];
+      }
+      return { text: '', images, documents };
+   }
+
+   // Put an unsent message back; attachments that didn't fit are kept and
+   // offered again, the text given back only once.
+   function restoreUnsent(conv, entry) {
+      const left = putBack(entry.note);
+      if (left.images.length || left.documents.length) {
+         entry.note = left;
+         entry.shown = true;
+         DawnToast.show(
+            "Some attachments didn't fit. They'll be offered again once there's room.",
+            'warning'
+         );
+      } else {
+         unsentByConv.delete(conv);
       }
    }
 
@@ -258,8 +278,7 @@
    function giveBack(conv, entry) {
       entry.shown = true;
       if (composerEmpty()) {
-         unsentByConv.delete(conv);
-         putBack(entry.note);
+         restoreUnsent(conv, entry);
          DawnToast.show("Your message wasn't sent. It's back in the message box.", 'info');
          return;
       }
@@ -270,8 +289,7 @@
             {
                label: 'Put it back',
                onClick: () => {
-                  unsentByConv.delete(conv);
-                  putBack(entry.note);
+                  restoreUnsent(conv, entry);
                   if (entry.toast) entry.toast.dismiss();
                },
             },

@@ -983,6 +983,7 @@
       images.slice(0, room).forEach((img) => state.pendingImages.push(img));
       rebuildPreviews();
       updateCounter();
+      return images.slice(room); // the ones the limit left no room for
    }
 
    /**

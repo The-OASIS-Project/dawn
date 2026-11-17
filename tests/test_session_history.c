@@ -1649,6 +1649,21 @@ static bool held(int64_t conv) {
    return conv_turn_lease_holder(conv, NULL, NULL, NULL);
 }
 
+/* Wait until the events read @p want: a waiter is counted a moment before its
+ * session is told it waits. */
+static void until_events(const char *want) {
+   for (int i = 0; i < WAIT_GUARD_POLLS; i++) {
+      pthread_mutex_lock(&s_events_mutex);
+      const bool same = strcmp(s_events, want) == 0;
+      pthread_mutex_unlock(&s_events_mutex);
+      if (same) {
+         return;
+      }
+      usleep(WAIT_GUARD_POLL_US);
+   }
+   TEST_ASSERT_EQUAL_STRING(want, s_events);
+}
+
 /* A turn on a conversation another session's turn holds waits for that turn's
  * end, and is told so; then it runs. */
 void test_turn_waits_for_another_turn_on_its_conversation(void) {
@@ -1660,6 +1675,7 @@ void test_turn_waits_for_another_turn_on_its_conversation(void) {
    pthread_t th;
    start_turn(&t, &th, b, 5);
    until_waiting(5, 1);
+   until_events("waiting ");
    TEST_ASSERT_EQUAL_INT(0, sem_trywait(&t.begun) == 0 ? 1 : 0); /* still waiting */
    session_turn_end(s);
    sem_wait(&t.begun);
@@ -1685,6 +1701,7 @@ void test_stop_while_waiting_leaves_the_turn_unsent(void) {
    pthread_t th;
    start_turn(&t, &th, b, 5);
    until_waiting(5, 1);
+   until_events("waiting ");
    atomic_store(&b->cancel_requested, true); /* the user's Stop */
    sem_wait(&t.begun);
    TEST_ASSERT_TRUE(t.unsent);
@@ -1811,7 +1828,7 @@ void test_post_into_a_held_conversation_waits_for_the_turn_end(void) {
    pthread_t th;
    start_turn(&t, &th, b, 5);
    until_waiting(5, 1);
-   TEST_ASSERT_EQUAL_STRING("waiting ", s_events); /* not written yet */
+   until_events("waiting "); /* told it waits; the post not written yet */
    session_turn_end(s);
    sem_wait(&t.begun);
    sem_post(&t.end);
