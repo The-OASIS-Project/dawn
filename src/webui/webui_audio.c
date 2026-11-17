@@ -1679,10 +1679,14 @@ static void *audio_worker_thread(void *arg) {
       if (max_tokens > 0) {
          webui_send_context(session, current_tokens, max_tokens, threshold);
       }
-   } else if (!superseded) {
-      /* Genuine failure: no reply and not superseded. */
-      OLOG_WARNING("WebUI: LLM call failed");
-      webui_send_error(session, "LLM_ERROR", "Failed to get response");
+   } else {
+      /* No reply (failed, stopped or superseded): the tool changes no model
+       * answered go back, as for a typed turn. */
+      (void)session_prefix_take_back_changes(session);
+      if (!superseded) {
+         OLOG_WARNING("WebUI: LLM call failed");
+         webui_send_error(session, "LLM_ERROR", "Failed to get response");
+      }
    }
 
    webui_send_state(session, "idle");

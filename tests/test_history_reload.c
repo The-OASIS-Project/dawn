@@ -68,6 +68,7 @@
 #include "llm/llm_local_provider.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_openai_responses_input.h"
+#include "llm/llm_tool_defs.h"
 #include "llm/llm_tool_history.h"
 #include "llm/llm_tool_images.h"
 #include "llm/llm_tools.h"
@@ -259,6 +260,9 @@ int llm_response_finalize(session_t *session, const char *raw_response, response
 static const char *s_persona = "P1";
 static const char *s_directive = "D1";
 static const char *s_time = "09:00";
+/* The tools registered now (a definitions array), or NULL for tools off; a
+ * model that takes a tool defined in a message. */
+static const char *s_tool_defs;
 
 int session_dispatch_user_turn_ex(session_t *session,
                                   const char *user_turn_text,
@@ -271,6 +275,10 @@ int session_dispatch_user_turn_ex(session_t *session,
    char ctx[64];
    snprintf(ctx, sizeof(ctx), "[system_time] %s\n", s_time);
    cp.context_head = strdup(ctx);
+   if (s_tool_defs) {
+      cp.tool_defs = strdup(s_tool_defs);
+      cp.inline_tools = true;
+   }
    /* As session_manager.c's dispatch_with_note: a history past its window is
     * compacted at the seam, before the turn's prompt is applied. */
    session_compaction_prepare(session, 0);
@@ -486,7 +494,7 @@ int llm_is_interrupt_requested(void) {
 }
 bool llm_tools_enabled(const llm_resolved_config_t *config) {
    (void)config;
-   return false;
+   return s_tool_defs != NULL;
 }
 bool llm_tools_suppressed(void) {
    return true;
@@ -496,11 +504,13 @@ struct json_object *llm_tools_request_tools(struct json_object *history,
                                             bool claude,
                                             bool inline_ok,
                                             const char **source_out) {
-   (void)history, (void)is_remote, (void)claude, (void)inline_ok;
+   (void)is_remote, (void)claude;
+   /* The conversation's set, as llm_tools_filter.c gives it (unrendered). */
+   struct json_object *defs = s_tool_defs ? llm_tool_defs_for_request(history, inline_ok) : NULL;
    if (source_out) {
-      *source_out = NULL;
+      *source_out = defs ? "the conversation's set" : NULL;
    }
-   return NULL;
+   return defs;
 }
 bool llm_cache_monitor_one_off_call(void) {
    return false;
@@ -691,7 +701,11 @@ static void run_turn(int64_t conv, const char *question, script_t script) {
    }
    if (reply && reply[0] != '\0') {
       persist_reply(conv, reply);
-   } else if (s_retract_unanswered) {
+   } else if (!atomic_load(&s->cancel_requested)) {
+      /* No reply, not stopped: as the WebUI text worker does. */
+      (void)session_prefix_take_back_changes(s);
+   }
+   if ((!reply || reply[0] == '\0') && s_retract_unanswered) {
       /* As job_reinvoke.c's retract_attempt: by the turn's question id.  An
        * envelope is request context, never the turn's question, so there is
        * none and nothing is taken back (a known gap of the retraction, kept
@@ -716,7 +730,8 @@ static void run_turn(int64_t conv, const char *question, script_t script) {
 /* ---- live vs reload, as each provider is sent them ---- */
 
 static char *claude_request(struct json_object *history) {
-   struct json_object *req = convert_to_claude_format(history, NULL, MODEL, CARRIER, 0, false);
+   struct json_object *req = convert_to_claude_format(history, NULL, MODEL, CARRIER, 0,
+                                                      s_tool_defs != NULL);
    TEST_ASSERT_NOT_NULL(req);
    char *out = strdup(json_object_to_json_string_ext(req, FLAGS));
    json_object_put(req);
@@ -886,6 +901,7 @@ void setUp(void) {
    s_persona = "P1";
    s_directive = "D1";
    s_time = "09:00";
+   s_tool_defs = NULL;
 }
 
 void tearDown(void) {
@@ -1236,6 +1252,28 @@ static int posted_rows(void) {
    return n;
 }
 
+#define TDEF(name, desc)                                                 \
+   "{\"name\":\"" name "\",\"description\":\"" desc "\",\"parameters\":" \
+   "{\"type\":\"object\",\"properties\":{}}}"
+
+/* The conversation's rows of @p kind (NULL: its questions). */
+static int64_t saved_rows(int64_t conv, const char *kind) {
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_prepare_v2(s_db.db,
+                                            "SELECT COUNT(*) FROM messages WHERE conversation_id "
+                                            "= ?1 AND (kind = ?2 OR (?2 IS NULL AND kind IS NULL "
+                                            "AND role = 'user'))",
+                                            -1, &st, NULL));
+   sqlite3_bind_int64(st, 1, conv);
+   if (kind) {
+      sqlite3_bind_text(st, 2, kind, -1, SQLITE_STATIC);
+   }
+   const int64_t n = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int64(st, 0) : -1;
+   sqlite3_finalize(st);
+   return n;
+}
+
 /* A post made while a turn runs is written at its end, after its rows; both
  * sessions, the one whose turn it was too, take it in at their next turn. */
 static void test_a_post_deferred_while_a_turn_runs(void) {
@@ -1425,6 +1463,70 @@ static void test_a_tail_from_an_empty_conversation(void) {
    json_object_put(tail);
 }
 
+static int changes_in(struct json_object *hist) {
+   int n = 0;
+   for (size_t i = 0; i < json_object_array_length(hist); i++) {
+      n += llm_history_kind_of(json_object_array_get_idx(hist, i)) == MESSAGE_KIND_TOOL_CHANGE;
+   }
+   return n;
+}
+
+/* The changes @p hist's record counted: the conversation's, and DAWN's own
+ * tools' this hour. */
+static void assert_counted(struct json_object *hist, int want) {
+   struct json_object *rec = llm_history_in_force(llm_history_prefix(hist), false);
+   struct json_object *v = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(rec, "tool_changes", &v));
+   TEST_ASSERT_EQUAL_INT(want, json_object_get_int(v));
+   struct json_object *servers = NULL;
+   struct json_object *e = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(rec, "tool_change_servers", &servers));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(servers, "", &e));
+   TEST_ASSERT_TRUE(json_object_object_get_ex(e, "n", &v));
+   TEST_ASSERT_EQUAL_INT(want, json_object_get_int(v));
+}
+
+/* A tool changed after the conversation froze, and the turn that appended the
+ * change in place failed (no reply): its question stays, the change goes,
+ * stored and live, with what it counted.  The next question gets the change
+ * in place after it, so the request's tools stay the frozen set and the
+ * earlier signed reasoning still replays. */
+static void test_a_failed_turn_takes_its_tool_change_back(void) {
+   s_tool_defs = "[" TDEF("a", "A") "]";
+   run_turn(s_conv, "Q1", (script_t){ .reply = "A1", .thinking = true });
+   char *frozen = strdup(
+       json_object_to_json_string_ext(llm_history_frozen_tools(s->conversation_history), FLAGS));
+
+   s_tool_defs = "[" TDEF("a", "A") "," TDEF("b", "B") "]";
+   s_time = "09:05";
+   run_turn(s_conv, "Q2", (script_t){ .reply = NULL });
+   TEST_ASSERT_EQUAL_INT(0, changes_in(s->conversation_history));
+   TEST_ASSERT_EQUAL_INT64(0, saved_rows(s_conv, "tool_change"));
+   TEST_ASSERT_NOT_NULL(strstr(json_object_to_json_string(s->conversation_history), "\"Q2\""));
+   TEST_ASSERT_EQUAL_INT64(2, saved_rows(s_conv, NULL));
+   assert_live_is_reload(s_conv, SIGNED);
+
+   s_time = "09:10";
+   run_turn(s_conv, "Q3", (script_t){ .reply = "A3", .thinking = true });
+   TEST_ASSERT_EQUAL_INT(1, changes_in(s->conversation_history));
+   TEST_ASSERT_EQUAL_INT64(1, saved_rows(s_conv, "tool_change"));
+   assert_counted(s->conversation_history, 1);
+   struct json_object *reloaded = reload(s_conv);
+   assert_counted(reloaded, 1);
+   json_object_put(reloaded);
+   struct json_object *defs = llm_tool_defs_for_request(s->conversation_history, true);
+   TEST_ASSERT_EQUAL_STRING(frozen, json_object_to_json_string_ext(defs, FLAGS));
+   json_object_put(defs);
+   free(frozen);
+   char *req = claude_request(s->conversation_history);
+   const char *q3 = strstr(req, "Q3");
+   TEST_ASSERT_NOT_NULL(q3);
+   TEST_ASSERT_NOT_NULL(strstr(q3, "tool_addition"));
+   TEST_ASSERT_NOT_NULL(strstr(req, SIGNED));
+   free(req);
+   assert_live_is_reload(s_conv, SIGNED);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_plain_turns);
@@ -1451,5 +1553,6 @@ int main(void) {
    RUN_TEST(test_a_withdrawal_by_the_other_session);
    RUN_TEST(test_a_tail_carrying_a_tool_change);
    RUN_TEST(test_a_tail_from_an_empty_conversation);
+   RUN_TEST(test_a_failed_turn_takes_its_tool_change_back);
    return UNITY_END();
 }

@@ -602,6 +602,13 @@ static void *text_worker_thread(void *arg) {
       image_store_update_retention(work->image_ids[i], turn_user_id, IMAGE_RETAIN_PERMANENT);
    }
 
+   /* No reply (failed, empty, stopped or superseded): the tool changes no model
+    * answered go back, to be appended again after the next question.  A reply
+    * stashed by a late stop is already in the history, so its change stays. */
+   if (!response || !response[0]) {
+      (void)session_prefix_take_back_changes(session);
+   }
+
    /* Check if request was superseded during LLM call */
    if (REQUEST_SUPERSEDED(session, expected_gen)) {
       /* Request superseded - don't send the response live.  G4 (SERVER_AUTHORITATIVE §9):
@@ -619,6 +626,11 @@ static void *text_worker_thread(void *arg) {
       if (superseded_reply != NULL && superseded_reply[0] != '\0') {
          text_worker_persist_final(session, session->stream_conversation_id, turn_user_id,
                                    superseded_reply);
+      }
+      /* A Stop can race the model's first thinking frame past the idle the
+       * cancel already sent: say idle again so the client closes it. */
+      if (atomic_load(&session->cancel_requested)) {
+         webui_send_state(session, "idle");
       }
       text_worker_end(session);
       free(superseded_reply); /* frees response OR the taken stash (mutually exclusive) */

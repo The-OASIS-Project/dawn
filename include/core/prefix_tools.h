@@ -96,6 +96,16 @@ void prefix_tools_apply(struct json_object *hist,
                         uint32_t session_id,
                         prefix_tools_result_t *out);
 
+/**
+ * @brief A tool change appended to @p hist that no model answered is being
+ *        taken out of it (a failed turn's): the change budgets it counted
+ *        against (the conversation's, and each server's this hour) get it back
+ *
+ * The next seam appends it again, and counts it then.  Caller holds the
+ * history's lock.
+ */
+void prefix_tools_refund(struct json_object *hist, struct json_object *change);
+
 /** Seams that compared a conversation's tools, since start (a diagnostic: an
  *  unchanged turn compares nothing). */
 uint64_t prefix_tools_diffs(void);

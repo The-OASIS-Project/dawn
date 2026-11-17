@@ -100,6 +100,9 @@ typedef struct {
    int64_t compaction_first_id;
    int64_t compaction_last_id;
    int compaction_level;
+   /** A failed turn's question: the tool changes saved with it that no
+    *  assistant row follows (no model answered them) go, or 0 */
+   int64_t retract_changes_of;
 } conv_turn_save_t;
 
 /**

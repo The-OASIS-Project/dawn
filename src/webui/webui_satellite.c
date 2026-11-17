@@ -38,6 +38,7 @@
 #include "core/ota_db.h"
 #include "core/rate_limiter.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "core/turn_queue.h"
 #include "core/utterance_dedup.h"
 #include "llm/llm_command_parser.h"
@@ -314,6 +315,10 @@ static void *satellite_worker_thread(void *arg) {
    }
 
    if (!response) {
+      /* Unless stopped, the tool changes no model answered go back. */
+      if (!atomic_load(&session->cancel_requested)) {
+         (void)session_prefix_take_back_changes(session);
+      }
       satellite_send_error(session, "LLM_ERROR", "Failed to get response from AI");
       satellite_send_stream_end(session, "error");
       terminal_sent = true;

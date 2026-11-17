@@ -89,6 +89,16 @@
                   DawnTurnWait.handleIdle(msg.payload);
                }
                if (isForeignConvFrame(msg.payload)) break;
+               // A turn's own idle (tagged with its conversation; a reconnect's isn't)
+               // closes a thinking block it left open: a Stop that raced the model's
+               // first thinking frame.
+               if (
+                  msg.payload.state === 'idle' &&
+                  msg.payload.conversation_id &&
+                  DawnState.thinkingState.active
+               ) {
+                  DawnStreaming.finalizeThinking(false);
+               }
                updateState(msg.payload.state, msg.payload.detail, msg.payload.tools);
                break;
             case 'force_logout':
