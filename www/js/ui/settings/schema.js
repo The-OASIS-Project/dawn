@@ -415,9 +415,9 @@
                label: 'Max Tokens',
                min: 100,
                hint:
-                  'Maximum tokens in an LLM response. A streamed reply that reasons gets at least ' +
-                  'its effort\'s ceiling (low 16K, medium 32K, high 64K, xhigh/max 128K), within ' +
-                  'the model\'s maximum.',
+                  'Maximum tokens in an LLM response. A streamed reply that reasons gets at ' +
+                  "least its effort's ceiling (low 16K, medium 32K, high 64K, xhigh/max 128K), " +
+                  "within the model's maximum.",
                advanced: true,
             },
             cloud: {
