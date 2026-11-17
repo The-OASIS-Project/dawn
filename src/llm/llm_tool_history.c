@@ -25,9 +25,14 @@
 
 #include <json-c/json.h>
 
+#include "core/conv_event.h"
+#include "core/event_payload.h"
 #include "core/session_manager.h"
+#include "llm/llm_history_kind.h"
+#include "llm/llm_history_rows.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
+#include "logging.h"
 
 _Static_assert(LLM_TURN_CALLS_MAX >= LLM_TOOLS_MAX_PARALLEL_CALLS,
                "a turn's blocks must be able to hold every call that runs");
@@ -165,4 +170,231 @@ void llm_tool_history_append_claude(struct json_object *history,
 
    /* Add tool results in Claude format */
    llm_tools_add_results_claude(history, results);
+}
+
+/* A string field of a row object, or NULL. */
+static const char *str_field(struct json_object *obj, const char *key) {
+   struct json_object *v = NULL;
+   return json_object_object_get_ex(obj, key, &v) ? json_object_get_string(v) : NULL;
+}
+
+/* Persist the tool messages just appended to @p history in [before_len, end) via
+ * the session's tool-persist hook (if set), in OpenAI-canonical form.  Runs on the
+ * worker thread with NO lock held, so conv_db (auth_db lock) is safe to call here.
+ * Every format goes through llm_history_rows_append, so the stored shape is
+ * provider-neutral and an assistant row carries its turn's stored blocks.
+ *
+ * @p reasoning_json is the display-only reasoning JSON for THIS iteration's assistant
+ * message (NULL if none).  It attaches to the single assistant row this iteration
+ * appended — guaranteed unique because an assistant turn is always one row
+ * (llm_history_rows_append) and only role:tool result rows fan out.
+ *
+ * A result's images (llm_tool_images.h) go with its tool row: the row names
+ * them by id (messages.images) and binds them as it is saved, so a reload
+ * rebuilds them from the store as the live turn built them. */
+void llm_tool_history_persist(session_t *s,
+                              struct json_object *history,
+                              int before_len,
+                              const char *reasoning_json,
+                              int iteration,
+                              const tool_result_list_t *results) {
+   if (!s || !history) {
+      return;
+   }
+   session_tool_persist_fn cb = s->tool_persist_cb;
+   void *ud = s->tool_persist_userdata;
+   /* NOTE: deliberately no early-return when cb is NULL.  The observe-side
+    * event log is emitted from the same walk below, and it must NOT be coupled
+    * to whether a conversation-persist hook happens to be installed — a
+    * surface with no persist hook still has tool steps worth watching. */
+
+   int after = json_object_array_length(history);
+   struct json_object *canonical = json_object_new_array();
+   if (!canonical) {
+      return;
+   }
+
+   /* The rows each appended message saves as (llm_history_rows_append): the
+    * canonical shape the walk below reads, whatever the history's format, and
+    * for an assistant turn its stored blocks. */
+   for (int i = before_len; i < after; i++) {
+      llm_history_rows_append(json_object_array_get_idx(history, i), canonical);
+   }
+
+   /* The event log is conversation-scoped; the turn's conversation was captured
+    * at dispatch (never the live view).  ev_observe scopes DURABLE step events
+    * to the same observe set as the `status` heartbeat (jobs / background /
+    * job-conversation turns), so ordinary interactive turns don't pay the durable-log tax.
+    *
+    * fan_ephemeral is the mirror image: an ordinary conversation-bound foreground turn (typed or
+    * voice) that is NOT on the durable observe path fans its tool steps LIVE to the user's OTHER
+    * browsers viewing this conv, with NO conversation_events write — the messages table already
+    * persists the step (tool-persist hook), so reload rebuilds it; the fan is pure live-view sugar.
+    * The two are mutually exclusive (ev_observe XOR fan_ephemeral when ev_conv>0), so a step takes
+    * exactly one path and jobs never double-emit. */
+   const int64_t ev_conv = atomic_load(&s->stream_conversation_id);
+   const int ev_user = (int)s->metrics.user_id;
+   const bool ev_observe = ev_conv > 0 && atomic_load(&s->events_observable);
+   const bool fan_ephemeral = ev_conv > 0 && !ev_observe;
+   const bool ev_live = ev_observe || fan_ephemeral; /* either surface consumes tool events */
+
+   /* Invariant guard: a foreground turn that promised full-turn
+    * server persistence (will_persist_turn) and relies on the messages table for its tool
+    * rows (fan_ephemeral — NOT the durable observe log) MUST have a tool-persist writer
+    * installed.  cb==NULL here means an entry path armed will_persist_turn but never
+    * installed the persist hook — the exact gap that silently dropped voice tool-turns.
+    * Log-only (the rows are already lost either way); will_persist_turn scopes it off the
+    * jobs/messaging/research paths, which don't arm it.  May repeat per tool iteration on a
+    * genuinely broken turn — acceptable for a should-never-fire diagnostic. */
+   if (fan_ephemeral && cb == NULL && atomic_load(&s->will_persist_turn)) {
+      OLOG_WARNING("tool-persist gap: turn on conv %lld armed will_persist_turn but no persist "
+                   "hook is installed — tool rows will NOT be saved (entry path missing "
+                   "webui_turn_persist_arm?)",
+                   (long long)ev_conv);
+   }
+
+   /* The canonical role:tool result row carries no tool name — only its
+    * tool_call_id — but the redactor needs the name to apply the
+    * TOOL_CAP_SECRETS backstop.  The assistant tool_calls row (with both id and
+    * name) precedes its results in this same batch, so map id->name as we pass
+    * it and look up when the result arrives.  Built when EITHER surface is live. */
+   struct json_object *tcid_to_name = ev_live ? json_object_new_object() : NULL;
+
+   /* Parallel tcid -> is_error map for the red-only pill signal.  Built UP FRONT from `results`
+    * (whose structs carry the execute-time is_error verdict), not during the row walk — the
+    * canonical role:tool rows carry only stripped text, so the failure signal must come from here.
+    * Consumed by BOTH the persist hook (cb — so a reloaded conv reds the failed pill) and the live
+    * tool_step emit; hence built whenever we persist OR fan, not only when ev_live.  A tcid with no
+    * entry / an uncorrelated result degrades to no-error (neutral), the failure-safe direction. */
+   struct json_object *tcid_to_error = (cb != NULL || ev_live) ? json_object_new_object() : NULL;
+   if (tcid_to_error != NULL && results != NULL) {
+      for (int r = 0; r < results->count; r++) {
+         const char *rid = results->results[r].tool_call_id;
+         if (rid != NULL && rid[0] != '\0') {
+            json_object_object_add(tcid_to_error, rid,
+                                   json_object_new_boolean(results->results[r].is_error));
+         }
+      }
+   }
+
+   int n = json_object_array_length(canonical);
+   for (int i = 0; i < n; i++) {
+      struct json_object *m = json_object_array_get_idx(canonical, i);
+      struct json_object *role_obj, *content_obj, *tc_obj, *tcid_obj;
+      if (!json_object_object_get_ex(m, "role", &role_obj)) {
+         continue;
+      }
+      const char *role = json_object_get_string(role_obj);
+      const char *content = json_object_object_get_ex(m, "content", &content_obj)
+                                ? json_object_get_string(content_obj)
+                                : "";
+      if (json_object_object_get_ex(m, "tool_calls", &tc_obj)) {
+         const char *tc_json = json_object_to_json_string(tc_obj);
+         if (cb) {
+            /* Assistant tool_calls row — never a failure verdict itself (that rides the
+             * role:tool result rows below). */
+            const session_tool_row_t row = { .role = role,
+                                             .content = content ? content : "",
+                                             .tool_calls = tc_json,
+                                             .reasoning = reasoning_json,
+                                             .llm_blocks = str_field(m,
+                                                                     LLM_HISTORY_ROW_STORED_KEY) };
+            (void)cb(ud, &row);
+         }
+         /* One tool_call event per call in the batch: an iteration can invoke
+          * several tools, and a tailer wants them individually, not as one blob. */
+         if (ev_live && json_object_is_type(tc_obj, json_type_array)) {
+            int ncalls = json_object_array_length(tc_obj);
+            for (int c = 0; c < ncalls; c++) {
+               struct json_object *call = json_object_array_get_idx(tc_obj, c);
+               struct json_object *fn = NULL, *nm = NULL, *ar = NULL, *ido = NULL;
+               const char *tool_name = NULL, *args = NULL, *call_id = NULL;
+               if (json_object_object_get_ex(call, "function", &fn)) {
+                  if (json_object_object_get_ex(fn, "name", &nm)) {
+                     tool_name = json_object_get_string(nm);
+                  }
+                  if (json_object_object_get_ex(fn, "arguments", &ar)) {
+                     args = json_object_get_string(ar);
+                  }
+               }
+               if (json_object_object_get_ex(call, "id", &ido)) {
+                  call_id = json_object_get_string(ido);
+               }
+               if (call_id && tool_name && tcid_to_name) {
+                  json_object_object_add(tcid_to_name, call_id, json_object_new_string(tool_name));
+               }
+               /* ev_observe (jobs) → durable conv_event_emit (persist + fan); else
+                * fan_ephemeral (interactive/voice) → live-only cross-viewer fan, no DB row.
+                * Both TAKE OWNERSHIP of the payload. */
+               char *tc_payload = event_payload_tool_call(tool_name, args, call_id, iteration);
+               if (ev_observe) {
+                  conv_event_emit(ev_conv, ev_user, CONV_EVENT_TOOL_CALL, tc_payload);
+               } else {
+                  conv_event_tool_step_fanout(ev_conv, ev_user, s->session_id,
+                                              atomic_load(&s->current_stream_id),
+                                              CONV_EVENT_TOOL_CALL, tc_payload);
+               }
+            }
+         }
+      } else if (llm_history_kind_of(m) == MESSAGE_KIND_LOOP_NOTE) {
+         /* A note the loop gave the model: saved where it sat, so a reload
+          * replays the request the model answered. */
+         if (cb) {
+            const session_tool_row_t row = { .role = role,
+                                             .content = content ? content : "",
+                                             .kind = message_kind_name(MESSAGE_KIND_LOOP_NOTE) };
+            (void)cb(ud, &row);
+         }
+      } else if (json_object_object_get_ex(m, "tool_call_id", &tcid_obj)) {
+         const char *tcid = json_object_get_string(tcid_obj);
+         /* Result's confirmed-failure verdict — needed by BOTH the persist hook (so reload reds
+          * it) and the live emit below.  Uncorrelated/absent tcid -> false (neutral). */
+         bool r_is_error = false;
+         struct json_object *eo = NULL;
+         if (tcid != NULL && tcid_to_error != NULL &&
+             json_object_object_get_ex(tcid_to_error, tcid, &eo)) {
+            r_is_error = json_object_get_boolean(eo);
+         }
+         if (cb) {
+            struct json_object *images = NULL;
+            json_object_object_get_ex(m, LLM_HISTORY_ROW_IMAGES_KEY, &images);
+            const session_tool_row_t row = {
+               .role = role,
+               .content = content ? content : "",
+               .tool_call_id = tcid,
+               .is_error = r_is_error,
+               .images = images ? json_object_to_json_string_ext(images, JSON_C_TO_STRING_PLAIN)
+                                : NULL
+            };
+            (void)cb(ud, &row);
+         }
+         if (ev_live) {
+            /* Recover the tool name from the batch's tool_calls (mapped above) so
+             * the redactor's TOOL_CAP_SECRETS backstop can fire; without it every
+             * result persisted unredacted.  A rare uncorrelated result (NULL name)
+             * stays unredacted, as before — a value-shape scan of the whole result
+             * body is deliberately NOT applied here, since it would redact any
+             * result merely containing a long opaque run (search URLs, base64) and
+             * gut the observe surface. */
+            struct json_object *nmo = NULL;
+            const char *rtool = (tcid && tcid_to_name &&
+                                 json_object_object_get_ex(tcid_to_name, tcid, &nmo))
+                                    ? json_object_get_string(nmo)
+                                    : NULL;
+            char *tr_payload = event_payload_tool_result(rtool, content, tcid, iteration,
+                                                         r_is_error);
+            if (ev_observe) {
+               conv_event_emit(ev_conv, ev_user, CONV_EVENT_TOOL_RESULT, tr_payload);
+            } else {
+               conv_event_tool_step_fanout(ev_conv, ev_user, s->session_id,
+                                           atomic_load(&s->current_stream_id),
+                                           CONV_EVENT_TOOL_RESULT, tr_payload);
+            }
+         }
+      }
+   }
+
+   json_object_put(tcid_to_name);
+   json_object_put(tcid_to_error);
+   json_object_put(canonical);
 }

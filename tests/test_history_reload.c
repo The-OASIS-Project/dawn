@@ -19,7 +19,9 @@
  * A session's own history, after each kind of turn it runs, is the request a
  * reload of its conversation builds: the turn runs through the real dispatch,
  * session unit, append-only prefix and LLM call finalizer (the model is a
- * fake), saves its rows as the WebUI does, and the live history and
+ * fake), saves a tool exchange's rows through the tool loop's own persist
+ * (llm_tool_history_persist) and the job worker's hook and its reply as the
+ * WebUI does, and the live history and
  * memory_history_request_context() are rendered by the Claude and OpenAI
  * Responses request builders and compared byte for byte.
  */
@@ -36,8 +38,11 @@
 #include "auth/auth_db_conv_prefix.h"
 #include "auth/auth_db_internal.h"
 #include "auth/auth_db_messages.h"
+#include "blob_store.h"
 #include "config/dawn_config.h"
+#include "core/job_dispatch.h"
 #include "core/llm_response_finalize.h"
+#include "core/ocp_helpers.h"
 #include "core/prompt_parts.h"
 #include "core/session_compaction.h"
 #include "core/session_manager.h"
@@ -46,6 +51,7 @@
 #include "core/text_input_dispatch.h"
 #include "core/turn_queue.h"
 #include "dawn_error.h"
+#include "image_store.h"
 #include "llm/llm_claude_format.h"
 #include "llm/llm_compaction.h"
 #include "llm/llm_context.h"
@@ -65,6 +71,8 @@ dawn_config_t g_config;
 
 #define CARRIER "api.anthropic.com#0123456789abcdef"
 #define MODEL "claude-opus-5-5"
+#define OPENAI_CARRIER "api.openai.com#0123456789abcdef"
+#define OPENAI_MODEL "gpt-5.5"
 #define FLAGS (JSON_C_TO_STRING_PLAIN | JSON_C_TO_STRING_NOSLASHESCAPE)
 
 /* ---- the model: one scripted response per call ---- */
@@ -75,6 +83,8 @@ typedef struct {
    const char *tool_call; /* a tool exchange runs first: the call's id */
    bool openai;           /* ... on an OpenAI path (the history in OpenAI shape) */
    const char *visual;    /* a visual the turn rendered (render_visual's pending_visual) */
+   bool tool_image;       /* the tool's result carries an image (a capture) */
+   bool tool_reasoning;   /* on an OpenAI path, the call comes with encrypted reasoning */
    bool cancel_after;     /* the user's stop lands once the answer is complete */
    bool cancel_during;    /* the stop lands mid-stream: no answer */
 } script_t;
@@ -92,12 +102,22 @@ static struct json_object *signed_blocks(const char *text) {
    return blocks;
 }
 
+/* A PNG's bytes (its signature, then a tag) as base64: what a camera tool
+ * hands back. */
+static char *png_base64(const char *tag) {
+   unsigned char bytes[64] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
+   const size_t n = 8 + strlen(tag);
+   memcpy(bytes + 8, tag, n - 8);
+   return ocp_base64_encode(bytes, n);
+}
+
 /* A tool exchange as the tool loop appends it (llm_tool_history.h): on a
  * Claude path the call's blocks rendered and one tool_result message, on an
- * OpenAI path the call with its tool_calls and a role:tool message.  Saved as
- * the loop saves it: each appended message's rows, through the turn's
- * persist hook. */
-static void run_tool_exchange(struct json_object *history, const char *call_id, bool openai) {
+ * OpenAI path the call with its tool_calls (and, with @p reasoning, the
+ * encrypted reasoning it came with) and a role:tool message.  Saved as the
+ * loop saves it (llm_tool_history_persist), through the turn's persist hook. */
+static void run_tool_exchange(struct json_object *history, const script_t *sc) {
+   const char *call_id = sc->tool_call;
    const int before = (int)json_object_array_length(history);
    llm_tool_response_t response;
    memset(&response, 0, sizeof(response));
@@ -108,51 +128,46 @@ static void run_tool_exchange(struct json_object *history, const char *call_id, 
    snprintf(tc->name, sizeof(tc->name), "weather");
    snprintf(tc->arguments, sizeof(tc->arguments), "{\"city\":\"Paris\"}");
    response.has_tool_calls = true;
-   if (!openai) {
+   if (!sc->openai) {
       response.blocks = llm_turn_blocks_new();
       llm_turn_blocks_add_reasoning(response.blocks, CARRIER, LLM_FORMAT_ANTHROPIC, MODEL,
                                     json_tokener_parse("{\"type\":\"thinking\",\"thinking\":"
                                                        "\"A tool.\",\"signature\":\"TSIG\"}"));
       llm_turn_blocks_add_text(response.blocks, "Checking.");
       llm_turn_blocks_add_tool_call(response.blocks, call_id, "weather", "{\"city\":\"Paris\"}");
+   } else if (sc->tool_reasoning) {
+      response.blocks = llm_turn_blocks_new();
+      llm_turn_blocks_add_reasoning(response.blocks, OPENAI_CARRIER, LLM_FORMAT_OPENAI,
+                                    OPENAI_MODEL,
+                                    json_tokener_parse("{\"type\":\"reasoning\",\"id\":"
+                                                       "\"rs_1\",\"encrypted_content\":"
+                                                       "\"ENC\",\"summary\":[]}"));
+      llm_turn_blocks_add_text(response.blocks, "Checking.");
+      llm_turn_blocks_add_tool_call(response.blocks, call_id, "weather", "{\"city\":\"Paris\"}");
    }
    tool_result_list_t *results = calloc(1, sizeof(*results));
    TEST_ASSERT_NOT_NULL(results);
    results->count = 1;
-   snprintf(results->results[0].tool_call_id, sizeof(results->results[0].tool_call_id), "%s",
-            call_id);
-   snprintf(results->results[0].result, sizeof(results->results[0].result), "Sunny, 21C");
-   results->results[0].success = true;
-   if (openai) {
+   tool_result_t *r = &results->results[0];
+   snprintf(r->tool_call_id, sizeof(r->tool_call_id), "%s", call_id);
+   if (sc->tool_image) {
+      TEST_ASSERT_TRUE(llm_tool_images_ingest(png_base64(call_id), r));
+      TEST_ASSERT_NOT_EQUAL('\0', r->vision_image_id[0]); /* stored, for the row to bind */
+      snprintf(r->result, sizeof(r->result), "Image captured successfully.");
+   } else {
+      snprintf(r->result, sizeof(r->result), "Sunny, 21C");
+   }
+   r->success = true;
+   if (sc->openai) {
       llm_tool_history_append_openai(history, &response, results);
    } else {
       llm_tool_history_append_claude(history, &response, results, CARRIER);
    }
    json_object_put(response.blocks);
+   /* The display-only reasoning the loop saves with the call's row. */
+   llm_tool_history_persist(s, history, before, "{\"text\":\"A tool.\"}", 1, results);
+   free(r->vision_image);
    free(results);
-
-   struct json_object *rows = json_object_new_array();
-   for (int i = before; i < (int)json_object_array_length(history); i++) {
-      llm_history_rows_append(json_object_array_get_idx(history, i), rows);
-   }
-   for (int i = 0; i < (int)json_object_array_length(rows); i++) {
-      struct json_object *m = json_object_array_get_idx(rows, i);
-      struct json_object *v = NULL;
-#define FIELD(k) (json_object_object_get_ex(m, (k), &v) ? json_object_get_string(v) : NULL)
-      struct json_object *tc_obj = NULL;
-      const session_tool_row_t row = {
-         .role = FIELD("role"),
-         .content = FIELD("content"),
-         .tool_calls = json_object_object_get_ex(m, "tool_calls", &tc_obj)
-                           ? json_object_to_json_string(tc_obj)
-                           : NULL,
-         .tool_call_id = FIELD("tool_call_id"),
-         .llm_blocks = FIELD(LLM_HISTORY_ROW_STORED_KEY),
-      };
-#undef FIELD
-      (void)s->tool_persist_cb(s->tool_persist_userdata, &row);
-   }
-   json_object_put(rows);
 }
 
 char *llm_chat_completion_streaming_with_config(struct json_object *conversation_history,
@@ -162,7 +177,7 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
                                                 const llm_resolved_config_t *config) {
    (void)input_text, (void)chunk_callback, (void)callback_userdata, (void)config;
    if (s_script.tool_call) {
-      run_tool_exchange(conversation_history, s_script.tool_call, s_script.openai);
+      run_tool_exchange(conversation_history, &s_script);
    }
    if (s_script.visual) {
       /* What the render_visual tool leaves for the final answer's save. */
@@ -179,8 +194,10 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
       return NULL;
    }
    if (s_script.thinking) {
-      /* The tool loop's stash of the final answer's blocks. */
+      /* The tool loop's stash of the final answer's blocks and display-only reasoning. */
       s->final_answer.blocks = signed_blocks(s_script.reply);
+      free(s->final_answer.reasoning_json);
+      s->final_answer.reasoning_json = strdup("{\"text\":\"Let me see.\"}");
    }
    if (s_script.cancel_after) {
       atomic_store(&s->cancel_requested, true);
@@ -309,9 +326,48 @@ void conv_event_emit(int64_t conv_id, int user_id, const char *kind, char *paylo
    (void)conv_id, (void)user_id, (void)kind;
    free(payload_owned);
 }
+void conv_event_tool_step_fanout(int64_t conv_id,
+                                 int user_id,
+                                 uint32_t origin_session_id,
+                                 unsigned stream_id,
+                                 const char *kind,
+                                 char *payload_owned) {
+   (void)conv_id, (void)user_id, (void)origin_session_id, (void)stream_id, (void)kind;
+   free(payload_owned);
+}
 char *event_payload_status(bool generating) {
    (void)generating;
    return NULL;
+}
+char *event_payload_tool_call(const char *tool_name,
+                              const char *args_json,
+                              const char *tool_call_id,
+                              int iteration) {
+   (void)tool_name, (void)args_json, (void)tool_call_id, (void)iteration;
+   return NULL;
+}
+char *event_payload_tool_result(const char *tool_name,
+                                const char *result_text,
+                                const char *tool_call_id,
+                                int iteration,
+                                bool is_error) {
+   (void)tool_name, (void)result_text, (void)tool_call_id, (void)iteration, (void)is_error;
+   return NULL;
+}
+
+/* The rest of job_dispatch.c, whose persist hook a turn here saves through. */
+bool job_manager_claim_reaped(const session_t *session, bool *user_cancelled_out) {
+   (void)session;
+   if (user_cancelled_out) {
+      *user_cancelled_out = false;
+   }
+   return false;
+}
+bool job_manager_is_shutting_down(void) {
+   return false;
+}
+void llm_get_default_config(session_llm_config_t *config) {
+   memset(config, 0, sizeof(*config));
 }
 void webui_send_error(struct session *session, const char *code, const char *message) {
    (void)session, (void)code, (void)message;
@@ -479,26 +535,14 @@ float llm_context_hard_threshold(void) {
 
 /* ---- a turn as the WebUI text worker runs it ---- */
 
-static int64_t persist_tool_row(void *userdata, const session_tool_row_t *row) {
-   (void)userdata;
-   const conv_message_row_t db_row = { .role = row->role,
-                                       .content = row->content ? row->content : "",
-                                       .tool_calls = row->tool_calls,
-                                       .tool_call_id = row->tool_call_id,
-                                       .llm_blocks = row->llm_blocks,
-                                       .kind = row->kind };
-   int64_t id = 0;
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(atomic_load(&s->stream_conversation_id),
-                                                          s_user, &db_row, &id));
-   return id;
-}
-
 /* The final answer saved as webui_persist_final_answer (webui_broadcasts.c)
- * saves it: its blocks with the row, a rendered visual taken from the session
- * and joined after the body (memory_history_join_visual), the row's id on the
- * history.  Its reasoning column, retention and fan-out are left out: a reload
- * reads none of them. */
+ * saves it: its reasoning and blocks with the row, a rendered visual taken
+ * from the session and joined after the body (memory_history_join_visual),
+ * the row's id on the history.  Its retention and fan-out are left out: a
+ * reload reads neither. */
 static void persist_reply(int64_t conv, const char *body) {
+   char *reasoning = s->final_answer.reasoning_json;
+   s->final_answer.reasoning_json = NULL;
    struct json_object *blocks = session_take_reply_blocks(s);
    char *stored = llm_turn_blocks_answer_stored(blocks);
    json_object_put(blocks);
@@ -509,12 +553,14 @@ static void persist_reply(int64_t conv, const char *body) {
    char *combined = (visual && visual[0]) ? memory_history_join_visual(body, visual) : NULL;
    const conv_message_row_t row = { .role = "assistant",
                                     .content = combined ? combined : body,
+                                    .reasoning = reasoning,
                                     .llm_blocks = stored };
    int64_t id = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &id));
    free(combined);
    free(visual);
    free(stored);
+   free(reasoning);
    session_stamp_last_message_id(s, "assistant", id);
 }
 
@@ -527,8 +573,10 @@ static void run_turn(int64_t conv, const char *question, script_t script) {
    s_script = script;
    atomic_store(&s->cancel_requested, false);
    session_turn_begin(s, conv, s_user);
-   s->tool_persist_cb = persist_tool_row;
-   s->tool_persist_userdata = NULL;
+   /* The job worker's hook: every field of a row into the conversation. */
+   job_persist_ctx_t persist_ctx = { .conv_id = conv, .user_id = s_user };
+   s->tool_persist_cb = job_dispatch_tool_persist_cb;
+   s->tool_persist_userdata = &persist_ctx;
    atomic_store(&s->will_persist_turn, true);
    const text_input_dispatch_opts_t opts = { .conversation_id = conv,
                                              .auth_user_id = s_user,
@@ -536,6 +584,7 @@ static void run_turn(int64_t conv, const char *question, script_t script) {
    char *reply = core_text_input_dispatch(s, question, &opts);
    atomic_store(&s->will_persist_turn, false);
    s->tool_persist_cb = NULL;
+   s->tool_persist_userdata = NULL;
    if (!reply) {
       /* A stop after the answer completed: the answer saved anyway. */
       reply = s->cancelled_final_response;
@@ -577,7 +626,7 @@ static char *responses_request(struct json_object *history) {
    char *volatile_ctx = llm_responses_extract_volatile_context(history);
    struct json_object *input = llm_responses_build_input(
        history, NULL, volatile_ctx, llm_responses_count_leading_system_run(history), false,
-       "api.openai.com#0123456789abcdef", "gpt-5.5");
+       OPENAI_CARRIER, OPENAI_MODEL);
    TEST_ASSERT_NOT_NULL(input);
    const char *in = json_object_to_json_string_ext(input, FLAGS);
    size_t len = strlen(in) + (instructions ? strlen(instructions) : 0) + 2;
@@ -806,6 +855,49 @@ static void test_an_openai_tool_exchange(void) {
    assert_live_is_reload(s_conv, "call_2");
 }
 
+/* An OpenAI call that came with encrypted reasoning: the reasoning goes back
+ * with the call on the Responses path, from the live history and a reload. */
+static void test_an_openai_tool_exchange_with_reasoning(void) {
+   run_turn(s_conv, "Q1",
+            (script_t){ .reply = "It's sunny.",
+                        .tool_call = "call_r",
+                        .openai = true,
+                        .tool_reasoning = true });
+   assert_live_is_reload(s_conv, "call_r");
+   struct json_object *reloaded = reload(s_conv);
+   char *responses = responses_request(reloaded);
+   TEST_ASSERT_NOT_NULL(strstr(responses, "\"encrypted_content\":\"ENC\""));
+   free(responses);
+   json_object_put(reloaded);
+   run_turn(s_conv, "Q2", (script_t){ .reply = "A2" });
+   assert_live_is_reload(s_conv, "A2");
+}
+
+/* The start of a PNG's bytes in base64: the image itself is in the request. */
+#define PNG_BASE64_HEAD "iVBORw0KGgp"
+
+/* A tool result carrying an image (a capture): stored, named by its row, and
+ * rebuilt from the store on reload as the live turn built it, on each path. */
+static void test_a_tool_result_with_an_image(void) {
+   char dir[] = "/tmp/dawn_reload_img_XXXXXX";
+   TEST_ASSERT_NOT_NULL(mkdtemp(dir));
+   image_store_config_t cfg = { .max_size = 4 * 1024 * 1024, .max_per_user = 100, .data_dir = dir };
+   TEST_ASSERT_EQUAL_INT(IMAGE_STORE_SUCCESS, image_store_init(&cfg));
+   g_config.vision.max_image_size_kb = 4096;
+   run_turn(s_conv, "Q1",
+            (script_t){ .reply = "A cat.", .tool_call = "toolu_img", .tool_image = true });
+   assert_live_is_reload(s_conv, PNG_BASE64_HEAD);
+   run_turn(s_conv, "Q2",
+            (script_t){ .reply = "A dog.",
+                        .tool_call = "call_img",
+                        .openai = true,
+                        .tool_image = true });
+   assert_live_is_reload(s_conv, PNG_BASE64_HEAD);
+   g_config.vision.max_image_size_kb = 0;
+   image_store_shutdown();
+   blob_store_shutdown();
+}
+
 #define VISUAL "<dawn-visual title=\"Chart\"><svg></svg></dawn-visual>"
 
 /* A reply with a rendered visual: saved with the visual after its body, kept
@@ -852,6 +944,8 @@ int main(void) {
    RUN_TEST(test_a_reply_stopped_mid_stream);
    RUN_TEST(test_a_re_engagement);
    RUN_TEST(test_an_openai_tool_exchange);
+   RUN_TEST(test_an_openai_tool_exchange_with_reasoning);
+   RUN_TEST(test_a_tool_result_with_an_image);
    RUN_TEST(test_a_reply_with_a_rendered_visual);
    RUN_TEST(test_a_compaction_at_the_seam);
    return UNITY_END();

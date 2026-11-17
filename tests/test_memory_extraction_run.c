@@ -22,7 +22,10 @@
  * no request ever leaves the process) records the prompt it was sent and
  * returns a scripted reply.  Covers a history that lacks another session's
  * rows, a complete one, another session's web result in the batch, and
- * memory recovery's progress check on a count stored in older units.
+ * memory recovery's progress check on a count stored in older units.  The
+ * session unit is linked too, so a test can run a turn on a session (the real
+ * dispatch, prefix and history, a fake model) and then extract its
+ * conversation in the same process.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -42,7 +45,13 @@
 #include "auth/auth_db_messages.h"
 #include "config/dawn_config.h"
 #include "core/embedding_engine.h"
+#include "core/llm_response_finalize.h"
 #include "core/outside_kind.h"
+#include "core/prompt_parts.h"
+#include "core/session_compaction.h"
+#include "core/session_manager.h"
+#include "core/session_prefix.h"
+#include "core/text_input_dispatch.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_third_party.h"
 #include "memory/memory_db.h"
@@ -105,6 +114,121 @@ char *__wrap_llm_chat_completion_with_config(struct json_object *conversation_hi
    return s_reply ? strdup(s_reply) : NULL;
 }
 
+/* The turn's model (the session unit's call, wrapped like the extraction's):
+ * the answer it gives. */
+static const char *s_turn_reply;
+
+char *__wrap_llm_chat_completion_streaming_with_config(struct json_object *conversation_history,
+                                                       const char *input_text,
+                                                       llm_text_chunk_callback chunk_callback,
+                                                       void *callback_userdata,
+                                                       const llm_resolved_config_t *config) {
+   (void)conversation_history, (void)input_text, (void)chunk_callback, (void)callback_userdata;
+   (void)config;
+   return s_turn_reply ? strdup(s_turn_reply) : NULL;
+}
+
+/* ---- the runtime a turn calls besides the session unit, stubbed ---- */
+
+/* The prompt each turn applies (session_manager.c's dispatch): a fixed one. */
+int session_dispatch_user_turn_ex(session_t *session,
+                                  const char *user_turn_text,
+                                  const char *turn_note) {
+   (void)user_turn_text;
+   composed_prompt_t cp = { .directives = strdup("D") };
+   prompt_sections_add(&cp, "persona", "your persona", "P");
+   cp.stable_prefix = prompt_sections_join(&cp);
+   cp.context_head = strdup("[system_time] 09:00\n");
+   session_prefix_apply_turn(session, &cp, turn_note);
+   composed_prompt_free(&cp);
+   return SUCCESS;
+}
+/* The thread's turn token, as session_manager.c keeps it: a turn's rows are
+ * added only while its token is the thread's. */
+static __thread uint64_t tl_turn_token;
+uint64_t session_turn_token(void) {
+   return tl_turn_token;
+}
+void session_set_turn_token(uint64_t token) {
+   tl_turn_token = token;
+}
+/* The finalizer's own work is tested elsewhere: the text as given. */
+int llm_response_finalize(session_t *session, const char *raw_response, response_final_t *out) {
+   (void)session;
+   out->text = strdup(raw_response);
+   return out->text ? SUCCESS : FAILURE;
+}
+void session_touch(session_t *session) {
+   (void)session;
+}
+void session_manager_for_each_session_any(void (*fn)(session_t *session, void *ctx), void *ctx) {
+   (void)fn, (void)ctx;
+}
+void job_manager_for_each_session(void (*fn)(session_t *session, void *ctx), void *ctx) {
+   (void)fn, (void)ctx;
+}
+bool turn_queue_busy(uint32_t session_id) {
+   (void)session_id;
+   return false;
+}
+void session_posts_untell_locked(session_t *session) {
+   (void)session;
+}
+int focus_handles_flush(struct session *session, int64_t conv_id, int user_id) {
+   (void)session, (void)conv_id, (void)user_id;
+   return SUCCESS;
+}
+void focus_handles_reset_locked(struct session *session) {
+   (void)session;
+}
+int focus_handles_withdrawn_locked(const struct session *session,
+                                   int64_t conv_id,
+                                   const char *const *item_ids,
+                                   int n_ids,
+                                   int *out,
+                                   int cap) {
+   (void)session, (void)conv_id, (void)item_ids, (void)n_ids, (void)out, (void)cap;
+   return 0;
+}
+int tool_result_store_bind_locked(struct session *session,
+                                  int64_t conv_id,
+                                  uint64_t turn_token,
+                                  bool with_ended) {
+   (void)session, (void)conv_id, (void)turn_token, (void)with_ended;
+   return 0;
+}
+void tool_result_store_drop_trees(struct session *session) {
+   (void)session;
+}
+void tool_result_store_reset_locked(struct session *session) {
+   (void)session;
+}
+void tool_result_store_turn_ended_locked(struct session *session,
+                                         uint64_t turn_token,
+                                         bool to_live) {
+   (void)session, (void)turn_token, (void)to_live;
+}
+char *event_payload_status(bool generating) {
+   (void)generating;
+   return NULL;
+}
+void webui_send_stream_delta(struct session *session, const char *text) {
+   (void)session, (void)text;
+}
+void webui_send_stream_end(struct session *session, const char *reason) {
+   (void)session, (void)reason;
+}
+void webui_send_transcript(struct session *session, const char *role, const char *text) {
+   (void)session, (void)role, (void)text;
+}
+void webui_send_transcript_ex(struct session *session,
+                              const char *role,
+                              const char *text,
+                              bool server_saved,
+                              int64_t message_id) {
+   (void)session, (void)role, (void)text, (void)server_saved, (void)message_id;
+}
+
 #define REPLY                                                                        \
    "{\"facts\": [{\"text\": \"The user keeps a placeholder notebook.\"}], "          \
    "\"preferences\": [], \"corrections\": [], "                                      \
@@ -129,6 +253,7 @@ void setUp(void) {
    s_gated = false;
    s_entered = false;
    s_open = false;
+   s_turn_reply = NULL;
 }
 
 void tearDown(void) {
@@ -422,11 +547,67 @@ void test_recovery_counts_a_falling_count_as_progress(void) {
    TEST_ASSERT_EQUAL_INT64(10, q1("SELECT message_count FROM conversations WHERE id = ?1", conv));
 }
 
+/* ---- a turn, then its extraction ---- */
+
+/* A turn run on a session (the question saved by the dispatch, the reply by
+ * the surface), then the session's history handed to extraction: the model is
+ * sent both, and the cursor ends at the reply. */
+void test_a_turn_on_a_session_then_its_extraction(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Turn", &conv));
+   session_t *s = calloc(1, sizeof(*s));
+   TEST_ASSERT_NOT_NULL(s);
+   s->session_id = 3;
+   s->type = SESSION_TYPE_WEBUI;
+   s->metrics.user_id = (uint32_t)s_user;
+   pthread_mutex_init(&s->history_mutex, NULL);
+   pthread_mutex_init(&s->llm_config_mutex, NULL);
+   pthread_mutex_init(&s->metrics_mutex, NULL);
+   pthread_mutex_init(&s->tools_mutex, NULL);
+   s->conversation_history = json_object_new_array();
+   session_bind_history_conversation(s, conv);
+
+   s_turn_reply = "MARK-TURN-R placeholder answer";
+   session_turn_begin(s, conv, s_user);
+   const text_input_dispatch_opts_t opts = { .conversation_id = conv, .auth_user_id = s_user };
+   char *reply = core_text_input_dispatch(s, "MARK-TURN-Q placeholder question", &opts);
+   TEST_ASSERT_NOT_NULL(reply);
+   const conv_message_row_t row = { .role = "assistant", .content = reply };
+   int64_t reply_id = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &reply_id));
+   session_stamp_last_message_id(s, "assistant", reply_id);
+   free(reply);
+   session_turn_end(s);
+
+   pthread_mutex_lock(&s->history_mutex);
+   struct json_object *history = NULL;
+   TEST_ASSERT_EQUAL_INT(0, json_object_deep_copy(s->conversation_history, &history, NULL));
+   pthread_mutex_unlock(&s->history_mutex);
+   extract(conv, history, (int)json_object_array_length(history));
+
+   TEST_ASSERT_EQUAL_INT(1, s_calls);
+   prompt_has("MARK-TURN-Q");
+   prompt_has("MARK-TURN-R");
+   TEST_ASSERT_EQUAL_INT64(reply_id, id_cursor(conv));
+
+   session_final_answer_clear(s);
+   session_compaction_teardown(s);
+   session_prefix_turn_free(s->prefix_turn);
+   json_object_put(s->withdraw_pending);
+   json_object_put(s->conversation_history);
+   pthread_mutex_destroy(&s->history_mutex);
+   pthread_mutex_destroy(&s->llm_config_mutex);
+   pthread_mutex_destroy(&s->metrics_mutex);
+   pthread_mutex_destroy(&s->tools_mutex);
+   free(s);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_history_lacking_another_sessions_rows_sends_them);
    RUN_TEST(test_complete_history_sends_only_new_rows);
    RUN_TEST(test_another_sessions_web_result_taints_a_model_batch);
    RUN_TEST(test_recovery_counts_a_falling_count_as_progress);
+   RUN_TEST(test_a_turn_on_a_session_then_its_extraction);
    return UNITY_END();
 }
