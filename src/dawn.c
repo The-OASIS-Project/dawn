@@ -67,7 +67,9 @@
 #include "core/command_executor.h"
 #include "core/command_router.h"
 #include "core/component_status.h"
+#include "core/conv_post.h"
 #include "core/conv_stream.h"
+#include "core/conv_turn_lease.h"
 #include "core/dawn_events.h"
 #include "core/embedding_engine.h"
 #include "core/endpointer.h"
@@ -2239,6 +2241,10 @@ int main(int argc, char *argv[]) {
       OLOG_ERROR("Failed to initialize session manager");
       return 1;
    }
+   /* One turn per conversation: posts from outside a turn are written through
+    * the lease, and a turn waiting past a job's runtime limit is reported. */
+   conv_post_init();
+   conv_turn_lease_set_stale_after(g_config.jobs.max_runtime_sec);
 
    // Register the prompt builder before any turn can run.
    /* The focus-source adapters, before the prompt builder that uses them.
@@ -4208,6 +4214,10 @@ server_shutdown:
    OLOG_INFO("Shutdown: webui_server_quiesce");
    webui_server_quiesce();
 #endif
+   /* No turn waits for a conversation from here on (each ends unsent), and
+    * posts queued behind running turns are written while the database is up. */
+   OLOG_INFO("Shutdown: conv_turn_lease_shutdown");
+   conv_turn_lease_shutdown();
 
    // Stop heartbeat immediately — no dependencies on other subsystems
    OLOG_INFO("Shutdown: stopping heartbeat");

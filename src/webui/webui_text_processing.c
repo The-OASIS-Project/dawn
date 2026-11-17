@@ -446,6 +446,7 @@ static void *text_worker_thread(void *arg) {
       OLOG_INFO("WebUI: Session disconnected or request superseded, aborting text processing");
       if (session) {
          finish_turn(session); /* begun at dequeue; never ran */
+         atomic_fetch_sub(&session->turn_in_flight, 1);
       }
       text_worker_cleanup(work, session, text);
       return NULL;
@@ -465,6 +466,7 @@ static void *text_worker_thread(void *arg) {
       free(defused_persist);
       webui_send_error(session, "PROCESSING_ERROR", "Your message couldn't be prepared.");
       finish_turn(session);
+      atomic_fetch_sub(&session->turn_in_flight, 1);
       text_worker_cleanup(work, session, text);
       return NULL;
    }
@@ -475,18 +477,8 @@ static void *text_worker_thread(void *arg) {
       work->persist_content = defused_persist;
    }
 
-   /* Mark a turn in flight so session_cleanup_expired won't reap this session
-    * out from under us while it generates (a disconnected client no longer
-    * aborts the turn — background-jobs Phase 1).  Cleared by text_worker_end()
-    * at every subsequent exit. */
-   /* Stamp this turn's input modality (voice vs typed) onto the session on
-    * THIS worker thread, before the turn counts as in flight (always-on's
-    * watchdog reads it with turn_in_flight).  Setting it at the entry point
-    * (LWS/always-on thread) instead left a window where a concurrent always-on
-    * voice turn could clobber a typed turn's reset.  The prompt builder reads
-    * session->input_was_voice to gate the ASR hint. */
-   session->input_was_voice = work->input_was_voice;
-   atomic_fetch_add(&session->turn_in_flight, 1);
+   /* The turn has counted as in flight since before its wait for the
+    * conversation (text_turn_thread_entry); text_worker_end() clears it. */
 
    OLOG_INFO("WebUI: Processing text input for session %u: %zu bytes (%d image(s))",
              session->session_id, strlen(text), work->image_id_count);
@@ -763,15 +755,36 @@ static void *text_turn_thread_entry(void *arg) {
          turn_queue_turn_done(sid);
          return NULL;
       }
+      /* Fresh flags for THIS turn (G2), before it may wait for its
+       * conversation: a Stop pressed during that wait must count. */
+      session_begin_turn_flags(work->session);
+      /* Its input modality, then in flight, both on THIS thread and before the
+       * wait: session_cleanup_expired never reaps a session whose turn waits or
+       * runs (a disconnected client no longer aborts it), and always-on's
+       * watchdog reads the modality with turn_in_flight.  The prompt builder
+       * reads input_was_voice to gate the ASR hint. */
+      work->session->input_was_voice = work->input_was_voice;
+      atomic_fetch_add(&work->session->turn_in_flight, 1);
+   }
+   /* The turn's errors, its user echo and its wait, raised on this thread, name it. */
+   webui_turn_ref_set(work != NULL ? work->client_ref : NULL);
+   if (work != NULL && work->session != NULL) {
       session_turn_begin(work->session, work->conv_id, (int)work->session->metrics.user_id);
+      if (session_turn_unsent(work->session)) {
+         /* Stopped while another turn had the conversation: nothing ran or was
+          * saved (the client was told, and its text goes back to it). */
+         session_turn_end(work->session);
+         atomic_fetch_sub(&work->session->turn_in_flight, 1);
+         webui_text_turn_free(work);
+         webui_turn_ref_set(NULL);
+         turn_queue_turn_done(sid);
+         return NULL;
+      }
       if (work->conv_id <= 0) {
          /* A new chat's first message: its conversation is created after it. */
          session_turn_await_conversation(work->session);
       }
-      session_begin_turn_flags(work->session); /* fresh flags for THIS turn (G2) */
    }
-   /* The turn's errors and its user echo, raised on this thread, name it. */
-   webui_turn_ref_set(work != NULL ? work->client_ref : NULL);
    text_worker_thread(work); /* existing turn body — frees work, releases session */
    webui_turn_ref_set(NULL);
    turn_queue_turn_done(sid); /* chain the next queued turn for this session */

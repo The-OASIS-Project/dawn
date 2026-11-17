@@ -478,10 +478,13 @@ static void *reinvoke_turn_entry(void *arg) {
       return NULL;
    }
 
-   session_turn_begin(live, parent, m->user_id); /* also tags the stream */
+   /* Flags first: a Stop pressed while the turn waits for the parent
+    * conversation must count.  In flight from before that wait, so the idle
+    * sweep never reaps the session under it. */
    session_begin_turn_flags(live);
    live->input_was_voice = false; /* a job's result, not the user's speech */
    atomic_fetch_add(&live->turn_in_flight, 1);
+   session_turn_begin_background(live, parent, m->user_id); /* also tags the stream */
 
    /* Clear a stale pending_visual left by a PRIOR turn on this viewer's session (e.g. a
     * render_visual whose turn was interrupted before its final answer persisted).  The
@@ -497,7 +500,11 @@ static void *reinvoke_turn_entry(void *arg) {
 
    int64_t fired_ids[JOB_MONITOR_MAX_PER_TICK];
    int n_fired = 0;
-   char *envelope = build_envelope(parent, user_id, fired_ids, &n_fired);
+   /* Stopped while another turn had the parent: nothing ran, no attempt is
+    * counted, and the monitor tries again. */
+   char *envelope = session_turn_unsent(live)
+                        ? NULL
+                        : build_envelope(parent, user_id, fired_ids, &n_fired);
 
    /* build_envelope returns non-NULL only when it included ≥1 job, so n_fired > 0
     * is implied here — the explicit clause is belt-and-suspenders. */

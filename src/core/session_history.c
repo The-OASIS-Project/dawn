@@ -31,6 +31,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "core/conv_turn_lease.h"
 #include "core/focus/focus_handles.h"
 #include "core/session_compaction.h"
 #include "core/session_manager.h"
@@ -1146,9 +1147,29 @@ static void pin_turn_for_conversation(session_t *session, int64_t conv_id, int u
    }
 }
 
-void session_turn_begin(session_t *session, int64_t conv_id, int user_id) {
+static void turn_begin_impl(session_t *session,
+                            int64_t conv_id,
+                            int user_id,
+                            bool background,
+                            uint64_t held_token) {
    if (!session) {
       return;
+   }
+   /* The conversation first, before the turn's settings are read: a turn that
+    * waited runs with the settings the session has when it starts. */
+   const uint64_t lease_token = held_token != 0 ? held_token : conv_turn_lease_new_token();
+   session_release_stray_lease(session);
+   int64_t leased = 0;
+   bool unsent = false;
+   if (conv_id > 0 && held_token != 0) {
+      leased = conv_id;
+   } else if (conv_id > 0) {
+      const int rc = session_turn_lease_wait(session, conv_id, lease_token, background);
+      if (rc == CONV_TURN_LEASE_GRANTED) {
+         leased = conv_id;
+      } else if (rc == CONV_TURN_LEASE_STOPPED) {
+         unsent = true;
+      } /* else no lease to take (the lease logged why): the turn runs as before */
    }
    /* The turn's token, and its settings as they stand now: a sidebar load
     * mid-turn changes the session's, never the running turn's. */
@@ -1175,9 +1196,12 @@ void session_turn_begin(session_t *session, int64_t conv_id, int user_id) {
    session->turn_owner_token = token;
    session->turn_outer_token = outer;
    session->turn_user_id = user_id;
+   session->turn_lease_token = lease_token;
+   session->turn_lease_conv = leased;
+   session->turn_unsent = unsent;
    session->turn_history_conv = conv_id > 0 ? conv_id : 0;
    session->turn_awaits_conversation = false;
-   session->turn_background = false;
+   session->turn_background = background;
    session->turn_from_visual = false;
    free(session->turn_attached);
    session->turn_attached = NULL;
@@ -1200,6 +1224,17 @@ void session_turn_begin(session_t *session, int64_t conv_id, int user_id) {
    }
    /* The one writer of the turn's stream tag (see turn_bind_conversation_locked). */
    atomic_store(&session->stream_conversation_id, session->turn_history_conv);
+   if (unsent) {
+      /* It never got the conversation: nothing is loaded, and the caller ends it. */
+      if (session->turn_history) {
+         json_object_put(session->turn_history);
+         session->turn_history = NULL;
+      }
+      session->turn_pin_conv = 0;
+      session->turn_appends = 0;
+      pthread_mutex_unlock(&session->history_mutex);
+      return;
+   }
    if (conv_id <= 0) {
       /* Conversation not known yet: start on the live history, recording which
        * conversation it holds; session_turn_set_conversation() resolves it
@@ -1217,6 +1252,21 @@ void session_turn_begin(session_t *session, int64_t conv_id, int user_id) {
    }
    pthread_mutex_unlock(&session->history_mutex);
    pin_turn_for_conversation(session, conv_id, user_id);
+}
+
+void session_turn_begin(session_t *session, int64_t conv_id, int user_id) {
+   turn_begin_impl(session, conv_id, user_id, false, 0);
+}
+
+void session_turn_begin_background(session_t *session, int64_t conv_id, int user_id) {
+   turn_begin_impl(session, conv_id, user_id, true, 0);
+}
+
+void session_turn_begin_leased(session_t *session,
+                               int64_t conv_id,
+                               int user_id,
+                               uint64_t lease_token) {
+   turn_begin_impl(session, conv_id, user_id, false, conv_id > 0 ? lease_token : 0);
 }
 
 /* Caller holds history_mutex, turn active.  Record @p conv_id as the turn's
@@ -1348,6 +1398,10 @@ static void set_conversation_impl(session_t *session,
 
 void session_turn_set_conversation(session_t *session, int64_t conv_id, bool may_load) {
    if (!session || conv_id <= 0) {
+      return;
+   }
+   bool took = false;
+   if (may_load && !session_bind_lease(session, conv_id, &took)) {
       return;
    }
    session_fact_source_t facts[SESSION_PENDING_FACT_SOURCES_MAX];
@@ -2191,6 +2245,14 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
    }
    session->turn_awaits_conversation = false;
    session->turn_outer_token = 0;
+   /* Its conversation's lease goes last, once everything above is settled. */
+   const int64_t lease_conv = was_active ? session->turn_lease_conv : 0;
+   const uint64_t lease_token = session->turn_lease_token;
+   if (was_active) {
+      session->turn_lease_conv = 0;
+      session->turn_lease_token = 0;
+      session->turn_unsent = false;
+   }
    pthread_mutex_unlock(&session->history_mutex);
 
    if (!was_active) {
@@ -2203,6 +2265,11 @@ static int turn_end_impl(session_t *session, session_turn_unsaved_t *out) {
    }
    pthread_mutex_unlock(&session->llm_config_mutex);
    session_set_turn_token(outer_token); /* the thread's token before this turn */
+   /* With no lock held: the release writes posts queued meanwhile, then hands
+    * the conversation to the next waiting turn. */
+   if (lease_conv > 0) {
+      (void)conv_turn_lease_release(lease_conv, lease_token);
+   }
    return SESSION_TURN_ENDED;
 }
 

@@ -50,6 +50,11 @@ char *core_text_input_dispatch(session_t *session,
    if (!session || !text || (text[0] == '\0' && !(opts && opts->question_message))) {
       return NULL;
    }
+   /* A turn that stopped waiting for its conversation never runs: nothing of it
+    * is saved (every caller then ends it). */
+   if (session_turn_unsent(session)) {
+      return NULL;
+   }
    /* What the user attached goes with the turn, or the turn doesn't run:
     * refused before its question is added or saved. */
    if (opts && (opts->email_account || opts->email_message_id) &&
@@ -98,6 +103,9 @@ char *core_text_input_dispatch(session_t *session,
    }
    if (opts && opts->conversation_id > 0) {
       session_turn_set_conversation(session, opts->conversation_id, true);
+      if (session_turn_unsent(session)) {
+         return NULL; /* stopped waiting for it, before anything was added */
+      }
    }
    const message_kind_t question_kind = opts ? opts->question_kind : MESSAGE_KIND_NONE;
    struct json_object *kinded_question = NULL; /* ref kept to stamp its row's id */

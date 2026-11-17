@@ -30,6 +30,7 @@
 
 #include "auth/auth_db.h"
 #include "core/job_manager.h"
+#include "core/job_report.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "tools/coding_agent_report.h"
@@ -101,11 +102,17 @@ char *job_report_take(struct session *s, const char *system_prompt, const char *
    atomic_fetch_add(&g_takes, 1);
    return g_take ? strdup(g_take) : NULL;
 }
-int job_report_post_ex(int64_t parent_conv, int user_id, const char *text, int64_t *msg_id_out) {
+int job_report_post_ex(int64_t parent_conv,
+                       int user_id,
+                       const char *text,
+                       conv_post_written_fn on_written) {
    (void)user_id;
    atomic_store(&g_posted_to, parent_conv);
    snprintf(g_post, sizeof(g_post), "%s", text);
-   *msg_id_out = 900 + atomic_fetch_add(&g_posts, 1);
+   const int64_t msg_id = 900 + atomic_fetch_add(&g_posts, 1);
+   if (on_written) {
+      on_written(parent_conv, msg_id);
+   }
    return SUCCESS;
 }
 void coding_agent_note_take(int64_t conv_id, int64_t msg_id) {

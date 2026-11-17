@@ -33,6 +33,7 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/conv_turn_lease.h"
 #include "core/focus/focus_handles.h"
 #include "core/focus/focus_incremental.h"
 #include "core/session_compaction.h"
@@ -270,6 +271,14 @@ static session_t *session_alloc(void) {
 static void session_free(session_t *session) {
    if (!session) {
       return;
+   }
+
+   /* No thread runs its turn by now, so a conversation it still holds would
+    * never be released: a turn exit that skipped its end. */
+   const int stray_leases = conv_turn_lease_release_session(session->session_id);
+   if (stray_leases > 0) {
+      OLOG_ERROR("Session %u: freed while holding %d conversation lease(s); released",
+                 session->session_id, stray_leases);
    }
 
    /* Its compaction first: a worker still summarizing (shutdown frees without

@@ -193,6 +193,24 @@ void webui_jobs_send_history(ws_connection_t *conn,
  */
 void webui_jobs_handle_action(ws_connection_t *conn, struct json_object *payload);
 
+/** stop_other_reply {conversation_id}: stop the turn the user's own turn waits
+ *  for on that conversation (webui_turn_wait.c). */
+void webui_handle_stop_other_reply(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief stop_other_reply's decision and action, without a connection
+ *
+ * Stops the turn holding @p conv_id's lease when it is @p user_id's on
+ * another session: a job's own turn through the job's cancel, any other only
+ * while that same turn still holds it.
+ *
+ * @param requester The asking session's id
+ * @return NULL when stopped; "FORBIDDEN" when the holder is @p requester
+ *         itself; "NOT_RUNNING" otherwise (nothing holds it, another user's
+ *         turn holds it, or it ended meanwhile)
+ */
+const char *webui_stop_other_reply_core(uint32_t requester, int user_id, int64_t conv_id);
+
 #ifdef DAWN_ENABLE_CODING_AGENT_TOOL
 /** coding_pending {jobs}: what those coding jobs wait on (webui_coding.c). */
 void webui_coding_handle_pending(ws_connection_t *conn, struct json_object *payload);

@@ -1715,6 +1715,11 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          return;
       webui_coding_handle_grant_revoke(conn, payload);
 #endif
+   } else if (strcmp(type, "stop_other_reply") == 0) {
+      /* Same user only, checked inside against the turn holding the conversation. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_handle_stop_other_reply(conn, payload);
    } else if (strcmp(type, "job_action") == 0) {
       /* cancel | resume.  Ownership is checked inside, against conn->auth_user_id. */
       if (!conn_require_auth(conn))

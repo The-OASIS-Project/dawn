@@ -23,10 +23,13 @@
 
 #include <json-c/json.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "core/conv_turn_lease.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_history_kind.h"
@@ -1482,6 +1485,281 @@ void test_snapshot_keeps_request_context(void) {
    json_object_put(copy);
 }
 
+/* ---- one turn per conversation -------------------------------------------- */
+
+/* What the session unit told clients about waits, in order. */
+static pthread_mutex_t s_events_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char s_events[256];
+
+static void note_event(const char *what) {
+   pthread_mutex_lock(&s_events_mutex);
+   const size_t used = strlen(s_events);
+   snprintf(s_events + used, sizeof(s_events) - used, "%s ", what);
+   pthread_mutex_unlock(&s_events_mutex);
+}
+
+static void clear_events(void) {
+   pthread_mutex_lock(&s_events_mutex);
+   s_events[0] = '\0';
+   pthread_mutex_unlock(&s_events_mutex);
+}
+
+/* Replaces the session unit's weak hook (the WebUI's, in the daemon). */
+void session_turn_waiting_notice(session_t *session, int64_t conv_id, int what, uint32_t holder) {
+   (void)session;
+   (void)conv_id;
+   (void)holder;
+   note_event(what == SESSION_TURN_WAIT_BEGIN     ? "waiting"
+              : what == SESSION_TURN_WAIT_GRANTED ? "granted"
+                                                  : "unsent");
+}
+
+static session_t *new_session(uint32_t id) {
+   session_t *n = calloc(1, sizeof(*n));
+   pthread_mutex_init(&n->history_mutex, NULL);
+   pthread_mutex_init(&n->llm_config_mutex, NULL);
+   n->session_id = id;
+   n->conversation_history = make_history(0, 0);
+   return n;
+}
+
+static void free_session(session_t *n) {
+   json_object_put(n->turn_user_msg);
+   json_object_put(n->conversation_history);
+   pthread_mutex_destroy(&n->history_mutex);
+   pthread_mutex_destroy(&n->llm_config_mutex);
+   free(n);
+}
+
+/* A turn run on its own thread: begun, held until told to end, then ended. */
+typedef struct {
+   session_t *session;
+   int64_t conv;
+   sem_t begun;
+   sem_t end;
+   bool unsent;
+   int history_len; /* its history's length once begun */
+} turn_thread_t;
+
+static void *run_turn(void *arg) {
+   turn_thread_t *t = arg;
+   session_turn_begin(t->session, t->conv, 1);
+   t->unsent = session_turn_unsent(t->session);
+   t->history_len = len(t->session->conversation_history);
+   note_event("begun");
+   sem_post(&t->begun);
+   sem_wait(&t->end);
+   session_turn_end(t->session);
+   return NULL;
+}
+
+static void start_turn(turn_thread_t *t, pthread_t *th, session_t *session, int64_t conv) {
+   memset(t, 0, sizeof(*t));
+   t->session = session;
+   t->conv = conv;
+   sem_init(&t->begun, 0, 0);
+   sem_init(&t->end, 0, 0);
+   TEST_ASSERT_EQUAL_INT(0, pthread_create(th, NULL, run_turn, t));
+}
+
+/* A failure guard only: the test proceeds as soon as the turn waits. */
+#define WAIT_GUARD_POLLS 2000
+#define WAIT_GUARD_POLL_US 1000
+
+static void until_waiting(int64_t conv, int n) {
+   for (int i = 0; i < WAIT_GUARD_POLLS && conv_turn_lease_waiters(conv) < n; i++) {
+      usleep(WAIT_GUARD_POLL_US);
+   }
+   TEST_ASSERT_EQUAL_INT(n, conv_turn_lease_waiters(conv));
+}
+
+static bool held(int64_t conv) {
+   return conv_turn_lease_holder(conv, NULL, NULL, NULL);
+}
+
+/* A turn on a conversation another session's turn holds waits for that turn's
+ * end, and is told so; then it runs. */
+void test_turn_waits_for_another_turn_on_its_conversation(void) {
+   clear_events();
+   load_live(5, 2);
+   session_turn_begin(s, 5, 1);
+   session_t *b = new_session(8);
+   turn_thread_t t;
+   pthread_t th;
+   start_turn(&t, &th, b, 5);
+   until_waiting(5, 1);
+   TEST_ASSERT_EQUAL_INT(0, sem_trywait(&t.begun) == 0 ? 1 : 0); /* still waiting */
+   session_turn_end(s);
+   sem_wait(&t.begun);
+   TEST_ASSERT_FALSE(t.unsent);
+   uint32_t holder = 0;
+   TEST_ASSERT_TRUE(conv_turn_lease_holder(5, &holder, NULL, NULL));
+   TEST_ASSERT_EQUAL_UINT32(8, holder);
+   sem_post(&t.end);
+   pthread_join(th, NULL);
+   TEST_ASSERT_FALSE(held(5));
+   TEST_ASSERT_EQUAL_STRING("waiting granted begun ", s_events);
+   free_session(b);
+}
+
+/* A Stop while waiting ends the turn unsent: nothing loaded, nothing added. */
+void test_stop_while_waiting_leaves_the_turn_unsent(void) {
+   clear_events();
+   load_live(5, 2);
+   session_turn_begin(s, 5, 1);
+   session_t *b = new_session(8);
+   const int loads = s_loader_calls;
+   turn_thread_t t;
+   pthread_t th;
+   start_turn(&t, &th, b, 5);
+   until_waiting(5, 1);
+   atomic_store(&b->cancel_requested, true); /* the user's Stop */
+   sem_wait(&t.begun);
+   TEST_ASSERT_TRUE(t.unsent);
+   TEST_ASSERT_EQUAL_INT(1, t.history_len); /* the system prompt alone */
+   TEST_ASSERT_EQUAL_INT(loads, s_loader_calls);
+   uint32_t holder = 0;
+   TEST_ASSERT_TRUE(conv_turn_lease_holder(5, &holder, NULL, NULL));
+   TEST_ASSERT_EQUAL_UINT32(7, holder); /* still the first turn's */
+   sem_post(&t.end);
+   pthread_join(th, NULL);
+   TEST_ASSERT_EQUAL_STRING("waiting unsent begun ", s_events);
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+   free_session(b);
+}
+
+/* A turn whose client is gone waits no longer than a holder counts as
+ * stale: then it stops, unsent, and frees its session. */
+void test_a_disconnected_waiter_stops_after_the_stale_time(void) {
+   load_live(5, 2);
+   session_turn_begin(s, 5, 1);
+   session_t *b = new_session(8);
+   atomic_store(&b->disconnected, true);
+   conv_turn_lease_set_stale_after(1);
+   turn_thread_t t;
+   pthread_t th;
+   start_turn(&t, &th, b, 5);
+   sem_wait(&t.begun);
+   conv_turn_lease_set_stale_after(0);
+   TEST_ASSERT_TRUE(t.unsent);
+   sem_post(&t.end);
+   pthread_join(th, NULL);
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+   free_session(b);
+}
+
+/* Every kind of turn lets its conversation go when it ends. */
+void test_no_lease_outlives_its_turn(void) {
+   load_live(5, 2);
+   /* Text. */
+   session_turn_begin(s, 5, 1);
+   TEST_ASSERT_TRUE(held(5));
+   session_add_turn_message(s, "user", "hi");
+   session_add_turn_message(s, "assistant", "hello");
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+   /* A tool exchange. */
+   session_turn_begin(s, 5, 1);
+   session_add_turn_message(s, "user", "look it up");
+   struct json_object *call = json_tokener_parse(
+       "{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c1\",\"type\":"
+       "\"function\",\"function\":{\"name\":\"t\",\"arguments\":\"{}\"}}]}");
+   TEST_ASSERT_TRUE(session_add_turn_message_object(s, call));
+   struct json_object *result = json_tokener_parse(
+       "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"done\"}");
+   TEST_ASSERT_TRUE(session_add_turn_message_object(s, result));
+   session_add_turn_message(s, "assistant", "found it");
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+   /* Stopped by the user. */
+   session_turn_begin(s, 5, 1);
+   session_add_turn_message(s, "user", "and then");
+   (void)session_stop_turn(s, "(stopped)");
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+   /* Rolled back. */
+   session_turn_begin(s, 5, 1);
+   session_add_turn_message(s, "user", "never mind");
+   (void)session_rollback_turn(s);
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+   /* Bound to an existing conversation mid-turn. */
+   session_turn_begin(s, 0, 1);
+   session_turn_set_conversation(s, 6, true);
+   uint32_t holder = 0;
+   TEST_ASSERT_TRUE(conv_turn_lease_holder(6, &holder, NULL, NULL));
+   TEST_ASSERT_EQUAL_UINT32(7, holder);
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(6));
+   /* A conversation created for it: claimed in its name, kept through the bind. */
+   session_turn_begin(s, 0, 1);
+   session_turn_await_conversation(s);
+   const uint64_t token = session_turn_claim_token(s, false);
+   TEST_ASSERT_TRUE(token != 0);
+   TEST_ASSERT_TRUE(conv_turn_lease_claim_new(9, 7, token));
+   TEST_ASSERT_TRUE(adopt(9));
+   TEST_ASSERT_TRUE(session_turn_keep_created_lease(s, 9, token));
+   TEST_ASSERT_TRUE(held(9));
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(9));
+   /* Taken with a try before the turn: the turn owns it and its end releases it. */
+   const uint64_t tried = conv_turn_lease_new_token();
+   TEST_ASSERT_EQUAL_INT(CONV_TURN_LEASE_GRANTED, conv_turn_lease_try_acquire(5, 7, tried));
+   session_turn_begin_leased(s, 5, 1, tried);
+   TEST_ASSERT_FALSE(session_turn_unsent(s));
+   TEST_ASSERT_TRUE(session_turn_holds_lease(s, 5, tried, NULL));
+   session_turn_end(s);
+   TEST_ASSERT_FALSE(held(5));
+}
+
+/* The lease's writer, standing in for the post funnel. */
+typedef struct {
+   conv_lease_item_t link;
+   const char *name;
+} test_post_t;
+
+static bool write_test_post(conv_lease_item_t *link) {
+   note_event(((test_post_t *)link)->name);
+   return true;
+}
+
+/* A post into a conversation a turn holds is written at that turn's end,
+ * before the next turn on it begins. */
+void test_post_into_a_held_conversation_waits_for_the_turn_end(void) {
+   clear_events();
+   conv_turn_lease_set_writer(write_test_post, NULL);
+   load_live(5, 2);
+   session_turn_begin(s, 5, 1);
+   test_post_t post = { .name = "post" };
+   TEST_ASSERT_EQUAL_INT(CONV_TURN_LEASE_DEFERRED, conv_turn_lease_post_or_defer(5, &post.link));
+   session_t *b = new_session(8);
+   turn_thread_t t;
+   pthread_t th;
+   start_turn(&t, &th, b, 5);
+   until_waiting(5, 1);
+   TEST_ASSERT_EQUAL_STRING("waiting ", s_events); /* not written yet */
+   session_turn_end(s);
+   sem_wait(&t.begun);
+   sem_post(&t.end);
+   pthread_join(th, NULL);
+   TEST_ASSERT_EQUAL_STRING("waiting post granted begun ", s_events);
+   conv_turn_lease_set_writer(NULL, NULL);
+   free_session(b);
+}
+
+/* A post into a free conversation is written at once. */
+void test_post_into_a_free_conversation_is_written_at_once(void) {
+   clear_events();
+   conv_turn_lease_set_writer(write_test_post, NULL);
+   test_post_t post = { .name = "post" };
+   TEST_ASSERT_EQUAL_INT(CONV_TURN_LEASE_WRITTEN, conv_turn_lease_post_or_defer(5, &post.link));
+   TEST_ASSERT_EQUAL_STRING("post ", s_events);
+   TEST_ASSERT_FALSE(held(5));
+   conv_turn_lease_set_writer(NULL, NULL);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_turn_on_loaded_conversation_uses_live_history);
@@ -1554,5 +1832,11 @@ int main(void) {
    RUN_TEST(test_stop_keeps_the_question_with_a_note);
    RUN_TEST(test_stop_without_its_question_leaves_it_to_rollback);
    RUN_TEST(test_snapshot_keeps_request_context);
+   RUN_TEST(test_turn_waits_for_another_turn_on_its_conversation);
+   RUN_TEST(test_stop_while_waiting_leaves_the_turn_unsent);
+   RUN_TEST(test_a_disconnected_waiter_stops_after_the_stale_time);
+   RUN_TEST(test_no_lease_outlives_its_turn);
+   RUN_TEST(test_post_into_a_held_conversation_waits_for_the_turn_end);
+   RUN_TEST(test_post_into_a_free_conversation_is_written_at_once);
    return UNITY_END();
 }

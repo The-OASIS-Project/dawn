@@ -35,6 +35,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/conv_turn_lease.h"
 #include "core/prompt_parts.h"  // For composed_prompt_t
 #include "core/text_filter.h"   // For cited_tag_filter_state_t
 #include "dawn_error.h"
@@ -580,11 +581,18 @@ typedef struct session {
    char *turn_attached;            // the note naming an email the user attached to this
                                    // turn (session_turn_attach_email); NULL = none
    uint32_t turn_number;           // turns begun on this session (the running one's number)
-   bool turn_context_reset;        // the live history it wrote was reset under it (a clear)
-   char *turn_pending_user;        // persisted form of a user message not yet written
-   char *turn_pending_reply;       // the reply, likewise
-   char *unclaimed_user;           // an ended turn's unsaved exchange (see
-   char *unclaimed_reply;          // session_bind_created_conversation), and when it ended
+   // The running turn's conversation lease (conv_turn_lease.h): the token it
+   // holds leases under, the conversation it holds (0 none), and whether its
+   // wait for that lease was stopped, so the turn ends before its question is
+   // saved.  Guarded by history_mutex; released by the turn's end.
+   uint64_t turn_lease_token;
+   int64_t turn_lease_conv;
+   bool turn_unsent;
+   bool turn_context_reset;   // the live history it wrote was reset under it (a clear)
+   char *turn_pending_user;   // persisted form of a user message not yet written
+   char *turn_pending_reply;  // the reply, likewise
+   char *unclaimed_user;      // an ended turn's unsaved exchange (see
+   char *unclaimed_reply;     // session_bind_created_conversation), and when it ended
    struct json_object *unclaimed_reply_blocks;  // that reply's blocks (owned)
    time_t unclaimed_at;
    struct json_object *turn_reply;         // the turn's assistant reply (owned ref): its row id
@@ -898,10 +906,12 @@ typedef struct session {
 //   - session_teardown_flags:    session is being destroyed — abort + gate.
 // =============================================================================
 
-/** Abort this turn's generation (explicit Stop).  Does NOT gate emission. */
+/** Abort this turn's generation (explicit Stop).  Does NOT gate emission.
+ *  A turn still waiting for its conversation stops waiting at once. */
 static inline void session_cancel_turn(session_t *s) {
    if (s != NULL) {
       atomic_store(&s->cancel_requested, true);
+      conv_turn_lease_wake_session(s->session_id);
    }
 }
 
@@ -918,6 +928,7 @@ static inline void session_teardown_flags(session_t *s) {
       atomic_store(&s->cancel_requested, true);
       atomic_store(&s->disconnected, true);
       atomic_store(&s->compaction.cancel, true); /* its summarizer's transfer, too */
+      conv_turn_lease_wake_session(s->session_id);
    }
 }
 

@@ -115,6 +115,7 @@ endfunction()
 # prepared-statement layer rather than stubbing it.
 set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_core.c
+    ${SRC_ROOT}/src/core/conv_turn_lease.c
     ${SRC_ROOT}/src/auth/auth_db_ids.c
     ${SRC_ROOT}/src/auth/auth_db_schema.c
     ${SRC_ROOT}/src/auth/auth_db_backup.c
@@ -826,6 +827,8 @@ dawn_add_unit_test(test_suit_service
 dawn_add_unit_test(test_session_history
    SOURCES test_session_history.c
            ${SRC_ROOT}/src/core/session_history.c
+           ${SRC_ROOT}/src/core/session_turn_lease.c
+           ${SRC_ROOT}/src/core/conv_turn_lease.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
@@ -892,6 +895,7 @@ dawn_add_unit_test(test_history_reload
            ${SRC_ROOT}/src/core/text_input_dispatch.c
            ${SRC_ROOT}/src/core/session_manager_llm.c
            ${SRC_ROOT}/src/core/session_history.c
+           ${SRC_ROOT}/src/core/session_turn_lease.c
            ${SRC_ROOT}/src/llm/llm_claude_format.c
            ${SRC_ROOT}/src/llm/llm_claude_tools.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
@@ -1166,6 +1170,15 @@ dawn_add_unit_test(test_messaging_sender
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# Messages the messaging worker keeps while their conversation is held: other
+# channels go on, a channel's run in order, the caps, shutdown.  The real lease.
+dawn_add_unit_test(test_messaging_parked
+   SOURCES test_messaging_parked.c
+           ${SRC_ROOT}/src/messaging/messaging_engine_parked.c
+           ${SRC_ROOT}/src/core/conv_turn_lease.c
+   LIBS    dawn_common unity pthread sodium ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Schema v101: messaging channel owners + SMS verification backfill on an
 # existing database (the migration re-run over rows shaped like before it).
 dawn_add_unit_test(test_messaging_channels_v101
@@ -1181,6 +1194,7 @@ dawn_add_unit_test(test_messaging_channels_db
    SOURCES test_messaging_channels_db.c
            ${AUTH_DB_SOURCES}
            ${SRC_ROOT}/src/messaging/messaging_engine_channels.c
+           ${SRC_ROOT}/src/core/conv_post.c
            ${SRC_ROOT}/src/messaging/messaging_engine_link.c
            ${SRC_ROOT}/src/core/reply_code.c
            ${SRC_ROOT}/src/core/tool_call_challenge.c
@@ -2178,6 +2192,15 @@ dawn_add_unit_test(test_auth_db_statements
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# Posts from outside a turn: written now, or at the end of the turn holding
+# the conversation.
+dawn_add_unit_test(test_conv_post
+   SOURCES test_conv_post.c
+           ${SRC_ROOT}/src/core/conv_post.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # messages.llm_blocks: replay-only read, assistant-only CHECK, watermark GC,
 # edit trigger, and the v92 re-render of legacy voice rows.
 dawn_add_unit_test(test_conv_db_llm_blocks
@@ -2409,6 +2432,7 @@ dawn_add_unit_test(test_coding_agent_report
    SOURCES test_coding_agent_report.c
            ${SRC_ROOT}/src/tools/coding_agent_report.c
            ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/core/conv_turn_lease.c
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
@@ -2432,6 +2456,7 @@ dawn_add_unit_test(test_coding_agent_watch
 dawn_add_unit_test(test_job_manager
    SOURCES test_job_manager.c
            ${SRC_ROOT}/src/core/job_manager.c
+           ${SRC_ROOT}/src/core/conv_turn_lease.c
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
@@ -3195,6 +3220,7 @@ dawn_add_unit_test(test_memory_extraction_run
            ${SRC_ROOT}/src/core/text_input_dispatch.c
            ${SRC_ROOT}/src/core/session_manager_llm.c
            ${SRC_ROOT}/src/core/session_history.c
+           ${SRC_ROOT}/src/core/session_turn_lease.c
            ${SRC_ROOT}/src/llm/llm_tool_history.c
            ${SRC_ROOT}/src/llm/llm_tools_results.c
            ${SRC_ROOT}/src/llm/llm_tool_images.c
@@ -3231,6 +3257,18 @@ if(ENABLE_WEBUI)
               ${SRC_ROOT}/src/webui/webui_message_frame.c
               ${SRC_ROOT}/src/webui/webui_email_ref.c
       LIBS    dawn_common unity sodium ${JSONC_LIBRARIES}
+      LABEL   ci)
+endif()
+
+# stop_other_reply: which turn on a conversation a user may stop from another
+# session.  Built with the WebUI, like its source (webui_internal.h).
+if(ENABLE_WEBUI)
+   dawn_add_unit_test(test_webui_turn_wait
+      SOURCES test_webui_turn_wait.c
+              ${SRC_ROOT}/src/webui/webui_turn_wait.c
+              ${SRC_ROOT}/src/core/session_turn_lease.c
+              ${SRC_ROOT}/src/core/conv_turn_lease.c
+      LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
       LABEL   ci)
 endif()
 
