@@ -468,9 +468,12 @@
       });
    }
 
+   // Whether it stopped a held message (then nothing of this tab's was streaming).
    function noteStop() {
+      let held = false;
       records.forEach((rec) => {
          if (rec.phase !== 'waiting') return;
+         held = true;
          clearTimeout(rec.timer);
          if (rec.btn) {
             releaseFocus(rec.btn);
@@ -480,6 +483,7 @@
          rec.stopping = true;
          setStatus(rec, 'Not sending…');
       });
+      return held;
    }
 
    // What a dropped socket leaves of a held turn is unknown; the reconnect's
