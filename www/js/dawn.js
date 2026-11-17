@@ -13,6 +13,7 @@
    // UI state
    let visualizerCollapsed = false;
    let pendingIdleState = false; // Server sent "idle" but audio still playing
+   let stopAwaitingIdle = false; // This tab pressed Stop; its turn's idle not yet seen
    // The conversation already restored for this connection. The server emits multiple
    // 'session' messages per (re)connect (reconnect + capability-update), and each would
    // otherwise re-issue a full load_conversation. Reset on disconnect (updateConnectionStatus).
@@ -89,15 +90,15 @@
                   DawnTurnWait.handleIdle(msg.payload);
                }
                if (isForeignConvFrame(msg.payload)) break;
-               // A turn's own idle (tagged with its conversation; a reconnect's isn't)
-               // closes a thinking block it left open: a Stop that raced the model's
-               // first thinking frame.
-               if (
-                  msg.payload.state === 'idle' &&
-                  msg.payload.conversation_id &&
-                  DawnState.thinkingState.active
-               ) {
-                  DawnStreaming.finalizeThinking(false);
+               // The stopped turn's own idle (tagged with its conversation; a
+               // reconnect's isn't) closes a thinking block the Stop raced: the
+               // model's first thinking frame landing after it.  Only after this
+               // tab's Stop, so another idle never cuts a live block short.
+               if (msg.payload.state === 'idle' && msg.payload.conversation_id) {
+                  if (stopAwaitingIdle && DawnState.thinkingState.active) {
+                     DawnStreaming.finalizeThinking(false);
+                  }
+                  stopAwaitingIdle = false;
                }
                updateState(msg.payload.state, msg.payload.detail, msg.payload.tools);
                break;
@@ -2119,7 +2120,10 @@
    function handleCancel() {
       console.log('Cancel button clicked - sending cancel');
       DawnWS.send({ type: 'cancel' });
-      if (window.DawnTurnWait) DawnTurnWait.noteStop();
+      // A held message has nothing streaming here: the thinking on screen is
+      // another turn's, live, so its idle mustn't close it.
+      const heldStopped = window.DawnTurnWait ? DawnTurnWait.noteStop() : false;
+      stopAwaitingIdle = !heldStopped;
       // Finalize any active stream immediately on the client side
       DawnStreaming.finalize();
    }
