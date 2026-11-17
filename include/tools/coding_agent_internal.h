@@ -19,7 +19,8 @@
  * The coding_agent tool's parts (coding_agent_tool.c: the callback, the
  * reads and these helpers; coding_agent_delegate.c: starting a task;
  * coding_agent_requests.c: answering what a task waits on;
- * coding_agent_watch.c: the gateway's events) and what they share.  Not for
+ * coding_agent_watch.c: the gateway's events; coding_agent_github.c: reading
+ * GitHub pull requests) and what they share.  Not for
  * use outside the tool.
  */
 
@@ -216,6 +217,20 @@ void coding_requests_drop_unasked(uint32_t id);
  *  confirm and no turn check, on purpose: an answer only goes back to the
  *  sandboxed agent and allows it nothing. */
 char *coding_requests_answer(struct json_object *details, int user_id);
+
+/* ---- coding_agent_github.c ---- */
+
+/** pr_status: a pull request's state, its blockers in plain words first.
+ *  {ref, repo?} or {job}.  Result: caller frees. */
+char *coding_github_pr_status(struct json_object *details, int user_id);
+
+/** pr_threads: its unresolved review threads (with all: every one), by
+ *  comment_id.  {ref, repo?, all?} or {job}.  Result: caller frees. */
+char *coding_github_pr_threads(struct json_object *details, int user_id);
+
+/** pr_log: an excerpt of one check's log.  {ref, repo?, check} or {job, check}.
+ *  Result: caller frees. */
+char *coding_github_pr_log(struct json_object *details, int user_id);
 
 #ifdef __cplusplus
 }

@@ -40,7 +40,8 @@ from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKCli
                               SystemMessage, UserMessage)
 
 from . import policy, store as st
-from .repos import GitError, Repos, pr_state, slug
+from .github import GitError, pr_state
+from .repos import Repos, slug
 
 log = logging.getLogger("agent-gateway")
 

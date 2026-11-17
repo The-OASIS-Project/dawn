@@ -150,6 +150,13 @@ class Store:
       row = self.db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
       return dict(row) if row else None
 
+   def published_tasks(self, dawn_user_id: int) -> list[tuple[str, str]]:
+      """(client_ref, published) of the user's open-to-work tasks that published."""
+      rows = self.db.execute(
+         "SELECT client_ref, published FROM tasks WHERE dawn_user_id = ? AND published != '' "
+         "AND client_ref IS NOT NULL AND client_ref != '' AND closed IS NULL", (dawn_user_id,))
+      return [(r[0], r[1]) for r in rows]
+
    def tasks(self, dawn_user_id: int | None = None, open_only: bool = False,
              status: str | None = None, limit: int | None = 50) -> list[dict]:
       sql, args = "SELECT * FROM tasks WHERE 1", []
