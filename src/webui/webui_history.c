@@ -1466,6 +1466,12 @@ void handle_rename_conversation(ws_connection_t *conn, struct json_object *paylo
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "message",
                              json_object_new_string("Conversation renamed"));
+      /* The user's other clients show this title too (their lists, a memory
+       * batch's heading): tell them, as an automatic title does. */
+      char safe_title[CONV_TITLE_MAX];
+      snprintf(safe_title, sizeof(safe_title), "%s", title);
+      sanitize_utf8_for_json(safe_title);
+      webui_broadcast_conversation_renamed(conn->auth_user_id, conv_id, safe_title);
    } else if (result == AUTH_DB_NOT_FOUND) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",

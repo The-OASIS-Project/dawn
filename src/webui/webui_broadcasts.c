@@ -679,7 +679,8 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
 
    int sent = broadcast_json_to_user_ex(user_id, root, false);
    if (sent > 0) {
-      OLOG_INFO("WebUI: Broadcast conversation rename to %d client(s): %s", sent, title);
+      OLOG_INFO("WebUI: Broadcast conversation rename (conv=%lld) to %d client(s)",
+                (long long)conv_id, sent);
    }
 }
 

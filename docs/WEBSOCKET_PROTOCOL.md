@@ -1237,7 +1237,7 @@ messages: they never appear in `messages`, the history, or what the model is sen
 - `conversation_title`: that conversation's title as it is when the frame is built (at most 255
   bytes; may be `""`); `null` when `conversation_id` is `null` or the conversation is gone.  A
   rename sends no `memory_batch`: update shown batches from `conversation_renamed`.  Absent on
-  daemons before 2026-11-16.
+  daemons before 2026-11-17.
 - `from_message_id`: the first message the batch learned from.
 - `after_message_id`: place the marker after this.  It may name a row the client doesn't render
   as a bubble (a tool row, an intermediate assistant row of a tool loop, a request-context row);
@@ -3118,6 +3118,17 @@ returns at once with `queued: true` and this follows when the sync ends, to the 
 ```json
 { "type": "calendar_sync_done", "payload": { "id": 3, "success": true } }
 ```
+
+#### `conversation_renamed`
+A conversation's title changed: the daemon titled it after its first exchange, or the user
+renamed it from any client (`rename_conversation`; sent for a manual rename since 2026-11-17,
+before that only for the daemon's own title).  Sent to every client of the owning user, the
+renaming one included, after `rename_conversation_response`.
+```json
+{ "type": "conversation_renamed", "payload": { "conversation_id": 1234, "title": "Trip planning" } }
+```
+Update the title wherever the client shows it: the conversation list, an open conversation's
+header, a memory batch's `conversation_title`.
 
 #### `conversation_list_changed`
 The user's conversation list changed — a conversation was **created** or its

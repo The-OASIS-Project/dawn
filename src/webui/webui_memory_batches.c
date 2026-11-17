@@ -36,6 +36,7 @@
 #include "logging.h"
 #include "memory/memory_consolidation_view.h"
 #include "memory/memory_db_consolidation.h"
+#include "utils/string_utils.h" /* sanitize_utf8_for_json */
 #include "webui/webui_handlers.h"
 #include "webui/webui_internal.h"
 #include "webui/webui_server.h"
@@ -173,6 +174,9 @@ static json_object *conversation_title(int user_id, int64_t conversation_id) {
    if (conversation_id <= 0 || conv_db_get(conversation_id, user_id, &conv) != AUTH_DB_SUCCESS) {
       return NULL;
    }
+   /* A stored title cut at its byte limit can end inside a character, which
+    * would make the whole frame unparseable. */
+   sanitize_utf8_for_json(conv.title);
    json_object *title = json_object_new_string(conv.title);
    conv_free(&conv);
    return title;
