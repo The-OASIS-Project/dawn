@@ -536,6 +536,10 @@ static void *reinvoke_turn_entry(void *arg) {
          /* Codec captured at begin (pre-dispatch) so this close never derefs a
           * client_data the lws thread may have freed during a long tool loop. */
          webui_reinvoke_tts_finish(live, tts_use_opus);
+      } else {
+         /* No speech to close: still settle the viewer, whose last state was
+          * this turn's. */
+         webui_reinvoke_settle(live);
       }
       session_set_tool_iteration_hook(live, NULL, NULL);
       session_set_tool_persist_hook(live, NULL, NULL);
@@ -918,4 +922,9 @@ __attribute__((weak)) bool webui_reinvoke_tts_begin(session_t *live,
 __attribute__((weak)) void webui_reinvoke_tts_finish(session_t *live, bool use_opus) {
    (void)live;
    (void)use_opus;
+}
+
+/* Weak default: no viewer to settle without WebUI. */
+__attribute__((weak)) void webui_reinvoke_settle(session_t *live) {
+   (void)live;
 }
