@@ -79,7 +79,7 @@ sudo apt install libasound2-dev libpulse-dev libflac-dev libsamplerate0-dev
 
 ```bash
 # ONNX Runtime (CPU) — for Piper TTS and embedding engine
-# Install from https://github.com/microsoft/onnxruntime/releases (x86_64 Linux CPU)
+# Microsoft's NuGet package Microsoft.ML.OnnxRuntime (see GETTING_STARTED_SERVER.md section 2)
 # Or: sudo apt install libonnxruntime-dev  (if packaged)
 
 # Piper TTS dependencies

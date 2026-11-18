@@ -125,10 +125,14 @@ Pre-built packages are available for **x86_64** and **aarch64** (Raspberry Pi, n
 
 ```bash
 # aarch64 (Raspberry Pi 5, etc.)
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-aarch64-1.19.2.tgz
-tar xzf onnxruntime-linux-aarch64-1.19.2.tgz
-sudo cp -a onnxruntime-linux-aarch64-1.19.2/lib/libonnxruntime*.so* /usr/local/lib/
-sudo cp onnxruntime-linux-aarch64-1.19.2/include/*.h /usr/local/include/
+# Microsoft's NuGet package carries the Linux libraries and headers
+wget https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.19.2/microsoft.ml.onnxruntime.1.19.2.nupkg
+unzip -q microsoft.ml.onnxruntime.1.19.2.nupkg -d ort "runtimes/linux-arm64/native/*" "build/native/include/*"
+sudo cp ort/runtimes/linux-arm64/native/libonnxruntime.so /usr/local/lib/libonnxruntime.so.1.19.2
+sudo cp ort/runtimes/linux-arm64/native/libonnxruntime_providers_shared.so /usr/local/lib/
+sudo ln -sf libonnxruntime.so.1.19.2 /usr/local/lib/libonnxruntime.so.1
+sudo ln -sf libonnxruntime.so.1 /usr/local/lib/libonnxruntime.so
+sudo cp -r ort/build/native/include/* /usr/local/include/
 sudo ldconfig
 
 # x86_64 — see docs/GETTING_STARTED_SERVER.md for the x86_64 package URL
