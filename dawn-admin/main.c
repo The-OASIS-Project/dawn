@@ -111,6 +111,11 @@ static void print_usage(const char *prog) {
    fprintf(stderr,
            "  memory reextract-status --user <user>\n"
            "                                       Report progress of last reextract run\n");
+   fprintf(stderr,
+           "  memory extract-range --user <u> --conv <id> --from <id> --to <id>\n"
+           "                    [--confirm]\n"
+           "                                       Extract rows behind a conversation's\n"
+           "                                       extraction cursor (dry run by default)\n");
    fprintf(stderr, "  memory superseded --user <u> [--grep <text>] [--limit N]\n"
                    "                                       List merged or replaced facts\n"
                    "  memory restore --user <u> --fact-id <id>\n"
@@ -1838,6 +1843,9 @@ int main(int argc, char *argv[]) {
 
       if (strcmp(subcmd, "superseded") == 0 || strcmp(subcmd, "restore") == 0) {
          return cmd_memory_facts(argc, argv); /* cmd_memory.c */
+      }
+      if (strcmp(subcmd, "extract-range") == 0) {
+         return cmd_memory_extract_range(argc, argv); /* cmd_memory.c */
       }
       if (strcmp(subcmd, "backfill-note-glosses") == 0) {
          if (argc < 4) {

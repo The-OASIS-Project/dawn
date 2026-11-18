@@ -2691,6 +2691,14 @@ int conv_db_briefing_mark_extracted(int64_t conv_id,
                                     int64_t *end_id_out,
                                     bool *replied_out);
 
+/**
+ * @brief conv_db_briefing_mark_extracted() without moving the cursor: where
+ *        the briefing ends and whether the user replied, for a read that must
+ *        change nothing (a range extraction, its dry run)
+ * @return AUTH_DB_SUCCESS, AUTH_DB_FORBIDDEN, or AUTH_DB_FAILURE
+ */
+int conv_db_briefing_end(int64_t conv_id, int user_id, int64_t *end_id_out, bool *replied_out);
+
 /* =============================================================================
  * Summary Nodes (LCM Phase 4 — hierarchical summaries)
  * ============================================================================= */

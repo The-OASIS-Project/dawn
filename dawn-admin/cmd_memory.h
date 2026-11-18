@@ -17,7 +17,8 @@
  * the project author(s).
  *
  * dawn-admin "memory superseded" and "memory restore": a user's merged or
- * replaced facts, and bringing one back.
+ * replaced facts, and bringing one back; "memory extract-range": rows of a
+ * conversation an extraction skipped.
  */
 
 #ifndef DAWN_ADMIN_CMD_MEMORY_H
@@ -25,5 +26,9 @@
 
 /** `memory superseded|restore ...` (argv[2] is the subcommand).  Exit status. */
 int cmd_memory_facts(int argc, char *argv[]);
+
+/** `memory extract-range ...`: extract rows behind a conversation's cursor.
+ *  Exit status. */
+int cmd_memory_extract_range(int argc, char *argv[]);
 
 #endif /* DAWN_ADMIN_CMD_MEMORY_H */

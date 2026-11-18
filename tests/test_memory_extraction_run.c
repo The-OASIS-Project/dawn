@@ -26,7 +26,8 @@
  * session unit is linked too, so a test can run a turn on a session (the real
  * dispatch, prefix and history, a fake model) and then extract its
  * conversation in the same process, or two sessions on one conversation
- * taking turns, each caught up at its turn's start.
+ * taking turns, each caught up at its turn's start.  Also a range behind the
+ * cursor extracted by an admin: its dry run, its refusals, its record.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
@@ -59,6 +60,7 @@
 #include "llm/llm_tools.h"
 #include "memory/memory_db.h"
 #include "memory/memory_extraction.h"
+#include "memory/memory_extraction_range.h"
 #include "memory/memory_history_loader.h"
 #include "memory/memory_recovery.h"
 #include "tools/tool_registry.h"
@@ -815,6 +817,354 @@ void test_a_caught_up_session_extracts_every_row_once(void) {
    session_set_history_tail_loader(NULL);
 }
 
+/* ---- a range behind the cursor ---- */
+
+#define RANGE_TABLES_COUNT 7
+
+/* What a run could write, which a dry run or a refusal must leave as it was:
+ * the conversation's cursors, floor and title, and what memory holds. */
+static void range_state(int64_t conv, int64_t out[RANGE_TABLES_COUNT]) {
+   out[0] = q1("SELECT last_extracted_msg_id * 1000 + last_extracted_msg_count FROM "
+               "conversations WHERE id = ?1",
+               conv);
+   out[1] = q1("SELECT outside FROM conversations WHERE id = ?1", conv);
+   out[2] = q1("SELECT COUNT(*) FROM memory_facts WHERE user_id = ?1", s_user);
+   out[3] = q1("SELECT COUNT(*) FROM memory_summaries WHERE user_id = ?1", s_user);
+   out[4] = q1("SELECT COUNT(*) FROM memory_extract_ranges WHERE conversation_id = ?1", conv);
+   out[5] = q1("SELECT title = 'Skipped' FROM conversations WHERE id = ?1", conv);
+   out[6] = q1("SELECT COUNT(*) FROM memory_consolidation_batches WHERE conversation_id = ?1",
+               conv);
+}
+
+/* A conversation of two exchanges, the first a range (@p web: with a web
+ * search's result in it), marked extracted through the second, as an
+ * extraction that never read the first leaves it.  @p ids gets the rows. */
+static int64_t skipped_range_conv(bool web, int64_t ids[6], int64_t *from, int64_t *to) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Skipped", &conv));
+   ids[0] = add(conv, "user", "MARK-RANGE-Q placeholder question");
+   ids[1] = 0;
+   ids[2] = 0;
+   if (web) {
+      const conv_message_row_t call = {
+         .role = "assistant",
+         .content = "",
+         .tool_calls = "[{\"id\":\"w1\",\"type\":\"function\",\"function\":{\"name\":\"search\","
+                       "\"arguments\":\"{\\\"query\\\":\\\"placeholder\\\"}\"}}]"
+      };
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &call, &ids[1]));
+      char *page = llm_third_party_frame(TOOL_FRAME_WEB, NULL, "MARK-RANGE-WEB placeholder\n");
+      TEST_ASSERT_NOT_NULL(page);
+      const conv_message_row_t result = { .role = "tool", .tool_call_id = "w1", .content = page };
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &result, &ids[2]));
+      free(page);
+   }
+   ids[3] = add(conv, "assistant", "MARK-RANGE-R placeholder answer");
+   ids[4] = add(conv, "user", "MARK-AFTER-Q placeholder question");
+   ids[5] = add(conv, "assistant", "MARK-AFTER-R placeholder answer");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_set_last_extracted(conv, 4, ids[5], OUTSIDE_NONE));
+   *from = ids[0];
+   *to = ids[3];
+   return conv;
+}
+
+/* The dry run reports the range's rows and outside kind and changes
+ * nothing; the run reads the range only, leaves both cursors, writes no
+ * summary, stores its facts with the range as their source, and records it,
+ * so a second run is refused. */
+void test_range_dry_run_then_run(void) {
+   int64_t ids[6], from = 0, to = 0;
+   const int64_t conv = skipped_range_conv(false, ids, &from, &to);
+   int64_t before[RANGE_TABLES_COUNT], after[RANGE_TABLES_COUNT];
+   range_state(conv, before);
+
+   memory_extract_range_report_t r;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_extract_range(s_user, conv, from, to, false, &r));
+   TEST_ASSERT_TRUE(r.counted);
+   TEST_ASSERT_EQUAL_INT(1, r.user);
+   TEST_ASSERT_EQUAL_INT(1, r.assistant);
+   TEST_ASSERT_EQUAL_INT(0, r.tool);
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, r.outside);
+   TEST_ASSERT_FALSE(r.overlap);
+   TEST_ASSERT_EQUAL_INT64(ids[5], r.cursor);
+   char text[1024];
+   memory_extract_range_describe(SUCCESS, false, from, to, &r, text, sizeof(text));
+   TEST_ASSERT_NOT_NULL(strstr(text, "user 1, assistant 1, tool 0"));
+   TEST_ASSERT_NOT_NULL(strstr(text, "Outside:     none"));
+   TEST_ASSERT_NOT_NULL(strstr(
+       text, "Would run (a confirmed run can still be refused if the user's memory is busy"));
+   TEST_ASSERT_NULL(strstr(text, "MARK-")); /* counts only */
+   TEST_ASSERT_EQUAL_INT(0, s_calls);
+   range_state(conv, after);
+   TEST_ASSERT_EQUAL_INT64_ARRAY(before, after, RANGE_TABLES_COUNT);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_extract_range(s_user, conv, from, to, true, &r));
+   TEST_ASSERT_TRUE(memory_extraction_wait_idle(s_user, WAIT_SEC));
+   TEST_ASSERT_EQUAL_INT(1, s_calls);
+   prompt_has("MARK-RANGE-Q");
+   prompt_has("MARK-RANGE-R");
+   prompt_lacks("MARK-AFTER-Q");
+   TEST_ASSERT_EQUAL_INT64(ids[5], id_cursor(conv));
+   TEST_ASSERT_EQUAL_INT(4, count_cursor(conv));
+   TEST_ASSERT_EQUAL_INT64(0,
+                           q1("SELECT COUNT(*) FROM memory_summaries WHERE user_id = ?1", s_user));
+   TEST_ASSERT_EQUAL_INT64(1, q1("SELECT COUNT(*) FROM memory_facts WHERE user_id = ?1", s_user));
+   TEST_ASSERT_EQUAL_INT64(conv, q1("SELECT source_conversation_id FROM memory_facts WHERE "
+                                    "user_id = ?1",
+                                    s_user));
+   TEST_ASSERT_EQUAL_INT64(from, q1("SELECT source_msg_id_start FROM memory_facts WHERE "
+                                    "user_id = ?1",
+                                    s_user));
+   TEST_ASSERT_EQUAL_INT64(to, q1("SELECT source_msg_id_end FROM memory_facts WHERE user_id = ?1",
+                                  s_user));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_NONE,
+                           q1("SELECT outside FROM memory_facts WHERE user_id = ?1", s_user));
+   TEST_ASSERT_EQUAL_INT64(1, q1("SELECT COUNT(*) FROM memory_extract_ranges WHERE "
+                                 "conversation_id = ?1",
+                                 conv));
+
+   /* Again, or overlapping: refused, and nothing asked. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_OVERLAP,
+                         memory_extract_range(s_user, conv, from, to, true, &r));
+   TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_OVERLAP,
+                         memory_extract_range(s_user, conv, to, ids[5], false, &r));
+   TEST_ASSERT_TRUE(r.overlap);
+   TEST_ASSERT_EQUAL_INT(1, s_calls);
+}
+
+/* A web search's result in the range: the batch, and what it stores, carry
+ * the web. */
+void test_range_with_a_web_result_is_tainted(void) {
+   int64_t ids[6], from = 0, to = 0;
+   const int64_t conv = skipped_range_conv(true, ids, &from, &to);
+   memory_extract_range_report_t r;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_extract_range(s_user, conv, from, to, false, &r));
+   TEST_ASSERT_EQUAL_INT(1, r.tool);
+   TEST_ASSERT_EQUAL_INT(2, r.assistant);
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, r.outside);
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_extract_range(s_user, conv, from, to, true, &r));
+   TEST_ASSERT_TRUE(memory_extraction_wait_idle(s_user, WAIT_SEC));
+   TEST_ASSERT_EQUAL_INT(1, s_calls);
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_WEB,
+                           q1("SELECT outside FROM memory_facts WHERE user_id = ?1", s_user));
+   TEST_ASSERT_EQUAL_INT64(ids[5], id_cursor(conv));
+}
+
+/* What is refused, each by its own code, with nothing asked or written. */
+void test_range_refusals(void) {
+   int64_t ids[6], from = 0, to = 0;
+   const int64_t conv = skipped_range_conv(false, ids, &from, &to);
+   int64_t before[RANGE_TABLES_COUNT], after[RANGE_TABLES_COUNT];
+   range_state(conv, before);
+   memory_extract_range_report_t r;
+
+   TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_BAD_RANGE,
+                         memory_extract_range(s_user, conv, to, from, true, &r));
+   TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_BAD_RANGE,
+                         memory_extract_range(s_user, conv, 0, to, false, &r));
+   /* Another user's conversation reads as none at all. */
+   auth_db_create_user("placeholder2", "hash", false);
+   auth_user_t other;
+   memset(&other, 0, sizeof(other));
+   auth_db_get_user("placeholder2", &other);
+   TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_NOT_FOUND,
+                         memory_extract_range(other.id, conv, from, to, true, &r));
+   TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_NOT_FOUND,
+                         memory_extract_range(s_user, conv + 1000, from, to, true, &r));
+   /* Past the cursor: the next normal run reads it. */
+   const int64_t late = add(conv, "user", "MARK-LATE placeholder question");
+   TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_PAST_CURSOR,
+                         memory_extract_range(s_user, conv, from, late, true, &r));
+   /* Nothing the user said. */
+   TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_NO_USER_ROW,
+                         memory_extract_range(s_user, conv, ids[3], ids[3], true, &r));
+   /* The user's extraction held: refused, never queued. */
+   TEST_ASSERT_TRUE(memory_extraction_hold_user(s_user, WAIT_SEC));
+   TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_BUSY,
+                         memory_extract_range(s_user, conv, from, to, true, &r));
+   memory_extraction_release_user(s_user);
+   /* Private. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(conv, s_user, true, NULL));
+   TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_PRIVATE,
+                         memory_extract_range(s_user, conv, from, to, true, &r));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(conv, s_user, false, NULL));
+
+   TEST_ASSERT_TRUE(memory_extraction_wait_idle(s_user, WAIT_SEC));
+   TEST_ASSERT_EQUAL_INT(0, s_calls);
+   range_state(conv, after);
+   TEST_ASSERT_EQUAL_INT64_ARRAY(before, after, RANGE_TABLES_COUNT);
+}
+
+/* With the agent consolidator, the run's batch is recorded with the range as
+ * its rows, and no summary. */
+void test_range_with_the_agent_consolidator_records_a_batch(void) {
+   safe_strscpy(g_config.memory.consolidator, "agent");
+   int64_t ids[6], from = 0, to = 0;
+   const int64_t conv = skipped_range_conv(false, ids, &from, &to);
+   memory_extract_range_report_t r;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_extract_range(s_user, conv, from, to, true, &r));
+   TEST_ASSERT_TRUE(memory_extraction_wait_idle(s_user, WAIT_SEC));
+   TEST_ASSERT_EQUAL_INT64(1, q1("SELECT COUNT(*) FROM memory_consolidation_batches WHERE "
+                                 "conversation_id = ?1",
+                                 conv));
+   TEST_ASSERT_EQUAL_INT64(from, q1("SELECT msg_id_start FROM memory_consolidation_batches WHERE "
+                                    "conversation_id = ?1",
+                                    conv));
+   TEST_ASSERT_EQUAL_INT64(to, q1("SELECT msg_id_end FROM memory_consolidation_batches WHERE "
+                                  "conversation_id = ?1",
+                                  conv));
+   TEST_ASSERT_EQUAL_INT64(0,
+                           q1("SELECT COUNT(*) FROM memory_summaries WHERE user_id = ?1", s_user));
+   TEST_ASSERT_EQUAL_INT64(ids[5], id_cursor(conv));
+   TEST_ASSERT_EQUAL_INT(4, count_cursor(conv));
+}
+
+/* An exchange (@p web: with a web search's result) before a range of one
+ * exchange, and one after it, all marked extracted with a clean floor: the
+ * conversation's stored kind never saw the page.  @p from / @p to get the
+ * range, @p before_to the last row before it. */
+static int64_t range_after_exchange_conv(bool web, int64_t *from, int64_t *to, int64_t *before_to) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Skipped", &conv));
+   add(conv, "user", "MARK-BEFORE-Q placeholder question");
+   if (web) {
+      const conv_message_row_t call = {
+         .role = "assistant",
+         .content = "",
+         .tool_calls = "[{\"id\":\"w0\",\"type\":\"function\",\"function\":{\"name\":\"search\","
+                       "\"arguments\":\"{\\\"query\\\":\\\"placeholder\\\"}\"}}]"
+      };
+      int64_t id = 0;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &call, &id));
+      char *page = llm_third_party_frame(TOOL_FRAME_WEB, NULL, "MARK-BEFORE-WEB placeholder\n");
+      TEST_ASSERT_NOT_NULL(page);
+      const conv_message_row_t result = { .role = "tool", .tool_call_id = "w0", .content = page };
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &result, &id));
+      free(page);
+   }
+   *before_to = add(conv, "assistant", "MARK-BEFORE-R placeholder answer");
+   *from = add(conv, "user", "MARK-RANGE-Q placeholder question");
+   *to = add(conv, "assistant", "MARK-RANGE-R placeholder restatement");
+   add(conv, "user", "MARK-AFTER-Q placeholder question");
+   const int64_t last = add(conv, "assistant", "MARK-AFTER-R placeholder answer");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_set_last_extracted(conv, 6, last, OUTSIDE_NONE));
+   return conv;
+}
+
+/* A page read just before the range: the dry run reports the web, and the
+ * run's facts and batch carry it, though only the range's rows are sent. */
+void test_range_carries_outside_text_read_before_it(void) {
+   int64_t from = 0, to = 0, before_to = 0;
+   const int64_t conv = range_after_exchange_conv(true, &from, &to, &before_to);
+   memory_extract_range_report_t r;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_extract_range(s_user, conv, from, to, false, &r));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, r.outside);
+   char text[1024];
+   memory_extract_range_describe(SUCCESS, false, from, to, &r, text, sizeof(text));
+   TEST_ASSERT_NOT_NULL(strstr(text, "Outside:     web"));
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_extract_range(s_user, conv, from, to, true, &r));
+   TEST_ASSERT_TRUE(memory_extraction_wait_idle(s_user, WAIT_SEC));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, r.outside);
+   prompt_has("MARK-RANGE-R");
+   prompt_lacks("MARK-BEFORE-");
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_WEB,
+                           q1("SELECT outside FROM memory_facts WHERE user_id = ?1", s_user));
+
+   /* The agent consolidator's batch carries it too. */
+   safe_strscpy(g_config.memory.consolidator, "agent");
+   const int64_t conv2 = range_after_exchange_conv(true, &from, &to, &before_to);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_extract_range(s_user, conv2, from, to, true, &r));
+   TEST_ASSERT_TRUE(memory_extraction_wait_idle(s_user, WAIT_SEC));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_WEB, q1("SELECT outside FROM memory_consolidation_batches "
+                                           "WHERE conversation_id = ?1",
+                                           conv2));
+}
+
+/* No outside text anywhere through the range's end: the run stays clean. */
+void test_range_with_no_outside_text_stays_clean(void) {
+   int64_t from = 0, to = 0, before_to = 0;
+   const int64_t conv = range_after_exchange_conv(false, &from, &to, &before_to);
+   memory_extract_range_report_t r;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_extract_range(s_user, conv, from, to, false, &r));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, r.outside);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_extract_range(s_user, conv, from, to, true, &r));
+   TEST_ASSERT_TRUE(memory_extraction_wait_idle(s_user, WAIT_SEC));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_NONE,
+                           q1("SELECT outside FROM memory_facts WHERE user_id = ?1", s_user));
+}
+
+/* A normal extraction reads past its cursor only: the same page, behind the
+ * cursor, leaves its batch clean, as before range runs existed. */
+void test_normal_extraction_kind_ignores_rows_behind_the_cursor(void) {
+   int64_t from = 0, to = 0, before_to = 0;
+   const int64_t conv = range_after_exchange_conv(true, &from, &to, &before_to);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_set_last_extracted(conv, 4, before_to, OUTSIDE_NONE));
+   extract(conv, memory_history_load_from_db(conv, s_user, NULL), 8);
+   TEST_ASSERT_EQUAL_INT(1, s_calls);
+   prompt_lacks("MARK-BEFORE-");
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_NONE,
+                           q1("SELECT outside FROM memory_facts WHERE user_id = ?1", s_user));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_NONE,
+                           q1("SELECT outside FROM conversations WHERE id = ?1", conv));
+}
+
+/* The range's record after a confirmed run on @p reply (NULL: the model
+ * fails), waited for. */
+static int64_t ranges_after_run(int64_t conv, int64_t from, int64_t to, const char *reply) {
+   s_reply = reply;
+   memory_extract_range_report_t r;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_extract_range(s_user, conv, from, to, true, &r));
+   TEST_ASSERT_TRUE(memory_extraction_wait_idle(s_user, WAIT_SEC));
+   return q1("SELECT COUNT(*) FROM memory_extract_ranges WHERE conversation_id = ?1", conv);
+}
+
+#define EMPTY_REPLY "{\"facts\": [], \"preferences\": [], \"corrections\": []}"
+
+/* A reply that can't be used, or none, stores nothing and leaves no record,
+ * so the range may run again; with either consolidator. */
+void test_range_reply_unusable_leaves_no_record(void) {
+   int64_t ids[6], from = 0, to = 0;
+   const int64_t conv = skipped_range_conv(false, ids, &from, &to);
+   TEST_ASSERT_EQUAL_INT64(0, ranges_after_run(conv, from, to, "not a reply at all"));
+   TEST_ASSERT_EQUAL_INT64(0, ranges_after_run(conv, from, to, NULL));
+   safe_strscpy(g_config.memory.consolidator, "agent");
+   TEST_ASSERT_EQUAL_INT64(0, ranges_after_run(conv, from, to, "not a reply at all"));
+   TEST_ASSERT_EQUAL_INT64(0, q1("SELECT COUNT(*) FROM memory_facts WHERE user_id = ?1", s_user));
+   TEST_ASSERT_EQUAL_INT(3, s_calls);
+
+   /* Allowed again, and this time it learns. */
+   TEST_ASSERT_EQUAL_INT64(1, ranges_after_run(conv, from, to, REPLY));
+   TEST_ASSERT_EQUAL_INT64(1, q1("SELECT COUNT(*) FROM memory_facts WHERE user_id = ?1", s_user));
+}
+
+/* A reply read with nothing in it to learn is the range's result: the record
+ * stays and a second run is refused. */
+void test_range_empty_result_keeps_its_record(void) {
+   int64_t ids[6], from = 0, to = 0;
+   const int64_t conv = skipped_range_conv(false, ids, &from, &to);
+   TEST_ASSERT_EQUAL_INT64(1, ranges_after_run(conv, from, to, EMPTY_REPLY));
+   memory_extract_range_report_t r;
+   TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_OVERLAP,
+                         memory_extract_range(s_user, conv, from, to, true, &r));
+}
+
+/* A reply naming a title leaves the conversation's own. */
+void test_range_run_keeps_the_title(void) {
+   int64_t ids[6], from = 0, to = 0;
+   const int64_t conv = skipped_range_conv(false, ids, &from, &to);
+   TEST_ASSERT_EQUAL_INT64(1, ranges_after_run(conv, from, to,
+                                               "{\"facts\": [], \"preferences\": [], "
+                                               "\"corrections\": [], \"title\": \"Renamed\", "
+                                               "\"summary\": \"A placeholder talk.\"}"));
+   TEST_ASSERT_EQUAL_INT64(1,
+                           q1("SELECT title = 'Skipped' FROM conversations WHERE id = ?1", conv));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_history_lacking_another_sessions_rows_sends_them);
@@ -825,5 +1175,15 @@ int main(void) {
    RUN_TEST(test_a_tool_exchange_is_extracted_once);
    RUN_TEST(test_an_idle_session_extracts_the_other_sessions_rows);
    RUN_TEST(test_a_caught_up_session_extracts_every_row_once);
+   RUN_TEST(test_range_dry_run_then_run);
+   RUN_TEST(test_range_with_a_web_result_is_tainted);
+   RUN_TEST(test_range_refusals);
+   RUN_TEST(test_range_with_the_agent_consolidator_records_a_batch);
+   RUN_TEST(test_range_carries_outside_text_read_before_it);
+   RUN_TEST(test_range_with_no_outside_text_stays_clean);
+   RUN_TEST(test_normal_extraction_kind_ignores_rows_behind_the_cursor);
+   RUN_TEST(test_range_reply_unusable_leaves_no_record);
+   RUN_TEST(test_range_empty_result_keeps_its_record);
+   RUN_TEST(test_range_run_keeps_the_title);
    return UNITY_END();
 }

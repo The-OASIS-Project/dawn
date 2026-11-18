@@ -946,9 +946,11 @@ int memory_consolidate_batch(const memory_consolidate_input_t *in,
    const int64_t created_at = memory_store_created_at(b->st);
    memory_store_close(b->st);
    b->st = NULL;
-   const int64_t summary_id = memory_extraction_store_summary(
-       in->user_id, in->conversation_id, in->session_id, b->roots[0], in->message_count,
-       in->duration_seconds, in->prov, created_at);
+   const int64_t summary_id = in->no_summary ? 0
+                                             : memory_extraction_store_summary(
+                                                   in->user_id, in->conversation_id, in->session_id,
+                                                   b->roots[0], in->message_count,
+                                                   in->duration_seconds, in->prov, created_at);
    if (summary_id > 0 && b->batch_id > 0) {
       memory_db_consolidation_batch_set_summary(b->batch_id, in->user_id, summary_id);
    }

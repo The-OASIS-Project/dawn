@@ -1688,6 +1688,36 @@ admin_resp_code_t admin_client_memory_fact_restore(int fd,
                            response, resp_len);
 }
 
+admin_resp_code_t admin_client_memory_extract_range(int fd,
+                                                    const char *username,
+                                                    int64_t conversation_id,
+                                                    int64_t from,
+                                                    int64_t to,
+                                                    bool confirm,
+                                                    char *response,
+                                                    size_t resp_len) {
+   const size_t ulen = username ? strlen(username) : 0;
+   if (ulen == 0 || ulen > ADMIN_MEM_ENTITY_USERNAME_MAX) {
+      fprintf(stderr, "Error: username must be 1-%d characters\n", ADMIN_MEM_ENTITY_USERNAME_MAX);
+      return ADMIN_RESP_FAILURE;
+   }
+   uint8_t payload[sizeof(admin_memory_extract_range_payload_t) + ADMIN_MEM_ENTITY_USERNAME_MAX];
+   const admin_memory_extract_range_payload_t pl = {
+      .flags = confirm ? ADMIN_MEM_EXTRACT_RANGE_FLAG_CONFIRM : 0,
+      .username_len = (uint8_t)ulen,
+      .conversation_id = conversation_id,
+      .from = from,
+      .to = to,
+   };
+   memcpy(payload, &pl, sizeof(pl));
+   memcpy(payload + sizeof(pl), username, ulen);
+   if (send_message(fd, ADMIN_MSG_MEMORY_EXTRACT_RANGE, payload, (uint16_t)(sizeof(pl) + ulen)) !=
+       0) {
+      return ADMIN_RESP_SERVICE_ERROR;
+   }
+   return recv_text_response(fd, response, resp_len);
+}
+
 admin_resp_code_t admin_client_memory_entity_list(int fd,
                                                   const char *username,
                                                   bool include_aliases,

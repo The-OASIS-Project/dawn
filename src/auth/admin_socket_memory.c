@@ -18,7 +18,8 @@
  *
  * Admin-socket memory-maintenance handlers (dawn-admin memory *).
  * Synchronous handlers backed by the memory subsystem's admin layer:
- * cleanup_meta_facts, summarize_missing, reextract, reextract_status.  Split out of admin_socket.c
+ * cleanup_meta_facts, summarize_missing, reextract, reextract_status,
+ * extract_range.  Split out of admin_socket.c
  * so that file can stay under the size limits in CLAUDE.md.  Sibling of
  * admin_socket_memory_entity.c (which owns the entity-merge handlers).
  * Dispatched from handle_client() in admin_socket.c via declarations in
@@ -40,6 +41,7 @@
 #include "memory/memory_db.h"
 #include "memory/memory_db_admin.h"
 #include "memory/memory_extraction.h"
+#include "memory/memory_extraction_range.h"
 #include "memory/memory_note_bridge.h"
 #include "memory/memory_summarize_missing.h"
 #include "tools/document_db.h"
@@ -553,4 +555,51 @@ int handle_memory_rebuild_document_fts(int client_fd, const char *payload, uint1
    char msg[128];
    snprintf(msg, sizeof(msg), "Rebuilt document search index: %d chunk(s) indexed.", indexed);
    return send_text_response(client_fd, ADMIN_RESP_SUCCESS, msg);
+}
+
+/* =============================================================================
+ * Memory extract-range: extract rows of a conversation behind its extraction
+ * cursor (memory_extraction_range.h).  A dry run unless confirmed.
+ * ============================================================================= */
+
+int handle_memory_extract_range(int client_fd, const char *payload, uint16_t payload_len) {
+   admin_memory_extract_range_payload_t pl;
+   if (!payload || payload_len < sizeof(pl)) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Malformed extract-range payload");
+   }
+   memcpy(&pl, payload, sizeof(pl));
+   if (pl.username_len == 0 || pl.username_len > ADMIN_MEM_ENTITY_USERNAME_MAX ||
+       payload_len < sizeof(pl) + pl.username_len) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Malformed extract-range payload");
+   }
+   char username[ADMIN_MEM_ENTITY_USERNAME_MAX + 1];
+   memcpy(username, payload + sizeof(pl), pl.username_len);
+   username[pl.username_len] = '\0';
+   if (strlen(username) != pl.username_len) {
+      return send_text_response(client_fd, ADMIN_RESP_FAILURE, "Malformed extract-range payload");
+   }
+
+   auth_user_t user;
+   if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS) {
+      return send_text_response(client_fd, ADMIN_RESP_NOT_FOUND, "User not found");
+   }
+   const bool confirm = (pl.flags & ADMIN_MEM_EXTRACT_RANGE_FLAG_CONFIRM) != 0;
+   memory_extract_range_report_t report;
+   const int rc = memory_extract_range(user.id, pl.conversation_id, pl.from, pl.to, confirm,
+                                       &report);
+   char text[ADMIN_MSG_CONTENT_MAX + 1];
+   memory_extract_range_describe(rc, confirm, pl.from, pl.to, &report, text, sizeof(text));
+   if (confirm && rc == SUCCESS) {
+      auth_db_log_event("MEMORY_EXTRACT_RANGE", username, NULL, NULL);
+   }
+   /* A dry run's report is its answer, whatever it would refuse. */
+   admin_resp_code_t code = ADMIN_RESP_SUCCESS;
+   if (rc == MEMORY_EXTRACT_RANGE_NOT_FOUND) {
+      code = ADMIN_RESP_NOT_FOUND;
+   } else if (rc == FAILURE) {
+      code = ADMIN_RESP_SERVICE_ERROR;
+   } else if (rc != SUCCESS && (confirm || !report.counted)) {
+      code = ADMIN_RESP_FAILURE;
+   }
+   return send_text_response(client_fd, code, text);
 }

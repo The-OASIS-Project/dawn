@@ -1105,6 +1105,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_consolidation_view.c
     src/memory/memory_extraction_queue.c
     src/memory/memory_extraction_slots.c
+    src/memory/memory_extraction_range.c
     src/memory/memory_extraction_input.c
     src/memory/memory_similarity.c
     src/memory/memory_import.c

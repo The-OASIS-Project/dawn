@@ -18,12 +18,14 @@
  *
  * dawn-admin "memory superseded" lists a user's merged or replaced facts (a
  * fact a newer value or a merge hid from recall); "memory restore" brings one
- * back.
+ * back.  "memory extract-range" extracts rows of a conversation that lie behind
+ * its extraction cursor (a dry run unless --confirm).
  */
 
 #include "cmd_memory.h"
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -87,6 +89,57 @@ int cmd_memory_facts(int argc, char *argv[]) {
                                                                       response, sizeof(response))
                                 : admin_client_memory_fact_restore(fd, user, fact_id, response,
                                                                    sizeof(response));
+   admin_client_disconnect(fd);
+   if (resp != ADMIN_RESP_SUCCESS) {
+      fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));
+      return 1;
+   }
+   printf("%s\n", response);
+   return 0;
+}
+
+/* A whole argument as a positive id, or 0. */
+static long long parse_id(const char *arg) {
+   char *end = NULL;
+   errno = 0;
+   const long long v = strtoll(arg, &end, 10);
+   return (errno != 0 || end == arg || *end != '\0' || v <= 0) ? 0 : v;
+}
+
+int cmd_memory_extract_range(int argc, char *argv[]) {
+   static const char k_usage[] = "Usage: %s memory extract-range --user <u> --conv <id> --from "
+                                 "<id> --to <id> [--confirm]\n";
+   const char *user = NULL;
+   long long conv = 0, from = 0, to = 0;
+   bool confirm = false;
+   for (int i = 3; i < argc; i++) {
+      if (strcmp(argv[i], "--user") == 0 && i + 1 < argc) {
+         user = argv[++i];
+      } else if (strcmp(argv[i], "--conv") == 0 && i + 1 < argc) {
+         conv = parse_id(argv[++i]);
+      } else if (strcmp(argv[i], "--from") == 0 && i + 1 < argc) {
+         from = parse_id(argv[++i]);
+      } else if (strcmp(argv[i], "--to") == 0 && i + 1 < argc) {
+         to = parse_id(argv[++i]);
+      } else if (strcmp(argv[i], "--confirm") == 0) {
+         confirm = true;
+      } else {
+         fprintf(stderr, k_usage, argv[0]);
+         return 1;
+      }
+   }
+   if (!user || conv <= 0 || from <= 0 || to <= 0) {
+      fprintf(stderr, k_usage, argv[0]);
+      return 1;
+   }
+   int fd = admin_client_connect();
+   if (fd < 0) {
+      return 1;
+   }
+   char response[ADMIN_MSG_CONTENT_MAX + 1] = "";
+   const admin_resp_code_t resp = admin_client_memory_extract_range(fd, user, conv, from, to,
+                                                                    confirm, response,
+                                                                    sizeof(response));
    admin_client_disconnect(fd);
    if (resp != ADMIN_RESP_SUCCESS) {
       fprintf(stderr, "Error: %s\n", response[0] ? response : admin_resp_strerror(resp));

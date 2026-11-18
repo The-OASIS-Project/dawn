@@ -206,7 +206,11 @@ typedef enum {
    ADMIN_MSG_MEMORY_FACT_SUPERSEDED = 0x93,
    ADMIN_MSG_MEMORY_FACT_RESTORE = 0x94,
 
-   /* Next free memory opcode: 0x95. */
+   /* Extract a range of a conversation's rows behind its extraction cursor
+    * (admin_memory_extract_range_payload_t); a dry run unless confirmed. */
+   ADMIN_MSG_MEMORY_EXTRACT_RANGE = 0x95,
+
+   /* Next free memory opcode: 0x96. */
 
    /* Phase 7: Messaging channels (Phase 4 + Phase 6 operator commands).
     * Opcode range 0xA0..0xAF is reserved for messaging — Phase 6 will
@@ -509,6 +513,22 @@ typedef struct __attribute__((packed)) {
 
 /* ADMIN_MSG_MEMORY_SUMMARIZE_MISSING flags (byte 0 of payload). */
 #define ADMIN_MEM_SUMMARIZE_FLAG_DRY_RUN 0x01
+
+/*
+ * ADMIN_MSG_MEMORY_EXTRACT_RANGE payload (little-endian):
+ *   flags (bit 0 = confirm), username_len (1..ADMIN_MEM_ENTITY_USERNAME_MAX),
+ *   conversation_id, from, to (int64 each), then username[username_len] (no NUL).
+ */
+#define ADMIN_MEM_EXTRACT_RANGE_FLAG_CONFIRM 0x01
+
+typedef struct __attribute__((packed)) {
+   uint8_t flags;
+   uint8_t username_len;
+   int64_t conversation_id;
+   int64_t from;
+   int64_t to;
+   /* Followed by: username[username_len] */
+} admin_memory_extract_range_payload_t;
 
 /*
  * =============================================================================
