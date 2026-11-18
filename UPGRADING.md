@@ -32,6 +32,35 @@ being retired.
 
 ---
 
+## 2026-11-15 — A reply's token ceiling follows its reasoning effort
+
+**What changed.** Reasoning counts toward a reply's token limit, so at a high effort a reply could
+end after its reasoning with no answer. A streamed reply that reasons, on Claude, OpenAI or Gemini,
+now gets a ceiling by its effort: low 16K, medium 32K, high 64K, xhigh and max 128K, up to the
+model's maximum (64K on Gemini). `[llm] max_tokens` is now the lowest ceiling these replies get,
+and stays the ceiling for everything else: replies without reasoning, local models, gpt-5.3, and
+calls that aren't streamed (briefings and memory extraction on Claude and on models that use Chat
+Completions; on the OpenAI Responses API, gpt-5.4 and later, every call is streamed, so these get
+their effort's ceiling too). Every cloud reply's ceiling is also held
+to the room left in the model's context window, so a long conversation's reply never asks for more
+than fits.
+
+**What you need to do.** Nothing, unless you lowered `max_tokens` to cap what reasoning replies
+cost. That no longer caps them. Lower the reasoning effort instead: it's what decides how much the
+model thinks, and with it what a reply costs.
+
+**If you already use a GPT-6 model, a Gemini 4 model or Claude Mythos.** DAWN now knows these
+models' reasoning settings and sends them the conversation's effort. Before, GPT-6 (Astra, Sol,
+6.1 Sol, 6.1 Terra, Luna) and Gemini 4 ran at the provider's default (Gemini 4 Hydrogen's is
+high), and Mythos was offered only low to high. Check the effort in the WebUI's reasoning menu.
+GPT-6 Cyber still gets no reasoning setting: OpenAI doesn't list its levels.
+
+**If you use GPT-5.6 Cyber.** DAWN took its context window to be GPT-5.6's 1,050,000 tokens; it's
+400,000. Its conversations are now compacted well before they reach that, where a long one could
+fail before.
+
+---
+
 ## 2026-11-03 — A named audio device is no longer swapped for another
 
 **What changed.** When the microphone or speaker named in `[audio] capture_device` /

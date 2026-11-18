@@ -24,6 +24,7 @@
 
 #include <json-c/json.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -342,6 +343,53 @@ int llm_compaction_calibrated_tokens(const llm_compaction_calibration_t *cal, in
    }
    const float tokens = fixed_part(cal) + cal->factor * (float)estimate;
    return tokens > (float)INT_MAX ? INT_MAX : (int)tokens;
+}
+
+int llm_compaction_question_tokens(struct json_object *history, const char *input_text) {
+   if (!input_text) {
+      return 0;
+   }
+   const size_t n = history && json_object_is_type(history, json_type_array)
+                        ? json_object_array_length(history)
+                        : 0;
+   struct json_object *role = NULL;
+   if (n > 0 &&
+       json_object_object_get_ex(json_object_array_get_idx(history, n - 1), "role", &role) &&
+       strcmp(json_object_get_string(role), "user") == 0) {
+      return 0;
+   }
+   return (int)(strlen(input_text) / 4);
+}
+
+int llm_compaction_request_estimate(struct json_object *history, const char *input_text) {
+   const int n = history && json_object_is_type(history, json_type_array)
+                     ? (int)json_object_array_length(history)
+                     : 0;
+   return (n > 0 ? llm_compaction_estimate_range(history, 0, n) : 0) +
+          llm_compaction_question_tokens(history, input_text);
+}
+
+int llm_compaction_reply_input(const llm_compaction_calibration_t *cal,
+                               int estimate,
+                               int tool_tokens) {
+   if (usable(cal)) {
+      return llm_compaction_calibrated_tokens(cal, estimate);
+   }
+   const int input = estimate + tool_tokens;
+   return cal && cal->last_prompt > input ? cal->last_prompt : input;
+}
+
+int llm_compaction_reply_room(int max_tokens, int window, int input_tokens) {
+   if (window <= 0 || max_tokens <= LLM_REPLY_ROOM_MIN) {
+      return max_tokens;
+   }
+   /* The estimate reads ~4 characters a token; code, non-English text and
+    * images run denser.  A 10% margin on the input, and 2% of the window. */
+   const int64_t left = (int64_t)window - input_tokens - input_tokens / 10 - window / 50;
+   if (left >= max_tokens) {
+      return max_tokens;
+   }
+   return left > LLM_REPLY_ROOM_MIN ? (int)left : LLM_REPLY_ROOM_MIN;
 }
 
 int llm_compaction_estimate_budget(const llm_compaction_calibration_t *cal, int tokens) {

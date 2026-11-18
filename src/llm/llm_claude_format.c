@@ -37,6 +37,7 @@
 #include "llm/llm_capabilities.h"
 #include "llm/llm_claude_tools.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_context.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_model_family.h"
@@ -700,7 +701,8 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                       const char *model,
                                       const char *carrier,
                                       int iteration,
-                                      bool inline_tools) {
+                                      bool inline_tools,
+                                      bool streamed) {
    /* A model that takes no images reads a fixed text for each a tool returned. */
    json_object *shown_history = NULL;
    if (!is_vision_enabled_for_current_llm()) {
@@ -733,14 +735,10 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                    ? llm_budget_tokens_for_effort(thinking.effort)
                                    : 0;
 
-   /* max_tokens covers a thinking budget and the answer: leave the answer at
-    * least CLAUDE_ANSWER_TOKENS_MIN (a memory extraction's JSON runs ~2K). */
-   int max_tokens = g_config.llm.max_tokens;
-   if (thinking_budget > 0 && max_tokens < thinking_budget + CLAUDE_ANSWER_TOKENS_MIN) {
-      max_tokens = thinking_budget + CLAUDE_ANSWER_TOKENS_MIN;
-      OLOG_INFO("Claude: Adjusted max_tokens to %d (budget %d + %d for the answer)", max_tokens,
-                thinking_budget, CLAUDE_ANSWER_TOKENS_MIN);
-   }
+   /* max_tokens covers the thinking and the answer: sized by effort when
+    * streamed; held to the window once the tools are attached (below). */
+   int max_tokens = llm_reply_max_tokens(LLM_CLOUD, model_provider, model_name, &thinking,
+                                         streamed);
    json_object_object_add(claude_request, "max_tokens", json_object_new_int(max_tokens));
 
    if (thinking.controllable) {
@@ -771,6 +769,22 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
                                                     inline_tools, is_current_session_remote(),
                                                     iteration) &&
                                inline_tools;
+
+   /* Held to the room the window leaves, the tools just attached included
+    * (the history alone is sent: input_text is never added to it here), and
+    * at least a thinking budget plus CLAUDE_ANSWER_TOKENS_MIN (a memory
+    * extraction's JSON runs ~2K; budget_tokens must stay below max_tokens).
+    * Replaced in place, so the request keeps its shape. */
+   json_object *request_tools = NULL;
+   json_object_object_get_ex(claude_request, "tools", &request_tools);
+   max_tokens = llm_context_fit_reply(max_tokens, openai_conversation, NULL, request_tools,
+                                      LLM_CLOUD, model_provider, model_name);
+   if (thinking_budget > 0 && max_tokens < thinking_budget + CLAUDE_ANSWER_TOKENS_MIN) {
+      max_tokens = thinking_budget + CLAUDE_ANSWER_TOKENS_MIN;
+      OLOG_INFO("Claude: Adjusted max_tokens to %d (budget %d + %d for the answer)", max_tokens,
+                thinking_budget, CLAUDE_ANSWER_TOKENS_MIN);
+   }
+   json_object_object_add(claude_request, "max_tokens", json_object_new_int(max_tokens));
 
    // Extract system message and user/assistant messages
    json_object *system_array = json_object_new_array();

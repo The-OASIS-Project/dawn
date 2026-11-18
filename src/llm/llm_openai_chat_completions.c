@@ -247,6 +247,33 @@ static void add_cloud_reasoning_effort(json_object *root,
    OLOG_INFO("Cloud LLM: Reasoning effort set to '%s' for model %s%s", effort, model_name, note);
 }
 
+/* The reply ceiling, once the tools are attached: by effort when streamed and
+ * reasoning (reasoning counts toward OpenAI's max_completion_tokens and
+ * Gemini's output limit; llm_reply_max_tokens), held to the room the window
+ * leaves, the tools included (the history alone is sent).  A local server
+ * takes [llm] max_tokens as it is: it stops at its window rather than reject
+ * the request, and its window may still be the default before it answers. */
+static void add_max_tokens(json_object *root,
+                           json_object *history,
+                           const char *base_url,
+                           const char *api_key,
+                           const char *model_name,
+                           bool streamed) {
+   if (api_key == NULL) {
+      json_object_object_add(root, "max_tokens", json_object_new_int(g_config.llm.max_tokens));
+      return;
+   }
+   const cloud_provider_t provider = provider_for_endpoint(base_url);
+   llm_thinking_resolved_t thinking;
+   llm_thinking_resolve_current(LLM_CLOUD, provider, model_name, &thinking);
+   int max_tokens = llm_reply_max_tokens(LLM_CLOUD, provider, model_name, &thinking, streamed);
+   json_object *tools = NULL;
+   json_object_object_get_ex(root, "tools", &tools);
+   max_tokens = llm_context_fit_reply(max_tokens, history, NULL, tools, LLM_CLOUD, provider,
+                                      model_name);
+   json_object_object_add(root, "max_completion_tokens", json_object_new_int(max_tokens));
+}
+
 /* ── Non-streaming chat completion ──────────────────────────────────────── */
 
 char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
@@ -307,13 +334,6 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
    json_object_object_add(root, "messages", converted_history);
    add_prompt_cache_key(root, api_key, base_url);
 
-   if (api_key == NULL) {
-      json_object_object_add(root, "max_tokens", json_object_new_int(g_config.llm.max_tokens));
-   } else {
-      json_object_object_add(root, "max_completion_tokens",
-                             json_object_new_int(g_config.llm.max_tokens));
-   }
-
    if (llm_tools_enabled(NULL)) {
       /* The conversation's own tool set when it has one (llm_history_kind.h). */
       const char *source = NULL;
@@ -327,6 +347,8 @@ char *llm_openai_cc_chat_completion(struct json_object *conversation_history,
                    source);
       }
    }
+
+   add_max_tokens(root, conversation_history, base_url, api_key, model_name, false);
 
    /* One leading system message: strict local chat templates (Qwen 3.5/3.6
     * Jinja) reject a second. */
@@ -616,13 +638,6 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
    json_object_object_add(root, "messages", converted_history);
    add_prompt_cache_key(root, api_key, base_url);
 
-   if (api_key == NULL) {
-      json_object_object_add(root, "max_tokens", json_object_new_int(g_config.llm.max_tokens));
-   } else {
-      json_object_object_add(root, "max_completion_tokens",
-                             json_object_new_int(g_config.llm.max_tokens));
-   }
-
    /* The loop's last call (iteration at the cap), for a text answer: the tools
     * stay (the request reads as every other did), none may be called. */
    if (llm_tools_enabled(NULL)) {
@@ -636,6 +651,8 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
                                     iteration >= LLM_TOOLS_MAX_ITERATIONS ? "none" : "auto"));
       }
    }
+
+   add_max_tokens(root, conversation_history, base_url, api_key, model_name, true);
 
    /* One leading system message: strict local chat templates (Qwen 3.5/3.6
     * Jinja) reject a second. */

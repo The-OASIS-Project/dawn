@@ -23,19 +23,27 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Provider selection based on configuration (`OPENAI_MODEL`, `ANTHROPIC_MODEL`)
 
 - **llm_openai.c/h**: OpenAI API implementation
-   - Supports GPT-5 series, GPT-4o, GPT-4
+   - Supports the GPT-6 family, the GPT-5 series, GPT-4o, GPT-4 (gpt-5.4 and later, and gpt-6, on
+     the Responses API)
    - Supports llama.cpp local server (OpenAI-compatible endpoint)
    - Supports Ollama with runtime model switching
-   - Supports Google Gemini (via OpenAI-compatible endpoint)
+   - Supports Google Gemini 4, 3 and 2.5 (via OpenAI-compatible endpoint, whose
+     `reasoning_effort` Google maps to each model's thinking level)
    - Both blocking and streaming modes
    - Conversation history management
-   - Extended thinking support (reasoning_effort for OpenAI/Gemini models)
+   - Extended thinking support (reasoning_effort for OpenAI/Gemini models); the reply
+     ceiling follows the effort as for Claude (below)
 
 - **llm_claude.c/h**: Claude API implementation
-   - Supports Claude 4.6 Opus/Sonnet, Claude 4.5 Sonnet
+   - Supports Claude Fable 5.x, Opus/Sonnet/Haiku 5.5 and earlier; a model's thinking modes,
+     efforts and max output come from `models.toml [thinking.anthropic]`
    - Streaming support
    - Different API format than OpenAI (Messages API)
-   - Extended thinking support with configurable token budget
+   - Adaptive thinking by effort, or a configurable token budget on the models that take one
+   - A streamed reply that thinks gets `max_tokens` by its effort, up to the model's max
+     output (`llm_reply_max_tokens`, also used by OpenAI Responses and Chat Completions);
+     a call that isn't streamed keeps `[llm] max_tokens`.  Every cloud request's ceiling is then
+     held to the room the context window leaves (`llm_context_fit_reply`)
    - Full thinking content visibility (unlike OpenAI/Gemini)
 
 - **llm_streaming.c/h**: Streaming response handler
