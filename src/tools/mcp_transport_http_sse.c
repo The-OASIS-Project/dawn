@@ -76,7 +76,7 @@ typedef struct {
 
 /* Forward declarations for the vtable + internal use. */
 static int http_sse_start(mcp_transport_t *base);
-static int http_sse_send(mcp_transport_t *base, const char *json, size_t len);
+static int http_sse_send(mcp_transport_t *base, const char *json, size_t len, long timeout_ms);
 static void http_sse_stop(mcp_transport_t *base);
 static void http_sse_destroy(mcp_transport_t *base);
 
@@ -304,7 +304,8 @@ static int http_sse_start(mcp_transport_t *base) {
    return SUCCESS;
 }
 
-static int http_sse_send(mcp_transport_t *base, const char *json, size_t len) {
+static int http_sse_send(mcp_transport_t *base, const char *json, size_t len, long timeout_ms) {
+   (void)timeout_ms; /* the reply arrives on the stream; mcp_client waits for it */
    mcp_http_sse_t *t = (mcp_http_sse_t *)base;
 
    /* Snapshot the endpoint under lock; the client only sends after CONNECTED. */

@@ -70,13 +70,32 @@
 }
 
 .cv-files,
+.cv-scopes,
 .cv-commits {
    list-style: none;
    margin: 0;
    padding: 0;
 }
 
-.cv-filebtn {
+/* A long history scrolls on its own, so the files stay in reach. */
+.cv-commits {
+   max-height: 40vh;
+   overflow: auto;
+}
+
+.cv-group {
+   margin: 0.5rem 1rem 0.2rem;
+   font-size: 0.72rem;
+   color: var(--text-secondary);
+}
+
+.cv-section .cv-hash {
+   text-transform: none;
+   letter-spacing: normal;
+}
+
+.cv-filebtn,
+.cv-scopebtn {
    display: block;
    width: 100%;
    text-align: left;
@@ -89,16 +108,20 @@
    font-size: 0.82rem;
 }
 
-.cv-filebtn:hover {
+.cv-filebtn:hover,
+.cv-scopebtn:hover {
    background: var(--accent-subtle);
 }
 
-.cv-filebtn[aria-current='true'] {
+.cv-filebtn[aria-current='true'],
+.cv-scopebtn[aria-current='true'],
+.cv-scopebtn.cv-inview {
    background: var(--accent-subtle);
    border-left-color: var(--accent);
 }
 
 .cv-filebtn:focus-visible,
+.cv-scopebtn:focus-visible,
 .cv-viewbtn:focus-visible,
 .cv-back:focus-visible,
 .cv-pane:focus-visible {
@@ -146,7 +169,7 @@
    color: var(--text-secondary);
 }
 
-.cv-commits li {
+.cv-scopebtn {
    display: flex;
    align-items: baseline;
    gap: 0.5rem;
@@ -162,6 +185,11 @@
    border-radius: 4px;
    padding: 0 5px;
    flex: none;
+}
+
+.cv-scopebtn[aria-current='true'] .cv-hash,
+.cv-scopebtn.cv-inview .cv-hash {
+   background: var(--bg-primary);
 }
 
 .cv-subject {
@@ -385,6 +413,17 @@
 
    .cv-filebtn {
       padding: 0.6rem 1rem;
+   }
+
+   .cv-scopebtn,
+   .cv-filebtn {
+      min-height: 44px;
+      padding-block: 0.55rem;
+   }
+
+   /* The list is the whole screen here: one scroll, not a scroll inside it. */
+   .cv-commits {
+      max-height: none;
    }
 
    .cv-viewbtn {

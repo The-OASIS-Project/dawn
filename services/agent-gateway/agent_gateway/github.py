@@ -23,7 +23,9 @@
 # string is cut to its cap, control characters are dropped and only github.com
 # links are kept; nothing in it is interpreted.
 
+import calendar
 import collections
+import difflib
 import json
 import re
 import time
@@ -66,9 +68,28 @@ LOG_HITS_CAP = 40
 EXCERPT_CAP = 12 * 1024
 CUT = "[...]"
 
+# What a revise hands the agent (pr_feedback).
+FEEDBACK_THREADS_CAP = 30
+FEEDBACK_CHECKS_CAP = 3  # failing required checks whose log excerpt is read
+FEEDBACK_CAP = 48 * 1024
+
+# A thread saying again what an answered one from an earlier review, same file, said.
+REPEAT_SIMILARITY = 0.85
+REPEAT_COMPARED = 400  # characters of each (normalized) first comment compared
+REPEAT_LINES = 20  # a repeat sits within this many lines of the one it repeats
+
+HASH_SHOWN = 12           # a commit's hash, in words
+LIST_SEP = 2              # ", " between two items of a JSON list
+REPLIES_CAP = 20          # replies one pr_reply posts
+REPLY_BODY_LIMIT = 65536  # GitHub's own limit on a comment's text
+ERROR_SHOWN = 200         # GitHub's own words in a refusal
+COMMITS_ASKED = 100       # commits read to tell what came after Copilot's last review
+
 RATE_WAIT_S = 60  # a secondary limit that doesn't say for how long
 HTTP_REDIRECTS = (301, 302, 303, 307, 308)
 COPILOT = "copilot-pull-request-reviewer"
+COPILOT_REVIEWER = COPILOT + "[bot]"  # how a REST review request names it
+WRITE_NEED = "Pull requests: Read and write"
 FAILED = ("failure", "error", "timed_out", "cancelled", "action_required", "startup_failure")
 
 TOKEN_REFUSED = ("the gateway's GitHub token was refused (expired or revoked); see the README "
@@ -87,6 +108,10 @@ PR_NEED = "Pull requests: Read-only"
 
 class GitError(Exception):
    pass
+
+
+class NoNewCommits(GitError):
+   """review_gate's refusal for no commit after Copilot's last review."""
 
 
 _SEG = r"[A-Za-z0-9._-]+"
@@ -499,7 +524,8 @@ query($owner: String!, $name: String!, $number: Int!, $after: String, $first: Bo
                 tail: comments(last: %(tail)d) { nodes { ...C } } }
       }
       reviews(last: %(reviews)d) @include(if: $first) {
-        nodes { author { login } state body submittedAt url } }
+        nodes { databaseId author { login __typename } state body submittedAt url
+                commit { oid } } }
       comments(last: %(conversation)d) @include(if: $first) {
         nodes { author { login __typename } authorAssociation body createdAt url } }
     }
@@ -507,6 +533,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String, $first: Bo
 }
 fragment C on PullRequestReviewComment {
   databaseId author { login __typename } authorAssociation body createdAt url
+  pullRequestReview { databaseId }
 }
 """ % {"page": THREADS_PAGE, "tail": THREAD_TAIL, "reviews": REVIEWS_ASKED,
        "conversation": CONVERSATION_ASKED}
@@ -533,20 +560,24 @@ def _thread(t: dict) -> dict | None:
       return None  # its first comment is gone: nothing to name it by
    outdated = bool(t.get("isOutdated"))
    line = t.get("originalLine") if outdated or t.get("line") is None else t.get("line")
+   first = (head.get("nodes") or [{}])[0] or {}
    return {"id": clean(t.get("id"), ID_CAP), "comment_id": comments[0]["comment_id"],
            "path": clean(t.get("path"), PATH_CAP), "line": line if isinstance(line, int) else None,
            "outdated": outdated, "resolved": bool(t.get("isResolved")), "comments": comments,
-           "comments_total": head.get("totalCount") or len(comments)}
+           "comments_total": head.get("totalCount") or len(comments),
+           # The review it came in, kept internal: which of Copilot's rounds it is from.
+           "review_id": (first.get("pullRequestReview") or {}).get("databaseId")}
 
 
 def _size(o) -> int:
    return len(json.dumps(o, ensure_ascii=False).encode())
 
 
-def pr_threads(owner: str, repo: str, number: int, token: str, everything: bool = False) -> dict:
-   """A pull request's unresolved review threads (with `everything`, resolved ones
-   too), each by its first comment's id; its reviews with a body; its newest
-   conversation comments.  Cut to THREADS_REPLY_CAP, threads first."""
+def threads_raw(owner: str, repo: str, number: int, token: str,
+                deadline: float | None = None) -> tuple[list, dict, bool]:
+   """Every review thread GitHub lists (resolved too; THREADS_PAGES pages at most,
+   fewer once `deadline`, monotonic, has passed), the first page's pull request
+   (its reviews and conversation), and whether threads were left unread."""
    where = f"{owner}/{repo}"
    found, after, more, first = [], None, False, None
    for _page in range(THREADS_PAGES):
@@ -556,33 +587,104 @@ def pr_threads(owner: str, repo: str, number: int, token: str, everything: bool 
                                   token, where, number)
       first = first or pr  # reviews and comments: as the first page read them
       page = pr.get("reviewThreads") or {}
-      found += [t for t in map(_thread, filter(None, page.get("nodes") or []))
-                if t and (everything or not t["resolved"])]
+      found += [t for t in map(_thread, filter(None, page.get("nodes") or [])) if t]
       more = bool((page.get("pageInfo") or {}).get("hasNextPage"))
       after = (page.get("pageInfo") or {}).get("endCursor")
-      if not more or not after:
+      if not more or not after or (deadline is not None and time.monotonic() >= deadline):
          break
+   return found, first, more
+
+
+def as_login(token: str) -> str | None:
+   """The token's user's login, or None when GitHub can't say."""
+   try:
+      return token_login(token)
+   except (OSError, ValueError, GitError):
+      return None
+
+
+def _norm(text: str) -> str:
+   return " ".join(text.lower().split())
+
+
+def _answered(t: dict, me: str | None) -> bool:
+   """Answered or declined: resolved, or replied to by the token's user."""
+   return t["resolved"] or bool(me) and any(c["author"] == me for c in t["comments"][1:])
+
+
+def _earlier(a: dict, t: dict) -> bool:
+   """Whether thread `a` is from a review before `t`'s (review ids grow), or
+   either's review isn't known."""
+   ra, rt = a.get("review_id"), t.get("review_id")
+   return ra is None or rt is None or ra < rt
+
+
+def _mark_repeats(threads: list, me: str | None) -> None:
+   """Each thread that says again what an answered one from an earlier review,
+   on the same file and near the same line, said gets repeat_of: that thread's
+   comment_id.  Answered or
+   not: replying to a repeat doesn't make it new."""
+   answered = [(a, _norm(a["comments"][0]["body"])[:REPEAT_COMPARED])
+               for a in threads if _answered(a, me)]
+   for t in threads:
+      said = _norm(t["comments"][0]["body"])[:REPEAT_COMPARED]
+      for a, before in answered:
+         if a is t or a["path"] != t["path"] or not _earlier(a, t):
+            continue
+         # The same words about another spot in the file are another finding.
+         if a.get("line") and t.get("line") and abs(a["line"] - t["line"]) > REPEAT_LINES:
+            continue
+         # autojunk off: on text over 200 characters it drops the common characters.
+         m = difflib.SequenceMatcher(None, said, before, autojunk=False)
+         if (m.real_quick_ratio() >= REPEAT_SIMILARITY and m.quick_ratio() >= REPEAT_SIMILARITY
+               and m.ratio() >= REPEAT_SIMILARITY):
+            t["repeat_of"] = a["comment_id"]
+            break
+
+
+def copilot_round(threads: list, reviews: list) -> dict | None:
+   """Copilot's latest review: the commit it reviewed, whether it had reviewed
+   before (a re-review), and its threads: how many, how many new, how many
+   repeats of threads already answered.  None when Copilot hasn't reviewed."""
+   mine = [r for r in reviews if r and login(r.get("author")) == COPILOT]
+   if not mine:
+      return None
+   last = mine[-1]
+   rid = last.get("databaseId")
+   own = [t for t in threads if rid is not None and t.get("review_id") == rid]
+   repeats = sum(1 for t in own if "repeat_of" in t)
+   return {"commit": clean((last.get("commit") or {}).get("oid"), NAME_CAP) or None,
+           "submitted": clean(last.get("submittedAt"), NAME_CAP), "rereview": len(mine) > 1,
+           "threads": len(own), "new": len(own) - repeats, "repeats": repeats}
+
+
+def pr_threads(owner: str, repo: str, number: int, token: str, everything: bool = False) -> dict:
+   """A pull request's unresolved review threads (with `everything`, resolved ones
+   too), each by its first comment's id and marked repeat_of when it repeats an
+   answered one; Copilot's latest round; its reviews with a body; its newest
+   conversation comments.  Cut to THREADS_REPLY_CAP, threads first."""
+   found, first, more = threads_raw(owner, repo, number, token)
+   me = as_login(token)
+   _mark_repeats(found, me)
+   reviews_raw = (first.get("reviews") or {}).get("nodes") or []
+   shown = [{k: v for k, v in t.items() if k != "review_id"} for t in found
+            if everything or not t["resolved"]]
    reviews = [{"author": login(r.get("author")), "state": lower(r.get("state")),
                "body": clean(r.get("body"), BODY_CAP), "submitted": clean(r.get("submittedAt"),
                                                                           NAME_CAP),
                "url": link(r.get("url"))}
-              for r in (first.get("reviews") or {}).get("nodes") or []
-              if r and str(r.get("body") or "").strip()]
+              for r in reviews_raw if r and str(r.get("body") or "").strip()]
    conversation = [_comment(c) for c in (first.get("comments") or {}).get("nodes") or [] if c]
-   try:
-      as_login = token_login(token)
-   except (OSError, ValueError, GitError):
-      as_login = None
-   out = {"threads": [], "reviews": [], "comments": [], "as_login": as_login,
-          "head_sha": clean(first.get("headRefOid"), NAME_CAP), "total": len(found),
-          "truncated": more}
+   out = {"threads": [], "reviews": [], "comments": [], "as_login": me,
+          "head_sha": clean(first.get("headRefOid"), NAME_CAP), "total": len(shown),
+          "truncated": more, "copilot_round": copilot_round(found, reviews_raw)}
    room = THREADS_REPLY_CAP - _size(out)
-   for key, items in (("threads", found), ("reviews", reviews[::-1]),
+   for key, items in (("threads", shown), ("reviews", reviews[::-1]),
                       ("comments", conversation[::-1])):
       for item in items:
          if key == "threads":
             item = {**item, "n": len(out["threads"]) + 1}
-         cost = _size(item) + 2
+         cost = _size(item) + LIST_SEP
          if cost > room:
             out["truncated"] = True
             break
@@ -657,9 +759,16 @@ def pr_check_log(owner: str, repo: str, number: int, check, token: str) -> dict:
    if match["job_id"] is None:
       raise GitError(f"{match['name']} isn't a GitHub Actions job, so its log can't be read "
                      f"here; see {match['url'] or 'the pull request'}")
-   deadline = time.monotonic() + LOG_READ_S
-   api = f"{GITHUB_API}/repos/{owner}/{repo}/actions/jobs/{match['job_id']}/logs"
-   gone = f"GitHub has no log for job {match['job_id']} on {where} (logs expire)"
+   log = job_log(owner, repo, match["job_id"], token, time.monotonic() + LOG_READ_S)
+   return {"name": match["name"], "conclusion": match["conclusion"], "url": match["url"], **log}
+
+
+def job_log(owner: str, repo: str, job_id: int, token: str, deadline: float) -> dict:
+   """The excerpt of GitHub Actions job `job_id`'s log, read until `deadline`
+   (monotonic): {excerpt, excerpt_bytes, log_bytes_read, truncated}."""
+   where = f"{owner}/{repo}"
+   api = f"{GITHUB_API}/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"
+   gone = f"GitHub has no log for job {job_id} on {where} (logs expire)"
    read = {"bytes": 0, "complete": False}
    try:
       try:
@@ -674,7 +783,225 @@ def pr_check_log(owner: str, repo: str, number: int, check, token: str) -> dict:
    except (OSError, ValueError) as e:
       raise refusal(e, where, "Actions: Read-only", gone) from None
    excerpt = log_excerpt(body, cut_start=read["bytes"] > len(body))
-   return {"name": match["name"], "conclusion": match["conclusion"], "url": match["url"],
-           "excerpt": excerpt, "excerpt_bytes": len(excerpt.encode()),
+   return {"excerpt": excerpt, "excerpt_bytes": len(excerpt.encode()),
            "log_bytes_read": read["bytes"],
            "truncated": read["bytes"] > len(body) or not read["complete"]}
+
+
+# --- what a revise hands the agent -----------------------------------------------
+
+
+def _feedback_thread(t: dict) -> dict:
+   out = {"comment_id": t["comment_id"], "path": t["path"], "line": t["line"],
+          "outdated": t["outdated"], "comments_total": t["comments_total"],
+          "comments": [{k: c[k] for k in ("author", "bot", "association", "body")}
+                       for c in t["comments"]]}
+   if "repeat_of" in t:
+      out["repeat_of"] = t["repeat_of"]
+   return out
+
+
+def pr_feedback(owner: str, repo: str, number: int, token: str, deadline: float) -> dict:
+   """What a revise hands the agent: the pull request's unresolved review threads
+   (current ones first, then outdated), its failing required checks with their
+   log excerpts, and each person's latest review when it requests changes.  Read
+   until `deadline` (monotonic); in FEEDBACK_CAP bytes, what didn't fit counted.
+   A pull request that isn't open: only its state."""
+   pr, checks, _, note = _status(owner, repo, number, token)
+   state = "merged" if pr.get("merged") else lower(pr.get("state"))
+   out = {"pull_request": link(pr.get("url")), "state": state,
+          "head": clean(pr.get("headRefOid"), NAME_CAP)}
+   if state != "open":
+      return out
+   found, first, more = threads_raw(owner, repo, number, token, deadline)
+   _mark_repeats(found, as_login(token))
+   threads = sorted((t for t in found if not t["resolved"]), key=lambda t: t["outdated"])
+   failing = [c for c in checks if c["failed"] and c["required"]]
+   latest = {}  # a person's reviews, oldest first: the last one stands
+   for r in (first.get("reviews") or {}).get("nodes") or []:
+      if r and (r.get("author") or {}).get("__typename") != "Bot":
+         latest[login(r.get("author"))] = r
+   asked = [{"author": who, "body": clean(r.get("body"), BODY_CAP)} for who, r in latest.items()
+            if lower(r.get("state")) == "changes_requested" and str(r.get("body") or "").strip()]
+   out.update(threads=[], threads_total=len(threads), threads_unread=more, checks=[],
+              checks_total=len(failing), changes_requested=[])
+   if note:
+      out["checks_note"] = note
+   room = FEEDBACK_CAP - _size(out)  # the threads first: a long CI log can't crowd them out
+   for key, items in (("changes_requested", asked),
+                      ("threads", [_feedback_thread(t) for t in threads[:FEEDBACK_THREADS_CAP]])):
+      for item in items:
+         cost = _size(item) + LIST_SEP
+         if cost > room:
+            break
+         room -= cost
+         out[key].append(item)
+   shown = failing[:FEEDBACK_CHECKS_CAP]
+   for i, c in enumerate(shown):
+      item = {"name": c["name"], "url": c["url"]}
+      if c["job_id"] is None:
+         item["log_error"] = "not a GitHub Actions job: its log isn't read here"
+      elif time.monotonic() >= deadline:
+         item["log_error"] = "not read: out of time"
+      else:
+         try:
+            item["log"] = job_log(owner, repo, c["job_id"], token, deadline)["excerpt"]
+         except GitError as e:
+            item["log_error"] = str(e)
+      over = _size(item) + LIST_SEP - room // (len(shown) - i)  # each log its share
+      if "log" in item and over > 0:
+         log = item.pop("log")  # its end kept, after CUT and a newline (two bytes in JSON)
+         kept = _cut_bytes(log, max(0, len(log.encode()) - over - len(CUT) - 2), keep_end=True)
+         if kept:
+            item["log"] = f"{CUT}\n{kept}"
+         else:
+            item["log_error"] = "not shown: no room left"
+      cost = _size(item) + LIST_SEP
+      if cost > room:
+         break
+      room -= cost
+      out["checks"].append(item)
+   out["threads_not_shown"] = len(threads) - len(out["threads"])
+   return out
+
+
+# --- writing: replies, resolving, asking Copilot ---------------------------------
+
+
+class ItemError(GitError):
+   """One reply refused (its comment isn't there); the others still go."""
+
+
+def post_reply(owner: str, repo: str, number: int, comment_id: int, body: str,
+               token: str) -> str | None:
+   """Reply on the review thread started by comment `comment_id`; its address."""
+   where = f"{owner}/{repo}"
+   try:
+      _, _, raw = _request(
+         f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies",
+         method="POST", data=json.dumps({"body": body}).encode(),
+         headers={**github_headers(token), "Content-Type": "application/json"})
+      return link(json.loads(raw).get("html_url"))
+   except urllib.error.HTTPError as e:
+      if e.code in (404, 422):
+         raise ItemError(f"GitHub refused the reply on comment {comment_id} ({e.code}): it "
+                         "isn't a top-level review comment on this pull request") from None
+      raise refusal(e, where, WRITE_NEED) from None
+   except (OSError, ValueError) as e:
+      raise refusal(e, where, WRITE_NEED) from None
+
+
+RESOLVE_MUTATION = """
+mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }
+"""
+
+
+def resolve_thread(thread_id: str, token: str, where: str) -> bool:
+   """Resolve a review thread (its GraphQL id); whether GitHub says it is."""
+   try:
+      data, errors = graphql(RESOLVE_MUTATION, {"id": thread_id}, token)
+   except (OSError, ValueError) as e:
+      raise refusal(e, where, WRITE_NEED) from None
+   if errors:
+      if any(err.get("type") == "FORBIDDEN" for err in errors):
+         raise GitError(permission_error(None, where, WRITE_NEED))
+      said = clean(errors[0].get("message"), ERROR_SHOWN)
+      raise GitError(f"GitHub didn't resolve the thread: {said}")
+   return bool(((data.get("resolveReviewThread") or {}).get("thread") or {}).get("isResolved"))
+
+
+GATE_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      url state merged headRefOid
+      reviewRequests(first: %(requests)d) {
+        nodes { requestedReviewer { __typename ... on User { login } ... on Bot { login } } }
+      }
+      commits(last: %(commits)d) { nodes { commit { oid parents { totalCount } } } }
+    }
+  }
+}
+""" % {"requests": REQUESTS_ASKED, "commits": COMMITS_ASKED}
+
+
+def _when(stamp: str) -> float:
+   """An ISO 8601 time GitHub gives, in seconds; 0 when there is none."""
+   try:
+      return float(calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")))
+   except (TypeError, ValueError):
+      return 0.0
+
+
+def review_gate(owner: str, repo: str, number: int, token: str, asked_at: float = 0.0,
+                pending_s: float = 0.0, check: bool = False) -> dict:
+   """Whether Copilot may be asked to review again: refused (GitError) while its
+   review is pending (requested, or asked at `asked_at` within `pending_s` with no
+   review since), and when no commit came after its last review (merges, of the
+   base, don't count): NoNewCommits, or the loop's end when its re-review found
+   nothing new.  With `check`, no new commits is said (no_new_commits) rather
+   than refused, the loop's end included (the user may publish next).  Else the pull
+   request, Copilot's round, and the new commits since it (None when its commit
+   is past the ones read)."""
+   where = f"{owner}/{repo}#{number}"
+   pr, _ = _pull_request(GATE_QUERY, {"owner": owner, "name": repo, "number": number}, token,
+                         f"{owner}/{repo}", number)
+   state = "merged" if pr.get("merged") else lower(pr.get("state"))
+   if state != "open":
+      raise GitError(f"{where} is {state}: Copilot reviews only an open pull request")
+   found, first, _ = threads_raw(owner, repo, number, token)
+   reviews = (first.get("reviews") or {}).get("nodes") or []
+   last = copilot_round(found, reviews)
+   requested = any(login((r or {}).get("requestedReviewer")) == COPILOT
+                   for r in (pr.get("reviewRequests") or {}).get("nodes") or [])
+   reviewed_at = _when(last["submitted"]) if last else 0.0
+   if requested or (asked_at > reviewed_at and time.time() - asked_at < pending_s):
+      raise GitError(f"Copilot's review of {where} is already pending; wait for it")
+   new = None
+   if last and last["commit"]:
+      nodes = (pr.get("commits") or {}).get("nodes") or []
+      commits = [(n or {}).get("commit") or {} for n in nodes]
+      oids = [c.get("oid") for c in commits]
+      if last["commit"] in oids:
+         after = commits[oids.index(last["commit"]) + 1:]
+         new = sum(1 for c in after if ((c.get("parents") or {}).get("totalCount") or 0) < 2)
+   out = {"pr": {"owner": owner, "repo": repo, "number": number, "url": link(pr.get("url"))},
+          "head_sha": clean(pr.get("headRefOid"), NAME_CAP), "copilot_round": last,
+          "new_commits": new}
+   if new == 0:
+      _mark_repeats(found, as_login(token))
+      last = out["copilot_round"] = copilot_round(found, reviews)
+      if check:
+         return {**out, "no_new_commits": True}
+      if last["rereview"] and last["new"] == 0:
+         said = (f"its latest review's {last['threads']} thread(s) only repeat ones already "
+                 "answered" if last["threads"] else "its latest review left no comments")
+         raise GitError(f"Copilot has nothing meaningfully new on {where}: {said}; it is ready "
+                        "for the user's review")
+      raise NoNewCommits(f"{where} has no new commits since Copilot's last review (of "
+                     f"{last['commit'][:HASH_SHOWN]}); merges of the base don't count. Publish "
+                     "the fixes first")
+   return out
+
+
+def request_copilot(owner: str, repo: str, number: int, token: str) -> dict:
+   """Ask Copilot to review the pull request."""
+   where = f"{owner}/{repo}#{number}"
+   try:
+      _request(
+         f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{number}/requested_reviewers",
+         method="POST", data=json.dumps({"reviewers": [COPILOT_REVIEWER]}).encode(),
+         headers={**github_headers(token), "Content-Type": "application/json"})
+   except urllib.error.HTTPError as e:
+      if e.code == 422:
+         try:
+            said = clean(json.loads(error_text(e) or "{}").get("message"), ERROR_SHOWN)
+         except ValueError:
+            said = ""
+         raise GitError(f"GitHub refused to ask Copilot to review {where} (422"
+                        f"{': ' + said if said else ''}): Copilot code review may be off for "
+                        "this repo, or the account's Copilot review quota used up") from None
+      raise refusal(e, f"{owner}/{repo}", WRITE_NEED) from None
+   except (OSError, ValueError) as e:
+      raise refusal(e, f"{owner}/{repo}", WRITE_NEED) from None
+   return {"requested": True}

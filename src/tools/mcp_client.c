@@ -439,7 +439,7 @@ static int do_request(mcp_client_t *c,
       return MCP_ERR_BACKPRESSURE;
    }
 
-   int sent = mcp_transport_send(c->transport, body, strlen(body));
+   int sent = mcp_transport_send_timed(c->transport, body, strlen(body), timeout_ms);
    json_object_put(req);
    if (sent != SUCCESS) {
       pthread_mutex_lock(&c->pending_mtx);

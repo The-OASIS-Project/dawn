@@ -324,6 +324,10 @@ static void *report_thread(void *arg) {
          fixed_line(line, sizeof(line), w, title ? title : rec.title);
          strbuf_append(&post, line);
       }
+      /* The way to its changes, Publish and Close from where its report is read
+       * (the WebUI turns the link into the changes viewer). */
+      strbuf_appendf(&post, "\n\n[View changes for job #%lld](#coding-job-%lld)", (long long)w->job,
+                     (long long)w->job);
       /* A take is noted once its row exists (now, or at the end of a turn
        * running there). */
       if (!strbuf_oom(&post)) {

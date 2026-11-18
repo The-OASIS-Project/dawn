@@ -791,6 +791,42 @@ static void test_coding_job_holds_agent_work(void) {
    TEST_ASSERT_EQUAL_INT64(child, holds);
 }
 
+/* A job moves under another chat of its owner's; nothing else moves or is moved under. */
+static void test_set_parent(void) {
+   int64_t a = 0, b = 0, bobs = 0, job = 0;
+   conv_db_create(alice_id, "chat a", &a);
+   conv_db_create(alice_id, "chat b", &b);
+   conv_db_create(bob_id, "bob's chat", &bobs);
+   conv_db_create_job(alice_id, "fix it", a, "detached", "notify", NULL, 1, "task", &job);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_parent(job, alice_id, b));
+   job_record_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(job, alice_id, &r));
+   TEST_ASSERT_EQUAL_INT64(b, r.parent_id);
+
+   /* Another user's job, a parent of another user's, a chat that isn't a job. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_set_parent(job, bob_id, bobs));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_set_parent(job, alice_id, bobs));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_set_parent(a, alice_id, b));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, conv_db_job_set_parent(job, alice_id, job)); /* itself */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(job, alice_id, &r));
+   TEST_ASSERT_EQUAL_INT64(b, r.parent_id);
+
+   /* Moved under a private chat it turns private; moved back, it stays private. */
+   int64_t priv = 0;
+   bool is_private = true;
+   conv_db_create(alice_id, "private chat", &priv);
+   conv_db_set_private(priv, alice_id, true, NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(job, alice_id, &is_private));
+   TEST_ASSERT_FALSE(is_private);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_parent(job, alice_id, priv));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(job, alice_id, &is_private));
+   TEST_ASSERT_TRUE(is_private);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_parent(job, alice_id, b));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(job, alice_id, &is_private));
+   TEST_ASSERT_TRUE(is_private);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_create_and_get);
@@ -821,5 +857,6 @@ int main(void) {
    RUN_TEST(test_job_inherits_parent_privacy);
    RUN_TEST(test_last_assistant_text);
    RUN_TEST(test_list_children);
+   RUN_TEST(test_set_parent);
    return UNITY_END();
 }

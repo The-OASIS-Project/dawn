@@ -215,7 +215,7 @@ static int http_start(mcp_transport_t *base) {
    return SUCCESS;
 }
 
-static int http_send(mcp_transport_t *base, const char *json, size_t len) {
+static int http_send(mcp_transport_t *base, const char *json, size_t len, long timeout_ms) {
    mcp_http_t *t = (mcp_http_t *)base;
    mcp_http_call_t call = { t, atomic_load(&t->gen) };
    if (atomic_load(&t->stopped)) {
@@ -237,6 +237,11 @@ static int http_send(mcp_transport_t *base, const char *json, size_t len) {
    DAWN_CURL_SET_PROTOCOLS(easy, "http,https");
    curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 0L);
    curl_apply_dawn_defaults(easy, MCP_HTTP_USER_AGENT, t->timeout_seconds, &resp);
+   /* A call given a longer wait than the server's (a long-poll) gets it here too,
+    * or curl would cut the request off before mcp_client stops waiting. */
+   if (timeout_ms > t->timeout_seconds * 1000) {
+      curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, timeout_ms);
+   }
    curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, t->tls_verify ? 1L : 0L);
    curl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, t->tls_verify ? 2L : 0L);
    curl_easy_setopt(easy, CURLOPT_HTTPHEADER, hdrs);

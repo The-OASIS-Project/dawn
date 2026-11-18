@@ -41,6 +41,7 @@
 #include "core/tool_call_challenge.h"
 #include "core/turn_origin.h"
 #include "dawn_error.h"
+#include "logging.h"
 #include "tools/coding_agent_gateway.h"
 #include "tools/coding_agent_internal.h"
 #include "tools/tool_pending.h"
@@ -55,7 +56,9 @@
 #define CA_REPO_MAX 64
 #define CA_TASK_MAX 4000 /* the task text sent (the gateway caps what it stores too) */
 #define CA_BRANCH_MAX 160
-#define CA_NAME_MAX 60 /* a job's short name, as the user hears it */
+#define CA_NAME_MAX 60      /* a job's short name, as the user hears it */
+#define CA_PR_URL_MAX 200   /* a pull request's address (the gateway's cap) */
+#define CA_FEEDBACK_MAX 512 /* what the revise result says of the feedback sent */
 
 typedef struct {
    pending_slot_t hdr;
@@ -64,7 +67,9 @@ typedef struct {
    char name[CONV_TITLE_MAX]; /* the job's title: the model's short name, else from the task */
    double budget_usd;         /* 0 = the gateway's default */
    int64_t parent_conv;
-   int64_t job; /* a revise: the finished job that gets the work */
+   int64_t job;              /* a revise: the finished job that gets the work */
+   bool merge_base;          /* a revise: the gateway merges the base in first */
+   char base[CA_BRANCH_MAX]; /* a revise: its base branch, as shown ("" unknown) */
 } ca_pending_t;
 
 PENDING_ITEM_CHECK(ca_pending_t);
@@ -124,24 +129,45 @@ static bool name_ok(const char *name) {
    return true;
 }
 
-/* Whether @p s has anything but spaces. */
-static bool has_text(const char *s) {
-   return s[strspn(s, " ")] != '\0';
-}
-
 /* Whether job @p job's work was closed at the gateway (its branch and clone are
- * gone): no revise can reach it.  False when the gateway can't tell. */
-static bool task_dropped(int user_id, int64_t job) {
+ * gone): no revise can reach it.  False when the gateway can't tell.  With
+ * @p pr_url, the pull request it published goes there ("" for none); with
+ * @p base, its base branch ("" when the gateway can't tell). */
+static bool task_dropped_pr(int user_id,
+                            int64_t job,
+                            char *pr_url,
+                            size_t pr_len,
+                            char *base,
+                            size_t base_len) {
    struct json_object *ans = NULL;
    char *err = NULL;
    bool dropped = false;
+   if (pr_url != NULL) {
+      pr_url[0] = '\0';
+   }
+   if (base != NULL) {
+      base[0] = '\0';
+   }
    if (coding_gateway_call(user_id, "task_list", coding_agent_job_args(job), &ans, &err) ==
        CODING_GW_OK) {
-      dropped = coding_gateway_jstr(json_object_object_get(ans, "task"), "closed")[0] != '\0';
+      struct json_object *task = json_object_object_get(ans, "task");
+      dropped = coding_gateway_jstr(task, "closed")[0] != '\0';
+      const char *url = coding_gateway_jstr(json_object_object_get(task, "published"), "pr_url");
+      if (pr_url != NULL && coding_publish_pr_url_ok(url)) {
+         snprintf(pr_url, pr_len, "%s", url);
+      }
+      const char *b = coding_gateway_jstr(task, "base");
+      if (base != NULL && strlen(b) < base_len && b[strcspn(b, "\r\n\"")] == '\0') {
+         snprintf(base, base_len, "%s", b);
+      }
    }
    json_object_put(ans);
    free(err);
    return dropped;
+}
+
+static bool task_dropped(int user_id, int64_t job) {
+   return task_dropped_pr(user_id, job, NULL, 0, NULL, 0);
 }
 
 /* A finished coding job of @p user_id the task names ("job 1977", "job #1977"),
@@ -242,7 +268,7 @@ char *coding_delegate_propose(struct json_object *details,
    if (p != NULL) {
       safe_strscpy(p->repo, repo);
       safe_strscpy(p->task, task);
-      if (has_text(name)) {
+      if (coding_agent_has_text(name)) {
          safe_strscpy(p->name, name);
       } else {
          conv_generate_title(task, p->name, sizeof(p->name));
@@ -438,7 +464,7 @@ int coding_delegate_describe(const char *value, char *out, size_t out_len, int *
       *valid_for_sec = pending_slots_valid_for(&s_pending_slots, slot, pending_slots_now());
    }
    pthread_mutex_unlock(&s_pending_mutex);
-   if (n > 0 && (size_t)n > TOOL_CALL_CHALLENGE_DESC_MAX - 48) {
+   if (n > 0 && (size_t)n > CA_DESCRIBE_ROOM) {
       snprintf(out, out_len,
                "the task is too long to approve by reply code; the user can ask for it "
                "again in the WebUI");
@@ -451,8 +477,15 @@ int coding_delegate_describe(const char *value, char *out, size_t out_len, int *
 
 #define CA_FOLLOW_UP "\n\nFollow-up: "
 #define CA_REVISE_REF_MAX 48
+/* A revise that merges the base waits for the gateway's mirror refresh (45 s at
+ * most there), the pull request's feedback (15 s) and the merge itself. */
+#define CA_REVISE_MERGE_TIMEOUT_MS 120000L
+#define CA_MERGE_SHOWN 8 /* conflicted files the result names */
 
-char *coding_revise_propose(struct json_object *details, int user_id, const turn_origin_t *origin) {
+char *coding_revise_propose(struct json_object *details,
+                            int user_id,
+                            int64_t parent_conv,
+                            const turn_origin_t *origin) {
    const int64_t job = coding_agent_details_job(details);
    job_record_t rec;
    char *bad = coding_agent_check_job(job, user_id, &rec);
@@ -464,7 +497,7 @@ char *coding_revise_propose(struct json_object *details, int user_id, const turn
    const double budget = json_object_object_get_ex(details, "budget_usd", &jbudget)
                              ? json_object_get_double(jbudget)
                              : 0.0;
-   if (!has_text(text)) {
+   if (!coding_agent_has_text(text)) {
       return coding_agent_error("revise needs {\"job\": N, \"instructions\": <the more work>}.");
    }
    if (strlen(text) >= CA_TASK_MAX) {
@@ -473,6 +506,10 @@ char *coding_revise_propose(struct json_object *details, int user_id, const turn
    if (budget < 0.0) {
       return coding_agent_error("budget_usd can't be negative (0 or none: the gateway's default).");
    }
+   bool merge_base = false;
+   if (!coding_agent_yes_no(details, "merge_base", false, &merge_base)) {
+      return coding_agent_error("merge_base is true or false.");
+   }
    if (strcmp(rec.job_status, "done") != 0 && strcmp(rec.job_status, "failed") != 0) {
       char msg[128];
       snprintf(msg, sizeof(msg),
@@ -480,7 +517,9 @@ char *coding_revise_propose(struct json_object *details, int user_id, const turn
                (long long)job, rec.job_status);
       return coding_agent_error(msg);
    }
-   if (task_dropped(user_id, job)) {
+   char pr_url[CA_PR_URL_MAX];
+   char base[CA_BRANCH_MAX];
+   if (task_dropped_pr(user_id, job, pr_url, sizeof(pr_url), base, sizeof(base))) {
       return coding_agent_error("That job was closed: its branch is gone, so it takes no more "
                                 "work. Start a new task (delegate) instead.");
    }
@@ -490,6 +529,7 @@ char *coding_revise_propose(struct json_object *details, int user_id, const turn
                                 "can't be replaced in a turn that read the coding agent's report. "
                                 "Ask the user about the waiting one first.");
    }
+   const bool moves = parent_conv > 0 && parent_conv != rec.parent_id;
    pending_stage_rc_t rc = PENDING_STAGED;
    pthread_mutex_lock(&s_pending_mutex);
    ca_pending_t *p = (ca_pending_t *)pending_slots_stage(&s_pending_slots, origin, user_id,
@@ -502,6 +542,10 @@ char *coding_revise_propose(struct json_object *details, int user_id, const turn
       safe_strscpy(p->name, rec.title);
       p->budget_usd = budget;
       p->job = job;
+      p->merge_base = merge_base;
+      safe_strscpy(p->base, base);
+      /* Set only when asked from another chat: the job moves there on the yes. */
+      p->parent_conv = moves ? parent_conv : 0;
    }
    pthread_mutex_unlock(&s_pending_mutex);
    coding_agent_preview_replaced(replaced);
@@ -512,16 +556,29 @@ char *coding_revise_propose(struct json_object *details, int user_id, const turn
    strbuf_init(&sb, CA_TASK_MAX);
    strbuf_appendf(&sb, "About to send coding job #%lld (\"%s\") more work, on its branch",
                   (long long)job, rec.title);
+   if (merge_base) {
+      strbuf_appendf(&sb, " (first merges %s into its branch)", base[0] ? base : "its base");
+   }
    if (budget > 0.0) {
       strbuf_appendf(&sb, ", adding up to $%.2f to its budget", budget);
    } else {
       strbuf_append(&sb, ", adding the gateway's usual task budget");
    }
+   strbuf_appendf(&sb, ":\n%s\n", text);
+   if (moves) {
+      strbuf_append(&sb, "Its report will come to this chat.\n");
+   }
+   if (pr_url[0] != '\0') {
+      strbuf_appendf(&sb,
+                     "If its pull request (%s) is still open, its open feedback (review threads, "
+                     "failing required checks) goes to the agent with this.\n",
+                     pr_url);
+   }
    strbuf_appendf(&sb,
-                  ":\n%s\nRead it to the user and ask them to confirm; if they say yes in their "
+                  "Read it to the user and ask them to confirm; if they say yes in their "
                   "reply, call coding_agent with action 'confirm_revise' and arguments "
                   "{\"id\": %u} (this one only).",
-                  text, (unsigned)id);
+                  (unsigned)id);
    return strbuf_steal(&sb);
 }
 
@@ -547,9 +604,86 @@ static char *revised_goal(int64_t job, int user_id, const char *text) {
    return strbuf_steal(&sb);
 }
 
+/* What the gateway sent the agent of its pull request's open feedback, as a
+ * sentence for the result (" ..."), or "" when it has no open pull request. */
+static void feedback_line(struct json_object *ans, char *out, size_t len) {
+   out[0] = '\0';
+   struct json_object *fb = json_object_object_get(ans, "feedback");
+   const char *why = coding_gateway_jstr(ans, "feedback_error");
+   if (json_object_is_type(fb, json_type_object)) {
+      const int threads = json_object_get_int(json_object_object_get(fb, "threads"));
+      const int checks = json_object_get_int(json_object_object_get(fb, "checks"));
+      const char *url = coding_gateway_jstr(fb, "pr_url");
+      if (threads == 0 && checks == 0) {
+         snprintf(out, len, " Its pull request has no open feedback.");
+      } else {
+         snprintf(out, len,
+                  " With it went %d review thread%s and %d failing required check%s from %s; "
+                  "the agent reports which commit addresses each thread.",
+                  threads, threads == 1 ? "" : "s", checks, checks == 1 ? "" : "s",
+                  coding_publish_pr_url_ok(url) ? url : "its pull request");
+      }
+   } else if (why[0] != '\0') {
+      snprintf(out, len,
+               " The gateway couldn't read its pull request's feedback (%s), so the agent works "
+               "from the instructions alone.",
+               why);
+   }
+}
+
+/* What the gateway's merge of the base did, as a sentence for the result
+ * (" ..."), or "" when none was asked. */
+static void merge_line(struct json_object *ans, const char *base, char *out, size_t len) {
+   out[0] = '\0';
+   struct json_object *m = json_object_object_get(ans, "merge");
+   if (!json_object_is_type(m, json_type_object)) {
+      return;
+   }
+   const char *b = base[0] ? base : "the base branch";
+   struct json_object *files = json_object_object_get(m, "conflicts");
+   if (json_object_is_type(files, json_type_array)) {
+      strbuf_t sb;
+      strbuf_init(&sb, 256);
+      const size_t n = json_object_array_length(files);
+      const size_t shown = n < CA_MERGE_SHOWN ? n : CA_MERGE_SHOWN;
+      const int total = json_object_get_int(json_object_object_get(m, "conflicts_count"));
+      for (size_t i = 0; i < shown; i++) {
+         strbuf_appendf(&sb, "%s%s", i ? ", " : "",
+                        json_object_get_string(json_object_array_get_idx(files, i)));
+      }
+      const int more = (total > (int)n ? total : (int)n) - (int)shown;
+      if (more > 0) {
+         strbuf_appendf(&sb, " and %d more", more);
+      }
+      char *list = strbuf_steal(&sb);
+      snprintf(out, len,
+               " Merging %s conflicted in %s; the agent resolves them and concludes the merge.", b,
+               list ? list : "some files");
+      free(list);
+      return;
+   }
+   const char *merged = coding_gateway_jstr(m, "merged");
+   if (strcmp(merged, "up to date") == 0) {
+      snprintf(out, len, " Its branch already had %s; nothing to merge.", b);
+   } else if (merged[0] != '\0') {
+      snprintf(out, len, " The gateway merged %s into its branch first (now at %.12s).", b, merged);
+   }
+}
+
 /* Send the follow-up to job @p job's task: once more with the same reference
- * when the first answer was lost (the gateway adds nothing for a repeat). */
-static int revise_task(int user_id, int64_t job, const ca_pending_t *p, char **err) {
+ * when the first answer was lost (the gateway adds nothing for a repeat).  What
+ * went with it of its pull request's feedback goes to @p fb, and what its merge
+ * of the base did to @p mg (sentences). */
+static int revise_task(int user_id,
+                       int64_t job,
+                       const ca_pending_t *p,
+                       char *fb,
+                       size_t fb_len,
+                       char *mg,
+                       size_t mg_len,
+                       char **err) {
+   fb[0] = '\0';
+   mg[0] = '\0';
    char ref[CA_REVISE_REF_MAX];
    snprintf(ref, sizeof(ref), "rev:%lld.%lld.%u", (long long)time(NULL), (long long)p->hdr.made_at,
             (unsigned)p->hdr.item_id);
@@ -567,8 +701,16 @@ static int revise_task(int user_id, int64_t job, const ca_pending_t *p, char **e
       if (p->budget_usd > 0.0) {
          json_object_object_add(args, "budget_usd", json_object_new_double(p->budget_usd));
       }
+      if (p->merge_base) {
+         json_object_object_add(args, "merge_base", json_object_new_boolean(true));
+      }
       struct json_object *ans = NULL;
-      rc = coding_gateway_call(user_id, "task_revise", args, &ans, err);
+      rc = coding_gateway_call_timed(user_id, "task_revise", args,
+                                     p->merge_base ? CA_REVISE_MERGE_TIMEOUT_MS : 0, &ans, err);
+      if (rc == CODING_GW_OK) {
+         feedback_line(ans, fb, fb_len);
+         merge_line(ans, p->base, mg, mg_len);
+      }
       json_object_put(ans);
    }
    return rc;
@@ -635,7 +777,9 @@ char *coding_revise_confirm(struct json_object *details, int user_id, const turn
    conv_event_emit(p.job, user_id, CONV_EVENT_RESUME, strdup("{\"continued\":true}"));
 
    char *err = NULL;
-   const int sent = revise_task(user_id, p.job, &p, &err);
+   char fb[CA_FEEDBACK_MAX];
+   char mg[CA_FEEDBACK_MAX];
+   const int sent = revise_task(user_id, p.job, &p, fb, sizeof(fb), mg, sizeof(mg), &err);
    /* No answer twice: open only if the gateway says its task is.  Unknown too
     * (it is most likely down, so nothing got through) puts the job back. */
    const ca_task_state_t state = sent == CODING_GW_FAILED ? task_state(user_id, p.job)
@@ -647,6 +791,18 @@ char *coding_revise_confirm(struct json_object *details, int user_id, const turn
       return coding_agent_error_free(err);
    }
    free(err);
+   /* Asked from another chat: the job moves there, so its report reaches it. */
+   if (p.parent_conv > 0 && p.parent_conv != before.parent_id) {
+      const int moved = conv_db_job_set_parent(p.job, user_id, p.parent_conv);
+      if (moved == AUTH_DB_SUCCESS) {
+         conv_event_emit(p.parent_conv, user_id, CONV_EVENT_SPAWN,
+                         event_payload_spawn(p.job, before.title));
+      } else {
+         OLOG_WARNING("coding_agent: job %lld not moved to chat %lld (rc=%d); its report goes "
+                      "to its old chat",
+                      (long long)p.job, (long long)p.parent_conv, moved);
+      }
+   }
    const time_t started = before.started_at ? before.started_at : time(NULL);
    job_record_t now;
    const bool running = conv_db_job_set_running(p.job, started) == AUTH_DB_SUCCESS;
@@ -686,8 +842,8 @@ char *coding_revise_confirm(struct json_object *details, int user_id, const turn
    strbuf_init(&sb, 256);
    strbuf_appendf(&sb,
                   "Sent coding job #%lld (\"%s\") the follow-up; its agent picks up on the same "
-                  "branch. The user hears when it needs them or finishes.",
-                  (long long)p.job, p.name);
+                  "branch.%s%s The user hears when it needs them or finishes.",
+                  (long long)p.job, p.name, mg, fb);
    return strbuf_steal(&sb);
 }
 
@@ -711,12 +867,18 @@ int coding_revise_describe(const char *value, char *out, size_t out_len, int *va
       if (p->budget_usd > 0.0) {
          snprintf(budget, sizeof(budget), "up to $%.2f", p->budget_usd);
       }
-      n = snprintf(out, out_len, "send coding job #%lld (\"%s\") more work, adding %s: %s",
-                   (long long)p->job, p->name, budget, p->task);
+      char merge[CA_BRANCH_MAX + 48] = "";
+      if (p->merge_base) {
+         snprintf(merge, sizeof(merge), " (first merges %s into its branch)",
+                  p->base[0] ? p->base : "its base");
+      }
+      n = snprintf(out, out_len, "send coding job #%lld (\"%s\") more work%s, adding %s%s: %s",
+                   (long long)p->job, p->name, merge, budget,
+                   p->parent_conv > 0 ? "; its report comes to this chat" : "", p->task);
       *valid_for_sec = pending_slots_valid_for(&s_pending_slots, slot, pending_slots_now());
    }
    pthread_mutex_unlock(&s_pending_mutex);
-   if (n > 0 && (size_t)n > TOOL_CALL_CHALLENGE_DESC_MAX - 48) {
+   if (n > 0 && (size_t)n > CA_DESCRIBE_ROOM) {
       snprintf(out, out_len,
                "the follow-up is too long to approve by reply code; the user can ask for it "
                "again in the WebUI");
