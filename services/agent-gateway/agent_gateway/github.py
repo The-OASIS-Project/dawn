@@ -284,9 +284,9 @@ def adopt_pull_request(owner, repo, token, branch, base, earlier_pr) -> str:
    return url
 
 
-def pr_state(pr_url: str, token: str) -> str | None:
-   """The pull request at `pr_url` (https://github.com/o/r/pull/N): "open",
-   "merged" or "closed", or None when it can't be read."""
+def read_pull_request(pr_url: str, token: str) -> dict | None:
+   """The pull request at `pr_url` (https://github.com/o/r/pull/N) as GitHub's
+   API gives it, or None when it can't be read."""
    found = github_url(pr_url)
    if not found or not found[2]:
       return None
@@ -294,7 +294,31 @@ def pr_state(pr_url: str, token: str) -> str | None:
       pr = github_get(f"/repos/{found[0]}/{found[1]}/pulls/{found[2]}", token)
    except (OSError, ValueError):
       return None
+   return pr if isinstance(pr, dict) else None
+
+
+def state_of(pr: dict | None) -> str | None:
+   """A pull request read by read_pull_request: "open", "merged" or "closed", or
+   None when it couldn't be read."""
+   if pr is None:
+      return None
    return "merged" if pr.get("merged_at") else pr.get("state")
+
+
+def pr_state(pr_url: str, token: str) -> str | None:
+   """The pull request at `pr_url`: "open", "merged" or "closed", or None when it
+   can't be read."""
+   return state_of(read_pull_request(pr_url, token))
+
+
+def update_pull_request(pr_url: str, token: str, title: str | None, body: str | None) -> None:
+   """Replace the title and/or description of the pull request at `pr_url`."""
+   found = github_url(pr_url)
+   if not found or not found[2]:
+      raise GitError(f"not a pull request's address: {pr_url}")
+   fields = {k: v for k, v in (("title", title), ("body", body)) if v is not None}
+   _request(f"{GITHUB_API}/repos/{found[0]}/{found[1]}/pulls/{found[2]}", method="PATCH",
+            data=json.dumps(fields).encode(), headers=github_headers(token))
 
 
 # --- refusals -------------------------------------------------------------------
