@@ -206,6 +206,10 @@ bool llm_cache_monitor_in_side_call(void) {
           !llm_call_kind_sets_context((llm_call_kind_t)t_kind);
 }
 
+session_t *llm_cache_monitor_conversation_session(void) {
+   return llm_cache_monitor_in_side_call() ? NULL : session_get_command_context();
+}
+
 bool llm_cache_monitor_one_off_call(void) {
    /* A compaction's summary; memory extraction and its backfilled summaries:
     * each request is built for one conversation or batch and sent once. */

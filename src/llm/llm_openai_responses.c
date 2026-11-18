@@ -348,8 +348,12 @@ static struct json_object *build_responses_request(struct json_object *history,
       json_object_object_add(root, "input", input);
    }
 
-   /* max_output_tokens */
-   json_object_object_add(root, "max_output_tokens", json_object_new_int(g_config.llm.max_tokens));
+   /* max_output_tokens: reasoning counts toward it, so it follows the effort
+    * (every Responses request is streamed); held to the window once the tools
+    * are attached (below). */
+   const int max_output = llm_reply_max_tokens(LLM_CLOUD, CLOUD_PROVIDER_OPENAI, model_name,
+                                               &resolved, true);
+   json_object_object_add(root, "max_output_tokens", json_object_new_int(max_output));
 
    /* Tools.  The loop's last call (iteration at the cap), for a text answer:
     * the tools stay (the request reads as every other did), none may be
@@ -372,6 +376,15 @@ static struct json_object *build_responses_request(struct json_object *history,
          }
       }
    }
+
+   /* Held to the room the window leaves, the tools included; replaced in
+    * place.  input_text counts only when the input above appended it. */
+   struct json_object *request_tools = NULL;
+   json_object_object_get_ex(root, "tools", &request_tools);
+   json_object_object_add(root, "max_output_tokens",
+                          json_object_new_int(
+                              llm_context_fit_reply(max_output, history, input_text, request_tools,
+                                                    LLM_CLOUD, CLOUD_PROVIDER_OPENAI, model_name)));
 
    return root;
 }

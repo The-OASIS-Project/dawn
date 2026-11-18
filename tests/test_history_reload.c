@@ -731,7 +731,7 @@ static void run_turn(int64_t conv, const char *question, script_t script) {
 
 static char *claude_request(struct json_object *history) {
    struct json_object *req = convert_to_claude_format(history, NULL, MODEL, CARRIER, 0,
-                                                      s_tool_defs != NULL);
+                                                      s_tool_defs != NULL, true);
    TEST_ASSERT_NOT_NULL(req);
    char *out = strdup(json_object_to_json_string_ext(req, FLAGS));
    json_object_put(req);
@@ -1116,7 +1116,6 @@ static void test_a_compaction_at_the_seam(void) {
    run_turn(s_conv, "Q7", (script_t){ .reply = "A7" });
    assert_live_is_reload(s_conv, "A7");
 }
-
 
 /* ---- two sessions on one conversation ---- */
 
@@ -1525,6 +1524,23 @@ static void test_a_failed_turn_takes_its_tool_change_back(void) {
    TEST_ASSERT_NOT_NULL(strstr(req, SIGNED));
    free(req);
    assert_live_is_reload(s_conv, SIGNED);
+}
+
+/* The window's room (llm_context.c, not linked): the ceiling as given. */
+int llm_context_fit_reply(int max_tokens,
+                          struct json_object *history,
+                          const char *input_text,
+                          struct json_object *tools,
+                          llm_type_t type,
+                          cloud_provider_t provider,
+                          const char *model) {
+   (void)history;
+   (void)input_text;
+   (void)tools;
+   (void)type;
+   (void)provider;
+   (void)model;
+   return max_tokens;
 }
 
 int main(void) {

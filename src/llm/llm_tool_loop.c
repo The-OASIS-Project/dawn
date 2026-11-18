@@ -131,14 +131,14 @@ static char *build_reasoning_json(const llm_tool_response_t *result, const char 
 }
 
 /* A request of this call's session is being sent: its size estimate, to
- * calibrate its model's density when its usage comes back (llm_compaction.h). */
+ * calibrate its model's density when its usage comes back (llm_compaction.h).
+ * Counted as the reply clamp counts it: a question already in the history
+ * (a session's turn appends it before the loop) counts once. */
 static void note_request(const llm_tool_loop_params_t *params, const char *input) {
    if (!params->has_session) {
       return;
    }
-   const size_t input_len = input ? strlen(input) : 0;
-   const int estimate = llm_context_estimate_tokens(params->conversation_history) +
-                        (int)(input_len / 4);
+   const int estimate = llm_compaction_request_estimate(params->conversation_history, input);
    llm_context_note_request(params->session_id, estimate, params->llm_type, params->cloud_provider,
                             params->model);
 }

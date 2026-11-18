@@ -139,7 +139,7 @@ static char *claude_chat_completion_once(struct json_object *conversation_histor
    char carrier[LLM_CARRIER_MAX];
    llm_request_carrier(base_url, api_key, carrier, sizeof(carrier));
    json_object *request = convert_to_claude_format(conversation_history, input_text, model, carrier,
-                                                   0, claude_betas_render_inline(base_url));
+                                                   0, claude_betas_render_inline(base_url), false);
    if (!request) {
       OLOG_ERROR("Failed to convert conversation to Claude format");
       return NULL;
@@ -526,7 +526,7 @@ static int claude_single_shot_once(struct json_object *conversation_history,
    char carrier[LLM_CARRIER_MAX];
    llm_request_carrier(base_url, api_key, carrier, sizeof(carrier));
    request = convert_to_claude_format(conversation_history, input_text, model, carrier, iteration,
-                                      claude_betas_render_inline(base_url));
+                                      claude_betas_render_inline(base_url), true);
    if (!request) {
       OLOG_ERROR("Failed to convert conversation to Claude format");
       return 1;

@@ -86,14 +86,27 @@ typedef struct {
 } cost_entry_t;
 
 static const cost_entry_t COST_TABLE[] = {
-   /* Anthropic — March 2026 published rates */
-   { "claude", "claude-haiku-5-5", 0.10, 0.50 }, /* prompts up to 100K tokens (5x above) */
+   /* Anthropic — platform.claude.com/docs/en/about-claude/pricing, 2026-11-15 */
+   { "claude", "claude-fable-5-2", 8.00, 40.00 },
+   { "claude", "claude-fable-5", 10.00, 50.00 }, /* Fable 5 and 5.1 */
+   { "claude", "claude-mythos-5-2", 8.00, 40.00 },
+   { "claude", "claude-mythos-5", 10.00, 50.00 }, /* Mythos 5 and 5.1 */
+   { "claude", "claude-haiku-5-5", 0.10, 0.50 },  /* prompts up to 100K tokens (5x above) */
    { "claude", "claude-haiku-4-5", 1.00, 5.00 },
    { "claude", "claude-3-5-haiku", 0.80, 4.00 },
-   { "claude", "claude-sonnet", 3.00, 15.00 },
-   { "claude", "claude-opus", 15.00, 75.00 },
-   { "claude", "claude", 1.00, 5.00 }, /* generic Claude fallback */
-   /* OpenAI */
+   { "claude", "claude-sonnet-5", 2.00, 10.00 }, /* Sonnet 5 and 5.5 */
+   { "claude", "claude-sonnet", 3.00, 15.00 },   /* Sonnet 4.5 and 4.6 */
+   { "claude", "claude-opus-5-5", 4.00, 20.00 },
+   { "claude", "claude-opus", 5.00, 25.00 }, /* Opus 4.5 through 5 (4 and 4.1 are retired) */
+   { "claude", "claude", 1.00, 5.00 },       /* generic Claude fallback */
+   /* OpenAI — developers.openai.com model pages, 2026-11-16; prompts up to 272K tokens */
+   { "openai", "gpt-6-astra", 10.00, 50.00 },
+   { "openai", "gpt-6-cyber", 20.00, 100.00 },
+   { "openai", "gpt-6-sol", 2.00, 10.00 },
+   { "openai", "gpt-6.1-sol", 2.00, 10.00 },
+   { "openai", "gpt-6.1-terra", 1.00, 5.00 },
+   { "openai", "gpt-6-luna", 0.10, 0.50 },
+   { "openai", "gpt-5.6-cyber", 12.50, 75.00 },
    { "openai", "gpt-4o-mini", 0.15, 0.60 },
    { "openai", "gpt-4o", 2.50, 10.00 },
    { "openai", "gpt-5", 2.50, 10.00 },

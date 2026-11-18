@@ -452,6 +452,52 @@ void test_estimate_haiku_5_5_has_its_own_rate(void) {
                              est.cost_high_usd);
 }
 
+static double estimate_high_on(const char *provider, const char *model) {
+   snprintf(g_config.memory.extraction_provider, sizeof(g_config.memory.extraction_provider), "%s",
+            provider);
+   snprintf(g_config.memory.extraction_model, sizeof(g_config.memory.extraction_model), "%s",
+            model);
+   memory_db_admin_cost_estimate_t est = { 0 };
+   TEST_ASSERT_EQUAL(SUCCESS, memory_db_admin_estimate_reextract_cost(1, &est));
+   TEST_ASSERT_TRUE(est.rates_known);
+   return est.cost_high_usd;
+}
+
+void test_estimate_cloud_model_rates(void) {
+   /* Haiku 4.5 is $1 / $5; each of these keeps the same 1:5 ratio, so its
+    * estimate is a fixed multiple of Haiku 4.5's. */
+   const double haiku = estimate_high_on("claude", "claude-haiku-4-5");
+   TEST_ASSERT_TRUE(haiku > 0.0);
+   const struct {
+      const char *model;
+      double multiple;
+   } cases[] = {
+      { "claude-fable-5-2", 8.0 },  { "claude-fable-5-1", 10.0 },  { "claude-fable-5", 10.0 },
+      { "claude-opus-5-5", 4.0 },   { "claude-opus-5", 5.0 },      { "claude-opus-4-8", 5.0 },
+      { "claude-sonnet-5-5", 2.0 }, { "claude-sonnet-5", 2.0 },    { "claude-sonnet-4-6", 3.0 },
+      { "claude-mythos-5-2", 8.0 }, { "claude-mythos-5-1", 10.0 }, { "claude-mythos-5", 10.0 },
+   };
+   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      TEST_ASSERT_DOUBLE_WITHIN_MESSAGE(haiku * 0.001, haiku * cases[i].multiple,
+                                        estimate_high_on("claude", cases[i].model), cases[i].model);
+   }
+   /* GPT-6: each at the same 1:5. */
+   const struct {
+      const char *model;
+      double multiple;
+   } gpt6[] = {
+      { "gpt-6-astra", 10.0 }, { "gpt-6-cyber", 20.0 },  { "gpt-6-sol", 2.0 },
+      { "gpt-6.1-sol", 2.0 },  { "gpt-6.1-terra", 1.0 }, { "gpt-6-luna", 0.1 },
+   };
+   for (size_t i = 0; i < sizeof(gpt6) / sizeof(gpt6[0]); i++) {
+      TEST_ASSERT_DOUBLE_WITHIN_MESSAGE(haiku * 0.001, haiku * gpt6[i].multiple,
+                                        estimate_high_on("openai", gpt6[i].model), gpt6[i].model);
+   }
+   /* GPT-5.6 Cyber ($12.50 / $75) has its own row, above the gpt-5 family's. */
+   TEST_ASSERT_TRUE(estimate_high_on("openai", "gpt-5.6-cyber") >
+                    estimate_high_on("openai", "gpt-5.6-luna") * 4.0);
+}
+
 void test_estimate_unknown_local_provider_marks_uncosted(void) {
    strncpy(g_config.memory.extraction_provider, "local",
            sizeof(g_config.memory.extraction_provider) - 1);
@@ -652,6 +698,7 @@ int main(void) {
    RUN_TEST(test_reset_derived_invalid_user_fails);
    RUN_TEST(test_estimate_uses_real_template_size);
    RUN_TEST(test_estimate_haiku_5_5_has_its_own_rate);
+   RUN_TEST(test_estimate_cloud_model_rates);
    RUN_TEST(test_estimate_unknown_local_provider_marks_uncosted);
    RUN_TEST(test_estimate_after_reset_includes_all_conversations);
    RUN_TEST(test_worker_is_running_starts_false);

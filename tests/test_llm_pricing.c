@@ -50,11 +50,34 @@ void test_shipped_models_toml_parses(void) {
    toml_datum_t window = toml_int_in(toml_table_in(s_root, "anthropic"), "claude-opus-5");
    TEST_ASSERT_TRUE(window.ok);
    TEST_ASSERT_EQUAL_INT64(1000000, window.u.i);
+   /* GPT-5.6 Cyber has its own, smaller window than the gpt-5.6 row; each GPT-6
+    * model is listed by name. */
+   toml_table_t *openai = toml_table_in(s_root, "openai");
+   TEST_ASSERT_EQUAL_INT64(400000, toml_int_in(openai, "gpt-5.6-cyber").u.i);
+   const char *gpt6[] = { "gpt-6-astra",   "gpt-6-sol",  "gpt-6.1-sol",
+                          "gpt-6.1-terra", "gpt-6-luna", "gpt-6-cyber" };
+   for (size_t i = 0; i < sizeof(gpt6) / sizeof(gpt6[0]); i++) {
+      TEST_ASSERT_EQUAL_INT64_MESSAGE(1050000, toml_int_in(openai, gpt6[i]).u.i, gpt6[i]);
+   }
 }
 
 void test_anthropic_prices_per_model(void) {
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f, price(CLOUD_PROVIDER_CLAUDE, "claude-opus-5-5").read);
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.025f, price(CLOUD_PROVIDER_CLAUDE, "claude-fable-5-1").read);
+   const llm_cache_pricing_t fable52 = price(CLOUD_PROVIDER_CLAUDE, "claude-fable-5-2");
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.025f, fable52.read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.25f, fable52.write_5m);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.00f, fable52.write_1h);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.025f, price(CLOUD_PROVIDER_CLAUDE, "claude-mythos-5-2").read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.025f, price(CLOUD_PROVIDER_CLAUDE, "claude-mythos-5-1").read);
+   /* Sonnet 5.5: $0.10 reads, $2.50 / $4 writes, on $2. */
+   const llm_cache_pricing_t sonnet55 = price(CLOUD_PROVIDER_CLAUDE, "claude-sonnet-5-5");
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f, sonnet55.read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.25f, sonnet55.write_5m);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.00f, sonnet55.write_1h);
+   /* Fable 5 and Mythos 5 read at $1 on $10: the default. */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, price(CLOUD_PROVIDER_CLAUDE, "claude-fable-5").read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, price(CLOUD_PROVIDER_CLAUDE, "claude-mythos-5").read);
    /* Everything else falls to the "claude" row. */
    const llm_cache_pricing_t sonnet = price(CLOUD_PROVIDER_CLAUDE, "claude-sonnet-5");
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, sonnet.read);
@@ -70,6 +93,33 @@ void test_openai_and_gemini_prices_per_model(void) {
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.50f, price(CLOUD_PROVIDER_OPENAI, "gpt-4o-mini").read);
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.25f, price(CLOUD_PROVIDER_OPENAI, "o4-mini").read);
    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, price(CLOUD_PROVIDER_GEMINI, "gemini-3-flash").read);
+}
+
+void test_gpt6_astra_and_gemini_4_prices(void) {
+   const llm_cache_pricing_t astra = price(CLOUD_PROVIDER_OPENAI, "gpt-6-astra");
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, astra.read);     /* $1 on $10 */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.25f, astra.write_5m); /* the default 30-minute write */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.50f, astra.write_1h); /* the 12-hour write */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.50f, price(CLOUD_PROVIDER_OPENAI, "gpt-6.1-sol").write_1h);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.50f, price(CLOUD_PROVIDER_OPENAI, "gpt-5.6-luna").write_1h);
+   /* Before GPT-5.6, writes cost nothing extra. */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.00f, price(CLOUD_PROVIDER_OPENAI, "gpt-5.5").write_1h);
+   /* The rest of GPT-6: 6.1 reads at 0.05x, the others 0.10x; writes 1.25x. */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, price(CLOUD_PROVIDER_OPENAI, "gpt-6-sol").read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f, price(CLOUD_PROVIDER_OPENAI, "gpt-6.1-sol").read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f, price(CLOUD_PROVIDER_OPENAI, "gpt-6.1-terra").read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, price(CLOUD_PROVIDER_OPENAI, "gpt-6-luna").read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.25f, price(CLOUD_PROVIDER_OPENAI, "gpt-6-cyber").write_5m);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f,
+                            price(CLOUD_PROVIDER_OPENROUTER, "openai/gpt-6.1-terra").read);
+   /* Gemini 4: implicit caching only, reads at 0.05x, no write premium. */
+   const llm_cache_pricing_t hydrogen = price(CLOUD_PROVIDER_GEMINI, "gemini-4-hydrogen");
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f, hydrogen.read);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.00f, hydrogen.write_5m);
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.05f,
+                            price(CLOUD_PROVIDER_OPENROUTER, "google/gemini-4-carbon").read);
+   /* Gemini 3 keeps the family row. */
+   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.10f, price(CLOUD_PROVIDER_GEMINI, "gemini-3.7-flash").read);
 }
 
 void test_openrouter_prices_by_vendor(void) {
@@ -109,6 +159,7 @@ int main(void) {
    RUN_TEST(test_shipped_models_toml_parses);
    RUN_TEST(test_anthropic_prices_per_model);
    RUN_TEST(test_openai_and_gemini_prices_per_model);
+   RUN_TEST(test_gpt6_astra_and_gemini_4_prices);
    RUN_TEST(test_openrouter_prices_by_vendor);
    RUN_TEST(test_saved_tokens);
    RUN_TEST(test_defaults_without_a_registry);
