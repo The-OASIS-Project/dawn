@@ -43,9 +43,9 @@
 #define CG_HASH_SHOWN 8            /* a commit's hash, as shown */
 #define CG_NAME_SHOWN 120          /* a check's, path's or login's characters */
 
-/* The gateway's arguments naming the pull request a call names: the one job
- * {job} published, or {ref, repo}.  NULL with the error result in *@p refusal. */
-static struct json_object *pr_args(struct json_object *details, int user_id, char **refusal) {
+struct json_object *coding_github_pr_args(struct json_object *details,
+                                          int user_id,
+                                          char **refusal) {
    *refusal = NULL;
    const int64_t job = coding_agent_details_job(details);
    if (job != 0) {
@@ -73,12 +73,10 @@ static struct json_object *pr_args(struct json_object *details, int user_id, cha
    return args;
 }
 
-/* Call @p tool on the gateway with @p args; NULL with the error result in
- * *@p refusal. */
-static struct json_object *pr_call(int user_id,
-                                   const char *tool,
-                                   struct json_object *args,
-                                   char **refusal) {
+struct json_object *coding_github_call(int user_id,
+                                       const char *tool,
+                                       struct json_object *args,
+                                       char **refusal) {
    struct json_object *ans = NULL;
    char *err = NULL;
    if (coding_gateway_call(user_id, tool, args, &ans, &err) != CODING_GW_OK) {
@@ -269,8 +267,8 @@ static void append_reviews(strbuf_t *sb, struct json_object *ans) {
 
 char *coding_github_pr_status(struct json_object *details, int user_id) {
    char *refusal = NULL;
-   struct json_object *args = pr_args(details, user_id, &refusal);
-   struct json_object *ans = args ? pr_call(user_id, "pr_status", args, &refusal) : NULL;
+   struct json_object *args = coding_github_pr_args(details, user_id, &refusal);
+   struct json_object *ans = args ? coding_github_call(user_id, "pr_status", args, &refusal) : NULL;
    if (ans == NULL) {
       return refusal;
    }
@@ -308,8 +306,13 @@ static void append_thread(strbuf_t *sb, struct json_object *t) {
    if (line[0] != '\0') {
       strbuf_appendf(sb, ":%s", line);
    }
-   strbuf_appendf(sb, "%s%s\n", jbool(t, "outdated") ? " (outdated)" : "",
+   strbuf_appendf(sb, "%s%s", jbool(t, "outdated") ? " (outdated)" : "",
                   jbool(t, "resolved") ? " (resolved)" : "");
+   const char *repeat = coding_gateway_jstr(t, "repeat_of");
+   if (repeat[0] != '\0') {
+      strbuf_appendf(sb, " (repeats comment_id %s, already answered)", repeat);
+   }
+   strbuf_append(sb, "\n");
    struct json_object *comments = json_object_object_get(t, "comments");
    const size_t n = json_object_is_type(comments, json_type_array)
                         ? json_object_array_length(comments)
@@ -323,13 +326,33 @@ static void append_thread(strbuf_t *sb, struct json_object *t) {
    }
 }
 
+/* Copilot's latest review, and whether the review loop is done: a re-review
+ * whose threads only repeat ones already answered has nothing new to fix. */
+static void append_copilot_round(strbuf_t *sb, struct json_object *round) {
+   if (!json_object_is_type(round, json_type_object)) {
+      return;
+   }
+   const int threads = json_object_get_int(json_object_object_get(round, "threads"));
+   const int fresh = json_object_get_int(json_object_object_get(round, "new"));
+   strbuf_appendf(sb,
+                  "Copilot's latest review (of %.*s): %d thread%s, %d new, %s repeating "
+                  "answered ones.\n",
+                  CG_HASH_SHOWN, coding_gateway_jstr(round, "commit"), threads,
+                  threads == 1 ? "" : "s", fresh, coding_gateway_jstr(round, "repeats"));
+   if (jbool(round, "rereview") && fresh == 0) {
+      strbuf_append(sb, "Copilot has nothing meaningfully new: the review loop is done and the "
+                        "pull request is ready for the user's review. Don't ask Copilot again.\n");
+   }
+}
+
 char *coding_github_pr_threads(struct json_object *details, int user_id) {
    char *refusal = NULL;
-   struct json_object *args = pr_args(details, user_id, &refusal);
+   struct json_object *args = coding_github_pr_args(details, user_id, &refusal);
    if (args != NULL && jbool(details, "all")) {
       json_object_object_add(args, "all", json_object_new_boolean(true));
    }
-   struct json_object *ans = args ? pr_call(user_id, "pr_threads", args, &refusal) : NULL;
+   struct json_object *ans = args ? coding_github_call(user_id, "pr_threads", args, &refusal)
+                                  : NULL;
    if (ans == NULL) {
       return refusal;
    }
@@ -343,6 +366,7 @@ char *coding_github_pr_threads(struct json_object *details, int user_id) {
                   jbool(details, "all") ? "All" : "Unresolved", CG_HASH_SHOWN,
                   coding_gateway_jstr(ans, "head_sha"), coding_gateway_jstr(ans, "total"),
                   jbool(ans, "truncated") ? " (not all shown: GitHub's answer was cut)" : "");
+   append_copilot_round(&sb, json_object_object_get(ans, "copilot_round"));
    size_t i = 0;
    for (; i < n && strbuf_len(&sb) < CG_THREADS_MAX - CG_ROOM; i++) {
       append_thread(&sb, json_object_array_get_idx(threads, i));
@@ -383,11 +407,12 @@ char *coding_github_pr_log(struct json_object *details, int user_id) {
                                 "as pr_status lists it>\"}, with the pull request's ref or job.");
    }
    char *refusal = NULL;
-   struct json_object *args = pr_args(details, user_id, &refusal);
+   struct json_object *args = coding_github_pr_args(details, user_id, &refusal);
    if (args != NULL) {
       json_object_object_add(args, "check", json_object_new_string(check));
    }
-   struct json_object *ans = args ? pr_call(user_id, "pr_check_log", args, &refusal) : NULL;
+   struct json_object *ans = args ? coding_github_call(user_id, "pr_check_log", args, &refusal)
+                                  : NULL;
    if (ans == NULL) {
       return refusal;
    }

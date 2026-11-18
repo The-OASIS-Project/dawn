@@ -44,6 +44,9 @@ from .github import GitError, adopt_pull_request, error_text, github_url, open_p
 log = logging.getLogger("agent-gateway")
 
 SUBMODULE_TIMEOUT_S = 300  # fetching a clone's submodules before its task starts
+# Refreshing the mirror for a revise's merge, which DAWN waits for (it then
+# merges what the mirror has, and names the commit).
+MERGE_REFRESH_S = 45
 
 # Mount points the Claude Code sandbox puts over protected paths (seen with
 # 2.1.317).  They exist only inside the sandbox, but `git add -A` there would
@@ -66,6 +69,7 @@ REPLY_CAP = 900 * 1024
 FILES_CAP = 2000          # changed files in one changes listing (protected first)
 TREE_CAP = 2000           # entries in one folder listing
 COMMITS_CAP = 100
+HASH_RE = re.compile(r"[0-9a-f]{4,40}")  # a commit as the viewer names it
 CLAUDE_MD_CAP = 64 * 1024
 
 async def run(argv: list[str], cwd: str | None = None, env: dict | None = None,
@@ -116,6 +120,13 @@ def is_protected(path: str, patterns: list[str]) -> bool:
    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in path):
       return True
    return any(glob_re(p).fullmatch(path) for p in patterns)
+
+
+def sandbox_protected(path: str) -> bool:
+   """A path the agent's sandbox keeps read-only: anything under .claude/, and the
+   sandbox's placeholder paths and what is under them."""
+   return path.startswith(".claude/") or any(path == p or path.startswith(p + "/")
+                                             for p in SANDBOX_PLACEHOLDERS)
 
 
 def safe_path(path: str) -> str:
@@ -181,7 +192,8 @@ class Repos:
                         "--dev", "/dev", "--proc", "/proc", "--setenv", "HOME", "/nonexistent",
                         "git", "-C", w, *args])
 
-   async def sync_base(self, name: str, base: str, task_id: str) -> str:
+   async def sync_base(self, name: str, base: str, task_id: str,
+                       refresh_s: float = SUBMODULE_TIMEOUT_S) -> str:
       """Before a follow-up: the mirror fetched from the remote (bounded in
       time; one that can't be reached leaves it as it was), then the task
       clone's origin/<base> set to it, so work merged since the task started is
@@ -189,7 +201,7 @@ class Repos:
       gateway makes, fetched in the jail with hooks and transports off.
       Returns the base head the gateway gave it."""
       try:
-         await asyncio.wait_for(self.refresh(name), SUBMODULE_TIMEOUT_S)
+         await asyncio.wait_for(self.refresh(name), refresh_s)
       except (GitError, asyncio.TimeoutError) as e:
          log.warning("%s: mirror not refreshed before a follow-up: %s", name, e or "timed out")
       m = self.mirror(name)
@@ -227,6 +239,62 @@ class Repos:
          if os.path.exists(path):
             os.remove(path)
       return head
+
+   async def merge_base(self, name: str, base: str, task_id: str) -> dict:
+      """Merges <base>, brought up to date first (sync_base), into the task's
+      branch in its clone, in the jail with hooks off: the agent's sandbox keeps
+      paths like .claude/ read-only, so a base that changes them can't be merged
+      by the agent.  Returns {"merged": head} ("up to date" when there was
+      nothing to merge), or {"conflicts": paths} with the merge left in progress
+      for the agent to resolve and commit.  Refuses (ValueError, nothing merged) a
+      clone with uncommitted changes or a merge already in progress, and a merge
+      with a conflict in a path the sandbox protects (aborted)."""
+      # Untracked files don't count: a merge leaves them alone, and refuses
+      # (nothing started) one it would overwrite.
+      if await self.has_ref(task_id, "MERGE_HEAD"):
+         raise ValueError(f"a merge of {base} is still in progress in the task's clone; nothing "
+                          "was sent.  Revise without merge_base to let the agent finish it")
+      if text(await self.jailed_git(task_id, "status", "--porcelain", "--untracked-files=no")):
+         raise ValueError(f"the task's clone has uncommitted changes; {base} wasn't merged and "
+                          "nothing was sent")
+      head = await self.sync_base(name, base, task_id, MERGE_REFRESH_S)
+      if await self.has_ancestor(task_id, head, "HEAD"):
+         return {"merged": "up to date", "base_head": head}
+      quiet = ["-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0", "-c", "commit.gpgSign=false"]
+      try:
+         # By its name (the commit sync_base set it to): the message reads
+         # "Merge remote-tracking branch 'origin/<base>'".
+         await self.jailed_git(task_id, *quiet, "merge", "-q", "--no-edit",
+                               f"refs/remotes/origin/{base}", writable=True)
+      except GitError as e:
+         out = await self.jailed_git(task_id, "diff", "--name-only", "--diff-filter=U", "-z")
+         conflicts = [p for p in out.decode(errors="replace").split("\0") if p]
+         held = [p for p in conflicts if sandbox_protected(p)]
+         if not conflicts or held:
+            if await self.has_ref(task_id, "MERGE_HEAD"):
+               await self.jailed_git(task_id, *quiet, "merge", "--abort", writable=True)
+            if not conflicts:
+               raise
+            raise ValueError(f"merging {base} conflicts in {', '.join(held[:PROTECTED_CAP])}, "
+                             "which the agent's sandbox can't write: those need your hand.  "
+                             "The merge was aborted; the branch is as it was and nothing was sent") from e
+         return {"conflicts": conflicts, "base_head": head}
+      merged = text(await self.jailed_git(task_id, "rev-parse", "HEAD"))
+      return {"merged": merged, "base_head": head}
+
+   async def has_ref(self, task_id: str, ref: str) -> bool:
+      try:
+         await self.jailed_git(task_id, "rev-parse", "-q", "--verify", ref)
+         return True
+      except GitError:
+         return False
+
+   async def has_ancestor(self, task_id: str, ancestor: str, rev: str) -> bool:
+      try:
+         await self.jailed_git(task_id, "merge-base", "--is-ancestor", ancestor, rev)
+         return True
+      except GitError:
+         return False
 
    # --- before the agent runs ----------------------------------------------
 
@@ -353,11 +421,99 @@ class Repos:
                         "and only what it committed")
       return head, await self.gw("-C", m, "merge-base", f"refs/heads/{base}", head)
 
-   async def changes(self, name: str, task_id: str, base: str) -> dict:
+   async def since_push(self, m: str, head: str, published: str | None) -> str | None:
+      """The published head when the task has commits after it, else None."""
+      if not published or not HASH_RE.fullmatch(published) or published == head:
+         return None
+      try:
+         await self.gw("-C", m, "merge-base", "--is-ancestor", published, head)
+      except GitError:
+         return None  # gone from the mirror, or not under the head any more
+      return published
+
+   async def scope_range(self, m: str, mb: str, head: str, scope: str | None,
+                         published: str | None, merges: dict | None = None) -> dict:
+      """What a viewer scope shows: the diff from..to (limited to `only` paths when
+      set) and the commits it covers.  all: the whole task.  since_push: after the
+      last published head; with none, all (nothing_since_push set).  A hash: one of the
+      task's own commits against its first parent.  A merge: the files with conflicts
+      when the gateway recorded the merge (merge_recorded), else an approximation, the
+      files the merge changed beyond both sides (differing from every parent).
+      Nothing the user sent reaches git."""
+      since = await self.since_push(m, head, published)
+      out = {"scope": "all", "from": mb, "to": head, "only": None, "range": f"{mb}..{head}",
+             "since_push_available": since is not None}
+      if scope in (None, "", "all"):
+         return out
+      if scope == "since_push":
+         if since is None:
+            return {**out, "nothing_since_push": True}
+         return {**out, "scope": scope, "from": since, "range": f"{since}..{head}"}
+      own = (await self.gw("-C", m, "rev-list", f"{mb}..{head}")).split()
+      found = [c for c in own if HASH_RE.fullmatch(scope) and c.startswith(scope)]
+      if len(found) != 1:
+         raise GitError("not one of this task's commits")
+      commit = found[0]
+      parents = (await self.gw("-C", m, "rev-list", "--parents", "-n1", commit)).split()[1:]
+      out = {**out, "scope": commit, "from": parents[0], "to": commit, "range": None,
+             "merge": len(parents) > 1}
+      if len(parents) > 1:
+         rec = (merges or {}).get(parents[1]) or {}
+         out["merge_recorded"] = True
+         if rec.get("merged") and commit.startswith(rec["merged"]):
+            out["only"] = []  # the gateway's own clean merge: nothing was conflicted
+         elif rec.get("conflicts") and len(rec["conflicts"]) == rec.get("conflicts_count"):
+            out["only"] = rec["conflicts"]
+         else:
+            out["merge_recorded"] = False
+            sides = [set((await run(["git", "-C", m, "diff", "--no-renames", "--name-only",
+                                     "-z", p, commit])).decode(errors="replace").split("\0"))
+                     for p in parents]
+            out["only"] = sorted(set.intersection(*sides) - {""})
+      return out
+
+   async def blobs(self, m: str, rev: str, paths: list[str]) -> dict:
+      """path -> blob id at `rev`, for those of `paths` it has."""
+      out = await run(["git", "--literal-pathspecs", "-C", m, "ls-tree", "-r", "-z", rev,
+                       "--", *paths])
+      return {r.split("\t", 1)[1]: r.split()[2]
+              for r in out.decode(errors="replace").split("\0") if r}
+
+   async def drop_main(self, m: str, head: str, published: str, mb: str,
+                       files: list[dict]) -> list[dict]:
+      """since_push across a merge of the base: files only main changed are left
+      out, files both changed are marked includes_main.  Main is the base head the
+      newest merge brought in (not the base now, which a refresh moves), and a file
+      is main's alone only when the published version had no change of the agent's
+      to it (a conflict resolved to main's side undoes the agent's published one)."""
+      merge = await self.gw("-C", m, "rev-list", "--first-parent", "--min-parents=2", "-n1",
+                            f"{published}..{head}")
+      tip = await self.gw("-C", m, "rev-parse", f"{merge}^2")
+      try:  # a merge of the base: its side is in the base the branch now forks from
+         await self.gw("-C", m, "merge-base", "--is-ancestor", tip, mb)
+      except GitError:
+         return files  # the agent merged a branch of its own: nothing there is main's
+      fork = await self.gw("-C", m, "merge-base", published, tip)
+      names = [f["path"].split(" -> ")[-1] for f in files]
+      at_head, at_tip, at_fork, at_pub = [await self.blobs(m, r, names)
+                                          for r in (head, tip, fork, published)]
+      kept = []
+      for f, n in zip(files, names):
+         main = at_tip.get(n) != at_fork.get(n)
+         if main and at_head.get(n) == at_tip.get(n) and at_pub.get(n) == at_fork.get(n):
+            continue
+         kept.append({**f, "includes_main": True} if main else f)
+      return kept
+
+   async def changes(self, name: str, task_id: str, base: str, scope: str | None = None,
+                     published: str | None = None, merges: dict | None = None) -> dict:
       head, mb = await self.agent_ref(name, task_id, base)
       m = self.mirror(name)
-      numstat = await run(["git", "-C", m, "diff", "--no-ext-diff", "--no-textconv", "-M",
-                           "--numstat", "-z", mb, head])
+      sc = await self.scope_range(m, mb, head, scope, published, merges)
+      only = sc["only"]
+      numstat = b"" if only == [] else await run(
+         ["git", "--literal-pathspecs", "-C", m, "diff", "--no-ext-diff", "--no-textconv", "-M",
+          "--numstat", "-z", sc["from"], sc["to"], *(["--", *only] if only else [])])
       files, fields = [], numstat.split(b"\0")
       patterns = self.protected(name)
       i = 0
@@ -372,6 +528,16 @@ class Repos:
                        "protected": any(is_protected(p, patterns)
                                         for p in path.split(" -> "))})
          i += 1
+      # A conflict resolved by keeping the branch's side has no diff against the
+      # first parent: still listed, as how it was resolved.
+      listed = {n for f in files for n in f["path"].split(" -> ")}
+      for p in only or []:
+         if p not in listed:
+            files.append({"path": p, "added": 0, "removed": 0,
+                          "protected": is_protected(p, patterns)})
+      if sc["scope"] == "since_push" and await self.gw(
+            "-C", m, "rev-list", "--first-parent", "--min-parents=2", "-n1", sc["range"]):
+         files = await self.drop_main(m, head, sc["from"], mb, files)
       files.sort(key=lambda f: not f["protected"])  # protected first: never cut off a listing
       # Paths a commit changed that the net diff doesn't show (added then removed, or
       # changed back): a push publishes the commits, so these are public too.
@@ -387,20 +553,35 @@ class Repos:
       workflows = any(p.startswith(".github/workflows/") for p in (*net, *seen))
       total = len(files)
       files = files[:FILES_CAP]
-      log = await self.gw("-C", m, "log", "--format=%H%x00%s", f"-{COMMITS_CAP}", f"{mb}..{head}")
-      commits = [dict(zip(("hash", "subject"), c.split("\0", 1))) for c in log.splitlines()]
-      for c in commits:
-         c["subject"] = c.get("subject", "")[:SUBJECT_CAP]
-      return {"head": head, "base": mb, "files": files, "files_total": total,
+      log = await self.gw("-C", m, "log", "--format=%H%x00%P%x00%s", f"-{COMMITS_CAP}",
+                          f"{mb}..{head}")
+      commits = []
+      for c in log.splitlines():
+         h, parents, subject = (c.split("\0", 2) + ["", ""])[:3]
+         commits.append({"hash": h, "subject": subject[:SUBJECT_CAP],
+                         "merge": len(parents.split()) > 1})
+      # The task's own commits (since_push across a merge: not main's it brought in).
+      covers = [sc["to"]] if sc["range"] is None else \
+         (await self.gw("-C", m, "rev-list", f"-{COMMITS_CAP}", head, f"^{sc['from']}",
+                        f"^{mb}")).split()
+      return {"head": head, "base": mb, "base_name": base, "files": files, "files_total": total,
               "commits": commits, "history_only": history[:FILES_CAP],
-              "workflows": workflows}
+              "workflows": workflows, "scope": sc["scope"], "scope_commits": covers,
+              "scope_merge": sc.get("merge", False),
+              "merge_recorded": sc.get("merge_recorded", False),
+              "nothing_since_push": sc.get("nothing_since_push", False),
+              "since_push_available": sc["since_push_available"]}
 
    async def file(self, name: str, task_id: str, base: str, path: str, view: str,
-                  old_path: str | None = None) -> dict:
-      """One file: its diff, or its content after (new) or before (old) the task.  A
-      renamed file's diff names its old path too, so git pairs the two."""
+                  old_path: str | None = None, scope: str | None = None,
+                  published: str | None = None) -> dict:
+      """One file: its diff, or its content after (new) or before (old) the task, or
+      the viewer scope's range (scope_range).  A renamed file's diff names its old
+      path too, so git pairs the two."""
       head, mb = await self.agent_ref(name, task_id, base)
-      p, m = safe_path(path), self.mirror(name)
+      m = self.mirror(name)
+      sc = await self.scope_range(m, mb, head, scope, published)
+      mb, head, p = sc["from"], sc["to"], safe_path(path)
       if view == "diff":
          old = safe_path(old_path) if old_path else p
          # git builds the whole diff in memory: check sizes first

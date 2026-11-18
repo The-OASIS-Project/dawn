@@ -145,6 +145,15 @@ class FakeRepos:
       self.synced += 1
       return "feedface00112233"
 
+   merges = 0  # merges of the base a revise asked for
+   merge_result = {"merged": "c0ffee00112233445566", "base_head": "feedface00112233"}
+
+   async def merge_base(self, name, base, task_id):
+      self.merges += 1
+      if isinstance(self.merge_result, Exception):
+         raise self.merge_result
+      return self.merge_result
+
    async def claude_md(self, name, base):
       return "Commits need the developer's OK."
 
@@ -748,6 +757,42 @@ def test_revise_resumes_the_session_with_more_budget(store, tmp_path):
    del r.running["t1"]
    again = asyncio.run(r.revise("t1", 1, "use Vosk instead", None, "job:7.1/1"))
    assert again["budget_usd"] == pytest.approx(10.0) and len(r.resumed) == 1
+
+
+def test_revise_merging_the_base(store, tmp_path):
+   """merge_base: the gateway merges first, reports it, tells the agent, and a
+   retried revise doesn't merge again; a refused merge changes nothing."""
+   r = runner(store)
+   finished_with_clone(store, tmp_path)
+   t = asyncio.run(r.revise("t1", 1, "merge main", None, "job:1", merge_base=True))
+   assert r.repos.merges == 1 and t["status"] == st.WORKING
+   assert r.revise_feedback("t1")["merge"] == {"merged": "c0ffee001122",
+                                                "base_head": "feedface00112233"}
+   note = r.resumed[0][1]
+   assert "merged main (feedface0011) into this branch (now at c0ffee001122)" in note
+   assert not r.base_out_of_date(store.task("t1"))       # the run doesn't sync again
+   del r.running["t1"]
+   asyncio.run(r.revise("t1", 1, "merge main", None, "job:1", merge_base=True))
+   assert r.repos.merges == 1 and len(r.resumed) == 1    # a retry: merged once
+   # Conflicts left for the agent: named to it and in the answer.
+   store.update_task("t1", status=st.COMPLETED)
+   r.repos.merge_result = {"conflicts": ["src/a.c", "b.h"], "base_head": "feedface00112233"}
+   asyncio.run(r.revise("t1", 1, "merge main", None, "job:2", merge_base=True))
+   assert r.revise_feedback("t1")["merge"] == {"conflicts": ["src/a.c", "b.h"],
+                                                "conflicts_count": 2,
+                                                "base_head": "feedface00112233"}
+   assert "- src/a.c\n- b.h" in r.resumed[1][1] and "git commit" in r.resumed[1][1]
+   # Refused (a protected conflict): no budget, no event, no run.
+   del r.running["t1"]
+   store.update_task("t1", status=st.COMPLETED)
+   before = store.task("t1")["budget_usd"]
+   r.repos.merge_result = ValueError("merging main conflicts in .claude/skills/x.md")
+   with pytest.raises(ValueError, match=".claude/skills"):
+      asyncio.run(r.revise("t1", 1, "merge main", None, "job:3", merge_base=True))
+   t = store.task("t1")
+   assert t["budget_usd"] == before and t["status"] == st.COMPLETED and len(r.resumed) == 2
+   assert store.task_events("t1", "revised", 1)[0]["data"]["revise_ref"] == "job:2"
+   assert "t1" not in r.busy
 
 
 def test_revise_refuses_what_it_cant_resume(store, tmp_path):
@@ -1361,6 +1406,217 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    asyncio.run(repos.remove("aaaa0001"))
    assert not os.path.exists(wt)
 
+def merge_repo(tmp_path):
+   """A mirror and one task clone (aaaa0001 on agent/x) of a repo with f and .claude/s."""
+   src = tmp_path / "src"
+   (src / ".claude").mkdir(parents=True)
+   git("init", "-q", "-b", "main", cwd=src)
+   (src / "f").write_text("1\n")
+   (src / ".claude/s").write_text("1\n")
+   git("add", "-A", cwd=src)
+   git("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "init", cwd=src)
+   home = tmp_path / "home"
+   (home / "work").mkdir(parents=True)
+   gitconfig = tmp_path / "gitconfig"
+   gitconfig.write_text("")
+   repos = Repos({"r": {"url": str(src), "base": "main"}}, str(tmp_path / "mirrors"),
+                 str(home / "work"), [], str(home), str(gitconfig))
+   wt = asyncio.run(repos.prepare("r", "main", "agent/x", "aaaa0001"))
+   return src, wt, repos
+
+
+def commit(cwd, path, content, msg):
+   with open(os.path.join(str(cwd), path), "w") as f:
+      f.write(content)
+   git("add", "-A", cwd=cwd)
+   git("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", msg, cwd=cwd)
+
+
+def test_viewer_scopes(tmp_path, service_umask):
+   """The viewer's scopes: the whole task, since the last push (main's changes from a
+   merge left out or marked), and one of the task's own commits (a merge: only its
+   conflicted files).  Anything else is refused, and never reaches git."""
+   from agent_gateway.github import GitError
+   from agent_gateway.runner import merge_report
+   src, wt, repos = merge_repo(tmp_path)
+   mirror = lambda *a: git("-C", str(tmp_path / "mirrors/r.git"), *a)  # noqa: E731
+   collect = lambda: asyncio.run(repos.collect("r", "aaaa0001", "agent/x", "main"))  # noqa: E731
+
+   def changes(scope=None, published=None, merges=None):
+      return asyncio.run(repos.changes("r", "aaaa0001", "main", scope, published, merges))
+
+   def paths(ch):
+      return [f["path"] for f in ch["files"]]
+
+   commit(wt, "g", "agent\n", "agent g")
+   collect()
+   pushed = mirror("rev-parse", "refs/agent/aaaa0001")
+   ch = changes(published=pushed)
+   assert ch["scope"] == "all" and paths(ch) == ["g"] and not ch["since_push_available"]
+   commit(wt, "h", "agent\n", "agent h")
+   collect()
+   h = mirror("rev-parse", "refs/agent/aaaa0001")
+   assert changes()["since_push_available"] is False          # never published
+   ch = changes("since_push", pushed)
+   assert ch["since_push_available"] and ch["scope"] == "since_push"
+   assert paths(ch) == ["h"] and ch["scope_commits"] == [h]
+   assert paths(changes(published=pushed)) == ["g", "h"]
+   ch = changes(h[:7])
+   assert ch["scope"] == h and paths(ch) == ["h"] and ch["scope_commits"] == [h]
+   init = git("rev-parse", "main", cwd=src)
+   for bad in (init, init[:8], "-c", "--all", "HEAD", "h", "abc"):
+      with pytest.raises(GitError):
+         changes(bad)                                          # not the task's own
+   ch = changes("since_push")                                  # nothing since a push: all
+   assert ch["scope"] == "all" and ch["nothing_since_push"] and paths(ch) == ["g", "h"]
+   diff = asyncio.run(repos.file("r", "aaaa0001", "main", "h", "diff", None, "since_push",
+                                 pushed))["text"]
+   assert "+agent" in diff
+   # main changes m (only main) and f (the agent too): merged, f conflicting.
+   commit(src, "m", "main\n", "main m")
+   commit(src, "f", "main\n", "main f")
+   commit(wt, "f", "agent\n", "agent f")
+   out = asyncio.run(repos.merge_base("r", "main", "aaaa0001"))
+   assert out["conflicts"] == ["f"]
+   commit(wt, "f", "both\n", "merge main")
+   collect()
+   merge = mirror("rev-parse", "refs/agent/aaaa0001")
+   ch = changes("since_push", pushed)
+   assert sorted(paths(ch)) == ["f", "h"]                     # m is main's alone
+   assert [f.get("includes_main", False) for f in sorted(ch["files"], key=lambda f: f["path"])] \
+      == [True, False]
+   main_head = git("rev-parse", "main", cwd=src)
+   assert merge in ch["scope_commits"] and main_head not in ch["scope_commits"]  # not main's
+   assert next(c for c in ch["commits"] if c["hash"] == merge)["merge"] is True
+   # The merge commit: its conflicted file only, from the record or from git.
+   for merges, recorded in (({out["base_head"]: merge_report(out)}, True), (None, False)):
+      ch = changes(merge[:10], pushed, merges)
+      assert ch["scope_merge"] and paths(ch) == ["f"] and ch["merge_recorded"] is recorded
+   diff = asyncio.run(repos.file("r", "aaaa0001", "main", "f", "diff", None, merge[:10]))
+   assert "-agent" in diff["text"] and "+both" in diff["text"]
+
+
+def viewer(tmp_path):
+   """merge_repo, plus a mirror git, a collect and a changes call."""
+   src, wt, repos = merge_repo(tmp_path)
+   mirror = lambda *a: git("-C", str(tmp_path / "mirrors/r.git"), *a)  # noqa: E731
+   collect = lambda: asyncio.run(repos.collect("r", "aaaa0001", "agent/x", "main"))  # noqa: E731
+
+   def changes(scope=None, published=None, merges=None):
+      return asyncio.run(repos.changes("r", "aaaa0001", "main", scope, published, merges))
+   return src, wt, repos, mirror, collect, changes
+
+
+def test_since_push_keeps_agent_change_undone_by_a_merge(tmp_path, service_umask):
+   """The agent's published change to f, undone by resolving a conflict to main's side:
+   since the push, f changed (back), so it is listed."""
+   src, wt, repos, mirror, collect, changes = viewer(tmp_path)
+   commit(wt, "f", "agent\n", "agent f")
+   collect()
+   pushed = mirror("rev-parse", "refs/agent/aaaa0001")
+   commit(src, "f", "main\n", "main f")
+   assert asyncio.run(repos.merge_base("r", "main", "aaaa0001"))["conflicts"] == ["f"]
+   commit(wt, "f", "main\n", "merge main, take main's")
+   collect()
+   ch = changes("since_push", pushed)
+   assert [(f["path"], f.get("includes_main", False)) for f in ch["files"]] == [("f", True)]
+
+
+def test_since_push_against_the_merged_base_head(tmp_path, service_umask):
+   """Main moving after the merge (a mirror refresh) changes nothing: main is the base
+   head the merge brought in."""
+   src, wt, repos, mirror, collect, changes = viewer(tmp_path)
+   commit(wt, "g", "agent\n", "agent g")
+   collect()
+   pushed = mirror("rev-parse", "refs/agent/aaaa0001")
+   commit(wt, "h", "agent\n", "agent h")
+   commit(src, "m", "main\n", "main m")
+   assert "merged" in asyncio.run(repos.merge_base("r", "main", "aaaa0001"))
+   collect()
+   commit(src, "m", "main2\n", "main m again")
+   commit(src, "h", "main-h\n", "main h, not merged")
+   asyncio.run(repos.refresh("r"))
+   ch = changes("since_push", pushed)
+   assert [(f["path"], f.get("includes_main", False)) for f in ch["files"]] == [("h", False)]
+
+
+def test_merge_scope_record_or_fallback(tmp_path, service_umask):
+   """A merge commit's files: the recorded conflicts (even one resolved wholly to one
+   side, which no parent comparison finds), and none for the gateway's clean merge."""
+   from agent_gateway.runner import merge_report
+   src, wt, repos, mirror, collect, changes = viewer(tmp_path)
+   commit(src, "f", "main\n", "main f")
+   commit(wt, "f", "agent\n", "agent f")
+   out = asyncio.run(repos.merge_base("r", "main", "aaaa0001"))
+   commit(wt, "f", "main\n", "merge main, take main's")
+   collect()
+   merge = mirror("rev-parse", "refs/agent/aaaa0001")
+   ch = changes(merge[:10], None, {out["base_head"]: merge_report(out)})
+   assert ch["merge_recorded"] and [f["path"] for f in ch["files"]] == ["f"]
+   ch = changes(merge[:10])
+   assert not ch["merge_recorded"] and ch["files"] == []     # same as main's side
+   commit(src, "m", "main\n", "main m")
+   out = asyncio.run(repos.merge_base("r", "main", "aaaa0001"))
+   collect()
+   clean = mirror("rev-parse", "refs/agent/aaaa0001")
+   assert out["merged"] == clean
+   ch = changes(clean[:10], None, {out["base_head"]: merge_report(out)})
+   assert ch["scope_merge"] and ch["merge_recorded"] and ch["files"] == []
+
+
+def test_merge_base_in_the_jail(tmp_path, service_umask):
+   """The gateway merges the base into a task's branch in the jail: clean, up to
+   date, conflicts left for the agent, and a protected conflict aborted."""
+   src, wt, repos = merge_repo(tmp_path)
+   merge = lambda: asyncio.run(repos.merge_base("r", "main", "aaaa0001"))  # noqa: E731
+   assert merge()["merged"] == "up to date"
+   # main changes .claude/s (the agent's sandbox can't write it): merged cleanly.
+   commit(wt, "g", "agent\n", "agent work")
+   commit(src, ".claude/s", "2\n", "skill")
+   hook = os.path.join(wt, ".git/hooks/post-merge")
+   with open(hook, "w") as f:
+      f.write("#!/bin/sh\ntouch \"$GIT_DIR/../planted\"\n")  # a hook the agent planted
+   os.chmod(hook, 0o755)
+   out = merge()
+   assert out["merged"] == git("rev-parse", "HEAD", cwd=wt)
+   assert out["base_head"] == git("rev-parse", "main", cwd=src)
+   assert open(os.path.join(wt, ".claude/s")).read() == "2\n"
+   assert git("rev-list", "--count", "HEAD^@", "^HEAD^", cwd=wt) == "1"   # a merge commit
+   assert not os.path.exists(os.path.join(wt, "planted"))                 # hooks off
+   assert merge()["merged"] == "up to date"
+   # A conflict in an ordinary file: left in progress, the path named.
+   commit(wt, "f", "agent\n", "agent f")
+   commit(src, "f", "main\n", "main f")
+   out = merge()
+   assert out["conflicts"] == ["f"]
+   assert git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=wt)
+   with pytest.raises(ValueError, match="still in progress.*without merge_base"):
+      merge()                                    # the agent hasn't concluded it yet
+   commit(wt, "f", "both\n", "merge main")      # the agent resolves and commits
+   # An untracked file (a build dropping) doesn't block a merge.
+   with open(os.path.join(wt, "scratch.out"), "w") as f:
+      f.write("x\n")
+   assert merge()["merged"] == "up to date"
+   os.remove(os.path.join(wt, "scratch.out"))
+   # A conflict under .claude/: aborted and refused, the branch as it was.
+   commit(wt, ".claude/s", "agent\n", "agent skill")
+   commit(src, ".claude/s", "3\n", "main skill")
+   commit(src, "f", "main2\n", "main f2")
+   before = git("rev-parse", "HEAD", cwd=wt)
+   with pytest.raises(ValueError, match=r"\.claude/s.*need your hand"):
+      merge()
+   assert git("rev-parse", "HEAD", cwd=wt) == before
+   assert git("status", "--porcelain", cwd=wt) == ""
+   with pytest.raises(subprocess.CalledProcessError):
+      git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=wt)
+   # Uncommitted edits: refused before anything is merged.
+   with open(os.path.join(wt, "f"), "a") as f:
+      f.write("dirty\n")
+   with pytest.raises(ValueError, match="uncommitted"):
+      merge()
+   assert git("rev-parse", "HEAD", cwd=wt) == before
+
+
 def test_follow_up_carries_checks_when_the_branch_did_not_move(store, tmp_path):
    """A check speaks for the commit it ran on: a follow-up that commits nothing
    keeps the last completion's checks; one that moved the branch doesn't."""
@@ -1749,7 +2005,7 @@ def test_changes_lists_paths_only_the_history_has(tmp_path, service_umask):
 class Publishing(FakeRepos):
    """Records what publish would send."""
 
-   async def changes(self, name, task_id, base):
+   async def changes(self, name, task_id, base, *scope):
       return {"head": "abcdef1234567890", "base": "base000", "files": [], "files_total": 0,
               "commits": [], "history_only": [], "workflows": False}
 
@@ -2051,3 +2307,35 @@ def test_start_with_no_room_queues_and_starts_in_order(store):
    asyncio.run(r.retry_blocked())                          # the day is spent: it fails
    assert began == [a["id"]] and store.task(c["id"])["status"] == st.FAILED
    assert "daily budget" in store.task(c["id"])["error"]
+
+
+def test_since_push_keeps_a_merge_of_the_agents_own_branch(tmp_path, service_umask):
+   """A --no-ff merge of a branch of the agent's own isn't a merge of the base:
+   since_push lists its files, none of them taken for main's."""
+   src, wt, repos, mirror, collect, changes = viewer(tmp_path)
+   commit(wt, "g", "agent\n", "agent g")
+   collect()
+   pushed = mirror("rev-parse", "refs/agent/aaaa0001")
+   git("checkout", "-q", "-b", "side", cwd=wt)
+   commit(wt, "s", "agent\n", "agent s on side")
+   git("checkout", "-q", "agent/x", cwd=wt)
+   git("-c", "user.email=a@b", "-c", "user.name=a", "merge", "-q", "--no-ff", "--no-edit",
+       "side", cwd=wt)
+   collect()
+   files = changes("since_push", pushed)["files"]
+   assert sorted((f["path"], f.get("includes_main", False)) for f in files) == [("s", False)]
+
+
+def test_merge_scope_lists_a_conflict_kept_to_the_branchs_side(tmp_path, service_umask):
+   """A recorded conflict resolved by keeping the branch's version has no diff
+   against the first parent, and is still listed."""
+   from agent_gateway.runner import merge_report
+   src, wt, repos, mirror, collect, changes = viewer(tmp_path)
+   commit(src, "f", "main\n", "main f")
+   commit(wt, "f", "agent\n", "agent f")
+   out = asyncio.run(repos.merge_base("r", "main", "aaaa0001"))
+   commit(wt, "f", "agent\n", "merge main, keep ours")
+   collect()
+   merge = mirror("rev-parse", "refs/agent/aaaa0001")
+   ch = changes(merge[:10], None, {out["base_head"]: merge_report(out)})
+   assert [(f["path"], f["added"], f["removed"]) for f in ch["files"]] == [("f", 0, 0)]

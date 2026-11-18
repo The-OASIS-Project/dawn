@@ -75,6 +75,15 @@ int coding_gateway_call(int user_id,
                         struct json_object *args,
                         struct json_object **out,
                         char **err) {
+   return coding_gateway_call_timed(user_id, tool, args, 0, out, err);
+}
+
+int coding_gateway_call_timed(int user_id,
+                              const char *tool,
+                              struct json_object *args,
+                              long timeout_ms,
+                              struct json_object **out,
+                              char **err) {
    *out = NULL;
    *err = NULL;
    if (args == NULL) {
@@ -101,7 +110,8 @@ int coding_gateway_call(int user_id,
       json_object_object_add(args, "dawn_user_id", json_object_new_int(user_id));
    }
    char *text = NULL;
-   const int rc = mcp_bridge_call_tool(alias, tool, json_object_to_json_string(args), 0, &text);
+   const int rc = mcp_bridge_call_tool(alias, tool, json_object_to_json_string(args), timeout_ms,
+                                       &text);
    json_object_put(args);
    if (rc != SUCCESS) {
       /* Text comes back only when the gateway itself said no. */

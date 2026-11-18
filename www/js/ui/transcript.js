@@ -887,6 +887,17 @@
          }
       }
 
+      /* A coding job's report links its changes viewer (Publish, Close) as
+       * "#coding-job-N"; the viewer checks on the server that the job is the user's. */
+      document.addEventListener('click', function (e) {
+         var link = e.target.closest('.transcript-entry a[href^="#coding-job-"]');
+         if (!link || typeof DawnCodingViewer === 'undefined') return;
+         var job = parseInt(link.getAttribute('href').slice('#coding-job-'.length), 10);
+         if (!(job > 0)) return;
+         e.preventDefault();
+         DawnCodingViewer.open(job, '', link);
+      });
+
       /* Delegated click on transcript — catches all images including dynamically added */
       document.addEventListener('click', function (e) {
          var img = e.target.closest('.transcript-entry img');

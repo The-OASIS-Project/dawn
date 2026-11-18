@@ -1625,6 +1625,17 @@ int conv_db_job_reset_for_resume(int64_t conv_id, int user_id, bool allow_cancel
 int conv_db_job_reopen_coding(int64_t conv_id, int user_id, const char *goal);
 
 /**
+ * @brief Move job @p job_id of @p user_id under conversation @p parent_id (its
+ *        report then goes there).
+ *
+ * Only a job row (job_status set) owned by @p user_id, and only under a
+ * conversation the same user owns.
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND (no such job of the user's, or the
+ *         parent isn't the user's), AUTH_DB_INVALID or AUTH_DB_FAILURE.
+ */
+int conv_db_job_set_parent(int64_t job_id, int user_id, int64_t parent_id);
+
+/**
  * @brief Ownership-scoped: a user's ACTIVE (queued/running) jobs, oldest first.
  *
  * A complete SET, not a page.  job_manager gates every reservation on the global

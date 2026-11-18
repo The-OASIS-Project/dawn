@@ -106,7 +106,7 @@ See [GETTING_STARTED.md — Automated Install](../GETTING_STARTED.md#automated-i
 ### Build tools
 
 ```bash
-sudo apt install cmake build-essential pkg-config
+sudo apt install cmake build-essential pkg-config wget unzip
 ```
 
 ### Core libraries
@@ -175,12 +175,14 @@ ONNX Runtime is required for TTS (Piper), VAD (Silero), and the embedding engine
 > **Have an NVIDIA GPU?** If you want GPU-accelerated Whisper ASR, build ONNX Runtime from source with CUDA instead. See [GETTING_STARTED.md — Option B](../GETTING_STARTED.md#step-3-install-onnx-runtime) for build instructions. The install script (`scripts/install.sh`) detects CUDA automatically and handles the source build, including the GCC 14 workaround.
 
 ```bash
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz
-tar xzf onnxruntime-linux-x64-1.22.0.tgz
-
-# Install headers (note: -r is required for the core/ subdirectory)
-sudo cp -r onnxruntime-linux-x64-1.22.0/include/* /usr/local/include/
-sudo cp -a onnxruntime-linux-x64-1.22.0/lib/libonnxruntime.so* /usr/local/lib/
+# Microsoft's NuGet package carries the Linux libraries and headers
+wget https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.22.0/microsoft.ml.onnxruntime.1.22.0.nupkg
+unzip -q microsoft.ml.onnxruntime.1.22.0.nupkg -d ort "runtimes/linux-x64/native/*" "build/native/include/*"
+sudo cp ort/runtimes/linux-x64/native/libonnxruntime.so /usr/local/lib/libonnxruntime.so.1.22.0
+sudo cp ort/runtimes/linux-x64/native/libonnxruntime_providers_shared.so /usr/local/lib/
+sudo ln -sf libonnxruntime.so.1.22.0 /usr/local/lib/libonnxruntime.so.1
+sudo ln -sf libonnxruntime.so.1 /usr/local/lib/libonnxruntime.so
+sudo cp -r ort/build/native/include/* /usr/local/include/
 sudo ldconfig
 ```
 

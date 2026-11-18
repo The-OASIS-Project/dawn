@@ -110,34 +110,43 @@ install_onnxruntime() {
 }
 
 install_onnxruntime_prebuilt() {
-   local ort_version ort_tarball ort_dir
-
+   # Microsoft's NuGet package (Microsoft.ML.OnnxRuntime): the Linux x64 and arm64
+   # libraries and the C headers.  Versions and checksums match the Dockerfiles.
+   local ort_version ort_sha256 ort_rid
    if [ "$ARCH" = "aarch64" ]; then
       ort_version="1.19.2"
-      ort_tarball="onnxruntime-linux-aarch64-${ort_version}.tgz"
-      ort_dir="onnxruntime-linux-aarch64-${ort_version}"
+      ort_sha256="fa133c8fe6238445a0dd3e8447baa5c7d16f418caa8e576c7e253ba77b27b61b"
+      ort_rid="linux-arm64"
    else
       # x86_64 — version per GETTING_STARTED_SERVER.md
       ort_version="1.22.0"
-      ort_tarball="onnxruntime-linux-x64-${ort_version}.tgz"
-      ort_dir="onnxruntime-linux-x64-${ort_version}"
+      ort_sha256="d571e63a2329baacb713f441e65ad75284de354db6e1ac435fe4bebbb417986a"
+      ort_rid="linux-x64"
    fi
 
-   local url="https://github.com/microsoft/onnxruntime/releases/download/v${ort_version}/${ort_tarball}"
+   local pkg="microsoft.ml.onnxruntime.${ort_version}.nupkg"
+   local url="https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ort_version}/${pkg}"
    local tmpdir
    tmpdir=$(mktemp -d)
    register_cleanup "$tmpdir"
 
    log "Downloading ONNX Runtime v${ort_version} (pre-built, $ARCH)..."
-   wget -q --show-progress -O "$tmpdir/$ort_tarball" "$url" ||
+   wget -q --show-progress -O "$tmpdir/$pkg" "$url" ||
       error "Failed to download ONNX Runtime from $url"
-   tar xzf "$tmpdir/$ort_tarball" -C "$tmpdir"
+   echo "${ort_sha256}  $tmpdir/$pkg" | sha256sum -c --quiet ||
+      error "ONNX Runtime package checksum mismatch"
+   unzip -q "$tmpdir/$pkg" -d "$tmpdir/ort" "runtimes/${ort_rid}/native/*" "build/native/include/*" ||
+      error "Failed to unpack ONNX Runtime"
 
+   local native="$tmpdir/ort/runtimes/${ort_rid}/native"
    sudo_begin_phase "onnxruntime"
-   # Install headers (note: -r for core/ subdirectory if present)
-   run_sudo cp -r "$tmpdir/$ort_dir/include/"* /usr/local/include/ ||
+   run_sudo cp -r "$tmpdir/ort/build/native/include/"* /usr/local/include/ ||
       error "Failed to install ONNX Runtime headers"
-   run_sudo cp -a "$tmpdir/$ort_dir/lib/libonnxruntime"*.so* /usr/local/lib/ ||
+   # SONAME libonnxruntime.so.1: the versioned file, with the .so.1 and .so links.
+   run_sudo cp "$native/libonnxruntime.so" "/usr/local/lib/libonnxruntime.so.${ort_version}" &&
+      run_sudo cp "$native/libonnxruntime_providers_shared.so" /usr/local/lib/ &&
+      run_sudo ln -sf "libonnxruntime.so.${ort_version}" /usr/local/lib/libonnxruntime.so.1 &&
+      run_sudo ln -sf libonnxruntime.so.1 /usr/local/lib/libonnxruntime.so ||
       error "Failed to install ONNX Runtime libraries"
    run_sudo ldconfig
 

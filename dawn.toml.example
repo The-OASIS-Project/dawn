@@ -1232,6 +1232,14 @@ citation_reinforcement_boost = 0.05
 # stale_after_sec = 30               # Live reads older than this report "stale"
 
 # =============================================================================
+# Coding agent (coding_agent tool) — hands coding work to the agent gateway
+# ([[mcp.server]] role = "agent_gateway", below) and replies on its pull
+# requests' review threads on the user's yes.
+# =============================================================================
+[coding_agent]
+# sign_replies = true                # End each reply posted on GitHub "— <ai_name>"
+
+# =============================================================================
 # MCP Bridge (coding harness) — requires building with
 # -DDAWN_ENABLE_MCP_BRIDGE_TOOL=ON. DAWN is a pure MCP *client*; the operator
 # launches each MCP server (systemd/tmux/docker). Transports: "http+sse" (an SSE

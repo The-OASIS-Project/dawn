@@ -42,6 +42,7 @@ CBM_READ_TOOLS = ("search_graph", "query_graph", "get_architecture", "get_code_s
 # user settings), so nothing can pre-approve a call around this function;
 # every call that would prompt comes here.
 READ_ONLY = {*(f"mcp__cbm__{t}" for t in CBM_READ_TOOLS),
+             "mcp__github__pr_feedback",  # what a revise read of its pull request
              "Read", "Glob", "Grep", "LS", "NotebookRead", "TodoWrite", "ToolSearch",
              "Task", "Agent", "TaskOutput", "Skill", "EnterPlanMode", "ExitPlanMode"}
 

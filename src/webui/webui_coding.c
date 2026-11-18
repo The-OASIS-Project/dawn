@@ -495,7 +495,7 @@ void webui_coding_handle_grant_revoke(ws_connection_t *conn, json_object *payloa
 }
 
 /* =============================================================================
- * coding_view {job, what: changes|file, path?, view?, nonce}: the changes viewer
+ * coding_view {job, what: changes|file, path?, view?, scope?, nonce}: the changes viewer
  *
  * A job's work from the gateway's mirror, answered to the asking tab only (a
  * file reply can be megabytes once serialized).  One request per user at a
@@ -504,6 +504,7 @@ void webui_coding_handle_grant_revoke(ws_connection_t *conn, json_object *payloa
  * ============================================================================= */
 
 #define WC_VIEW_PATH_MAX 2100 /* a rename's two paths and its separator */
+#define WC_VIEW_SCOPE_MAX 41  /* a full commit hash */
 
 typedef struct {
    int64_t job;
@@ -511,8 +512,22 @@ typedef struct {
    bool diff; /* else new */
    uint32_t session_id;
    char path[WC_VIEW_PATH_MAX];
+   char scope[WC_VIEW_SCOPE_MAX]; /* "" (all), "all", "since_push" or a commit's hex */
    char nonce[WC_NONCE_MAX];
 } wc_view_req_t;
+
+/* A viewer scope the gateway may be asked for: all, since_push, or 4 to 40 lowercase
+ * hex digits (one of the job's commits; the gateway checks it is). */
+static bool view_scope_ok(const char *scope) {
+   const size_t n = strlen(scope);
+   if (n == 0 || strcmp(scope, "all") == 0 || strcmp(scope, "since_push") == 0) {
+      return true;
+   }
+   if (n < 4 || n >= WC_VIEW_SCOPE_MAX) {
+      return false;
+   }
+   return strspn(scope, "0123456789abcdef") == n;
+}
 
 static struct {
    int user_id; /* 0: free */
@@ -584,7 +599,7 @@ static void view_run(void *arg) {
       }
       char *err = NULL;
       struct json_object *result = coding_view_fetch(user_id, r.job, r.file, r.path,
-                                                     r.diff ? "diff" : "new", &err);
+                                                     r.diff ? "diff" : "new", r.scope, &err);
       const char *text = err ? err : "The coding-agent gateway didn't answer.";
       if (err != NULL && tool_result_is_error(err)) {
          text += strlen(TOOL_RESULT_ERROR_MARK);
@@ -622,16 +637,19 @@ void webui_coding_handle_view(ws_connection_t *conn, json_object *payload) {
                                                                      : "diff";
    const char *path = json_object_object_get_ex(payload, "path", &o) ? json_object_get_string(o)
                                                                      : "";
+   const char *scope = json_object_object_get_ex(payload, "scope", &o) ? json_object_get_string(o)
+                                                                       : "";
    r.file = what && strcmp(what, "file") == 0;
    r.diff = !view || strcmp(view, "new") != 0;
    const bool known = what && (r.file || strcmp(what, "changes") == 0) &&
                       (!view || strcmp(view, "diff") == 0 || strcmp(view, "new") == 0);
    if (!known || r.job <= 0 || !path || strlen(path) >= sizeof(r.path) ||
-       (r.file && path[0] == '\0')) {
+       (r.file && path[0] == '\0') || !scope || !view_scope_ok(scope)) {
       view_reply(user_id, &r, NULL, "Malformed request.");
       return;
    }
    snprintf(r.path, sizeof(r.path), "%s", path);
+   snprintf(r.scope, sizeof(r.scope), "%s", scope);
    if (!users_coding_job(user_id, r.job)) {
       view_reply(user_id, &r, NULL, "No coding job with that number.");
       return;

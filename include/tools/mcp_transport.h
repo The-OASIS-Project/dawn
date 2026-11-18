@@ -87,9 +87,11 @@ typedef struct mcp_transport mcp_transport_t;
 /** Method table implemented by each concrete transport. */
 typedef struct mcp_transport_vtable {
    const char *name;
-   int (*start)(mcp_transport_t *t);                              /**< SUCCESS/FAILURE. */
-   int (*send)(mcp_transport_t *t, const char *json, size_t len); /**< SUCCESS/FAILURE. */
-   void (*stop)(mcp_transport_t *t);                              /**< Idempotent. */
+   int (*start)(mcp_transport_t *t); /**< SUCCESS/FAILURE. */
+   /** SUCCESS/FAILURE. timeout_ms > 0 lets a transport that waits for the reply
+    *  inside send() wait at least that long; 0 means the server's own timeout. */
+   int (*send)(mcp_transport_t *t, const char *json, size_t len, long timeout_ms);
+   void (*stop)(mcp_transport_t *t); /**< Idempotent. */
    void (*destroy)(mcp_transport_t *t);
 } mcp_transport_vtable_t;
 
@@ -109,7 +111,14 @@ static inline int mcp_transport_start(mcp_transport_t *t) {
 }
 
 static inline int mcp_transport_send(mcp_transport_t *t, const char *json, size_t len) {
-   return t->vt->send(t, json, len);
+   return t->vt->send(t, json, len, 0);
+}
+
+static inline int mcp_transport_send_timed(mcp_transport_t *t,
+                                           const char *json,
+                                           size_t len,
+                                           long timeout_ms) {
+   return t->vt->send(t, json, len, timeout_ms);
 }
 
 static inline void mcp_transport_stop(mcp_transport_t *t) {

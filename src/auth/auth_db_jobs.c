@@ -606,6 +606,39 @@ int conv_db_job_reopen_coding(int64_t conv_id, int user_id, const char *goal) {
    return changed == 1 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
+int conv_db_job_set_parent(int64_t job_id, int user_id, int64_t parent_id) {
+   if (job_id <= 0 || user_id <= 0 || parent_id <= 0 || parent_id == job_id) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* A job of the user's, moved under a conversation of the same user.  Under a
+    * private one it turns private too (never the other way): its trail is now
+    * that conversation's work. */
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE conversations SET parent_id=?1, is_private=MAX(is_private, "
+                          "(SELECT p.is_private FROM conversations p WHERE p.id=?1)) "
+                          "WHERE id=?2 AND user_id=?3 AND job_status IS NOT NULL AND EXISTS "
+                          "(SELECT 1 FROM conversations p WHERE p.id=?1 AND p.user_id=?3)",
+                          -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("auth_db_jobs: prepare set_parent failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, parent_id);
+   sqlite3_bind_int64(st, 2, job_id);
+   sqlite3_bind_int(st, 3, user_id);
+   int rc = sqlite3_step(st);
+   int changed = sqlite3_changes(s_db.db);
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("auth_db_jobs: set_parent failed for conv %lld", (long long)job_id);
+      return AUTH_DB_FAILURE;
+   }
+   return changed == 1 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
+}
+
 /* =============================================================================
  * Ownership-checked readers
  * ============================================================================= */

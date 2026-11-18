@@ -192,6 +192,7 @@ static void test_completed_posts_the_take(void) {
    }
    TEST_ASSERT_NOT_EQUAL(0, atomic_load(&g_noted_take)); /* a turn told it reads the agent */
    TEST_ASSERT_NOT_NULL(strstr(g_post, "Coding job #42 (fix the oracle) finished."));
+   TEST_ASSERT_NOT_NULL(strstr(g_post, "[View changes for job #42](#coding-job-42)"));
    TEST_ASSERT_NOT_NULL(strstr(g_post, "the tests pass"));
    TEST_ASSERT_NOT_NULL(strstr(g_ask, "Fix the calendar fuzzer oracle."));
    TEST_ASSERT_NOT_NULL(strstr(g_ask, "--- AGENT CONTENT ---"));
