@@ -2513,9 +2513,10 @@ conversation, and later starts; sent to the waiting session's connection only.
   (`[jobs] max_runtime_sec`), then stops (`turn_unsent`).
 
 #### `turn_unsent`
-Flag `turn_wait`.  The waiting turn stopped before it started (`cancel`, its connection gone
-past the stale-turn time, or the daemon shutting down): its question was never saved. Followed by
-`state` `idle`.  Not sent for a turn the client didn't send (a background job's result
+Flag `turn_wait`.  The turn stopped before its question was saved: while it waited (`cancel`,
+its connection gone past the stale-turn time, or the daemon shutting down), or after it started
+(a `cancel` meant for the turn before it can land here).  Followed by `state` `idle`.  A spoken
+turn gets it without `client_ref`.  Not sent for a turn the client didn't send (a background job's result
 re-engaging the conversation): that one is tried again later.
 ```json
 {"type": "turn_unsent",

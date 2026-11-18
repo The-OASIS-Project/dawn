@@ -1409,6 +1409,8 @@ static void *audio_worker_thread(void *arg) {
    if (!session || REQUEST_SUPERSEDED(session, expected_gen)) {
       OLOG_INFO("WebUI: Audio session disconnected or request superseded, aborting");
       if (session) {
+         /* Stopped before it ran: nothing was saved, and its sender is told. */
+         session_turn_waiting_notice(session, work->conv_id, SESSION_TURN_WAIT_UNSENT, 0);
          session_turn_end(session); /* begun at dequeue; never ran */
          atomic_fetch_sub(&session->turn_in_flight, 1);
          session_release(session);
@@ -1495,6 +1497,8 @@ static void *audio_worker_thread(void *arg) {
 
    /* Check if request was superseded */
    if (REQUEST_SUPERSEDED(session, expected_gen)) {
+      /* Stopped before its question was saved: its sender is told. */
+      session_turn_waiting_notice(session, work->conv_id, SESSION_TURN_WAIT_UNSENT, 0);
       audio_worker_end(session);
       free(transcript);
       free(work);

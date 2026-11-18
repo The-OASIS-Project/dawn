@@ -445,6 +445,10 @@ static void *text_worker_thread(void *arg) {
    if (!session || REQUEST_SUPERSEDED(session, expected_gen)) {
       OLOG_INFO("WebUI: Session disconnected or request superseded, aborting text processing");
       if (session) {
+         /* Stopped before it ran (a Stop meant for the turn before it can land
+          * here): nothing was saved, and its sender is told so, not left
+          * waiting for an echo that never comes. */
+         session_turn_waiting_notice(session, work->conv_id, SESSION_TURN_WAIT_UNSENT, 0);
          finish_turn(session); /* begun at dequeue; never ran */
          atomic_fetch_sub(&session->turn_in_flight, 1);
       }

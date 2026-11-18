@@ -1713,6 +1713,13 @@ void webui_reinvoke_tts_finish(session_t *live, bool use_opus) {
    webui_send_state(live, "idle");
 }
 
+/* Strong override: a re-engagement that spoke nothing still ends in idle. */
+void webui_reinvoke_settle(session_t *live) {
+   if (live) {
+      webui_send_state(live, "idle");
+   }
+}
+
 void webui_broadcast_memory_proposals_changed(int user_id) {
    if (user_id <= 0)
       return;
