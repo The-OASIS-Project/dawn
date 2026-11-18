@@ -487,6 +487,19 @@ void memory_extraction_anchor_line(int user_id, int64_t conversation_id, char *o
       snprintf(out, out_sz, "Conversation anchor: %s\n\n", date_buf);
 }
 
+/* Whether a range run can use the model's reply: a JSON object whose facts,
+ * when it names any, are a list.  Anything else is read as holding nothing,
+ * which would settle the range as run with nothing learned. */
+static bool range_reply_usable(const char *response) {
+   struct json_object *root = memory_extraction_parse_json(response);
+   struct json_object *facts = NULL;
+   const bool usable = root && json_object_is_type(root, json_type_object) &&
+                       (!json_object_object_get_ex(root, "facts", &facts) ||
+                        json_object_is_type(facts, json_type_array));
+   json_object_put(root);
+   return usable;
+}
+
 /* Record a range run before anything is stored, so a crash partway can't
  * leave it free to run again and learn the same rows twice.  False: another
  * run recorded an overlapping range meanwhile (or the record failed), and
@@ -512,6 +525,12 @@ static void range_run_end(const extraction_context_t *ctx,
                           bool agent,
                           int stored,
                           const memory_consolidate_result_t *res) {
+   if (stored == SUCCESS) {
+      /* What the run read stays with the conversation, as a normal batch's
+       * does: a later batch reads only its own rows, and one restating this
+       * range's outside text must not come out clean.  The cursors stay. */
+      (void)conv_db_raise_outside(ctx->conversation_id, ctx->user_id, ctx->outside);
+   }
    if (stored != SUCCESS) {
       extraction_range_unrecord(ctx->conversation_id, ctx->range_from, ctx->range_to);
       OLOG_WARNING("memory_extraction: range run conv %lld rows %lld-%lld stored nothing; it may "
@@ -762,10 +781,20 @@ static void *extraction_thread(void *arg) {
 #endif
 
    bool recorded = false;
-   if (!revoked && response && ctx->range && !(recorded = range_record(ctx))) {
-      free(response);
-      response = NULL;
-      revoked = true;
+   if (!revoked && response && ctx->range) {
+      if (!range_reply_usable(response)) {
+         OLOG_WARNING("memory_extraction: range run conv %lld rows %lld-%lld: the reply can't be "
+                      "used; it may run again",
+                      (long long)ctx->conversation_id, (long long)ctx->range_from,
+                      (long long)ctx->range_to);
+      } else {
+         recorded = range_record(ctx);
+      }
+      if (!recorded) {
+         free(response);
+         response = NULL;
+         revoked = true;
+      }
    }
 
    /* The model answered: store what it found.  A conversation made private

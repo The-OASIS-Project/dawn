@@ -950,6 +950,9 @@ void test_range_with_a_web_result_is_tainted(void) {
    TEST_ASSERT_EQUAL_INT64(OUTSIDE_WEB,
                            q1("SELECT outside FROM memory_facts WHERE user_id = ?1", s_user));
    TEST_ASSERT_EQUAL_INT64(ids[5], id_cursor(conv));
+   /* The conversation carries it from now on, for the batches after. */
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_WEB,
+                           q1("SELECT outside FROM conversations WHERE id = ?1", conv));
 }
 
 /* What is refused, each by its own code, with nothing asked or written. */
@@ -977,6 +980,16 @@ void test_range_refusals(void) {
    const int64_t late = add(conv, "user", "MARK-LATE placeholder question");
    TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_PAST_CURSOR,
                          memory_extract_range(s_user, conv, from, late, true, &r));
+   /* Rows from before a forget of what the conversation taught stay forgotten. */
+   exec2("UPDATE conversations SET extract_floor_msg_id = ?2 WHERE id = ?1", conv, from);
+   TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_FORGOTTEN,
+                         memory_extract_range(s_user, conv, from, to, true, &r));
+   TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_FORGOTTEN,
+                         memory_extract_range(s_user, conv, from, to, false, &r));
+   /* A range that begins after it is the user's to repair. */
+   exec2("UPDATE conversations SET extract_floor_msg_id = ?2 WHERE id = ?1", conv, from - 1);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_extract_range(s_user, conv, from, to, false, &r));
+   exec2("UPDATE conversations SET extract_floor_msg_id = ?2 WHERE id = ?1", conv, 0);
    /* Nothing the user said. */
    TEST_ASSERT_EQUAL_INT(MEMORY_EXTRACT_RANGE_NO_USER_ROW,
                          memory_extract_range(s_user, conv, ids[3], ids[3], true, &r));
@@ -1124,6 +1137,7 @@ static int64_t ranges_after_run(int64_t conv, int64_t from, int64_t to, const ch
 }
 
 #define EMPTY_REPLY "{\"facts\": [], \"preferences\": [], \"corrections\": []}"
+#define WRONG_SHAPE_REPLY "{\"facts\": {\"text\": \"Placeholder keeps a notebook.\"}}"
 
 /* A reply that can't be used, or none, stores nothing and leaves no record,
  * so the range may run again; with either consolidator. */
@@ -1132,10 +1146,14 @@ void test_range_reply_unusable_leaves_no_record(void) {
    const int64_t conv = skipped_range_conv(false, ids, &from, &to);
    TEST_ASSERT_EQUAL_INT64(0, ranges_after_run(conv, from, to, "not a reply at all"));
    TEST_ASSERT_EQUAL_INT64(0, ranges_after_run(conv, from, to, NULL));
+   /* JSON, but its facts aren't a list: read as holding nothing, it would
+    * settle the range. */
+   TEST_ASSERT_EQUAL_INT64(0, ranges_after_run(conv, from, to, WRONG_SHAPE_REPLY));
    safe_strscpy(g_config.memory.consolidator, "agent");
    TEST_ASSERT_EQUAL_INT64(0, ranges_after_run(conv, from, to, "not a reply at all"));
+   TEST_ASSERT_EQUAL_INT64(0, ranges_after_run(conv, from, to, WRONG_SHAPE_REPLY));
    TEST_ASSERT_EQUAL_INT64(0, q1("SELECT COUNT(*) FROM memory_facts WHERE user_id = ?1", s_user));
-   TEST_ASSERT_EQUAL_INT(3, s_calls);
+   TEST_ASSERT_EQUAL_INT(5, s_calls);
 
    /* Allowed again, and this time it learns. */
    TEST_ASSERT_EQUAL_INT64(1, ranges_after_run(conv, from, to, REPLY));

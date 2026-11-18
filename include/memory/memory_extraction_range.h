@@ -45,6 +45,7 @@ extern "C" {
 #define MEMORY_EXTRACT_RANGE_BUSY 16        /**< the user's extraction is running or held */
 #define MEMORY_EXTRACT_RANGE_JOB 17         /**< a background job's conversation */
 #define MEMORY_EXTRACT_RANGE_DISABLED 18    /**< memory is turned off */
+#define MEMORY_EXTRACT_RANGE_FORGOTTEN 19   /**< it reaches rows the user had forgotten */
 
 /** What a range holds, counts only. */
 typedef struct {

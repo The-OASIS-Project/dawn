@@ -197,6 +197,27 @@ static int check_conversation(int user_id, int64_t conversation_id, int64_t from
    return jrc == AUTH_DB_NOT_FOUND ? SUCCESS : FAILURE;
 }
 
+/* Where a forget (of this conversation's memories, or of everything) left the
+ * conversation: what was said up to it stays forgotten.  0: never. */
+static int forget_floor(int64_t conversation_id, int64_t *floor_out) {
+   *floor_out = 0;
+   AUTH_DB_LOCK_OR_RETURN(FAILURE);
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db,
+                               "SELECT extract_floor_msg_id FROM conversations WHERE id = ?1", -1,
+                               &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, conversation_id);
+      rc = sqlite3_step(st);
+      if (rc == SQLITE_ROW) {
+         *floor_out = sqlite3_column_int64(st, 0);
+      }
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_ROW ? SUCCESS : FAILURE;
+}
+
 int memory_extract_range(int user_id,
                          int64_t conversation_id,
                          int64_t from,
@@ -211,7 +232,9 @@ int memory_extract_range(int user_id,
    if (hard != SUCCESS) {
       return hard;
    }
+   int64_t forgotten_to = 0;
    if (memory_db_get_last_extracted_msg_id(conversation_id, &r->cursor) != MEMORY_DB_SUCCESS ||
+       forget_floor(conversation_id, &forgotten_to) != SUCCESS ||
        count_range(conversation_id, from, to, r) != SUCCESS) {
       return FAILURE;
    }
@@ -222,6 +245,9 @@ int memory_extract_range(int user_id,
    int refusal = SUCCESS;
    if (to > r->cursor) {
       refusal = MEMORY_EXTRACT_RANGE_PAST_CURSOR;
+   } else if (from <= forgotten_to) {
+      /* Not rows an extraction skipped: rows the user asked to have forgotten. */
+      refusal = MEMORY_EXTRACT_RANGE_FORGOTTEN;
    } else if (r->user == 0) {
       refusal = MEMORY_EXTRACT_RANGE_NO_USER_ROW;
    } else if (r->overlap) {
@@ -265,6 +291,9 @@ const char *memory_extract_range_refusal_text(int code) {
       case MEMORY_EXTRACT_RANGE_PAST_CURSOR:
          return "--to is past the conversation's extraction cursor; normal extraction reads "
                 "those rows";
+      case MEMORY_EXTRACT_RANGE_FORGOTTEN:
+         return "The range reaches rows from before the user forgot this conversation's "
+                "memories, or all of them; they stay forgotten";
       case MEMORY_EXTRACT_RANGE_NO_USER_ROW:
          return "Nothing in the range is the user's";
       case MEMORY_EXTRACT_RANGE_OVERLAP:
