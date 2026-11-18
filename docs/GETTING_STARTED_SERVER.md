@@ -106,7 +106,7 @@ See [GETTING_STARTED.md — Automated Install](../GETTING_STARTED.md#automated-i
 ### Build tools
 
 ```bash
-sudo apt install cmake build-essential pkg-config
+sudo apt install cmake build-essential pkg-config wget unzip
 ```
 
 ### Core libraries

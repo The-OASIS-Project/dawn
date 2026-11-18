@@ -548,7 +548,7 @@ sudo reboot
 
 ```bash
 sudo apt install -y \
-  build-essential cmake git pkg-config \
+  build-essential cmake git pkg-config wget unzip \
   libasound2-dev \
   libwebsockets-dev \
   libjson-c-dev \
