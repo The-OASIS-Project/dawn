@@ -783,7 +783,8 @@ typedef struct {
  */
 static void webui_tts_pace_after_send(ws_connection_t *conn,
                                       session_t *session,
-                                      uint64_t audio_duration_us) {
+                                      uint64_t audio_duration_us,
+                                      bool stop_on_cancel) {
    /* Bail if client already disconnected (avoid writing to stale conn) */
    if (session->disconnected)
       return;
@@ -821,8 +822,11 @@ static void webui_tts_pace_after_send(ws_connection_t *conn,
              (unsigned long long)(conn->tts_audio_sent_us / 1000),
              (unsigned long long)(elapsed_us / 1000));
 
-   /* Sleep in chunks, checking for disconnect and cancellation between each */
+   /* Sleep in chunks, checking for disconnect, a new stream and (for a turn's
+    * reply) a Stop between each.  Speech sent outside a turn keeps its pace: the
+    * session's cancel flag stays set from a stopped turn until its next one. */
    while (sleep_us > 0 && !session->disconnected &&
+          !(stop_on_cancel && atomic_load(&session->cancel_requested)) &&
           atomic_load(&session->current_stream_id) == conn->tts_pace_stream_id) {
       uint64_t chunk = sleep_us < WEBUI_TTS_PACE_CHECK_US ? sleep_us : WEBUI_TTS_PACE_CHECK_US;
       usleep((useconds_t)chunk);
@@ -878,6 +882,10 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
    session_t *session = (session_t *)userdata;
 
    if (!sentence || strlen(sentence) == 0 || !session || session->disconnected) {
+      return;
+   }
+   /* Stopped: nothing more of this reply is spoken. */
+   if (atomic_load(&session->cancel_requested)) {
       return;
    }
 
@@ -945,7 +953,8 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
                webui_send_audio(session, opus, opus_len);
                webui_send_audio_end(session, true);
                webui_tts_pace_after_send(conn, session,
-                                         (uint64_t)frame_count * WEBUI_OPUS_FRAME_MS * 1000ULL);
+                                         (uint64_t)frame_count * WEBUI_OPUS_FRAME_MS * 1000ULL,
+                                         true);
             }
             free(opus);
          }
@@ -983,7 +992,7 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
                webui_send_audio(session, (const uint8_t *)pcm, bytes);
                webui_send_audio_end(session, false);
                webui_tts_pace_after_send(conn, session,
-                                         (samples * 1000000ULL) / WEBUI_OPUS_SAMPLE_RATE);
+                                         (samples * 1000000ULL) / WEBUI_OPUS_SAMPLE_RATE, true);
             }
             free(pcm);
          }
@@ -1172,7 +1181,7 @@ void webui_sentence_audio_fanout_callback(const char *sentence, void *userdata) 
    /* Do NOT abort on origin->disconnected: the turn survives a mid-turn origin drop (the worker
     * holds a turn ref, so `origin` stays valid), and other speaker-capable viewers should keep
     * hearing the rest of the reply. */
-   if (!sentence || sentence[0] == '\0' || !origin)
+   if (!sentence || sentence[0] == '\0' || !origin || atomic_load(&origin->cancel_requested))
       return;
 
    ws_connection_t *ocon = NULL;
@@ -1243,7 +1252,7 @@ void webui_sentence_audio_fanout_callback(const char *sentence, void *userdata) 
    /* Pace the worker ONCE per sentence (not per recipient), off the origin conn's clock. */
    if (ocon)
       webui_tts_pace_after_send(ocon, origin,
-                                (uint64_t)samples * 1000000ULL / (rate ? rate : 22050));
+                                (uint64_t)samples * 1000000ULL / (rate ? rate : 22050), true);
 
    free(opus);
    free(pcm48);
@@ -1284,7 +1293,7 @@ static void scheduler_tts_sentence_callback(const char *sentence, void *userdata
             webui_send_audio(session, opus, opus_len);
             webui_send_audio_end(session, true);
             webui_tts_pace_after_send(conn, session,
-                                      (uint64_t)frame_count * WEBUI_OPUS_FRAME_MS * 1000ULL);
+                                      (uint64_t)frame_count * WEBUI_OPUS_FRAME_MS * 1000ULL, false);
          }
          free(opus);
       }
@@ -1298,7 +1307,7 @@ static void scheduler_tts_sentence_callback(const char *sentence, void *userdata
             webui_send_audio(session, (const uint8_t *)pcm, bytes);
             webui_send_audio_end(session, false);
             webui_tts_pace_after_send(conn, session,
-                                      (samples * 1000000ULL) / WEBUI_OPUS_SAMPLE_RATE);
+                                      (samples * 1000000ULL) / WEBUI_OPUS_SAMPLE_RATE, false);
          }
          free(pcm);
       }

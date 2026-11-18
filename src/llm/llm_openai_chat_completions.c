@@ -131,6 +131,12 @@ static size_t streaming_write_callback(void *contents, size_t size, size_t nmemb
    size_t realsize = size * nmemb;
    openai_streaming_context_t *ctx = (openai_streaming_context_t *)userp;
 
+   /* Stopped: take no more of what curl already holds (a short write ends the
+    * transfer).  Each event fed on would run its sentence through speech. */
+   if (llm_transfer_cancelled()) {
+      return 0;
+   }
+
    /* Capture raw response for error diagnostics (cap at OPENAI_RAW_BUFFER_CAP).
     * Matches Claude's streaming context pattern (see llm_claude.c). */
    if (ctx->raw_response.size < OPENAI_RAW_BUFFER_CAP) {
@@ -756,13 +762,16 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
             continue;
          }
 
-         if (res == CURLE_ABORTED_BY_CALLBACK) {
+         /* The write callback ends a stopped transfer with a short write. */
+         const bool stopped = res == CURLE_ABORTED_BY_CALLBACK ||
+                              (res == CURLE_WRITE_ERROR && llm_transfer_cancelled());
+         if (stopped) {
             OLOG_INFO("LLM transfer interrupted by user");
          } else {
             OLOG_ERROR("curl_easy_perform() failed: %s", curl_easy_strerror(res));
          }
 #ifdef ENABLE_WEBUI
-         if (res != CURLE_ABORTED_BY_CALLBACK) {
+         if (!stopped) {
             session_t *session = session_get_command_context();
             if (session && session->type == SESSION_TYPE_WEBUI) {
                const char *error_code = (res == CURLE_OPERATION_TIMEDOUT) ? "LLM_TIMEOUT"
