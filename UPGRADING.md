@@ -12,6 +12,22 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-11-18 — models.toml: `[cache_pricing]` is now `[pricing]`
+
+**What changed.** `models.toml` keeps every price DAWN uses in one table per provider,
+`[pricing.<provider>]`: the base prices the memory re-extraction estimate uses (until now
+compiled into DAWN) and the prompt-cache multiples that `[cache_pricing.<provider>]` held.
+
+**What you need to do.** Nothing if you use the shipped `models.toml`. A service install
+reads `/usr/local/etc/dawn/models.toml` (`/var/lib/dawn/models.toml` is a symlink to it), and
+the installer doesn't overwrite it: it saves the shipped copy beside it as `models.toml.new`.
+Copy the `[pricing.*]` tables from `models.toml.new` into your `models.toml`, in place of its
+`[cache_pricing.*]` tables. Until you do, DAWN uses its built-in prices and logs a warning at
+every start, and any cache multiple you changed by hand is ignored until you move it into
+`[pricing]`.
+
+---
+
 ## 2026-11-16 — Gemini 2.5 Flash and 2.5 Pro are retired on December 1, 2026
 
 **What changed.** Google is retiring `gemini-2.5-flash` and `gemini-2.5-pro`. From December 1,

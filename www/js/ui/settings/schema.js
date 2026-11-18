@@ -446,7 +446,7 @@
                      type: 'model_list',
                      label: 'OpenAI Models',
                      rows: 8, // LLM_CLOUD_MAX_MODELS
-                     placeholder: 'gpt-4o\ngpt-4-turbo\ngpt-4o-mini',
+                     placeholder: 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna',
                      hint: 'Available models for quick controls (one per line)',
                   },
                   openai_default_model_idx: {

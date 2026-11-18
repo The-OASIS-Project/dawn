@@ -42,6 +42,7 @@
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "dawn_error.h"
+#include "llm/llm_pricing.h"
 #include "logging.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_extraction.h"
@@ -71,69 +72,24 @@ static pthread_t s_reextract_thread;
  * fallback: dawn.c orders memory_recovery_stop before this stop. */
 #define REEXTRACT_JOIN_TIMEOUT_SEC 30
 
-/* =============================================================================
- * Cost rates — small embedded table for known providers.  No dawn.toml
- * config knob today; Phase 2 may add `[memory.cost_rates]` if we grow
- * more providers.  Rates are in USD per 1M tokens.  Keep sorted by
- * model-prefix specificity (longer match wins).
- * ============================================================================= */
-
-typedef struct {
-   const char *provider;
-   const char *model_prefix;
-   double in_usd_per_million;
-   double out_usd_per_million;
-} cost_entry_t;
-
-static const cost_entry_t COST_TABLE[] = {
-   /* Anthropic — platform.claude.com/docs/en/about-claude/pricing, 2026-11-15 */
-   { "claude", "claude-fable-5-2", 8.00, 40.00 },
-   { "claude", "claude-fable-5", 10.00, 50.00 }, /* Fable 5 and 5.1 */
-   { "claude", "claude-mythos-5-2", 8.00, 40.00 },
-   { "claude", "claude-mythos-5", 10.00, 50.00 }, /* Mythos 5 and 5.1 */
-   { "claude", "claude-haiku-5-5", 0.10, 0.50 },  /* prompts up to 100K tokens (5x above) */
-   { "claude", "claude-haiku-4-5", 1.00, 5.00 },
-   { "claude", "claude-3-5-haiku", 0.80, 4.00 },
-   { "claude", "claude-sonnet-5", 2.00, 10.00 }, /* Sonnet 5 and 5.5 */
-   { "claude", "claude-sonnet", 3.00, 15.00 },   /* Sonnet 4.5 and 4.6 */
-   { "claude", "claude-opus-5-5", 4.00, 20.00 },
-   { "claude", "claude-opus", 5.00, 25.00 }, /* Opus 4.5 through 5 (4 and 4.1 are retired) */
-   { "claude", "claude", 1.00, 5.00 },       /* generic Claude fallback */
-   /* OpenAI — developers.openai.com model pages, 2026-11-16; prompts up to 272K tokens */
-   { "openai", "gpt-6-astra", 10.00, 50.00 },
-   { "openai", "gpt-6-cyber", 20.00, 100.00 },
-   { "openai", "gpt-6-sol", 2.00, 10.00 },
-   { "openai", "gpt-6.1-sol", 2.00, 10.00 },
-   { "openai", "gpt-6.1-terra", 1.00, 5.00 },
-   { "openai", "gpt-6-luna", 0.10, 0.50 },
-   { "openai", "gpt-5.6-cyber", 12.50, 75.00 },
-   { "openai", "gpt-4o-mini", 0.15, 0.60 },
-   { "openai", "gpt-4o", 2.50, 10.00 },
-   { "openai", "gpt-5", 2.50, 10.00 },
-   { "openai", "gpt-4", 10.00, 30.00 },
-   /* Local / Ollama / unknown — zero cost, rates_known stays false */
-};
-
+/* The extraction model's base prices, from models.toml [pricing].  Only the
+ * cloud providers memory extraction accepts are priced (memory_extraction.c
+ * runs any other name locally, "gemini" and "anthropic" included); a local
+ * model gets no estimate rather than a made-up one.  OpenRouter is priced
+ * through its vendor's table. */
 static bool lookup_rates(const char *provider,
                          const char *model,
                          double *in_rate,
                          double *out_rate) {
-   if (!provider || !model)
+   llm_type_t type;
+   cloud_provider_t cloud;
+   if (!provider || !model ||
+       (strcmp(provider, "claude") != 0 && strcmp(provider, "openai") != 0 &&
+        strcmp(provider, "openrouter") != 0) ||
+       cloud_provider_from_string(provider, &type, &cloud) != SUCCESS) {
       return false;
-   /* Skip lookup entirely for local providers — recovery worker can use
-    * any local model, and we don't want to fabricate a cost number. */
-   if (strcmp(provider, "local") == 0 || strcmp(provider, "ollama") == 0)
-      return false;
-   for (size_t i = 0; i < sizeof(COST_TABLE) / sizeof(COST_TABLE[0]); i++) {
-      if (strcmp(provider, COST_TABLE[i].provider) != 0)
-         continue;
-      if (strncmp(model, COST_TABLE[i].model_prefix, strlen(COST_TABLE[i].model_prefix)) == 0) {
-         *in_rate = COST_TABLE[i].in_usd_per_million;
-         *out_rate = COST_TABLE[i].out_usd_per_million;
-         return true;
-      }
    }
-   return false;
+   return llm_pricing_rate(type, cloud, model, in_rate, out_rate);
 }
 
 /* =============================================================================

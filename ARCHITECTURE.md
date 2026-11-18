@@ -990,7 +990,7 @@ gemini_api_key = "..."
 
 **`include/prompts.h`** — every prompt and directive sent to a model, including the defaults `dawn.toml` can replace: the persona's two halves (`AI_PERSONA_VALUES`, who the assistant is, then `AI_PERSONA_VOICE`, how it talks), the voice-output directives (`DEFAULT_VOICE_OUTPUT_DIRECTIVE`, `_WEBUI`) and the ASR disambiguation hint.
 
-**`models.toml`** — model context-window registry (per-model-prefix → max input tokens for OpenAI/Anthropic/Gemini). Read-only reference data loaded once by `llm_context.c` at startup; **exempt from the `dawn.toml` settings round-trip** (never rewritten). Edit + restart to update; no rebuild. OpenRouter/local windows are fetched live and not listed. See [MODELS_TOML_DESIGN.md](docs/MODELS_TOML_DESIGN.md).
+**`models.toml`** — model reference data: context windows, prices and reasoning capabilities per model prefix for OpenAI/Anthropic/Gemini. Read-only reference data loaded once by `llm_context.c` at startup; **exempt from the `dawn.toml` settings round-trip** (never rewritten). Edit + restart to update; no rebuild. OpenRouter/local windows are fetched live and not listed. See [MODELS_TOML_DESIGN.md](docs/MODELS_TOML_DESIGN.md).
 
 **Tool registry** — tools are defined as compile-time `tool_metadata_t` structs in `src/tools/*.c` and registered in `src/tools/tools_init.c` via `tools_register_all()`. See [command-processing.md](docs/arch/command-processing.md).
 

@@ -1059,6 +1059,7 @@
 
    function updateLlmControls(runtime) {
       llmRuntimeState = { ...llmRuntimeState, ...runtime };
+      if (typeof DawnVision !== 'undefined') DawnVision.setLlmType(llmRuntimeState.type);
 
       const typeSelect = document.getElementById('llm-type-select');
       const providerSelect = document.getElementById('llm-provider-select');

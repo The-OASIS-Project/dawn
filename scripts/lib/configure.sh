@@ -246,25 +246,24 @@ validate_api_key() {
       openai)
          status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
             -H "Authorization: Bearer $key" \
-            https://api.openai.com/v1/models 2>/dev/null || echo "000")
+            https://api.openai.com/v1/models 2>/dev/null || true)
          ;;
       claude)
          status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
             -H "x-api-key: $key" \
             -H "anthropic-version: 2026-10-21" \
-            -H "content-type: application/json" \
-            -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
-            https://api.anthropic.com/v1/messages 2>/dev/null || echo "000")
+            https://api.anthropic.com/v1/models 2>/dev/null || true)
          ;;
       gemini)
          status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
-            "https://generativelanguage.googleapis.com/v1beta/models?key=$key" 2>/dev/null || echo "000")
+            "https://generativelanguage.googleapis.com/v1beta/models?key=$key" 2>/dev/null || true)
          ;;
       local)
          status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-            http://127.0.0.1:8080/v1/models 2>/dev/null || echo "000")
+            http://127.0.0.1:8080/v1/models 2>/dev/null || true)
          ;;
    esac
+   status="${status:-000}"
 
    if [ "$status" = "200" ]; then
       log "  $provider: VALID (HTTP 200)"

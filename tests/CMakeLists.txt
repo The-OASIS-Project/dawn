@@ -1590,6 +1590,13 @@ dawn_add_unit_test(test_llm_capabilities
    DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
 
+# The provider a bare model name belongs to.
+dawn_add_unit_test(test_llm_model_family
+   SOURCES test_llm_model_family.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
+   LIBS    dawn_common unity
+   LABEL   ci)
+
 # Loading models.toml: the disk copy over the built-in one, table by table.
 dawn_add_unit_test(test_llm_models_toml
    SOURCES test_llm_models_toml.c
@@ -1649,7 +1656,7 @@ dawn_add_unit_test(test_openai_history
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
-# Per-model prompt-cache pricing, against the shipped models.toml.
+# Per-model base and prompt-cache prices, against the shipped models.toml.
 dawn_add_unit_test(test_llm_pricing
    SOURCES test_llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_pricing.c
@@ -1951,7 +1958,12 @@ dawn_add_unit_test(test_memory_db_admin
            ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/memory/memory_bm25.c
            ${SRC_ROOT}/src/memory/memory_stem.c
+           ${SRC_ROOT}/src/llm/llm_pricing.c
+           ${SRC_ROOT}/src/llm/llm_models_toml.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    dawn_common unity sqlite3 pthread m stemmer
+   DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_source_dedup
@@ -3390,3 +3402,4 @@ if(ENABLE_WEBUI)
    add_dependencies(test_webui_memory_batches models_toml_builtin)
 endif()
 add_dependencies(test_llm_models_toml models_toml_builtin)
+add_dependencies(test_memory_db_admin models_toml_builtin)

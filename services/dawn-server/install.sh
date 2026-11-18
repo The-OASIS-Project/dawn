@@ -506,7 +506,7 @@ if [ ! -L "$DATA_DIR/secrets.toml" ]; then
     ln -sf "$CONFIG_DIR/secrets.toml" "$DATA_DIR/secrets.toml"
 fi
 
-# Install models.toml (model context-window registry) and symlink into the
+# Install models.toml (model reference data: windows, prices, capabilities) and symlink into the
 # WorkingDirectory so llm_context's cwd-relative search finds it (same pattern as
 # secrets.toml above). A missing file only degrades to per-provider defaults.
 # Do NOT overwrite an operator-edited copy on re-install — the file is an

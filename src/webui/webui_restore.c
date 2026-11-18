@@ -32,6 +32,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_model_family.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
@@ -90,17 +91,11 @@ static bool conversation_llm_config(const conversation_t *conv,
       safe_strscpy(cfg.model, conv->model);
 
       /* Infer provider from model name if not explicitly stored. OpenRouter IDs are
-       * "vendor/model" slugs and match none of the bare prefixes below, so an
+       * "vendor/model" slugs and name no provider, so an
        * OpenRouter conversation's provider/model are left as stored. */
-      if (conv->cloud_provider[0] == '\0') {
-         if (strncmp(conv->model, "gpt-", 4) == 0 || strncmp(conv->model, "o1-", 3) == 0 ||
-             strncmp(conv->model, "o3-", 3) == 0) {
-            cfg.cloud_provider = CLOUD_PROVIDER_OPENAI;
-         } else if (strncmp(conv->model, "claude-", 7) == 0) {
-            cfg.cloud_provider = CLOUD_PROVIDER_CLAUDE;
-         } else if (strncmp(conv->model, "gemini-", 7) == 0) {
-            cfg.cloud_provider = CLOUD_PROVIDER_GEMINI;
-         }
+      const cloud_provider_t named = llm_model_provider_from_name(conv->model);
+      if (conv->cloud_provider[0] == '\0' && named != CLOUD_PROVIDER_NONE) {
+         cfg.cloud_provider = named;
       }
    } else if (cfg.type != base->type || cfg.cloud_provider != base->cloud_provider) {
       /* No stored model means its type's and provider's own default, not the
