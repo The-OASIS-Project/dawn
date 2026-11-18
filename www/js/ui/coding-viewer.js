@@ -421,7 +421,9 @@
       }
       ui.head.textContent = head.slice(0, SHORT_HEAD);
       ui.list.replaceChildren();
-      if (!files.length && applied === 'all') {
+      /* No commits at all: nothing to choose.  Commits with no net change (one
+       * undoing another) still get the scopes, to look at each. */
+      if (!files.length && applied === 'all' && !commits.length) {
          ui.list.appendChild(
             elem('div', 'cv-note', 'No committed changes yet; work is collected when a run stops.')
          );

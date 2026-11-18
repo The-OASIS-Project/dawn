@@ -528,6 +528,13 @@ class Repos:
                        "protected": any(is_protected(p, patterns)
                                         for p in path.split(" -> "))})
          i += 1
+      # A conflict resolved by keeping the branch's side has no diff against the
+      # first parent: still listed, as how it was resolved.
+      listed = {n for f in files for n in f["path"].split(" -> ")}
+      for p in only or []:
+         if p not in listed:
+            files.append({"path": p, "added": 0, "removed": 0,
+                          "protected": is_protected(p, patterns)})
       if sc["scope"] == "since_push" and await self.gw(
             "-C", m, "rev-list", "--first-parent", "--min-parents=2", "-n1", sc["range"]):
          files = await self.drop_main(m, head, sc["from"], mb, files)

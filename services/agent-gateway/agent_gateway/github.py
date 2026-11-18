@@ -76,6 +76,7 @@ FEEDBACK_CAP = 48 * 1024
 # A thread saying again what an answered one from an earlier review, same file, said.
 REPEAT_SIMILARITY = 0.85
 REPEAT_COMPARED = 400  # characters of each (normalized) first comment compared
+REPEAT_LINES = 20  # a repeat sits within this many lines of the one it repeats
 
 HASH_SHOWN = 12           # a commit's hash, in words
 LIST_SEP = 2              # ", " between two items of a JSON list
@@ -620,7 +621,8 @@ def _earlier(a: dict, t: dict) -> bool:
 
 def _mark_repeats(threads: list, me: str | None) -> None:
    """Each thread that says again what an answered one from an earlier review,
-   on the same file, said gets repeat_of: that thread's comment_id.  Answered or
+   on the same file and near the same line, said gets repeat_of: that thread's
+   comment_id.  Answered or
    not: replying to a repeat doesn't make it new."""
    answered = [(a, _norm(a["comments"][0]["body"])[:REPEAT_COMPARED])
                for a in threads if _answered(a, me)]
@@ -628,6 +630,9 @@ def _mark_repeats(threads: list, me: str | None) -> None:
       said = _norm(t["comments"][0]["body"])[:REPEAT_COMPARED]
       for a, before in answered:
          if a is t or a["path"] != t["path"] or not _earlier(a, t):
+            continue
+         # The same words about another spot in the file are another finding.
+         if a.get("line") and t.get("line") and abs(a["line"] - t["line"]) > REPEAT_LINES:
             continue
          # autojunk off: on text over 200 characters it drops the common characters.
          m = difflib.SequenceMatcher(None, said, before, autojunk=False)

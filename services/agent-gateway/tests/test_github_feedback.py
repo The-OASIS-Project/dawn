@@ -549,3 +549,16 @@ def test_tools_reply_and_request(monkeypatch):
       _, out = call_tool(c, "pr_threads", {"dawn_user_id": 1, "ref": "115"})
       assert out["pr"] == {"owner": "o", "repo": "dawn", "number": 115}
       assert out["configured_repo"] == "dawn" and out["job"] is None
+
+
+def test_the_same_words_elsewhere_in_the_file_are_a_new_finding(monkeypatch):
+   """Copilot's wording about another spot in the same file isn't a repeat."""
+   nodes = [copilot_thread(1, 100, COPILOT_SAID, 901), copilot_thread(2, 200, COPILOT_SAID, 902)]
+   nodes[0]["isResolved"] = True
+   nodes[0]["line"], nodes[1]["line"] = 42, 42 + github.REPEAT_LINES + 1
+   reviews = [review_node(901, COPILOT, commit="a" * 40), review_node(902, COPILOT)]
+   monkeypatch.setattr(github, "_request", FakeGitHub(threads=[threads_page(nodes,
+                                                                          reviews=reviews)]))
+   res = github.pr_threads("o", "dawn", 115, "tok")
+   assert "repeat_of" not in res["threads"][0]
+   assert res["copilot_round"]["new"] == 1 and res["copilot_round"]["repeats"] == 0

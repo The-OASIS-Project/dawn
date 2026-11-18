@@ -2324,3 +2324,18 @@ def test_since_push_keeps_a_merge_of_the_agents_own_branch(tmp_path, service_uma
    collect()
    files = changes("since_push", pushed)["files"]
    assert sorted((f["path"], f.get("includes_main", False)) for f in files) == [("s", False)]
+
+
+def test_merge_scope_lists_a_conflict_kept_to_the_branchs_side(tmp_path, service_umask):
+   """A recorded conflict resolved by keeping the branch's version has no diff
+   against the first parent, and is still listed."""
+   from agent_gateway.runner import merge_report
+   src, wt, repos, mirror, collect, changes = viewer(tmp_path)
+   commit(src, "f", "main\n", "main f")
+   commit(wt, "f", "agent\n", "agent f")
+   out = asyncio.run(repos.merge_base("r", "main", "aaaa0001"))
+   commit(wt, "f", "agent\n", "merge main, keep ours")
+   collect()
+   merge = mirror("rev-parse", "refs/agent/aaaa0001")
+   ch = changes(merge[:10], None, {out["base_head"]: merge_report(out)})
+   assert [(f["path"], f["added"], f["removed"]) for f in ch["files"]] == [("f", 0, 0)]
