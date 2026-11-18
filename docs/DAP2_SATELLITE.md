@@ -548,7 +548,7 @@ sudo reboot
 
 ```bash
 sudo apt install -y \
-  build-essential cmake git pkg-config \
+  build-essential cmake git pkg-config wget unzip \
   libasound2-dev \
   libwebsockets-dev \
   libjson-c-dev \
@@ -596,20 +596,22 @@ Music (Opus): ON
 
 #### ONNX Runtime (required for VAD and TTS)
 
-Download the prebuilt aarch64 release:
+Download the prebuilt aarch64 library from Microsoft's NuGet package:
 
 ```bash
 cd ~
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-aarch64-1.19.2.tgz
-tar xzf onnxruntime-linux-aarch64-1.19.2.tgz
-cd onnxruntime-linux-aarch64-1.19.2
-sudo cp -a lib/libonnxruntime.so* /usr/local/lib/
-sudo cp include/*.h /usr/local/include/
+# Microsoft's NuGet package carries the Linux libraries and headers
+wget https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.19.2/microsoft.ml.onnxruntime.1.19.2.nupkg
+unzip -q microsoft.ml.onnxruntime.1.19.2.nupkg -d ort "runtimes/linux-arm64/native/*" "build/native/include/*"
+sudo cp ort/runtimes/linux-arm64/native/libonnxruntime.so /usr/local/lib/libonnxruntime.so.1.19.2
+sudo cp ort/runtimes/linux-arm64/native/libonnxruntime_providers_shared.so /usr/local/lib/
+sudo ln -sf libonnxruntime.so.1.19.2 /usr/local/lib/libonnxruntime.so.1
+sudo ln -sf libonnxruntime.so.1 /usr/local/lib/libonnxruntime.so
+sudo cp -r ort/build/native/include/* /usr/local/include/
 sudo ldconfig
-cd ~
 ```
 
-Check https://github.com/microsoft/onnxruntime/releases for newer versions. Building from source on a Pi takes 30–60 minutes and is rarely necessary.
+Newer versions are listed at https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime. Building from source on a Pi takes 30–60 minutes and is rarely necessary.
 
 #### libvosk (required for Vosk ASR — the default)
 

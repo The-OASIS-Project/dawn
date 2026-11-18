@@ -17,6 +17,7 @@ FROM ${BASE_IMAGE}
 
 # Pinned dep versions — MUST match scripts/lib/libs.sh.
 ARG ONNXRUNTIME_VERSION=1.19.2
+ARG ONNXRUNTIME_SHA256=fa133c8fe6238445a0dd3e8447baa5c7d16f418caa8e576c7e253ba77b27b61b
 ARG VOSK_VERSION=0.3.45
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -30,16 +31,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         unzip wget ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# --- ONNX Runtime (prebuilt aarch64) → /usr/local (VAD + Piper TTS) ---
+# --- ONNX Runtime (prebuilt aarch64, Microsoft's NuGet package) → /usr/local (VAD + Piper TTS) ---
 RUN set -eux; \
     cd /tmp; \
-    wget -q -O ort.tgz \
-      "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}.tgz"; \
-    tar xzf ort.tgz; \
-    cp -r "onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}/include/"* /usr/local/include/; \
-    cp -a "onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime"*.so* /usr/local/lib/; \
+    wget -q -O ort.nupkg \
+      "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ONNXRUNTIME_VERSION}/microsoft.ml.onnxruntime.${ONNXRUNTIME_VERSION}.nupkg"; \
+    echo "${ONNXRUNTIME_SHA256}  ort.nupkg" | sha256sum -c; \
+    unzip -q ort.nupkg -d ort "runtimes/linux-arm64/native/*" "build/native/include/*"; \
+    cp -r ort/build/native/include/* /usr/local/include/; \
+    cp ort/runtimes/linux-arm64/native/libonnxruntime.so "/usr/local/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}"; \
+    cp ort/runtimes/linux-arm64/native/libonnxruntime_providers_shared.so /usr/local/lib/; \
+    ln -sf "libonnxruntime.so.${ONNXRUNTIME_VERSION}" /usr/local/lib/libonnxruntime.so.1; \
+    ln -sf libonnxruntime.so.1 /usr/local/lib/libonnxruntime.so; \
     ldconfig; \
-    rm -rf /tmp/ort.tgz "/tmp/onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}"
+    rm -rf /tmp/ort.nupkg /tmp/ort
 
 # --- espeak-ng (rhasspy fork — required by piper-phonemize) → /usr ---
 RUN set -eux; \
