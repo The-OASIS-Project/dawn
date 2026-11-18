@@ -98,7 +98,9 @@ char *coding_requests_grant_revoke(int user_id, int64_t grant);
  *        buttons rest on; a closed job's work is gone, so its files and commits
  *        come back empty without asking for them.  Or (@p file) task_file's for
  *        @p path as changes listed it ("a -> b" for a rename) in @p view ("diff"
- *        or "new").  The user's own coding job only.  Blocks on the gateway: call
+ *        or "new").  @p scope (NULL or "": all) narrows either to since_push or
+ *        one of the job's commits by hash; the caller checks its characters.
+ *        The user's own coding job only.  Blocks on the gateway: call
  *        off the lws thread.  None of it reaches the model.
  * @return The gateway's object (caller puts), or NULL with the error result
  *         (TOOL_RESULT_ERROR_MARK-prefixed) in *err_out.
@@ -108,6 +110,7 @@ struct json_object *coding_view_fetch(int user_id,
                                       bool file,
                                       const char *path,
                                       const char *view,
+                                      const char *scope,
                                       char **err_out);
 
 /**

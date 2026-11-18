@@ -62,6 +62,7 @@ static int g_ntasks;               /* tasks task_list returns */
 static bool g_reachable = true;
 static const char *g_pending = "[]";  /* the task's open requests, as task_list returns them */
 static int g_revise_mode;             /* task_revise: 0 accepted, 1 refused, 2 no answer */
+static const char *g_revise_answer;   /* task_revise's answer when accepted */
 static bool g_revise_ends_job;        /* the job's old end lands while it is sent */
 static char g_status[JOB_STATUS_MAX]; /* the job row (defined with the job store below) */
 static bool g_list_fails;             /* task_list gets no answer */
@@ -132,7 +133,7 @@ int mcp_bridge_call_tool(const char *alias,
       if (g_revise_mode == 2) {
          return FAILURE; /* no text: no answer */
       }
-      *result_out = strdup("{\"id\":\"t1\",\"status\":\"working\"}");
+      *result_out = strdup(g_revise_answer);
    } else if (strcmp(tool, "task_list") == 0 && args_json && strstr(args_json, "task_id")) {
       char buf[256];
       snprintf(buf, sizeof(buf),
@@ -260,6 +261,8 @@ static char g_status[JOB_STATUS_MAX];
 static char g_kind[JOB_KIND_MAX];
 static bool g_fired;
 static bool g_claim_lost;
+static int64_t g_parent;     /* job 42's parent chat */
+static int64_t g_spawn_conv; /* where the last spawn marker went */
 
 int conv_db_create_job_ex(int user_id,
                           const char *title,
@@ -304,7 +307,7 @@ int conv_db_job_get(int64_t conv_id, int user_id, job_record_t *out) {
    memset(out, 0, sizeof(*out));
    out->id = 42;
    out->user_id = 5;
-   out->parent_id = 7;
+   out->parent_id = g_parent;
    snprintf(out->job_status, sizeof(out->job_status), "%s", g_status);
    snprintf(out->job_kind, sizeof(out->job_kind), "%s", g_kind);
    return AUTH_DB_SUCCESS;
@@ -359,8 +362,18 @@ int job_manager_register_kind_cancel(const char *kind, job_kind_cancel_fn fn) {
    g_hook = fn;
    return SUCCESS;
 }
+int conv_db_job_set_parent(int64_t job_id, int user_id, int64_t parent_id) {
+   if (job_id != 42 || user_id != 5) {
+      return AUTH_DB_NOT_FOUND;
+   }
+   g_parent = parent_id;
+   return AUTH_DB_SUCCESS;
+}
 void conv_event_emit(int64_t conv_id, int user_id, const char *kind, char *payload_owned) {
-   (void)conv_id, (void)user_id, (void)kind;
+   (void)user_id;
+   if (strcmp(kind, CONV_EVENT_SPAWN) == 0) {
+      g_spawn_conv = conv_id;
+   }
    free(payload_owned);
 }
 char *event_payload_agent(const char *gw_kind,
@@ -601,11 +614,14 @@ void setUp(void) {
    g_start_lost = 0;
    g_ntasks = 0;
    g_claim_lost = false;
+   g_parent = 7;
+   g_spawn_conv = 0;
    g_reachable = true;
    g_granted = true;
    g_status[0] = '\0';
    g_pending = "[]";
    g_revise_mode = 0;
+   g_revise_answer = "{\"id\":\"t1\",\"status\":\"working\"}";
    g_revise_ends_job = false;
    g_list_fails = false;
    g_task_status = "working";
@@ -1092,10 +1108,102 @@ static void test_revise_then_confirm(void) {
    free(r);
 }
 
+/* merge_base: the preview and describe line say the base is merged first, the
+ * gateway gets a real boolean, its report is in the result, and anything but a
+ * boolean (or "true"/"false") is refused before anything is staged. */
+static void test_revise_merging_the_base(void) {
+   coding_job();
+   snprintf(g_status, sizeof(g_status), "done");
+   char *r = call("revise", "{\"job\":42,\"instructions\":\"merge main\",\"merge_base\":\"yes\"}");
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "merge_base is true or false"), r);
+   free(r);
+   char *preview = call("revise",
+                        "{\"job\":42,\"instructions\":\"merge main\",\"merge_base\":\"true\"}");
+   TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(preview, "(first merges main into its branch)"), preview);
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   free(preview);
+   g_turn++;
+   char out[256];
+   int valid = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         g_meta.describe_call("confirm_revise", args, out, sizeof(out), &valid));
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "more work (first merges main into its branch)"), out);
+   g_revise_answer = "{\"id\":\"t1\",\"status\":\"working\",\"merge\":{\"merged\":"
+                     "\"c0ffee001122\"}}";
+   char *done = call("confirm_revise", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(done, "merged main into its branch first (now at "
+                                             "c0ffee001122)"),
+                                done);
+   free(done);
+   const int c = last_call("task_revise");
+   TEST_ASSERT_NOT_EQUAL(-1, c);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(g_args[c], "\"merge_base\": true"), g_args[c]);
+   /* Conflicts left for the agent are named. */
+   snprintf(g_status, sizeof(g_status), "done");
+   preview = call("revise", "{\"job\":42,\"instructions\":\"merge main\",\"merge_base\":true}");
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   free(preview);
+   g_turn++;
+   g_revise_answer = "{\"id\":\"t1\",\"status\":\"working\",\"merge\":{\"conflicts\":"
+                     "[\"src/a.c\",\"b.h\"],\"conflicts_count\":2}}";
+   done = call("confirm_revise", args);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(done, "Merging main conflicted in src/a.c, b.h; the agent "
+                                             "resolves them"),
+                                done);
+   free(done);
+   /* Without it, the gateway isn't asked to merge. */
+   snprintf(g_status, sizeof(g_status), "done");
+   preview = call("revise", "{\"job\":42,\"instructions\":\"more\",\"merge_base\":false}");
+   TEST_ASSERT_NULL(strstr(preview, "first merges"));
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   free(preview);
+   g_turn++;
+   done = call("confirm_revise", args);
+   free(done);
+   TEST_ASSERT_NULL(strstr(g_args[last_call("task_revise")], "merge_base"));
+}
+
+/* A follow-up asked from another chat moves the job there: its report goes to
+ * the chat that asked; one from the job's own chat leaves it. */
+static void test_revise_from_another_chat_moves_the_job(void) {
+   coding_job();
+   snprintf(g_status, sizeof(g_status), "done");
+   atomic_store(&g_session->stream_conversation_id, 7);
+   char *preview = call("revise", "{\"job\":42,\"instructions\":\"more\"}");
+   TEST_ASSERT_NULL_MESSAGE(strstr(preview, "this chat"), preview);
+   free(preview);
+
+   g_turn++; /* the user asks again, from the other chat */
+   atomic_store(&g_session->stream_conversation_id, 9);
+   preview = call("revise", "{\"job\":42,\"instructions\":\"more\"}");
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(preview, "Its report will come to this chat."), preview);
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   free(preview);
+   g_turn++;
+   char out[256];
+   int valid = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         g_meta.describe_call("confirm_revise", args, out, sizeof(out), &valid));
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "its report comes to this chat"), out);
+   char *done = call("confirm_revise", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
+   free(done);
+   TEST_ASSERT_EQUAL_INT64(9, g_parent);
+   TEST_ASSERT_EQUAL_INT64(9, g_spawn_conv);
+   atomic_store(&g_session->stream_conversation_id, 0);
+}
+
 /* Refused, or no answer with no open task: the job goes back as it was, with no
- * second notice; no answer but the task open: the job stays open. */
+ * second notice, and stays under its chat though asked from another; no answer
+ * but the task open: the job stays open. */
 static void test_revise_not_sent(void) {
    coding_job();
+   atomic_store(&g_session->stream_conversation_id, 9); /* asked from another chat */
    for (int mode = 1; mode <= 3; mode++) {
       snprintf(g_status, sizeof(g_status), "failed");
       g_fired = false;
@@ -1111,6 +1219,8 @@ static void test_revise_not_sent(void) {
          TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
          TEST_ASSERT_EQUAL_STRING("failed", g_status);
          TEST_ASSERT_TRUE(g_fired);
+         TEST_ASSERT_EQUAL_INT64(7, g_parent); /* not moved */
+         TEST_ASSERT_EQUAL_INT64(0, g_spawn_conv);
       } else {
          TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
          TEST_ASSERT_EQUAL_STRING("running", g_status);
@@ -1118,6 +1228,7 @@ static void test_revise_not_sent(void) {
       free(r);
       g_turn++;
    }
+   atomic_store(&g_session->stream_conversation_id, 0);
 }
 
 /* Stage a revise of job 42 and return its confirm arguments in @p args. */
@@ -1206,6 +1317,44 @@ static void test_revise_edges(void) {
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "already ended"), r);
    free(r);
    TEST_ASSERT_EQUAL_STRING("done", g_status); /* its real end is kept */
+}
+
+/* A published job's revise says its pull request's feedback goes too, and the
+ * result says what went (or why none could be read). */
+static void test_revise_carries_the_pull_requests_feedback(void) {
+   coding_job();
+   snprintf(g_status, sizeof(g_status), "done");
+   g_task_extra = ",\"published\":{\"pr_url\":\"https://github.com/o/dawn/pull/7\"}";
+   char *preview = call("revise", "{\"job\":42,\"instructions\":\"fix the review\"}");
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(preview, "If its pull request "
+                                                "(https://github.com/o/dawn/pull/7) is still "
+                                                "open, its open feedback"),
+                                preview);
+   char args[48];
+   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   free(preview);
+   g_turn++;
+   g_revise_answer = "{\"id\":\"t1\",\"status\":\"working\",\"feedback\":{\"threads\":4,"
+                     "\"checks\":1,\"pr_url\":\"https://github.com/o/dawn/pull/7\"},"
+                     "\"feedback_error\":null}";
+   char *done = call("confirm_revise", args);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(done, "With it went 4 review threads and 1 failing "
+                                             "required check from "
+                                             "https://github.com/o/dawn/pull/7;"),
+                                done);
+   free(done);
+
+   g_turn++;
+   snprintf(g_status, sizeof(g_status), "done");
+   stage_revise(args, sizeof(args));
+   g_turn++;
+   g_revise_answer = "{\"id\":\"t1\",\"status\":\"working\",\"feedback\":null,"
+                     "\"feedback_error\":\"GitHub didn't answer\"}";
+   done = call("confirm_revise", args);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(done, "couldn't read its pull request's feedback "
+                                             "(GitHub didn't answer)"),
+                                done);
+   free(done);
 }
 
 /* The WebUI card: what a job waits on, in DAWN's checked words. */
@@ -1827,10 +1976,10 @@ static void test_close_a_task_with_no_job(void) {
 static void test_view_fetch(void) {
    coding_job();
    char *err = NULL;
-   TEST_ASSERT_NULL(coding_view_fetch(6, 42, false, "", "diff", &err)); /* not theirs */
+   TEST_ASSERT_NULL(coding_view_fetch(6, 42, false, "", "diff", NULL, &err)); /* not theirs */
    TEST_ASSERT_TRUE(tool_result_is_error(err));
    free(err);
-   struct json_object *ans = coding_view_fetch(5, 42, false, "", "diff", &err);
+   struct json_object *ans = coding_view_fetch(5, 42, false, "", "diff", NULL, &err);
    TEST_ASSERT_NOT_NULL(ans);
    TEST_ASSERT_NULL(err);
    TEST_ASSERT_NOT_NULL(json_object_object_get(ans, "files"));
@@ -1842,7 +1991,7 @@ static void test_view_fetch(void) {
    /* A closed job's work is gone: its state, and nothing to list. */
    g_task_extra = ",\"closed\":1793949000.5";
    const int before = atomic_load(&g_ncalls);
-   ans = coding_view_fetch(5, 42, false, "", "diff", &err);
+   ans = coding_view_fetch(5, 42, false, "", "diff", NULL, &err);
    TEST_ASSERT_NOT_NULL(ans);
    st = json_object_object_get(ans, "job_state");
    TEST_ASSERT_TRUE(json_object_get_boolean(json_object_object_get(st, "closed")));
@@ -1852,15 +2001,20 @@ static void test_view_fetch(void) {
    }
    json_object_put(ans);
    g_task_extra = "";
-   ans = coding_view_fetch(5, 42, true, "old.c -> src/a.c", "diff", &err);
+   ans = coding_view_fetch(5, 42, true, "old.c -> src/a.c", "diff", NULL, &err);
    TEST_ASSERT_NOT_NULL(ans);
    json_object_put(ans);
    const int c = last_call("task_file");
    TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"path\": \"src\\/a.c\""));
    TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"old_path\": \"old.c\""));
-   TEST_ASSERT_NULL(coding_view_fetch(5, 42, true, "", "diff", &err)); /* no path */
+   /* A viewer scope goes to the gateway as given (the WebUI checked it). */
+   ans = coding_view_fetch(5, 42, true, "a.c", "diff", "since_push", &err);
+   TEST_ASSERT_NOT_NULL(ans);
+   json_object_put(ans);
+   TEST_ASSERT_NOT_NULL(strstr(g_args[last_call("task_file")], "\"scope\": \"since_push\""));
+   TEST_ASSERT_NULL(coding_view_fetch(5, 42, true, "", "diff", NULL, &err)); /* no path */
    free(err);
-   TEST_ASSERT_NULL(coding_view_fetch(5, 42, true, "a.c", "blame", &err)); /* no such view */
+   TEST_ASSERT_NULL(coding_view_fetch(5, 42, true, "a.c", "blame", NULL, &err)); /* no such view */
    free(err);
    /* A rename's two paths are each within the limit, not together. */
    char longer[1600];
@@ -1868,7 +2022,7 @@ static void test_view_fetch(void) {
    memcpy(longer + 700, " -> ", 4);
    memset(longer + 704, 'b', 700);
    longer[1404] = '\0';
-   ans = coding_view_fetch(5, 42, true, longer, "diff", &err);
+   ans = coding_view_fetch(5, 42, true, longer, "diff", NULL, &err);
    TEST_ASSERT_NOT_NULL_MESSAGE(ans, err);
    json_object_put(ans);
 }
@@ -2209,13 +2363,13 @@ static void test_close_when_the_gateway_lost_the_task(void) {
    /* The viewer: Close stays until DAWN recorded the close, then it reads closed. */
    g_holder = 42;
    char *err = NULL;
-   struct json_object *v = coding_view_fetch(5, 42, false, "", "diff", &err);
+   struct json_object *v = coding_view_fetch(5, 42, false, "", "diff", NULL, &err);
    TEST_ASSERT_NOT_NULL_MESSAGE(v, err);
    TEST_ASSERT_FALSE(json_object_get_boolean(
        json_object_object_get(json_object_object_get(v, "job_state"), "closed")));
    json_object_put(v);
    g_holder = 0;
-   v = coding_view_fetch(5, 42, false, "", "diff", &err);
+   v = coding_view_fetch(5, 42, false, "", "diff", NULL, &err);
    TEST_ASSERT_NOT_NULL_MESSAGE(v, err);
    TEST_ASSERT_TRUE(json_object_get_boolean(
        json_object_object_get(json_object_object_get(v, "job_state"), "closed")));
@@ -2249,8 +2403,11 @@ int main(void) {
    RUN_TEST(test_file_views);
    RUN_TEST(test_approve_then_confirm_allows);
    RUN_TEST(test_revise_then_confirm);
+   RUN_TEST(test_revise_merging_the_base);
    RUN_TEST(test_revise_not_sent);
+   RUN_TEST(test_revise_from_another_chat_moves_the_job);
    RUN_TEST(test_revise_edges);
+   RUN_TEST(test_revise_carries_the_pull_requests_feedback);
    RUN_TEST(test_delegate_naming_a_finished_job);
    RUN_TEST(test_card_open_requests);
    RUN_TEST(test_card_reply_checks);

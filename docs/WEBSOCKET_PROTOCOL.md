@@ -349,7 +349,11 @@ One lookup per user runs at a time; asks that arrive meanwhile are merged into t
 The changes viewer: a coding job's work, read from the agent gateway's mirror (never
 shown to the model). `what` is `changes` (the changed files and commits) or `file`
 (one file: `path` exactly as `changes` listed it, `"old -> new"` for a rename;
-`view` `diff`, the default, or `new`). The user's own coding job only. One request
+`view` `diff`, the default, or `new`). `scope` (optional, either `what`) narrows the
+view: `all` (the default, the whole job), `since_push` (after the last published head)
+or one of the job's commits by hash (4-40 lowercase hex digits; against its first
+parent, and for a merge only its files with conflicts); view only, Publish and Close
+still act on the whole job. The user's own coding job only. One request
 per user at a time; a newer one replaces one still waiting. Answered with
 `coding_view_response`, to the asking tab only; `nonce` (optional, up to 39
 characters) is echoed so the tab renders only its latest.
@@ -2273,7 +2277,13 @@ through the assistant: "follow up on job 1977: ...").
 `base`, `task_id` (the job's branch is `refs/agent/<task_id>` in the gateway's
 mirror), `files` ({`path`, `added`, `removed`, `protected`}; `added`/`removed` null
 for a binary file; protected first, at most 2000) with `files_total`, and `commits`
-({`hash`, `subject`}, at most 100), plus `job_state`, DAWN's facts about the job (the
+({`hash`, `subject`, `merge`}, at most 100, always the whole job's), `base_name` (the
+base branch), `scope` (as applied: `all`, `since_push` or the full hash),
+`scope_commits` (hashes it covers), `scope_merge` (a merge commit's scope) with
+`merge_recorded` (its files are the conflicts the gateway recorded; false: an
+approximation, the files it changed beyond both sides), `since_push_available` (bool),
+`nothing_since_push` (asked for `since_push` with nothing since the push: shows all), and on a `since_push` file `includes_main` (main's
+changes from a merge are in its diff), plus `job_state`, DAWN's facts about the job (the
 viewer's Publish and Close buttons come only from these): `status`, `closed` (bool),
 `pr_url` (checked; absent when none), `unpublished_commits` (int, `-1` when unknown) and
 `published` (bool). For `file`: `path`, `view`, and `text` (a unified

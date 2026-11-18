@@ -303,6 +303,8 @@ window.DawnJobsActivity = (function () {
       if (job.resumed) {
          unmarkTerminal(key);
       }
+      // A revise from another chat moves the job there: the old chat's badge drops it.
+      var prevParent = key in jobs ? jobs[key].parent_id : null;
       var trackedWentTerminal = false;
       if (!isActive(job.status)) {
          markTerminal(key);
@@ -337,10 +339,17 @@ window.DawnJobsActivity = (function () {
       ) {
          DawnJobs.onJobResumed(job);
       }
-      // Patch just the affected conversation's sidebar badge (no list re-render).
-      // A job's parent never changes, so the row carries the right parent whether
-      // it just joined the set or just left it. A rootless job (parent_id 0) has
-      // no conversation badge to patch.
+      // Patch just the affected conversation's sidebar badge (no list re-render),
+      // and the one it left when a revise moved it. A rootless job (parent_id 0)
+      // has no conversation badge to patch.
+      if (
+         prevParent &&
+         prevParent !== job.parent_id &&
+         typeof DawnHistory !== 'undefined' &&
+         DawnHistory.updateConversationJobsBadge
+      ) {
+         DawnHistory.updateConversationJobsBadge(String(prevParent));
+      }
       if (
          job.parent_id &&
          typeof DawnHistory !== 'undefined' &&

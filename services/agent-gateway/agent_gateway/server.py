@@ -36,7 +36,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
-from . import github
+from . import github, review
 from .github import GitError
 from .runner import PR_FOOTER, body_sha256, pr_body
 
@@ -166,14 +166,23 @@ def build(runner, cfg) -> MCPServer:
    @tool
    async def task_revise(dawn_user_id: int, instructions: str, task_id: str | None = None,
                          client_ref: str | None = None, budget_usd: float | None = None,
-                         revise_ref: str | None = None) -> dict:
+                         revise_ref: str | None = None, merge_base: bool = False) -> dict:
       """More work for a completed or failed task: its agent session resumes on the same
       branch and clone with `instructions`; `budget_usd` is added to its budget (default:
       the configured task budget).  A repeated `revise_ref` returns the task and adds
-      nothing (safe to retry)."""
+      nothing (safe to retry).  A task whose pull request is open gets its open feedback
+      too (its agent reads it with its pr_feedback tool): feedback has the counts
+      (threads, checks: failing required ones; null with no open pull request) and
+      feedback_error says why it couldn't be read.  `merge_base`: the gateway merges the
+      base branch into the task's branch first (the agent's sandbox can't write paths
+      like .claude/, which a base may change): merge says what it did (merged: a commit
+      or "up to date"; or conflicts, left in progress for the agent).  A conflict in a
+      path the sandbox protects, or a clone with uncommitted changes, refuses the revise
+      with nothing changed."""
       t = task_of(dawn_user_id, task_id, client_ref)
-      return public(await runner.revise(t["id"], dawn_user_id, instructions, budget_usd,
-                                        revise_ref))
+      t = await runner.revise(t["id"], dawn_user_id, instructions, budget_usd, revise_ref,
+                              merge_base)
+      return {**public(t), **runner.revise_feedback(t["id"])}
 
    @tool
    async def task_reply(dawn_user_id: int, request_id: int, decision: str = "",
@@ -230,16 +239,31 @@ def build(runner, cfg) -> MCPServer:
 
    # --- reading the work: from the gateway's mirror, never the agent's clone ---
 
+   def published_head(t: dict) -> str | None:
+      return (json.loads(t["published"]) if t["published"] else {}).get("head")
+
    @tool
    async def task_changes(dawn_user_id: int, task_id: str | None = None,
-                          client_ref: str | None = None) -> dict:
+                          client_ref: str | None = None, scope: str | None = None) -> dict:
       """The task's work so far: changed files with +/- counts, its commits, paths only
       its commits changed (history_only), whether any path is a CI workflow, and the
       pull request publish would open: the title the agent wrote (pr_title; null when
-      none, then DAWN's) and the description (pr_body, with its pr_body_sha256)."""
+      none, then DAWN's) and the description (pr_body, with its pr_body_sha256).
+      `scope` narrows the files to view: all (the default), since_push (after the last
+      published head; since_push_available says whether there is one) or one of the
+      task's commits by hash (a merge: its files with conflicts when merge_recorded, else
+      those it changed beyond both sides).  since_push with nothing since the push
+      shows all, with nothing_since_push set.  The answer names the scope applied and
+      the commits it covers (scope_commits)."""
       t = task_of(dawn_user_id, task_id, client_ref)
       closed_check(t)
-      res = await runner.repos.changes(t["repo"], t["id"], t["base"])
+      # A later "up to date" record for the same base head mustn't hide the merge's.
+      merges = {e["data"]["merge"]["base_head"]: e["data"]["merge"]
+                for e in store.task_events(t["id"], "revised", 50)
+                if (e["data"].get("merge") or {}).get("base_head")
+                and e["data"]["merge"].get("merged") != "up to date"}
+      res = await runner.repos.changes(t["repo"], t["id"], t["base"], scope, published_head(t),
+                                       merges)
       body = pr_body(t)
       # task_id names refs/agent/<id> for looking locally
       return {**res, "task_id": t["id"], "pr_title": t["pr_title"], "pr_body": body,
@@ -248,12 +272,13 @@ def build(runner, cfg) -> MCPServer:
    @tool
    async def task_file(dawn_user_id: int, path: str, view: str = "diff",
                        task_id: str | None = None, client_ref: str | None = None,
-                       old_path: str | None = None) -> dict:
+                       old_path: str | None = None, scope: str | None = None) -> dict:
       """One file of the task's work: view diff, new (after) or old (before).  A renamed
-      file's diff takes its old name as old_path."""
+      file's diff takes its old name as old_path; `scope` as task_changes takes it."""
       t = task_of(dawn_user_id, task_id, client_ref)
       closed_check(t)
-      return await runner.repos.file(t["repo"], t["id"], t["base"], path, view, old_path)
+      return await runner.repos.file(t["repo"], t["id"], t["base"], path, view, old_path,
+                                     scope, published_head(t))
 
    @tool
    async def task_tree(dawn_user_id: int, path: str = "", task_id: str | None = None,
@@ -308,11 +333,14 @@ def build(runner, cfg) -> MCPServer:
    async def pr_threads(dawn_user_id: int, ref: str | None = None, repo: str | None = None,
                         client_ref: str | None = None, all: bool = False) -> dict:
       """A pull request's unresolved review threads (all: resolved ones too), each keyed
-      by comment_id (its first comment's id; n is for display), its reviews with a body
-      and its newest conversation comments.  The pull request is named as for pr_status."""
+      by comment_id (its first comment's id; n is for display; repeat_of: it says again
+      what an answered thread said), copilot_round (Copilot's latest review), its
+      reviews with a body and its newest conversation comments.  The pull request is
+      named as for pr_status; pr, configured_repo and job as there."""
       owner, name, number = pull_request(dawn_user_id, ref, repo, client_ref)
-      return await asyncio.to_thread(github.pr_threads, owner, name, number, github_token(),
-                                     all)
+      res = await asyncio.to_thread(github.pr_threads, owner, name, number, github_token(), all)
+      return {**res, "pr": {"owner": owner, "repo": name, "number": number},
+              **pr_context(dawn_user_id, owner, name, number)}
 
    @tool
    async def pr_check_log(dawn_user_id: int, check: str, ref: str | None = None,
@@ -322,6 +350,35 @@ def build(runner, cfg) -> MCPServer:
       owner, name, number = pull_request(dawn_user_id, ref, repo, client_ref)
       return await asyncio.to_thread(github.pr_check_log, owner, name, number, check,
                                      github_token())
+
+   @tool
+   async def pr_reply(dawn_user_id: int, replies: list[dict], ref: str | None = None,
+                      repo: str | None = None, client_ref: str | None = None,
+                      resolve: bool = True) -> dict:
+      """Post replies as the token's user on a pull request's review threads, each
+      {comment_id (the thread's first comment, as pr_threads names it), body, resolve?},
+      then resolve each thread whose reply's resolve is true (a reply without one
+      takes the call's resolve; false leaves its thread open).  DAWN calls this only
+      after the user confirmed.  A reply already posted (the same text on the same
+      thread) isn't posted again, so a retry is safe.  Each result: url and resolved
+      (already_posted when it was there), or error."""
+      owner, name, number = pull_request(dawn_user_id, ref, repo, client_ref)
+      return await review.post_replies(store, github_token(), owner, name, number, replies,
+                                       resolve)
+
+   @tool
+   async def pr_request_review(dawn_user_id: int, ref: str | None = None,
+                               repo: str | None = None, client_ref: str | None = None,
+                               check: bool = False) -> dict:
+      """Ask Copilot to review a pull request again (DAWN calls this only after the
+      user confirmed); with check, only whether it may be asked.  Refused while its
+      review is pending, when its re-review found nothing new, and when no commit
+      came after its last review (merges, of the base, don't count; with check,
+      answered as no_new_commits instead).  Answers pr, head_sha, copilot_round,
+      new_commits and requested; configured_repo and job as for pr_status."""
+      owner, name, number = pull_request(dawn_user_id, ref, repo, client_ref)
+      res = await review.request_review(store, github_token(), owner, name, number, check)
+      return {**res, **pr_context(dawn_user_id, owner, name, number)}
 
    @tool
    async def grants_list(dawn_user_id: int) -> dict:

@@ -2424,20 +2424,27 @@ dawn_add_unit_test(test_coding_agent_tool
            ${SRC_ROOT}/src/tools/coding_agent_requests.c
            ${SRC_ROOT}/src/tools/coding_agent_publish.c
            ${SRC_ROOT}/src/tools/coding_agent_github.c
+           ${SRC_ROOT}/src/tools/coding_agent_github_post.c
            ${SRC_ROOT}/src/tools/coding_agent_gateway.c
            ${SRC_ROOT}/src/core/pending_slots.c
            ${SRC_ROOT}/src/tools/tool_pending.c
            ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
-# coding_agent's GitHub reads: framed as web content, what is sent, what is said.
+# coding_agent on GitHub: reads framed as web content; replies and Copilot
+# requests staged, confirmed and described; the [coding_agent] section's round trip.
 dawn_add_unit_test(test_coding_agent_github
    SOURCES test_coding_agent_github.c
            ${SRC_ROOT}/src/tools/coding_agent_tool.c
            ${SRC_ROOT}/src/tools/coding_agent_github.c
+           ${SRC_ROOT}/src/tools/coding_agent_github_post.c
            ${SRC_ROOT}/src/tools/coding_agent_gateway.c
+           ${SRC_ROOT}/src/core/pending_slots.c
+           ${SRC_ROOT}/src/tools/tool_pending.c
            ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 

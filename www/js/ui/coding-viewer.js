@@ -41,6 +41,8 @@
    const HUNK = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
    const NARROW = '(max-width: 759px)';
    const SHORT_HEAD = 12; /* characters of a commit hash shown */
+   const SINCE_PUSH = 'Since last push';
+   const PUSHED = 'Everything is pushed; showing all changes.';
 
    let dlg = null;
    let ui = {};
@@ -60,6 +62,9 @@
    let downOnBackdrop = false;
    let current = null; /* the file shown: {path, added, removed, protected} */
    let view = 'diff';
+   let scope = 'all'; /* what the list shows: all, since_push or a commit's hash */
+   let baseName = 'the base'; /* the task's base branch, for the notes */
+   let loadedScope = ''; /* the scope the listing is for */
 
    function elem(tag, cls, text) {
       const e = document.createElement(tag);
@@ -116,7 +121,9 @@
          changesSeq = nonceSeq;
       } else {
          latest = connected ? nonce : ''; /* whatever was asked before is for something else now */
-         pending = connected ? { nonce: nonce, seq: nonceSeq, path: path, view: view } : null;
+         pending = connected
+            ? { nonce: nonce, seq: nonceSeq, path: path, view: view, scope: scope }
+            : null;
       }
       if (!connected) {
          if (what === 'file') {
@@ -124,9 +131,11 @@
          } else if (!listed) {
             ui.list.replaceChildren(elem('div', 'cv-note', 'Not connected.'));
          }
+         ui.list.removeAttribute('aria-busy');
          return;
       }
       const payload = { job: job, what: what, nonce: nonce };
+      if (scope !== 'all') payload.scope = scope;
       if (what === 'file') {
          payload.path = path;
          payload.view = view;
@@ -219,13 +228,16 @@
 
    function backToFiles() {
       dlg.classList.remove('show-file');
-      const sel = ui.list.querySelector('[aria-current="true"]');
+      const sel = ui.list.querySelector('.cv-filebtn[aria-current="true"]');
       if (sel) sel.focus();
    }
 
    /* Where focus goes when the footer has nothing to take it. */
    function home() {
-      const sel = ui.list.querySelector('[aria-current="true"]') || ui.list.querySelector('button');
+      const sel =
+         ui.list.querySelector('.cv-filebtn[aria-current="true"]') ||
+         ui.list.querySelector('.cv-filebtn') ||
+         ui.list.querySelector('button');
       /* An empty pane says nothing: the dialog's close button then. */
       const empty = !ui.pane.childNodes.length;
       (sel || (empty ? dlg.querySelector('.dawn-dialog-close') : ui.pane)).focus();
@@ -252,6 +264,8 @@
       cache = new Map();
       current = null;
       view = 'diff';
+      scope = 'all';
+      loadedScope = '';
       latest = '';
       pending = null;
       listed = false;
@@ -328,8 +342,17 @@
       if (f.path.indexOf(' -> ') >= 0) {
          b.appendChild(shownPath('cv-dir', 'renamed from ' + f.path.split(' -> ')[0]));
       }
+      if (f.includes_main)
+         b.appendChild(elem('span', 'cv-dir', 'includes ' + baseName + '’s changes'));
       const added = f.added == null ? 'binary' : f.added + ' added, ' + f.removed + ' removed';
-      b.setAttribute('aria-label', f.path + ', ' + added + (f.protected ? ', protected' : ''));
+      b.setAttribute(
+         'aria-label',
+         f.path +
+            ', ' +
+            added +
+            (f.protected ? ', protected' : '') +
+            (f.includes_main ? ', includes ' + baseName + '’s changes' : '')
+      );
       b.addEventListener('click', function () {
          choose(f, b);
       });
@@ -351,6 +374,7 @@
 
    function renderChanges(r, first) {
       const head = r.head ? String(r.head) : '';
+      ui.list.removeAttribute('aria-busy');
       if (acts) acts.render(r.job_state);
       if (r.job_state && r.job_state.closed) {
          /* Its clone and branch are gone: nothing left to list (the footer says Closed). */
@@ -363,54 +387,171 @@
          ui.pane.removeAttribute('aria-busy');
          return;
       }
-      if (!first && head === loadedHead) return;
-      listed = true;
-      loadedHead = head;
-      if (!first) {
-         dropFiles();
-         note('The work changed since you opened it.');
-         say('The work changed since you opened it.');
-      }
-      ui.head.textContent = head.slice(0, SHORT_HEAD);
+      const applied = String(r.scope || 'all');
+      baseName = r.base_name || 'the base';
       const files = Array.isArray(r.files) ? r.files : [];
       const commits = Array.isArray(r.commits) ? r.commits : [];
+      /* Since last push with nothing since the push: the gateway showed all. */
+      const pushed = !!r.nothing_since_push && scope === 'since_push';
+      if (pushed) {
+         scope = 'all';
+         loadedScope = '';
+      }
+      if (!first && head === loadedHead && applied === loadedScope) {
+         /* A publish since: Since last push comes or goes, the files stay. */
+         const had = !!ui.list.querySelector('.cv-scopebtn[data-scope="since_push"]');
+         const old = ui.list.querySelector('.cv-scopes');
+         if (old && had !== !!r.since_push_available) old.replaceWith(scopeList(r, commits));
+         return;
+      }
+      const moved = !first && head !== loadedHead;
+      const rescoped = !first && !moved; /* only the scope changed: focus stays on it */
+      listed = true;
+      loadedHead = head;
+      loadedScope = applied;
+      if (!first) dropFiles();
+      if (moved) {
+         note('The work changed since you opened it.');
+         say('The work changed since you opened it.');
+      } else if (pushed) {
+         note(PUSHED);
+         say(PUSHED);
+      } else if (rescoped) {
+         note('Choose a file to see what changed.');
+      }
+      ui.head.textContent = head.slice(0, SHORT_HEAD);
       ui.list.replaceChildren();
-      if (!files.length) {
+      if (!files.length && applied === 'all') {
          ui.list.appendChild(
             elem('div', 'cv-note', 'No committed changes yet; work is collected when a run stops.')
          );
          return;
       }
-      ui.list.appendChild(
-         elem('h3', 'cv-section', 'Files (' + (r.files_total || files.length) + ')')
-      );
+      ui.list.append(elem('h3', 'cv-section', 'Show'), scopeList(r, commits));
+      /* The files, under the scope they are for (the scope button's label). */
+      const sec = elem('div', 'cv-filesec');
+      const title = elem('h3', 'cv-section', 'Files (' + (r.files_total || files.length) + ')');
+      if (applied === 'since_push') {
+         title.append(' · ' + SINCE_PUSH.toLowerCase());
+      } else if (applied !== 'all') {
+         title.append(' · commit ', elem('span', 'cv-hash', applied.slice(0, 8)));
+      }
+      sec.appendChild(title);
+      if (!files.length) sec.appendChild(elem('div', 'cv-note', 'No files in this view.'));
+      if (r.scope_merge) {
+         sec.appendChild(
+            elem(
+               'div',
+               'cv-note',
+               r.merge_recorded
+                  ? 'A merge: only files with conflicts are shown; the rest came from ' +
+                       baseName +
+                       '.'
+                  : 'A merge: only files the merge changed beyond both sides are shown.'
+            )
+         );
+      }
       const ul = elem('ul', 'cv-files');
       files.forEach(function (f) {
          const li = elem('li');
          li.appendChild(fileButton(f));
          ul.appendChild(li);
       });
-      ui.list.appendChild(ul);
+      sec.appendChild(ul);
       if (r.files_total > files.length) {
-         ui.list.appendChild(
+         sec.appendChild(
             elem('div', 'cv-note', r.files_total - files.length + ' more files not listed.')
          );
       }
-      ui.list.appendChild(elem('h3', 'cv-section', 'Commits (' + commits.length + ')'));
-      const ol = elem('ol', 'cv-commits');
-      commits.forEach(function (c) {
-         const li = elem('li');
-         li.appendChild(elem('span', 'cv-hash', String(c.hash || '').slice(0, 8)));
-         const s = elem('span', 'cv-subject');
-         s.setAttribute('dir', 'auto');
-         appendShown(s, String(c.subject || ''));
-         li.appendChild(s);
-         ol.appendChild(li);
-      });
-      ui.list.appendChild(ol);
+      ui.list.appendChild(sec);
       ui.taskId = r.task_id || '';
       const btn = ui.list.querySelector('.cv-filebtn');
       if (btn && first) btn.focus();
+      const sel = ui.list.querySelector('.cv-scopebtn[aria-current="true"]');
+      if (sel && rescoped) {
+         sel.focus();
+         if (!pushed) say(sel.getAttribute('aria-label') + ': ' + files.length + ' files');
+      }
+   }
+
+   /* ---- the scope: the whole job, since the last push, or one commit ------ */
+
+   function scopeButton(name, label, sub) {
+      const b = elem('button', 'cv-scopebtn');
+      b.type = 'button';
+      if (sub) {
+         b.append(elem('span', 'cv-hash', name.slice(0, 8)), sub);
+      } else {
+         b.textContent = label;
+      }
+      b.setAttribute('aria-label', label);
+      b.dataset.scope = name;
+      if (scope === name) b.setAttribute('aria-current', 'true');
+      b.addEventListener('click', function () {
+         if (scope === name) return;
+         scope = name;
+         ui.list.querySelectorAll('.cv-scopebtn').forEach(function (x) {
+            x.removeAttribute('aria-current');
+         });
+         b.setAttribute('aria-current', 'true');
+         dropFiles();
+         loadedScope = ''; /* the listing is gone: the next answer redraws it */
+         note('Loading…');
+         /* No stale files under the new scope while it loads. */
+         const sec = ui.list.querySelector('.cv-filesec');
+         if (sec) sec.replaceChildren(elem('div', 'cv-note', 'Loading…'));
+         ui.list.setAttribute('aria-busy', 'true');
+         send('changes');
+      });
+      return b;
+   }
+
+   /* View only: Publish and Close act on the whole job whatever is shown. */
+   function scopeList(r, commits) {
+      const ol = elem('ol', 'cv-scopes');
+      ol.setAttribute('aria-label', 'Show');
+      const add = function (list, b) {
+         const li = elem('li');
+         li.appendChild(b);
+         list.appendChild(li);
+      };
+      add(ol, scopeButton('all', 'All changes'));
+      if (r.since_push_available) add(ol, scopeButton('since_push', SINCE_PUSH));
+      if (!commits.length) return ol;
+      const label = commits.length + (commits.length === 1 ? ' commit' : ' commits');
+      const sub = elem('ol', 'cv-commits');
+      sub.setAttribute('aria-label', label);
+      const group = elem('li');
+      group.append(elem('div', 'cv-group', label), sub);
+      ol.appendChild(group);
+      /* Since the last push: the commits it covers carry the selected look, as
+       * the one commit does when it is the view. */
+      const covered =
+         r.scope === 'since_push' && Array.isArray(r.scope_commits)
+            ? new Set(r.scope_commits.map(String))
+            : null;
+      commits.forEach(function (c) {
+         const hash = String(c.hash || '');
+         const inView = covered !== null && covered.has(hash);
+         const s = elem('span', 'cv-subject');
+         s.setAttribute('dir', 'auto');
+         appendShown(s, String(c.subject || ''));
+         if (c.merge) s.appendChild(elem('span', 'cv-dir', 'merge of ' + baseName));
+         const merge = c.merge ? ', merge of ' + baseName : '';
+         const b = scopeButton(
+            hash,
+            'Commit ' +
+               hash.slice(0, 8) +
+               ': ' +
+               c.subject +
+               merge +
+               (inView ? ', in this view' : ''),
+            s
+         );
+         if (inView) b.classList.add('cv-inview');
+         add(sub, b);
+      });
+      return ol;
    }
 
    /* ---- one file --------------------------------------------------------- */
@@ -452,7 +593,7 @@
          (view === 'diff' ? 'Diff of ' : 'New version of ') + f.path
       );
       ui.banner.hidden = true;
-      const key = f.path + '|' + view;
+      const key = scope + '|' + f.path + '|' + view;
       if (cache.has(key)) {
          latest = ''; /* an answer still on its way is for something else now */
          pending = null;
@@ -601,8 +742,19 @@
    function handleChanges(p) {
       changesNonce = '';
       const first = !listed;
+      if (!p.ok && scope !== 'all') {
+         /* That scope is gone (the work moved): back to all of it. */
+         scope = 'all';
+         loadedScope = ''; /* relisted, marked as all */
+         send('changes');
+         const msg = p.error || 'The coding agent didn’t answer.';
+         note(msg);
+         say(msg);
+         return;
+      }
       if (!p.ok) {
          const msg = p.error || 'The coding agent didn’t answer.';
+         ui.list.removeAttribute('aria-busy');
          if (first) ui.list.replaceChildren(elem('div', 'cv-note', msg));
          say(msg);
       } else {
@@ -628,8 +780,8 @@
          return;
       }
       const r = p.result || {};
-      cache.set(asked.path + '|' + asked.view, r);
-      if (current && current.path === asked.path && view === asked.view) {
+      cache.set(asked.scope + '|' + asked.path + '|' + asked.view, r);
+      if (current && current.path === asked.path && view === asked.view && scope === asked.scope) {
          renderFile(r); /* only under the file and view it is for */
       }
    }

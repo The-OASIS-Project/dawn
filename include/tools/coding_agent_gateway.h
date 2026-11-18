@@ -65,6 +65,15 @@ int coding_gateway_call(int user_id,
                         struct json_object **out,
                         char **err);
 
+/** coding_gateway_call() waiting up to @p timeout_ms for the answer (0: the
+ *  server's request_timeout_seconds), for a call that may take longer. */
+int coding_gateway_call_timed(int user_id,
+                              const char *tool,
+                              struct json_object *args,
+                              long timeout_ms,
+                              struct json_object **out,
+                              char **err);
+
 /** The string @p key of a gateway answer's object @p o, or "" (missing, null). */
 const char *coding_gateway_jstr(struct json_object *o, const char *key);
 

@@ -20,7 +20,8 @@
  * reads and these helpers; coding_agent_delegate.c: starting a task;
  * coding_agent_requests.c: answering what a task waits on;
  * coding_agent_watch.c: the gateway's events; coding_agent_github.c: reading
- * GitHub pull requests) and what they share.  Not for
+ * GitHub pull requests; coding_agent_github_post.c: replying on them and asking
+ * Copilot to review) and what they share.  Not for
  * use outside the tool.
  */
 
@@ -31,6 +32,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "auth/auth_db.h"
 #include "core/turn_origin.h"
@@ -46,6 +48,16 @@ extern "C" {
 
 /** @p text as an error result (TOOL_RESULT_ERROR_MARK in front); NULL on OOM. */
 char *coding_agent_error(const char *text);
+
+/** Whether @p s has anything but whitespace. */
+static inline bool coding_agent_has_text(const char *s) {
+   return s[strspn(s, " \t\r\n")] != '\0';
+}
+
+/** The longest line a confirm's describe_call gives a reply code: under
+ *  TOOL_CALL_CHALLENGE_DESC_MAX (core/tool_call_challenge.h) with room to spare;
+ *  a longer one is refused, never cut. */
+#define CA_DESCRIBE_ROOM (TOOL_CALL_CHALLENGE_DESC_MAX - 48)
 
 /** Room for a repo's name at the gateway. */
 #define CODING_AGENT_REPO_MAX 64
@@ -82,6 +94,10 @@ void coding_agent_preview_replaced(uint32_t replaced_turn);
  *  was told a report with a take on them. */
 bool coding_agent_turn_read(const turn_origin_t *o);
 
+/** @p obj's @p key as a yes/no in *@p out (@p dflt when it has none): a boolean,
+ *  or "true"/"false" as a model may write it.  False for anything else. */
+bool coding_agent_yes_no(struct json_object *obj, const char *key, bool dflt, bool *out);
+
 /** The job a call names ({"job": N}); 0 when none. */
 int64_t coding_agent_details_job(struct json_object *details);
 
@@ -98,6 +114,10 @@ uint32_t coding_agent_details_id(struct json_object *details);
 
 /** End a job the user hears about in this reply (no completion notice too). */
 void coding_agent_end_quietly(int64_t conv_id, int user_id, const char *status, const char *why);
+
+/** Whether replies on GitHub are signed with the assistant's name
+ *  ([coding_agent] sign_replies). */
+bool coding_agent_sign_replies(void);
 
 /* ---- coding_agent_delegate.c ---- */
 
@@ -119,7 +139,10 @@ bool coding_delegate_live(uint32_t session_id);
 int coding_delegate_describe(const char *value, char *out, size_t out_len, int *valid_for_sec);
 
 /** revise: stage more work for a finished job and return the preview the user confirms. */
-char *coding_revise_propose(struct json_object *details, int user_id, const turn_origin_t *origin);
+char *coding_revise_propose(struct json_object *details,
+                            int user_id,
+                            int64_t parent_conv,
+                            const turn_origin_t *origin);
 
 /** confirm_revise: reopen the job and send its task the follow-up. */
 char *coding_revise_confirm(struct json_object *details, int user_id, const turn_origin_t *origin);
@@ -231,6 +254,54 @@ char *coding_github_pr_threads(struct json_object *details, int user_id);
 /** pr_log: an excerpt of one check's log.  {ref, repo?, check} or {job, check}.
  *  Result: caller frees. */
 char *coding_github_pr_log(struct json_object *details, int user_id);
+
+/** The gateway's arguments naming the pull request a call names: the one job
+ *  {job} published, or {ref, repo}.  NULL with the error result in *@p refusal. */
+struct json_object *coding_github_pr_args(struct json_object *details, int user_id, char **refusal);
+
+/** Call @p tool on the gateway with @p args (taken); its answer, or NULL with
+ *  the error result in *@p refusal. */
+struct json_object *coding_github_call(int user_id,
+                                       const char *tool,
+                                       struct json_object *args,
+                                       char **refusal);
+
+/* ---- coding_agent_github_post.c ---- */
+
+/** Replies one confirm_reply posts (the gateway's REPLIES_CAP), and a reply's
+ *  text before its signature, in bytes. */
+#define CODING_GITHUB_REPLIES_MAX 20
+#define CODING_GITHUB_REPLY_BODY_MAX 1000
+#define CODING_GITHUB_STR_(x) #x
+#define CODING_GITHUB_STR(x) CODING_GITHUB_STR_(x)
+
+/** reply: a preview of replies on a pull request's review threads (each
+ *  {comment_id, body}), resolving them unless resolve is false. */
+char *coding_github_reply(struct json_object *details, int user_id, const turn_origin_t *origin);
+
+/** confirm_reply: posts the replies the preview showed and resolves their threads. */
+char *coding_github_confirm_reply(struct json_object *details,
+                                  int user_id,
+                                  const turn_origin_t *origin);
+
+/** request_review: a preview of asking Copilot to review a pull request again,
+ *  refused while its review is pending or when nothing came after its last one. */
+char *coding_github_request_review(struct json_object *details,
+                                   int user_id,
+                                   const turn_origin_t *origin);
+
+/** confirm_request_review: asks Copilot. */
+char *coding_github_confirm_request_review(struct json_object *details,
+                                           int user_id,
+                                           const turn_origin_t *origin);
+
+/** What confirm_reply (or confirm_request_review, @p review) carries out, for a
+ *  reply code. */
+int coding_github_describe(const char *value,
+                           bool review,
+                           char *out,
+                           size_t out_len,
+                           int *valid_for_sec);
 
 #ifdef __cplusplus
 }
