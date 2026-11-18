@@ -69,6 +69,7 @@ int handle_memory_backfill_note_glosses(int client_fd, const char *payload, uint
 int handle_memory_rebuild_document_fts(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_reextract(int client_fd, const char *payload, uint16_t payload_len);
 int handle_memory_reextract_status(int client_fd, const char *payload, uint16_t payload_len);
+int handle_memory_extract_range(int client_fd, const char *payload, uint16_t payload_len);
 
 /* MCP bridge handlers (admin_socket_mcp.c).  Dispatched from handle_client()
  * against ADMIN_MSG_MCP_* opcodes 0xB0-0xB4.  Compiled only when the MCP bridge

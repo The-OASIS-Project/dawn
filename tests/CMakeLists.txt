@@ -153,6 +153,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v113.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v114.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v115.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v116.c
     ${SRC_ROOT}/src/core/tz.c
     ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
@@ -2755,6 +2756,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_forgotten.c
            ${SRC_ROOT}/src/memory/memory_extraction_queue.c
            ${SRC_ROOT}/src/memory/memory_extraction_slots.c
+           ${SRC_ROOT}/src/memory/memory_extraction_range.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/memory/memory_history_loader.c
            ${SRC_ROOT}/src/core/prompt_sections.c
@@ -2889,6 +2891,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/memory/memory_forgotten.c
            ${SRC_ROOT}/src/memory/memory_extraction_queue.c
            ${SRC_ROOT}/src/memory/memory_extraction_slots.c
+           ${SRC_ROOT}/src/memory/memory_extraction_range.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/memory/memory_note_guard.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
@@ -3015,6 +3018,7 @@ dawn_add_unit_test(test_memory_supersede_kinds
            ${SRC_ROOT}/src/memory/memory_forgotten.c
            ${SRC_ROOT}/src/memory/memory_extraction_queue.c
            ${SRC_ROOT}/src/memory/memory_extraction_slots.c
+           ${SRC_ROOT}/src/memory/memory_extraction_range.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/memory/memory_note_guard.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
@@ -3144,6 +3148,7 @@ set(MEMORY_CONSOLIDATE_TEST_SOURCES
     ${SRC_ROOT}/src/memory/memory_forgotten.c
     ${SRC_ROOT}/src/memory/memory_extraction_queue.c
     ${SRC_ROOT}/src/memory/memory_extraction_slots.c
+    ${SRC_ROOT}/src/memory/memory_extraction_range.c
     ${SRC_ROOT}/src/memory/memory_extraction_input.c
     ${SRC_ROOT}/src/memory/memory_note_guard.c
     ${SRC_ROOT}/src/memory/memory_fact_search.c

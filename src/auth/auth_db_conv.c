@@ -2364,10 +2364,13 @@ int conv_db_get_max_msg_id(int64_t conv_id, int user_id, int64_t *max_id_out) {
    return AUTH_DB_SUCCESS;
 }
 
-int conv_db_briefing_mark_extracted(int64_t conv_id,
-                                    int user_id,
-                                    int64_t *end_id_out,
-                                    bool *replied_out) {
+/* The briefing's last row and whether the user replied; with @p mark, the
+ * cursor moved past it too. */
+static int briefing_end(int64_t conv_id,
+                        int user_id,
+                        bool mark,
+                        int64_t *end_id_out,
+                        bool *replied_out) {
    if (conv_id <= 0 || !end_id_out || !replied_out)
       return AUTH_DB_FAILURE;
    *end_id_out = 0;
@@ -2422,7 +2425,7 @@ int conv_db_briefing_mark_extracted(int64_t conv_id,
       return AUTH_DB_FAILURE;
    }
 
-   if (end > 0) {
+   if (end > 0 && mark) {
       /* No reply: every row is the briefing, so the whole conversation. */
       if (sqlite3_prepare_v2(s_db.db, mark_sql, -1, &stmt, NULL) != SQLITE_OK) {
          AUTH_DB_UNLOCK();
@@ -2442,6 +2445,17 @@ int conv_db_briefing_mark_extracted(int64_t conv_id,
    *end_id_out = end;
    *replied_out = replied;
    return AUTH_DB_SUCCESS;
+}
+
+int conv_db_briefing_mark_extracted(int64_t conv_id,
+                                    int user_id,
+                                    int64_t *end_id_out,
+                                    bool *replied_out) {
+   return briefing_end(conv_id, user_id, true, end_id_out, replied_out);
+}
+
+int conv_db_briefing_end(int64_t conv_id, int user_id, int64_t *end_id_out, bool *replied_out) {
+   return briefing_end(conv_id, user_id, false, end_id_out, replied_out);
 }
 
 /* =============================================================================

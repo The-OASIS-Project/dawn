@@ -58,6 +58,7 @@
 #include "memory/memory_embeddings_internal.h"
 #include "memory/memory_extraction_input.h"
 #include "memory/memory_extraction_internal.h"
+#include "memory/memory_extraction_range.h"
 #include "memory/memory_forgotten.h"
 #include "memory/memory_history_loader.h"
 #include "memory/memory_note_guard.h"
@@ -82,6 +83,9 @@ typedef struct {
    int64_t checked_max_id;                /* highest row the history held (0: none) */
    bool has_fallback;                     /* Whether fallback LLM info is available */
    memory_extraction_fallback_t fallback; /* Session's active LLM for retry */
+   bool range;                            /* rows range_from..range_to, behind the cursor */
+   int64_t range_from;
+   int64_t range_to;
 } extraction_context_t;
 
 /* Set only by the benchmark harness (bench_retrieval --dump-candidates). */
@@ -193,17 +197,21 @@ static char *build_existing_profile(int user_id) {
  * Helper: Parse extraction response
  * ============================================================================= */
 
-static void process_extraction_response(int user_id,
-                                        int64_t conversation_id,
-                                        const char *session_id,
-                                        const char *response_text,
-                                        int message_count,
-                                        int duration_seconds,
-                                        const memory_provenance_t *prov,
-                                        const memory_forgotten_list_t *forgotten) {
+/* FAILURE: the reply couldn't be used (none, not JSON, out of memory) and
+ * nothing was stored; SUCCESS once it was read, even with nothing in it to
+ * learn. */
+static int process_extraction_response(int user_id,
+                                       int64_t conversation_id,
+                                       const char *session_id,
+                                       const char *response_text,
+                                       int message_count,
+                                       int duration_seconds,
+                                       const memory_provenance_t *prov,
+                                       const memory_forgotten_list_t *forgotten,
+                                       bool with_summary) {
    if (!response_text) {
       OLOG_WARNING("memory_extraction: NULL response from LLM");
-      return;
+      return FAILURE;
    }
 
    /* Extract JSON from response (handles markdown blocks, preamble text, etc.) */
@@ -211,7 +219,7 @@ static void process_extraction_response(int user_id,
    if (!root) {
       OLOG_WARNING("memory_extraction: Failed to parse LLM response as JSON");
       OLOG_WARNING("memory_extraction: Response preview: %.200s...", response_text);
-      return;
+      return FAILURE;
    }
 
    memory_candidates_t cands = { 0 };
@@ -221,7 +229,7 @@ static void process_extraction_response(int user_id,
       memory_store_close(st);
       memory_candidates_free(&cands);
       json_object_put(root);
-      return;
+      return FAILURE;
    }
    const int64_t conv_created_at = memory_store_created_at(st);
    memory_candidates_drop_assistant(&cands, g_config.general.ai_name);
@@ -360,10 +368,13 @@ static void process_extraction_response(int user_id,
    memory_store_close(st);
    memory_candidates_free(&cands);
 
-   memory_extraction_store_summary(user_id, conversation_id, session_id, root, message_count,
-                                   duration_seconds, prov, conv_created_at);
+   if (with_summary) {
+      memory_extraction_store_summary(user_id, conversation_id, session_id, root, message_count,
+                                      duration_seconds, prov, conv_created_at);
+   }
 
    json_object_put(root);
+   return SUCCESS;
 }
 
 /* =============================================================================
@@ -399,15 +410,18 @@ static bool conversation_allowed(int user_id, int64_t conversation_id) {
 
 /* Store a batch's reply: through the consolidator, or as extraction proposed
  * it.  MEMORY_CONSOLIDATE_REVOKED: the conversation was made private while the
- * consolidator worked (nothing stored). */
+ * consolidator worked (nothing stored); FAILURE: the reply couldn't be used
+ * (nothing stored).  A range run writes no summary: the conversation has its
+ * own, and a range's would be a second entry for it. */
 static int store_batch(const extraction_context_t *ctx,
                        bool agent,
-                       const extraction_reply_t *reply) {
+                       const extraction_reply_t *reply,
+                       memory_consolidate_result_t *res) {
    if (!agent) {
-      process_extraction_response(ctx->user_id, ctx->conversation_id, ctx->session_id,
-                                  reply->response, ctx->new_message_count, ctx->duration_seconds,
-                                  reply->prov, reply->forgotten);
-      return SUCCESS;
+      return process_extraction_response(ctx->user_id, ctx->conversation_id, ctx->session_id,
+                                         reply->response, ctx->new_message_count,
+                                         ctx->duration_seconds, reply->prov, reply->forgotten,
+                                         !ctx->range);
    }
    const memory_consolidate_input_t in = {
       .user_id = ctx->user_id,
@@ -424,8 +438,9 @@ static int store_batch(const extraction_context_t *ctx,
       .input_tokens = reply->input_tokens,
       .on_reply = s_reply_hook,
       .allowed = conversation_allowed,
+      .no_summary = ctx->range,
    };
-   const int rc = memory_consolidate_batch(&in, NULL);
+   const int rc = memory_consolidate_batch(&in, res);
    if (rc == MEMORY_CONSOLIDATE_REVOKED) {
       OLOG_INFO("memory_extraction: conv %lld: consolidation stopped, conversation made private "
                 "or deleted",
@@ -470,6 +485,71 @@ void memory_extraction_anchor_line(int user_id, int64_t conversation_id, char *o
    char date_buf[16]; /* "YYYY-MM-DD\0" needs 11; 16 is conventional. */
    if (strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm_local) != 0)
       snprintf(out, out_sz, "Conversation anchor: %s\n\n", date_buf);
+}
+
+/* Whether a range run can use the model's reply: a JSON object whose facts,
+ * when it names any, are a list.  Anything else is read as holding nothing,
+ * which would settle the range as run with nothing learned. */
+static bool range_reply_usable(const char *response) {
+   struct json_object *root = memory_extraction_parse_json(response);
+   struct json_object *facts = NULL;
+   const bool usable = root && json_object_is_type(root, json_type_object) &&
+                       (!json_object_object_get_ex(root, "facts", &facts) ||
+                        json_object_is_type(facts, json_type_array));
+   json_object_put(root);
+   return usable;
+}
+
+/* Record a range run before anything is stored, so a crash partway can't
+ * leave it free to run again and learn the same rows twice.  False: another
+ * run recorded an overlapping range meanwhile (or the record failed), and
+ * nothing is stored. */
+static bool range_record(const extraction_context_t *ctx) {
+   const int rec = extraction_range_record(ctx->conversation_id, ctx->range_from, ctx->range_to);
+   if (rec != SUCCESS) {
+      OLOG_WARNING("memory_extraction: conv %lld: range %lld-%lld not stored (%s)",
+                   (long long)ctx->conversation_id, (long long)ctx->range_from,
+                   (long long)ctx->range_to,
+                   rec == MEMORY_EXTRACT_RANGE_OVERLAP ? "an earlier range run overlaps"
+                                                       : "record failed");
+   }
+   return rec == SUCCESS;
+}
+
+/* A recorded range run's end, given what store_batch returned.  Nothing stored
+ * (the reply unusable, or the conversation made private meanwhile): the
+ * record goes, so the range may run again.  A reply read with nothing in it
+ * to learn keeps the record: that is the range's result, and a re-run would
+ * only repeat it.  Ids and counts only in the log. */
+static void range_run_end(const extraction_context_t *ctx,
+                          bool agent,
+                          int stored,
+                          const memory_consolidate_result_t *res) {
+   if (stored == SUCCESS) {
+      /* What the run read stays with the conversation, as a normal batch's
+       * does: a later batch reads only its own rows, and one restating this
+       * range's outside text must not come out clean.  The cursors stay. */
+      (void)conv_db_raise_outside(ctx->conversation_id, ctx->user_id, ctx->outside);
+   }
+   if (stored != SUCCESS) {
+      extraction_range_unrecord(ctx->conversation_id, ctx->range_from, ctx->range_to);
+      OLOG_WARNING("memory_extraction: range run conv %lld rows %lld-%lld stored nothing; it may "
+                   "run again",
+                   (long long)ctx->conversation_id, (long long)ctx->range_from,
+                   (long long)ctx->range_to);
+   } else if (agent) {
+      OLOG_INFO("memory_extraction: range run conv %lld rows %lld-%lld done: rows read %d, "
+                "facts added %d, merged %d, dropped %d, batch %lld, outside %d",
+                (long long)ctx->conversation_id, (long long)ctx->range_from,
+                (long long)ctx->range_to, ctx->new_message_count, res->added, res->merged,
+                res->dropped, (long long)res->batch_id, ctx->outside);
+   } else {
+      OLOG_INFO("memory_extraction: range run conv %lld rows %lld-%lld done: rows read %d, "
+                "facts added, merged and dropped not available (prompt consolidator), no batch, "
+                "outside %d",
+                (long long)ctx->conversation_id, (long long)ctx->range_from,
+                (long long)ctx->range_to, ctx->new_message_count, ctx->outside);
+   }
 }
 
 static void *extraction_thread(void *arg) {
@@ -634,14 +714,18 @@ static void *extraction_thread(void *arg) {
    /* Recovery-triggered extractions process old, idle conversations the user
     * has long since moved on from.  Surfacing a noisy "extraction failed"
     * toast for those is just clutter — log only, don't notify. */
-   bool is_recovery_run = (strncmp(ctx->session_id, "recovery_", 9) == 0);
+   bool is_recovery_run = ctx->range || (strncmp(ctx->session_id, "recovery_", 9) == 0);
 #endif
 
    /* Source range for provenance: (last_extracted_msg_id + 1, the highest row
     * the batch's history held), the cursor's last row read after the LLM
     * returns (a concurrent extraction may have moved it). */
    memory_provenance_t prov = { .outside = ctx->outside }; /* no source range yet */
-   if (ctx->conversation_id > 0 && response) {
+   if (ctx->range && response) {
+      prov.conv_id = ctx->conversation_id;
+      prov.msg_id_start = ctx->range_from;
+      prov.msg_id_end = ctx->range_to;
+   } else if (ctx->conversation_id > 0 && response) {
       int64_t last_id = 0;
       memory_db_get_last_extracted_msg_id(ctx->conversation_id, &last_id);
       int64_t max_id = 0;
@@ -696,10 +780,29 @@ static void *extraction_thread(void *arg) {
    }
 #endif
 
+   bool recorded = false;
+   if (!revoked && response && ctx->range) {
+      if (!range_reply_usable(response)) {
+         OLOG_WARNING("memory_extraction: range run conv %lld rows %lld-%lld: the reply can't be "
+                      "used; it may run again",
+                      (long long)ctx->conversation_id, (long long)ctx->range_from,
+                      (long long)ctx->range_to);
+      } else {
+         recorded = range_record(ctx);
+      }
+      if (!recorded) {
+         free(response);
+         response = NULL;
+         revoked = true;
+      }
+   }
+
    /* The model answered: store what it found.  A conversation made private
     * while the consolidator worked stops it before its next write (REVOKED);
     * the cursor stays, as above. */
    bool answered = false;
+   memory_consolidate_result_t res = { 0 };
+   int stored = FAILURE;
    if (!revoked && response) {
       answered = true;
       if (s_reply_hook) {
@@ -712,9 +815,13 @@ static void *extraction_thread(void *arg) {
                                                               : &extraction_config,
                                          .history = extraction_history,
                                          .input_tokens = round0_input };
-      revoked = store_batch(ctx, agent, &reply) == MEMORY_CONSOLIDATE_REVOKED;
+      stored = store_batch(ctx, agent, &reply, &res);
+      revoked = stored == MEMORY_CONSOLIDATE_REVOKED;
       free(response);
       response = NULL;
+   }
+   if (recorded) {
+      range_run_end(ctx, agent, stored, &res);
    }
    if (revoked) {
       /* nothing more written; the cursor stays */
@@ -737,8 +844,9 @@ static void *extraction_thread(void *arg) {
       }
 
       /* Update extraction high-water mark on success, to the end of the range
-       * above: rows saved during the call stay to be read. */
-      if (ctx->conversation_id > 0) {
+       * above: rows saved during the call stay to be read.  A range run is
+       * behind the cursor and leaves it. */
+      if (ctx->conversation_id > 0 && !ctx->range) {
          /* What this batch read stays with the conversation (its floor): a
           * later batch reads only its own rows. */
          if (memory_db_set_last_extracted(ctx->conversation_id, ctx->message_count, prov.msg_id_end,
@@ -841,8 +949,44 @@ static int trigger_skip(int user_id, bool have_slot, int rc) {
    return rc;
 }
 
-/* memory_trigger_extraction(), or a queued run (@p have_slot: its slot is
- * already claimed, and every return lets it go or hands it to the thread). */
+/* A range run's outside kind: @p kind (the conversation's floor and the
+ * range's rows) with every row of @p history before the range too.  The
+ * floor covers only what a batch has read, and a row just before the range
+ * (a page, an email, a document) can be restated by a reply inside it. */
+static int range_outside(int user_id,
+                         int64_t conversation_id,
+                         struct json_object *history,
+                         int kind) {
+   return outside_combine(kind,
+                          memory_extraction_history_outside(user_id, conversation_id, history, 0));
+}
+
+/* Whether a range run stops before its thread (@p rc: what to return): dry,
+ * once it knows the outside kind; or with nothing the user said, since
+ * nothing is marked done behind the cursor.  Otherwise @p ctx becomes the
+ * range's. */
+static bool range_stops(extraction_context_t *ctx,
+                        extraction_range_t *range,
+                        bool question,
+                        int *rc) {
+   range->outside = ctx->outside;
+   if (range->dry || !question) {
+      *rc = question ? SUCCESS : MEMORY_EXTRACT_RANGE_NO_USER_ROW;
+      return true;
+   }
+   ctx->range = true;
+   ctx->range_from = range->from;
+   ctx->range_to = range->to;
+   ctx->first_msg_id = range->from; /* the batch's record names the range */
+   return false;
+}
+
+/* memory_trigger_extraction(), a queued run (@p have_slot: its slot is
+ * already claimed, and every return lets it go or hands it to the thread), or
+ * a range run (@p range: @p conversation_history is the stored rows through
+ * its end, the rows before its start count as extracted, and the cursor is
+ * neither read as the batch's start nor moved; dry, it stops once it knows
+ * what the batch would read). */
 static int trigger_extraction(int user_id,
                               int64_t conversation_id,
                               const char *session_id_str,
@@ -850,7 +994,8 @@ static int trigger_extraction(int user_id,
                               int message_count,
                               int duration_seconds,
                               const memory_extraction_fallback_t *fallback,
-                              bool have_slot) {
+                              bool have_slot,
+                              extraction_range_t *range) {
    if (user_id <= 0 || !conversation_history) {
       return trigger_skip(user_id, have_slot, 1);
    }
@@ -858,6 +1003,9 @@ static int trigger_extraction(int user_id,
    if (!g_config.memory.enabled) {
       return trigger_skip(user_id, have_slot, 1);
    }
+   /* A skip is a quiet success for a session's run; a range run's caller is
+    * told it didn't start. */
+   const int skipped = range ? FAILURE : SUCCESS;
 
 #ifdef ENABLE_AUTH
    /* Every caller that knows the conversation passes it, so this is the one
@@ -872,7 +1020,7 @@ static int trigger_extraction(int user_id,
          OLOG_INFO("memory_extraction: skipping - conversation %lld is %s",
                    (long long)conversation_id,
                    priv_rc == AUTH_DB_SUCCESS ? "private" : "unreadable");
-         return trigger_skip(user_id, have_slot, 0);
+         return trigger_skip(user_id, have_slot, skipped);
       }
       /* A background job's transcript is research the model did, not what the
        * user said; memory comes from the parent conversation it reports into. */
@@ -882,7 +1030,7 @@ static int trigger_extraction(int user_id,
          OLOG_INFO("memory_extraction: skipping - conversation %lld is %s",
                    (long long)conversation_id,
                    job_rc == AUTH_DB_SUCCESS ? "a background job" : "unreadable (job check)");
-         return trigger_skip(user_id, have_slot, 0);
+         return trigger_skip(user_id, have_slot, skipped);
       }
    }
 #endif
@@ -891,7 +1039,7 @@ static int trigger_extraction(int user_id,
     * recovery scans don't keep re-evaluating a structurally inextractable
     * conversation forever.  If the user later adds a 2nd message the
     * counter advances back to zero on the new live extraction. */
-   if (message_count < 2) {
+   if (!range && message_count < 2) {
       OLOG_INFO("memory_extraction: skipping - too few messages (%d)", message_count);
       if (conversation_id > 0) {
          memory_db_set_last_extracted(conversation_id, message_count, 0,
@@ -915,13 +1063,16 @@ static int trigger_extraction(int user_id,
        * answered never reaches the model (the no-new-messages skip below). */
       int64_t briefing_end = 0;
       bool briefing_replied = false;
-      if (conv_db_briefing_mark_extracted(conversation_id, user_id, &briefing_end,
-                                          &briefing_replied) != AUTH_DB_SUCCESS) {
+      const int brc = range ? conv_db_briefing_end(conversation_id, user_id, &briefing_end,
+                                                   &briefing_replied)
+                            : conv_db_briefing_mark_extracted(conversation_id, user_id,
+                                                              &briefing_end, &briefing_replied);
+      if (brc != AUTH_DB_SUCCESS) {
          /* Fail closed: unchecked, a briefing would reach the model; memory
           * recovery tries the conversation again later. */
          OLOG_WARNING("memory_extraction: skipping conv %lld: briefing check failed",
                       (long long)conversation_id);
-         return trigger_skip(user_id, have_slot, 0);
+         return trigger_skip(user_id, have_slot, skipped);
       }
       if (conv_db_get_outside(conversation_id, user_id, &floor) != AUTH_DB_SUCCESS) {
          floor = OUTSIDE_OTHER; /* unreadable: fail closed, as the checks beside it */
@@ -934,11 +1085,15 @@ static int trigger_extraction(int user_id,
       }
       memory_db_get_last_extracted(conversation_id, &last_extracted);
       memory_db_get_last_extracted_msg_id(conversation_id, &last_msg_id);
+      if (range) {
+         /* The range's rows are read; a briefing's stay unread, as above. */
+         last_msg_id = range->from - 1 > briefing_end ? range->from - 1 : briefing_end;
+      }
 
       /* ID-based early-skip: compare max DB row ID against cursor. */
       int64_t max_msg_id = 0;
       conv_db_get_max_msg_id(conversation_id, user_id, &max_msg_id);
-      if (max_msg_id > 0 && max_msg_id <= last_msg_id) {
+      if (!range && max_msg_id > 0 && max_msg_id <= last_msg_id) {
          OLOG_INFO("memory_extraction: skipping — no new messages (max_id=%lld, last=%lld)",
                    (long long)max_msg_id, (long long)last_msg_id);
          return trigger_skip(user_id, have_slot, 0);
@@ -951,16 +1106,22 @@ static int trigger_extraction(int user_id,
     * user's extraction is running or held, or every slot is busy): a
     * conversation waits in the queue for the next release; recovery's own
     * requests retry on its pass instead. */
-   if (!have_slot &&
-       !extraction_slot_claim_or_queue(user_id, conversation_id, session_id_str, fallback)) {
-      return MEMORY_EXTRACTION_BUSY;
+   /* A range run can't wait in the queue (it holds only a conversation), so
+    * it is refused instead; its dry run claims nothing. */
+   const bool dry = range && range->dry;
+   if (!have_slot && !dry) {
+      if (range ? !extraction_slot_claim(user_id)
+                : !extraction_slot_claim_or_queue(user_id, conversation_id, session_id_str,
+                                                  fallback)) {
+         return MEMORY_EXTRACTION_BUSY;
+      }
+      have_slot = true;
    }
 
    /* Prepare context */
    extraction_context_t *ctx = calloc(1, sizeof(extraction_context_t));
    if (!ctx) {
-      extraction_slot_release(user_id);
-      return 1;
+      return trigger_skip(user_id, have_slot, 1);
    }
 
    ctx->user_id = user_id;
@@ -981,12 +1142,13 @@ static int trigger_extraction(int user_id,
    /* A session's history may lack rows of its conversation (another
     * session's, a compaction's): then the stored conversation is read, so the
     * cursor never passes a row nothing read. */
-   struct json_object *history = memory_extraction_history_whole(user_id, conversation_id,
-                                                                 conversation_history, last_msg_id);
+   struct json_object *history = range ? json_object_get(conversation_history)
+                                       : memory_extraction_history_whole(user_id, conversation_id,
+                                                                         conversation_history,
+                                                                         last_msg_id);
    if (!history) {
       free(ctx);
-      extraction_slot_release(user_id);
-      return 0;
+      return trigger_skip(user_id, have_slot, 0);
    }
 
    /* The messages to extract, verified to belong to conversation_id (see
@@ -996,12 +1158,14 @@ static int trigger_extraction(int user_id,
    struct json_object *filtered = memory_extraction_build_input(user_id, conversation_id, history,
                                                                 last_msg_id, &batch_outside);
    ctx->outside = outside_combine(floor, batch_outside);
+   if (range) {
+      ctx->outside = range_outside(user_id, conversation_id, history, ctx->outside);
+   }
    ctx->checked_max_id = memory_extraction_history_max_id(history);
    json_object_put(history);
    if (!filtered) {
       free(ctx);
-      extraction_slot_release(user_id);
-      return 0;
+      return trigger_skip(user_id, have_slot, range ? FAILURE : SUCCESS);
    }
    /* The batch is the rows being sent, not the caller's count less the stored
     * one: those two are in different units when the history isn't the stored
@@ -1013,7 +1177,14 @@ static int trigger_extraction(int user_id,
     * rather than send the model an empty conversation.  Only as far as the
     * history checked: a reply arriving since then is still to be read. */
    ctx->first_msg_id = memory_extraction_history_first_id(filtered);
-   if (!memory_extraction_input_has_question(filtered)) {
+   const bool question = memory_extraction_input_has_question(filtered);
+   int range_rc = SUCCESS;
+   if (range && range_stops(ctx, range, question, &range_rc)) {
+      json_object_put(filtered);
+      free(ctx);
+      return trigger_skip(user_id, have_slot, range_rc);
+   }
+   if (!question) {
       json_object_put(filtered);
       /* The rows passed may still have read outside text (DAWN's posts): the
        * floor takes it with the cursor. */
@@ -1028,8 +1199,7 @@ static int trigger_extraction(int user_id,
       }
       OLOG_INFO("memory_extraction: conv %lld: nothing the user said is new; skipped",
                 (long long)conversation_id);
-      extraction_slot_release(user_id);
-      return 0;
+      return trigger_skip(user_id, have_slot, 0);
    }
 
    /* memory_extraction_build_input strips the history; this is the backstop,
@@ -1038,16 +1208,14 @@ static int trigger_extraction(int user_id,
    json_object_put(filtered);
    if (!safe) {
       free(ctx);
-      extraction_slot_release(user_id);
-      return 1;
+      return trigger_skip(user_id, have_slot, 1);
    }
    ctx->conversation_json = strdup(json_object_to_json_string_ext(safe, JSON_C_TO_STRING_PLAIN));
    json_object_put(safe);
 
    if (!ctx->conversation_json) {
       free(ctx);
-      extraction_slot_release(user_id);
-      return 1;
+      return trigger_skip(user_id, have_slot, 1);
    }
 
    OLOG_INFO("memory_extraction: extracting %d new messages (last=%d, total=%d)", new_messages,
@@ -1066,8 +1234,7 @@ static int trigger_extraction(int user_id,
       OLOG_ERROR("memory_extraction: failed to create thread: %d", rc);
       free(ctx->conversation_json);
       free(ctx);
-      extraction_slot_release(user_id);
-      return 1;
+      return trigger_skip(user_id, have_slot, 1);
    }
 
    OLOG_INFO("memory_extraction: triggered for user %d", user_id);
@@ -1082,7 +1249,7 @@ int memory_trigger_extraction(int user_id,
                               int duration_seconds,
                               const memory_extraction_fallback_t *fallback) {
    return trigger_extraction(user_id, conversation_id, session_id_str, conversation_history,
-                             message_count, duration_seconds, fallback, false);
+                             message_count, duration_seconds, fallback, false, NULL);
 }
 
 /* A queued conversation's run, on the slot claimed when it was taken
@@ -1094,7 +1261,17 @@ int extraction_run_queued(int user_id,
                           int message_count,
                           const memory_extraction_fallback_t *fallback) {
    return trigger_extraction(user_id, conversation_id, session_id, history, message_count, 0,
-                             fallback, true);
+                             fallback, true, NULL);
+}
+
+int extraction_run_range(int user_id,
+                         int64_t conversation_id,
+                         struct json_object *history,
+                         extraction_range_t *range) {
+   char session_id[MEMORY_SESSION_ID_MAX];
+   snprintf(session_id, sizeof(session_id), "range_%lld", (long long)conversation_id);
+   return trigger_extraction(user_id, conversation_id, session_id, history,
+                             (int)json_object_array_length(history), 0, NULL, false, range);
 }
 
 size_t memory_extraction_get_template_size_chars(void) {

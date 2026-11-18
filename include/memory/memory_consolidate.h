@@ -130,6 +130,9 @@ typedef struct {
    /* Whether the conversation may still be learned from, asked again just
     * before anything is stored (NULL: always). */
    bool (*allowed)(int user_id, int64_t conversation_id);
+   /* No summary or title stored (a range behind the conversation's cursor:
+    * the conversation has its own). */
+   bool no_summary;
 } memory_consolidate_input_t;
 
 /** What a batch's consolidation did. */

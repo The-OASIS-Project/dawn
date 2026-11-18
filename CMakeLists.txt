@@ -1029,6 +1029,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v113.c
     src/auth/auth_db_migrations_v114.c
     src/auth/auth_db_migrations_v115.c
+    src/auth/auth_db_migrations_v116.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c
@@ -1104,6 +1105,7 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_consolidation_view.c
     src/memory/memory_extraction_queue.c
     src/memory/memory_extraction_slots.c
+    src/memory/memory_extraction_range.c
     src/memory/memory_extraction_input.c
     src/memory/memory_similarity.c
     src/memory/memory_import.c
