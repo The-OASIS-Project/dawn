@@ -902,6 +902,12 @@ static size_t responses_write_callback(void *contents, size_t size, size_t nmemb
    size_t total = size * nmemb;
    const char *data = (const char *)contents;
 
+   /* Stopped: take no more of what curl already holds (a short write ends the
+    * transfer).  Each event fed on would run its sentence through speech. */
+   if (llm_transfer_cancelled()) {
+      return 0;
+   }
+
    /* Capture raw response for error message extraction (cap at
     * RESPONSES_RAW_BUFFER_MAX).  Matches Claude's streaming context
     * pattern (see llm_claude.c). */
@@ -1056,13 +1062,16 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
          continue;
       }
 
-      if (res == CURLE_ABORTED_BY_CALLBACK) {
+      /* The write callback ends a stopped transfer with a short write. */
+      const bool stopped = res == CURLE_ABORTED_BY_CALLBACK ||
+                           (res == CURLE_WRITE_ERROR && llm_transfer_cancelled());
+      if (stopped) {
          OLOG_INFO("Responses: transfer interrupted by user");
       } else {
          OLOG_ERROR("Responses: curl_easy_perform failed: %s", curl_easy_strerror(res));
       }
 #ifdef ENABLE_WEBUI
-      if (res != CURLE_ABORTED_BY_CALLBACK) {
+      if (!stopped) {
          session_t *s = session_get_command_context();
          if (s && s->type == SESSION_TYPE_WEBUI) {
             const char *err_code = (res == CURLE_OPERATION_TIMEDOUT) ? "LLM_TIMEOUT" : "LLM_ERROR";
