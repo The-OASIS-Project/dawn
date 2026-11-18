@@ -29,26 +29,14 @@
 struct llm_tool_response;
 
 /*
- * Anthropic Claude Configuration
- *
- * Model, API version, and behavior settings for Claude provider.
- * These are compile-time defaults; runtime config in dawn.toml takes precedence.
- */
-
-/* Default model for Claude */
-#define CLAUDE_MODEL "claude-sonnet-4-5-20250929"
-/* Alternative models:
- * #define CLAUDE_MODEL "claude-haiku-4-5-20241022"    // Faster, cheaper
- * #define CLAUDE_MODEL "claude-opus-4-20250514"       // Most capable
+ * Anthropic Claude API constants.  The default model is LLM_DEFAULT_CLAUDE_MODEL
+ * (config/dawn_config.h); what each model can do is in models.toml.
  */
 
 /* Claude API version header value.  OpenRouter's Messages endpoint accepts it but
  * does not pass it to Anthropic (verified 2026-10-22), so behavior new in this
  * version can't be counted on there. */
 #define CLAUDE_API_VERSION "2026-10-21"
-
-/* Max tokens for completion */
-#define CLAUDE_MAX_TOKENS 4096
 
 /* API endpoint path */
 #define CLAUDE_MESSAGES_ENDPOINT "/v1/messages"

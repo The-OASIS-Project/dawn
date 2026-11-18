@@ -1,6 +1,6 @@
-# models.toml — model context-window registry
+# models.toml — model reference data: context windows, pricing, capabilities
 
-**Status:** in-flight (Aug 2026). Replaces the hard-coded per-model context tables
+**Status:** context windows and capabilities shipped (Aug–Nov 2026); `[pricing]` in-flight (Nov 2026). Replaces the hard-coded per-model context tables
 in `src/llm/llm_context.c` with an editable data file.
 
 ## Problem
@@ -64,12 +64,10 @@ first-match-in-array C tables had.
   0 and the caller uses the existing per-provider default
   (`LLM_CONTEXT_DEFAULT_OPENAI` = 128000, the Claude/Gemini defaults). DAWN always
   works. That default is *conservative* (safe against over-running the window)
-  only for models whose real window ≥ the default — i.e. every modern model. The
-  legacy sub-128K OpenAI entries (`gpt-4` 8K, `gpt-3.5-turbo` 16K, `gpt-4-32k` 32K)
-  would be **over**-estimated by the 128K default (compaction fires late → the
-  provider can 400), so those models specifically require `models.toml` present.
-  A conscious trade: we do not keep a compiled floor for models effectively
-  extinct in 2026, rather than re-introduce the hard-coded table this replaces.
+  only for models whose real window ≥ the default — i.e. every model listed.
+  OpenAI models shut down by 2026-10-23 (the sub-128K `gpt-4`, `gpt-3.5-turbo`
+  and `gpt-4-32k`, GPT-4 Turbo, o1, o3-mini, o4-mini, gpt-4.1-nano; OpenAI's
+  deprecations page, read 2026-11-18) are left out of every table.
 - There is **no** compiled per-model table any more — `models.toml` is the single
   place those numbers live, which is the whole point. The only compiled numbers
   are the per-provider catch-all defaults.
@@ -113,10 +111,8 @@ OpenAI (developers.openai.com + model reference):
 | gpt-5.4 | 256000 | |
 | gpt-5.2 / gpt-5.1 / gpt-5* | 400000 | |
 | gpt-4.1* | 1047576 | |
-| o1/o3/o4* | 200000 | o1-mini/preview 128000 |
+| o3 / o3-pro | 200000 | deprecated, shut down Dec 2026 |
 | gpt-4o* | 128000 | |
-| gpt-4-turbo / gpt-4-32k / gpt-4 | 128000 / 32768 / 8192 | |
-| gpt-3.5* | 16384 | |
 
 Anthropic (**1M is GA at standard pricing since March 2026 — no beta header**):
 
@@ -153,7 +149,7 @@ bare completion collects the stream), so there they are sized by effort too.
 | claude-opus-4-5 / sonnet-4-5 / haiku-4-5, claude-sonnet-4, claude-3-7-sonnet | 64000 | |
 | claude-opus-4 / 4-1 | 32000 | retired on the Claude API |
 | gpt-5 / 5.1 / 5.2 / 5.4 / 5.5 / 5.6 (and mini, nano) | 128000 | developers.openai.com model pages |
-| o1 / o3 / o4-mini | 100000 | |
+| o3 | 100000 | |
 | claude-mythos-5 | 128000 | each the same model as its Fable (5, 5.1, 5.2) |
 | gemini-3 / gemini-2.5 | 65536 | ai.google.dev model pages |
 | gemini-4 (carbon, argon) / gemini-4-hydrogen | 65536 | synchronous limit; long decode (up to 1M) isn't used |
@@ -200,6 +196,47 @@ and the OpenAI Responses API a reply that reaches the window just stops,
 where older Claude models reject the request outright. Local servers aren't
 clamped: they stop at their window rather than reject, and a local window read
 before the server answers is only DAWN's 8K default.
+
+## Prices (`[pricing.<provider>]`, Nov 2026)
+
+One table per direct provider holds what DAWN knows about a model's price, so
+nothing about it lives in C. Each row carries base prices, cache multiples, or
+both:
+
+```toml
+[pricing.anthropic]
+"claude-opus-5-5"   = { input = 4.00, output = 20.00, read = 0.05, write_5m = 1.25, write_1h = 2.0 }
+"claude-sonnet-5-5" = { read = 0.05, write_5m = 1.25, write_1h = 2.0 }
+"claude-sonnet-5"   = { input = 2.00, output = 10.00 }
+```
+
+- `input` / `output`: list prices in $ per million tokens. A row lists both or
+  neither (one alone is logged and ignored). Read by
+  `llm_pricing_rate()`; its one user today is the memory re-extraction cost
+  estimate (`dawn-admin memory reextract`, `memory_db_admin.c`), which prices
+  the cloud providers memory extraction accepts (`claude`, `openai`, and
+  `openrouter` through its vendor's table) and gives no estimate for a name
+  extraction runs locally (local, Ollama, `gemini`, `anthropic`).
+- `read` / `write_5m` / `write_1h`: prompt-cache prices as multiples of the
+  input price (`llm_cache_pricing()`), for the "saved by caching" estimates and
+  cost telemetry. A multiple a row leaves out is the provider's default.
+- Each group is matched by longest prefix **on its own**: a row with only
+  cache multiples (`claude-sonnet-5-5`) takes its base prices from the longest
+  shorter row that has them (`claude-sonnet-5`), and a row with only base
+  prices (`gpt-4o-mini`) takes the multiples of the row above it (`gpt-4o`).
+  The first rows kept every price the two old tables gave (a C `COST_TABLE`
+  in `memory_db_admin.c` and `[cache_pricing]`); the OpenAI rows were then
+  corrected to OpenAI's pricing page (standard tier, 2026-11-18), with a row
+  for each model whose price differs from the row it would otherwise take, and
+  the GPT-6.2 models added.
+- A model no row gives cache multiples gets its provider's compiled default
+  (Anthropic 0.10/1.25/2.00, OpenAI and Gemini 0.10/1.00/1.00). A model no row
+  gives base prices has no price, and no cost estimate: none is made up. Gemini
+  lists no base prices yet.
+- OpenRouter's `vendor/model` ids are priced from their vendor's table, as for
+  the other tables.
+
+An older models.toml without `[pricing]` uses the built-in prices.
 
 > **Behavior note:** bumping the Claude flagships 200K→1M changes when DAWN
 > compacts a Claude conversation (much later). If a deployment's account tier does

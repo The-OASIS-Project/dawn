@@ -233,14 +233,16 @@ static void test_openai_rows(void) {
    /* gpt-5 base can't turn reasoning off: minimal is its floor. */
    assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "gpt-5-mini", "disabled", ""), LLM_THINK_ENABLED,
                    "minimal", true);
-   assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "o3-mini", "enabled", "none"), LLM_THINK_ENABLED,
-                   "low", true);
+   assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "o3-2025-04-16", "enabled", "none"),
+                   LLM_THINK_ENABLED, "low", true);
    /* A family row doesn't catch a newer or specialty variant: those get
     * nothing until listed, never a level they reject. */
    TEST_ASSERT_FALSE(resolve(CLOUD_PROVIDER_OPENAI, "gpt-5.7", "disabled", "").controllable);
    TEST_ASSERT_FALSE(
        resolve(CLOUD_PROVIDER_OPENAI, "gpt-5-chat-latest", "enabled", "high").controllable);
-   TEST_ASSERT_FALSE(resolve(CLOUD_PROVIDER_OPENAI, "o1-mini", "enabled", "high").controllable);
+   /* A model that takes no reasoning_effort. */
+   TEST_ASSERT_FALSE(
+       resolve(CLOUD_PROVIDER_OPENAI, "gpt-4.1-mini", "enabled", "high").controllable);
    assert_resolved(resolve(CLOUD_PROVIDER_OPENAI, "gpt-5-2025-08-07", "disabled", ""),
                    LLM_THINK_ENABLED, "minimal", true);
    TEST_ASSERT_FALSE(

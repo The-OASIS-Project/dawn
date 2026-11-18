@@ -292,7 +292,7 @@ static void free_model_table(model_context_entry_t **arr) {
 }
 
 /* Load the model reference tables from models.toml: the context windows here,
- * cache pricing and reasoning capabilities in their modules.  Each table comes
+ * pricing and reasoning capabilities in their modules.  Each table comes
  * from the disk copy when it has it, else from the shipped copy compiled in. */
 static void load_model_registry(void) {
    llm_models_toml_t m;
@@ -300,7 +300,7 @@ static void load_model_registry(void) {
    s_openai_models = load_provider_table(llm_models_toml_root_for(&m, "openai"), "openai");
    s_claude_models = load_provider_table(llm_models_toml_root_for(&m, "anthropic"), "anthropic");
    s_gemini_models = load_provider_table(llm_models_toml_root_for(&m, "gemini"), "gemini");
-   llm_pricing_load_registry(llm_models_toml_root_for(&m, "cache_pricing"));
+   llm_pricing_load_registry(llm_models_toml_root_for(&m, "pricing"));
    llm_capabilities_load_registry(llm_models_toml_root_for(&m, "thinking"));
    llm_capabilities_load_mid_system(llm_models_toml_root_for(&m, "mid_system"));
    llm_capabilities_load_inline_tools(llm_models_toml_root_for(&m, "inline_tools"));

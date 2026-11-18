@@ -57,6 +57,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
 #include "llm/llm_local_provider.h"
+#include "llm/llm_model_family.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "utils/string_utils.h"
@@ -649,23 +650,22 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
                   /* Infer provider from model name if not explicitly set
                    * (handles old conversations and frontend bugs).
                    * Only infer if the inferred provider has an API key available.
-                   * OpenRouter IDs are "vendor/model" slugs and match none of the bare
-                   * prefixes below, so an OpenRouter session's model is left untouched. */
+                   * OpenRouter IDs are "vendor/model" slugs and name no provider, so an
+                   * OpenRouter session's model is left untouched. */
                   /* Not on an explicit local pick: a local model may share a
                    * cloud prefix (Ollama's gpt-oss). */
                   bool local_pick = type_explicitly_set && config.type == LLM_LOCAL;
                   if (!provider_explicitly_set && !local_pick) {
-                     if ((strncmp(new_model, "gpt-", 4) == 0 || strncmp(new_model, "o1-", 3) == 0 ||
-                          strncmp(new_model, "o3-", 3) == 0) &&
-                         llm_has_openai_key()) {
-                        config.cloud_provider = CLOUD_PROVIDER_OPENAI;
-                        OLOG_INFO("WebUI: Inferred OpenAI provider from model '%s'", new_model);
-                     } else if (strncmp(new_model, "claude-", 7) == 0 && llm_has_claude_key()) {
-                        config.cloud_provider = CLOUD_PROVIDER_CLAUDE;
-                        OLOG_INFO("WebUI: Inferred Claude provider from model '%s'", new_model);
-                     } else if (strncmp(new_model, "gemini-", 7) == 0 && llm_has_gemini_key()) {
-                        config.cloud_provider = CLOUD_PROVIDER_GEMINI;
-                        OLOG_INFO("WebUI: Inferred Gemini provider from model '%s'", new_model);
+                     const cloud_provider_t named = llm_model_provider_from_name(new_model);
+                     const bool has_key = (named == CLOUD_PROVIDER_OPENAI &&
+                                           llm_has_openai_key()) ||
+                                          (named == CLOUD_PROVIDER_CLAUDE &&
+                                           llm_has_claude_key()) ||
+                                          (named == CLOUD_PROVIDER_GEMINI && llm_has_gemini_key());
+                     if (has_key) {
+                        config.cloud_provider = named;
+                        OLOG_INFO("WebUI: Inferred %s provider from model '%s'",
+                                  cloud_provider_to_string(named), new_model);
                      }
                   }
                } else {
@@ -674,11 +674,7 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
             }
          }
 
-         bool model_is_cloud = strncmp(config.model, "gpt-", 4) == 0 ||
-                               strncmp(config.model, "o1-", 3) == 0 ||
-                               strncmp(config.model, "o3-", 3) == 0 ||
-                               strncmp(config.model, "claude-", 7) == 0 ||
-                               strncmp(config.model, "gemini-", 7) == 0;
+         bool model_is_cloud = llm_model_provider_from_name(config.model) != CLOUD_PROVIDER_NONE;
 
          /* An explicit switch to local that names no model drops the one carried over
           * from a cloud session (any name, an OpenRouter slug included) or a bare cloud

@@ -53,7 +53,7 @@ static void test_builtin_copy_is_complete(void) {
    llm_models_toml_open_file(NULL, &m);
    TEST_ASSERT_NOT_NULL(m.builtin);
    TEST_ASSERT_NULL(m.disk);
-   const char *tables[] = { "openai", "anthropic", "gemini", "cache_pricing", "thinking" };
+   const char *tables[] = { "openai", "anthropic", "gemini", "pricing", "thinking" };
    for (size_t i = 0; i < sizeof(tables) / sizeof(tables[0]); i++) {
       TEST_ASSERT_EQUAL_PTR_MESSAGE(m.builtin, llm_models_toml_root_for(&m, tables[i]), tables[i]);
    }
@@ -70,7 +70,7 @@ static void test_an_older_disk_copy_keeps_its_tables_and_gains_the_new_ones(void
                                                 "anthropic", "claude-opus-5"));
    /* ...and a table it predates comes from the built-in copy. */
    TEST_ASSERT_EQUAL_PTR(m.builtin, llm_models_toml_root_for(&m, "thinking"));
-   TEST_ASSERT_EQUAL_PTR(m.builtin, llm_models_toml_root_for(&m, "cache_pricing"));
+   TEST_ASSERT_EQUAL_PTR(m.builtin, llm_models_toml_root_for(&m, "pricing"));
    TEST_ASSERT_NULL(llm_models_toml_root_for(&m, "no_such_table"));
    llm_models_toml_close(&m);
 }
