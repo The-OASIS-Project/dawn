@@ -114,6 +114,13 @@ bool webui_reinvoke_tts_begin(session_t *live,
 void webui_reinvoke_tts_finish(session_t *live, bool use_opus);
 
 /**
+ * @brief End a live re-engagement that spoke nothing: the viewer gets
+ *        `state` `idle`, as webui_reinvoke_tts_finish() sends after speech.
+ *        Weak default is a no-op.
+ */
+void webui_reinvoke_settle(session_t *live);
+
+/**
  * @brief Register the reinvoke processor with the completion monitor.
  *
  * Idempotent.  Call once after job_manager_init().  Wires
