@@ -685,8 +685,9 @@ def test_publish_after_a_revise_pushes_again(store, monkeypatch):
    a merged one gets a new PR."""
    from agent_gateway import runner as rmod
    pr_open = [True]
-   monkeypatch.setattr(rmod, "pr_state",
-                       lambda url, token: "open" if pr_open[0] else "merged")
+   monkeypatch.setattr(rmod, "read_pull_request",
+                       lambda url, token: {"state": "open" if pr_open[0] else "closed",
+                                           "merged_at": None if pr_open[0] else "2026-11-01"})
    class Moving(FakeRepos):
       head = "abcdef1234567890"
       pushes = []
@@ -892,18 +893,212 @@ def test_publish_sends_the_users_own_title_and_description(store, monkeypatch):
       asyncio.run(r.publish("t1", 1, True, None, head, None, None, None))
    r.repos.workflows = False
    asyncio.run(r.publish("t1", 1, True, None, head, None, "Mine", "my text"))
-   # Published already at this head: edits are refused, not reported as done.
-   with pytest.raises(ValueError, match="published already"):
-      asyncio.run(r.publish("t1", 1, True, None, head, None, "Other", None))
    # A title alone: the agent's description, still bound by its hash.
    store.update_task("t1", published=None)
    with pytest.raises(ValueError, match="changed since"):
       asyncio.run(r.publish("t1", 1, True, None, head, "0" * 64, "Mine", None))
-   # Its pull request still open: new commits join it, its text is GitHub's to edit.
+   # Its pull request merged with nothing new: no text goes anywhere.
+   store.update_task("t1", published=json.dumps({"pr_url": "https://github.com/o/r/pull/9",
+                                                 "head": head}))
+   monkeypatch.setattr(rmod, "read_pull_request",
+                       lambda url, token: {"state": "closed", "merged_at": "2026-11-01"})
+   with pytest.raises(ValueError, match="merged, and there is nothing new"):
+      asyncio.run(r.publish("t1", 1, True, None, head, None, "Other", None))
+   # Its state unreadable: the push may join it, so its text isn't sent as used.
    store.update_task("t1", published='{"pr_url": "https://github.com/o/r/pull/9", "head": "old"}')
-   monkeypatch.setattr(rmod, "pr_state", lambda url, token: "open")
-   with pytest.raises(ValueError, match="edit its title and description on GitHub"):
+   monkeypatch.setattr(rmod, "read_pull_request", lambda url, token: None)
+   with pytest.raises(ValueError, match="couldn't be read; try again"):
       asyncio.run(r.publish("t1", 1, True, None, head, None, "Mine", None))
+
+
+class FakePullRequest:
+   """GitHub's pull request 9 for the edit tests: read and PATCHed in memory."""
+
+   def __init__(self, monkeypatch, rmod, title="Agent's title", body="agent text"):
+      self.pr = {"state": "open", "title": title, "body": body}
+      self.patches = []
+      monkeypatch.setattr(rmod, "pr_state", lambda url, token: self.pr["state"])
+      monkeypatch.setattr(rmod, "read_pull_request", lambda url, token: dict(self.pr))
+      monkeypatch.setattr(rmod, "update_pull_request", self.patch)
+
+   def patch(self, url, token, title, body):
+      self.patches.append((url, title, body))
+      if title is not None:
+         self.pr["title"] = title
+      if body is not None:
+         self.pr["body"] = body
+
+
+class Pushes(FakeRepos):
+   head = "abcdef1234567890"
+
+   def __init__(self):
+      self.pushes = []
+
+   async def agent_ref(self, name, task_id, base):
+      return self.head, "base000"
+
+   async def publish(self, name, head, branch, base, token, open_pr, title, body, earlier):
+      self.pushes.append((head, open_pr))
+      return {"pushed": "o/r:agent/t1"}
+
+
+def published_with_pr(store, head="abcdef1234567890"):
+   store.update_task("t1", status=st.COMPLETED, published=json.dumps(
+      {"pushed": "o/r:agent/t1", "pr_url": "https://github.com/o/r/pull/9", "head": head}))
+
+
+def test_publish_edits_an_open_pull_requests_text_with_no_new_commits(store, monkeypatch):
+   """Nothing new to push: the user's text replaces the open PR's, with the footer
+   the open path adds; a replay changes nothing and says so."""
+   from agent_gateway import runner as rmod
+   gh = FakePullRequest(monkeypatch, rmod)
+   r = runner(store, github_token="tok")
+   r.repos = Pushes()
+   add_task(store)
+   published_with_pr(store)
+   head = "abcdef1234567890"
+   shown = rmod.body_sha256("agent text")
+   out = asyncio.run(r.publish("t1", 1, True, None, head, None, "New title", "New text",
+                               shown))
+   assert r.repos.pushes == []
+   assert gh.patches == [("https://github.com/o/r/pull/9", "New title",
+                          "New text" + rmod.PR_FOOTER)]
+   assert out["pr_updated"] == ["title", "description"]
+   assert out["pr_url"] == "https://github.com/o/r/pull/9" and "pushed" not in out
+   # The stored record keeps the push it made, never the edit.
+   assert "pr_updated" not in json.loads(store.task("t1")["published"])
+   # Replayed (an answer lost): already says it, nothing sent again.
+   again = asyncio.run(r.publish("t1", 1, True, None, head, None, "New title", "New text",
+                                 shown))
+   assert again["pr_updated"] == [] and len(gh.patches) == 1
+
+
+def test_publish_pushes_then_edits_an_open_pull_request(store, monkeypatch):
+   from agent_gateway import runner as rmod
+   gh = FakePullRequest(monkeypatch, rmod)
+   r = runner(store, github_token="tok")
+   r.repos = Pushes()
+   add_task(store)
+   published_with_pr(store, head="1111111111111111")  # revised since
+   out = asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890", None, None, "Better",
+                               rmod.body_sha256("agent text")))
+   assert r.repos.pushes == [("abcdef1234567890", False)]  # joins the open PR
+   assert gh.patches == [("https://github.com/o/r/pull/9", None, "Better" + rmod.PR_FOOTER)]
+   assert out["pr_updated"] == ["description"] and out["pushed"] == "o/r:agent/t1"
+   assert json.loads(store.task("t1")["published"])["head"] == "abcdef1234567890"
+
+
+def test_publish_takes_one_footer_from_a_reused_description(store, monkeypatch):
+   """The model reuses the current description, footer and all: the footer once."""
+   from agent_gateway import runner as rmod
+   gh = FakePullRequest(monkeypatch, rmod)
+   r = runner(store, github_token="tok")
+   r.repos = Pushes()
+   add_task(store)
+   published_with_pr(store)
+   asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890", None, None,
+                         "agent text, amended" + rmod.PR_FOOTER + "\n",
+                         rmod.body_sha256("agent text")))
+   assert gh.patches == [("https://github.com/o/r/pull/9", None,
+                          "agent text, amended" + rmod.PR_FOOTER)]
+
+
+def test_publish_retries_an_edit_whose_patch_failed_after_the_push(store, monkeypatch):
+   """The push went up, the PATCH didn't: said so; a retry only PATCHes.  A later
+   replay with no description hash finds it already says that and sends nothing."""
+   from agent_gateway import runner as rmod
+   gh = FakePullRequest(monkeypatch, rmod)
+   fails = [OSError("GitHub is down")]
+
+   def patch(url, token, title, body):
+      if fails:
+         raise fails.pop()
+      gh.patch(url, token, title, body)
+   monkeypatch.setattr(rmod, "update_pull_request", patch)
+   r = runner(store, github_token="tok")
+   r.repos = Pushes()
+   add_task(store)
+   published_with_pr(store, head="1111111111111111")
+   shown = rmod.body_sha256("agent text")
+   args = ("t1", 1, True, None, "abcdef1234567890", None, None, "Better", shown, True)
+   with pytest.raises(ValueError, match="the push went up, but"):
+      asyncio.run(r.publish(*args))
+   assert r.repos.pushes == [("abcdef1234567890", False)] and gh.patches == []
+   out = asyncio.run(r.publish(*args))
+   assert len(r.repos.pushes) == 1
+   assert gh.patches == [("https://github.com/o/r/pull/9", None, "Better" + rmod.PR_FOOTER)]
+   assert out["pr_updated"] == ["description"]
+   again = asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890", None, None, "Better",
+                                 None, True))
+   assert again["pr_updated"] == [] and len(gh.patches) == 1 and len(r.repos.pushes) == 1
+
+
+def test_publish_refuses_an_edit_of_a_pull_request_merged_since_shown(store, monkeypatch):
+   """Shown as an edit, merged before the yes, with new commits: never a new pull
+   request the user wasn't shown; nothing pushed."""
+   from agent_gateway import runner as rmod
+   gh = FakePullRequest(monkeypatch, rmod)
+   gh.pr["merged_at"] = "2026-11-01"
+   r = runner(store, github_token="tok")
+   r.repos = Pushes()
+   add_task(store)
+   published_with_pr(store, head="1111111111111111")
+   with pytest.raises(ValueError, match="merged or closed since it was shown; publish again"):
+      asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890", None, "Mine", None, None,
+                            True))
+   assert r.repos.pushes == [] and gh.patches == []
+
+
+def test_publish_refuses_to_replace_a_description_that_changed(store, monkeypatch):
+   """Someone edited it on GitHub since the preview: nothing pushed, nothing sent."""
+   from agent_gateway import runner as rmod
+   gh = FakePullRequest(monkeypatch, rmod, body="edited on GitHub")
+   r = runner(store, github_token="tok")
+   r.repos = Pushes()
+   add_task(store)
+   published_with_pr(store, head="1111111111111111")
+   for shown in (rmod.body_sha256("agent text"), None):
+      with pytest.raises(ValueError, match="description changed since it was shown; look again"):
+         asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890", None, None, "Mine",
+                               shown))
+   assert r.repos.pushes == [] and gh.patches == []
+
+
+def test_publish_edits_only_the_title(store, monkeypatch):
+   """A title alone needs no description hash and leaves the description as it is."""
+   from agent_gateway import runner as rmod
+   gh = FakePullRequest(monkeypatch, rmod, body="edited on GitHub")
+   r = runner(store, github_token="tok")
+   r.repos = Pushes()
+   add_task(store)
+   published_with_pr(store)
+   out = asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890", None, "Just this"))
+   assert gh.patches == [("https://github.com/o/r/pull/9", "Just this", None)]
+   assert out["pr_updated"] == ["title"] and gh.pr["body"] == "edited on GitHub"
+
+
+def test_task_changes_shows_the_open_pull_requests_text(store, monkeypatch):
+   from starlette.testclient import TestClient
+   from agent_gateway import runner as rmod, server
+   FakePullRequest(monkeypatch, rmod, body=None)  # GitHub's null for no description
+   s = st.Store(":memory:", check_same_thread=False)
+   r = runner(s, github_token="tok")
+   r.repos = Publishing()
+   add_task(s)
+   published_with_pr(s)
+   with TestClient(server.app(r, Config(token="s" * 32)), base_url="http://127.0.0.1:9760") as c:
+      _, ch = call_tool(c, "task_changes", {"dawn_user_id": 1, "task_id": "t1"})
+      assert "open_pr" not in ch
+      s.update_task("t1", published=None)  # none open: the key says so
+      _, ch = call_tool(c, "task_changes", {"dawn_user_id": 1, "task_id": "t1",
+                                            "open_pr": True})
+      assert ch["open_pr"] is None
+      published_with_pr(s)
+      _, ch = call_tool(c, "task_changes", {"dawn_user_id": 1, "task_id": "t1",
+                                            "open_pr": True})
+      assert ch["open_pr"] == {"url": "https://github.com/o/r/pull/9", "title": "Agent's title",
+                               "body": "", "body_sha256": rmod.body_sha256("")}
 
 
 def closed_events(store, tid="t1"):

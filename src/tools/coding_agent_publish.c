@@ -93,6 +93,10 @@ typedef struct {
    char body_sha[CODING_SHA256_LEN + 1];   /* publish: the description shown ("" if unknown) */
    char pr_title[CODING_PR_TITLE_MAX + 1]; /* publish: the user's own ("": the agent's) */
    char pr_desc[CODING_PR_DESC_MAX + 1];   /* publish: the user's own ("": the agent's) */
+   bool edit_open; /* publish: that text replaces the job's open pull request's */
+   bool text_only; /* publish (edit_open): nothing new to push, only that text changes */
+   char replaces_sha[CODING_SHA256_LEN + 1]; /* edit_open: the description it replaces */
+   char pr_url[CP_URL_MAX];                  /* edit_open: that pull request */
 } cp_pending_t;
 
 PENDING_ITEM_CHECK(cp_pending_t);
@@ -194,11 +198,14 @@ static void copy_whole(char *out, size_t len, const char *s) {
 
 /* ========== publish ========== */
 
-/* The agent's commit subjects and changed paths: its words, cleaned and framed. */
+/* The agent's commit subjects and changed paths (none when !@p work: nothing is
+ * pushed), under the pull request's @p title and @p summary: its words, cleaned
+ * and framed. */
 static char *agent_lines(struct json_object *changes,
                          const char *title,
                          const char *summary,
-                         bool whole) {
+                         bool whole,
+                         bool work) {
    strbuf_t sb;
    strbuf_init_with_max(
        &sb, 512, CP_AGENT_TEXT_MAX + CODING_PR_DESC_MAX + CP_SUMMARY_SHOWN + CP_TITLE_SHOWN + 256);
@@ -217,21 +224,25 @@ static char *agent_lines(struct json_object *changes,
       strbuf_appendf(&sb, "Pull request description:\n%s%s\n", shown,
                      strlen(summary) > CP_SUMMARY_SHOWN ? " [...]" : "");
    }
-   struct json_object *commits = json_object_object_get(changes, "commits");
-   struct json_object *files = json_object_object_get(changes, "files");
+   struct json_object *commits = work ? json_object_object_get(changes, "commits") : NULL;
+   struct json_object *files = work ? json_object_object_get(changes, "files") : NULL;
    const size_t nc = json_object_is_type(commits, json_type_array)
                          ? json_object_array_length(commits)
                          : 0;
    const size_t nf = json_object_is_type(files, json_type_array) ? json_object_array_length(files)
                                                                  : 0;
-   strbuf_append(&sb, "Commits:\n");
+   if (work) {
+      strbuf_append(&sb, "Commits:\n");
+   }
    for (size_t i = 0; i < nc && i < CP_LINES_SHOWN; i++) {
       char line[CP_LINE_MAX];
       str_excerpt_line(coding_gateway_jstr(json_object_array_get_idx(commits, i), "subject"),
                        CP_SUBJECT_SHOWN, line, sizeof(line));
       strbuf_appendf(&sb, "- %s\n", line);
    }
-   strbuf_append(&sb, "Files:\n");
+   if (work) {
+      strbuf_append(&sb, "Files:\n");
+   }
    for (size_t i = 0; i < nf && i < CP_LINES_SHOWN; i++) {
       struct json_object *f = json_object_array_get_idx(files, i);
       char path[CP_LINE_MAX];
@@ -245,7 +256,7 @@ static char *agent_lines(struct json_object *changes,
       strbuf_appendf(&sb, "(%zu more files)\n", nf - CP_LINES_SHOWN);
    }
    /* Changed in a commit and changed back: public in the branch's history too. */
-   struct json_object *hist = json_object_object_get(changes, "history_only");
+   struct json_object *hist = work ? json_object_object_get(changes, "history_only") : NULL;
    const size_t nh = json_object_is_type(hist, json_type_array) ? json_object_array_length(hist)
                                                                 : 0;
    if (nh > 0) {
@@ -266,6 +277,61 @@ static char *agent_lines(struct json_object *changes,
    char *body = llm_context_neutralize_owned(strbuf_steal(&sb));
    char *framed = body ? llm_third_party_frame(TOOL_FRAME_AGENT, NULL, body) : NULL;
    free(body);
+   return framed;
+}
+
+static bool is_space(char c) {
+   return c == ' ' || (c >= '\t' && c <= '\r');
+}
+
+static size_t rtrim_len(const char *s, size_t n) {
+   while (n > 0 && is_space(s[n - 1])) {
+      n--;
+   }
+   return n;
+}
+
+/* The length of @p text without trailing white space and one trailing @p footer
+ * (NULL: none), as the gateway takes a description before adding its footer:
+ * text that reuses the current description gets the footer once. */
+static size_t footless_len(const char *text, const char *footer) {
+   size_t n = rtrim_len(text, strlen(text));
+   if (footer == NULL) {
+      return n;
+   }
+   while (is_space(*footer)) {
+      footer++;
+   }
+   const size_t f = rtrim_len(footer, strlen(footer));
+   if (f > 0 && n >= f && memcmp(text + n - f, footer, f) == 0) {
+      n = rtrim_len(text, n - f);
+   }
+   return n;
+}
+
+/* The open pull request's description as GitHub has it, whole up to what a new
+ * one may be (the user's text is rebuilt from it), without the gateway's
+ * @p footer: written by anyone who can edit it there, so framed as a page's
+ * text, never the user's. */
+static char *github_description(const char *body, const char *footer) {
+   const size_t n = footless_len(body, footer);
+   const bool cut = n > CODING_PR_DESC_MAX;
+   char *shown = strndup(body, cut ? CODING_PR_DESC_MAX : n);
+   if (shown == NULL) {
+      return NULL;
+   }
+   utf8_trim_incomplete(shown);
+   strbuf_t sb;
+   strbuf_init(&sb, strlen(shown) + 160);
+   strbuf_appendf(&sb,
+                  "The pull request's current description on GitHub, without the gateway's "
+                  "closing line%s:\n%s%s\n",
+                  cut ? " (cut: too long to show whole)" : "", shown[0] ? shown : "(empty)",
+                  cut ? " [...]" : "");
+   free(shown);
+   char *text = llm_context_neutralize_owned(strbuf_steal(&sb));
+   char *framed = text ? llm_third_party_frame(TOOL_FRAME_WEB, NULL, text) : NULL;
+   free(text);
    return framed;
 }
 
@@ -305,9 +371,10 @@ static void plan_free(cp_plan_t *plan) {
 
 /* The user's own title and/or description for a new pull request (NULL: the
  * agent's), into @p want: the title as one line (runs of white space as one
- * space).  Refused, never cut, when empty or too long: they confirm this text.
- * NULL, or the refusal. */
-static char *own_text(const char *title, const char *desc, cp_pending_t *want) {
+ * space), the description without trailing white space or the gateway's
+ * @p footer (NULL: unknown) it adds again.  Refused, never cut, when empty or
+ * too long: they confirm this text.  NULL, or the refusal. */
+static char *own_text(const char *title, const char *desc, const char *footer, cp_pending_t *want) {
    if (title != NULL) {
       char line[CODING_PR_TITLE_MAX + 1];
       size_t n = 0;
@@ -337,17 +404,15 @@ static char *own_text(const char *title, const char *desc, cp_pending_t *want) {
       safe_strscpy(want->pr_title, line);
    }
    if (desc != NULL) {
-      const char *c = desc;
-      while (*c == ' ' || (*c >= '\t' && *c <= '\r')) {
-         c++;
-      }
-      if (*c == '\0' || strlen(desc) > CODING_PR_DESC_MAX) {
+      const size_t n = footless_len(desc, footer);
+      if (n == 0 || n > CODING_PR_DESC_MAX) {
          char msg[96];
          snprintf(msg, sizeof(msg), "The pull request description must be 1 to %d bytes.",
                   CODING_PR_DESC_MAX);
          return coding_agent_error(msg);
       }
-      safe_strscpy(want->pr_desc, desc);
+      memcpy(want->pr_desc, desc, n);
+      want->pr_desc[n] = '\0';
    }
    return NULL;
 }
@@ -366,8 +431,10 @@ static char *publishable_job(int user_id, int64_t job, job_record_t *rec) {
    return coding_agent_error(msg);
 }
 
-/* NULL with @p out filled (to free), or the refusal. */
-static char *publish_plan(int user_id, int64_t job, bool pr, cp_plan_t *out) {
+/* NULL with @p out filled (to free), or the refusal.  @p edit: the user's own
+ * title or description comes with it, which replace the job's open pull
+ * request's (want.edit_open, with nothing new to push too: want.text_only). */
+static char *publish_plan(int user_id, int64_t job, bool pr, bool edit, cp_plan_t *out) {
    memset(out, 0, sizeof(*out));
    char *bad = publishable_job(user_id, job, &out->rec);
    if (bad != NULL) {
@@ -387,9 +454,11 @@ static char *publish_plan(int user_id, int64_t job, bool pr, cp_plan_t *out) {
       return coding_agent_error("That job was closed; its work is gone from the gateway.");
    }
    out->had_pr = coding_publish_pr_url_ok(pr_url);
-   if (json_object_is_type(published, json_type_object) &&
-       json_object_is_type(jleft, json_type_int) && json_object_get_int(jleft) == 0 &&
-       (out->had_pr || !pr)) {
+   const bool nothing_new = json_object_is_type(published, json_type_object) &&
+                            json_object_is_type(jleft, json_type_int) &&
+                            json_object_get_int(jleft) == 0;
+   /* Nothing new: a publish only changes the text of a pull request still open. */
+   if (nothing_new && (out->had_pr || !pr) && !(out->had_pr && edit)) {
       char msg[CP_URL_MAX + 96];
       if (out->had_pr) {
          snprintf(msg, sizeof(msg), "Coding job #%lld is already published: %s", (long long)job,
@@ -411,12 +480,53 @@ static char *publish_plan(int user_id, int64_t job, bool pr, cp_plan_t *out) {
    out->summary = strdup(coding_gateway_jstr(task, "summary"));
    json_object_put(ans);
 
-   if (coding_gateway_call(user_id, "task_changes", coding_agent_job_args(job), &out->changes,
-                           &err) != CODING_GW_OK) {
+   /* Text for a pull request the job has: replaces that one's while it is open. */
+   const bool ask_open = edit && out->had_pr;
+   struct json_object *cargs = coding_agent_job_args(job);
+   if (cargs != NULL && ask_open) {
+      json_object_object_add(cargs, "open_pr", json_object_new_boolean(true));
+   }
+   if (coding_gateway_call(user_id, "task_changes", cargs, &out->changes, &err) != CODING_GW_OK) {
       plan_free(out);
       return coding_agent_error_free(err);
    }
    free(err);
+   struct json_object *open = json_object_object_get(out->changes, "open_pr");
+   const char *open_err = coding_gateway_jstr(out->changes, "open_pr_error");
+   const bool is_open = json_object_is_type(open, json_type_object);
+   /* An older gateway ignores the question and leaves the key out. */
+   if (ask_open && open_err[0] == '\0' &&
+       !json_object_object_get_ex(out->changes, "open_pr", NULL)) {
+      plan_free(out);
+      return coding_agent_error("The coding-agent gateway is too old to change an open pull "
+                                "request's text; reinstall it. Nothing was staged.");
+   }
+   /* Merged or closed with new commits: they open a new one, with this text. */
+   if (ask_open && !is_open && (open_err[0] != '\0' || nothing_new)) {
+      char msg[CP_URL_MAX + 256];
+      if (open_err[0] != '\0') {
+         snprintf(msg, sizeof(msg),
+                  "Coding job #%lld's pull request couldn't be read on GitHub (%.120s); nothing "
+                  "was staged.",
+                  (long long)job, open_err);
+      } else {
+         snprintf(msg, sizeof(msg),
+                  "Coding job #%lld's pull request %s was merged or closed, and there is nothing "
+                  "new to publish.",
+                  (long long)job, out->pr_url);
+      }
+      plan_free(out);
+      return coding_agent_error(msg);
+   }
+   if (ask_open && is_open) {
+      out->want.edit_open = true;
+      out->want.text_only = nothing_new;
+      safe_strscpy(out->want.pr_url, out->pr_url);
+      const char *osha = coding_gateway_jstr(open, "body_sha256");
+      if (is_sha256(osha)) {
+         safe_strscpy(out->want.replaces_sha, osha);
+      }
+   }
    const char *head = coding_gateway_jstr(out->changes, "head");
    struct json_object *commits = json_object_object_get(out->changes, "commits");
    struct json_object *files = json_object_object_get(out->changes, "files");
@@ -466,24 +576,23 @@ char *coding_publish_propose(struct json_object *details,
                                 "opens none.");
    }
    cp_plan_t plan;
-   char *bad = publish_plan(user_id, job, pr, &plan);
+   char *bad = publish_plan(user_id, job, pr, own_title || own_desc, &plan);
    if (bad != NULL) {
       return bad;
    }
-   if ((own_title || own_desc) && plan.had_pr) {
-      plan_free(&plan);
-      return coding_agent_error(
-          "This job already had a pull request: its new commits go there, whose title and "
-          "description are edited on GitHub (or, if it was merged or closed, to a new one with "
-          "the agent's text). Publish again without them.");
-   }
-   bad = own_text(own_title, own_desc, &plan.want);
+   bad = own_text(own_title, own_desc, coding_gateway_jstr(plan.changes, "pr_footer"), &plan.want);
    if (bad != NULL) {
       plan_free(&plan);
       return bad;
    }
-   if (plan.want.pr_desc[0] != '\0') {
-      plan.want.body_sha[0] = '\0'; /* the user's own needs no binding */
+   const bool edit_open = plan.want.edit_open;
+   if (plan.want.pr_desc[0] != '\0' || edit_open) {
+      plan.want.body_sha[0] = '\0'; /* the user's own needs no binding; nor an edit, the agent's */
+   }
+   if (edit_open && plan.want.pr_desc[0] != '\0' && plan.want.replaces_sha[0] == '\0') {
+      plan_free(&plan);
+      return coding_agent_error("The coding-agent gateway can't show the pull request's current "
+                                "description exactly; nothing was staged.");
    }
    const cp_pending_t want = plan.want;
    const bool again = plan.had_pr; /* new commits go to the PR it has (a new one if that ended) */
@@ -504,16 +613,27 @@ char *coding_publish_propose(struct json_object *details,
       strbuf_appendf(&ob, "%s%s", want.pr_desc, coding_gateway_jstr(plan.changes, "pr_footer"));
       own_body = strbuf_steal(&ob);
    }
-   /* The title the gateway will use: the user's, the agent's, else the job's name. */
+   /* The title the gateway will use: the user's, the agent's, else the job's name;
+    * of an open pull request's, only what changes. */
    const char *shown_title = want.pr_title[0] ? want.pr_title
+                             : edit_open      ? NULL
                              : agent_title[0] ? agent_title
                                               : plan.rec.title;
-   char *agent = agent_lines(plan.changes, pr ? shown_title : NULL,
-                             pr ? (own_body ? own_body : (body[0] ? body : plan.summary)) : NULL,
-                             own_body != NULL);
+   const char *shown_body = own_body ? own_body : edit_open ? NULL : body[0] ? body : plan.summary;
+   char *agent = agent_lines(plan.changes, pr ? shown_title : NULL, pr ? shown_body : NULL,
+                             own_body != NULL, !want.text_only);
    free(own_body);
-   if (agent == NULL) {
+   /* The description it replaces: GitHub's, never framed as the user's. */
+   char *github = NULL;
+   if (edit_open && want.pr_desc[0] != '\0') {
+      github = github_description(
+          coding_gateway_jstr(json_object_object_get(plan.changes, "open_pr"), "body"),
+          coding_gateway_jstr(plan.changes, "pr_footer"));
+   }
+   if (agent == NULL || (edit_open && want.pr_desc[0] != '\0' && github == NULL)) {
       /* What can't be shown isn't staged: the yes would be to text nobody read. */
+      free(agent);
+      free(github);
       plan_free(&plan);
       return coding_agent_error("The publish preview is too large to show; nothing was staged.");
    }
@@ -528,6 +648,7 @@ char *coding_publish_propose(struct json_object *details,
 
    if (read_before && live(origin->session_id, CP_PENDING_PUBLISH)) {
       free(agent);
+      free(github);
       return coding_agent_error("A publish is already waiting for the user's answer; it can't be "
                                 "replaced in a turn that read the coding agent's words.");
    }
@@ -547,8 +668,11 @@ char *coding_publish_propose(struct json_object *details,
    coding_agent_preview_replaced(replaced);
    if (id == 0) {
       free(agent);
+      free(github);
       return tool_pending_stage_refusal(rc, "publish");
    }
+   const bool both = want.pr_title[0] && want.pr_desc[0];
+   const char *parts = both ? "title and description" : want.pr_title[0] ? "title" : "description";
    char count[16];
    if (want.commits >= CODING_COMMITS_LISTED) {
       snprintf(count, sizeof(count), "%d+", CODING_COMMITS_LISTED);
@@ -557,15 +681,29 @@ char *coding_publish_propose(struct json_object *details,
    }
    strbuf_t sb;
    strbuf_init(&sb, 1024);
-   strbuf_appendf(&sb,
-                  "About to publish coding job #%lld (\"%s\"): push branch %s of %s at commit "
-                  "%.12s (%s commit%s, %d file%s changed",
-                  (long long)job, title, want.branch, want.repo, want.head, count,
-                  want.commits == 1 ? "" : "s", nfiles, nfiles == 1 ? "" : "s");
-   if (nprot > 0) {
+   if (want.text_only) {
+      strbuf_appendf(&sb,
+                     "About to change coding job #%lld (\"%s\")'s open pull request %s: replace "
+                     "its %s (no new commits to push).",
+                     (long long)job, title, pr_url_copy, parts);
+   } else {
+      strbuf_appendf(&sb,
+                     "About to publish coding job #%lld (\"%s\"): push branch %s of %s at commit "
+                     "%.12s (%s commit%s, %d file%s changed",
+                     (long long)job, title, want.branch, want.repo, want.head, count,
+                     want.commits == 1 ? "" : "s", nfiles, nfiles == 1 ? "" : "s");
+   }
+   if (!want.text_only && nprot > 0) {
       strbuf_appendf(&sb, ", %d protected path%s among them", nprot, nprot == 1 ? "" : "s");
    }
-   if (!pr && again) {
+   if (want.text_only) {
+      /* said above */
+   } else if (edit_open) {
+      strbuf_appendf(&sb,
+                     "), adding the new commits to its open pull request %s and replacing "
+                     "its %s.",
+                     pr_url_copy, parts);
+   } else if (!pr && again) {
       strbuf_appendf(&sb, "); the new commits join its open pull request %s.", pr_url_copy);
    } else if (!pr) {
       strbuf_append(&sb, "), the branch only, no pull request.");
@@ -577,19 +715,30 @@ char *coding_publish_propose(struct json_object *details,
    } else {
       strbuf_appendf(&sb, ") and open a pull request against %s.", want.base);
    }
-   if (pr && (want.pr_title[0] || want.pr_desc[0])) {
+   if (edit_open) {
+      strbuf_appendf(&sb,
+                     " The new %s, given with this publish, %s shown below%s: read %s to the "
+                     "user too, since %s public.",
+                     parts, both ? "are" : "is",
+                     want.pr_desc[0] ? " in full, with the line the gateway adds" : "",
+                     both ? "them" : "it", both ? "they will be" : "it will be");
+      if (want.pr_desc[0]) {
+         strbuf_append(&sb, " The description it replaces is shown last, as GitHub has it now "
+                            "(anyone who can edit the pull request may have written it); if it "
+                            "changes before the user's yes, nothing is replaced.");
+      }
+   } else if (pr && (want.pr_title[0] || want.pr_desc[0])) {
       strbuf_appendf(&sb,
                      " The pull request's %s given with this publish (%s the agent's), shown "
                      "below%s: read %s to the user too, since %s public.",
-                     want.pr_title[0] && want.pr_desc[0] ? "title and description are the ones"
-                     : want.pr_title[0]                  ? "title is the one"
-                                                         : "description is the one",
-                     want.pr_title[0] && want.pr_desc[0] ? "not"
-                     : want.pr_title[0]                  ? "the description is"
-                                                         : "the title is",
+                     both               ? "title and description are the ones"
+                     : want.pr_title[0] ? "title is the one"
+                                        : "description is the one",
+                     both               ? "not"
+                     : want.pr_title[0] ? "the description is"
+                                        : "the title is",
                      want.pr_desc[0] ? " in full, with the line the gateway adds" : "",
-                     want.pr_title[0] && want.pr_desc[0] ? "them" : "it",
-                     want.pr_title[0] && want.pr_desc[0] ? "they will be" : "it will be");
+                     both ? "them" : "it", both ? "they will be" : "it will be");
    } else if (pr && by_agent) {
       strbuf_append(&sb, " The pull request's title and description are the agent's, shown "
                          "below: read them to the user too, since they will be public.");
@@ -600,12 +749,16 @@ char *coding_publish_propose(struct json_object *details,
                      "be public.",
                      title);
    }
-   strbuf_appendf(&sb,
-                  " Read this to the user (the protected paths too) and ask them to confirm; if "
-                  "they say yes in their reply, call coding_agent with action 'confirm_publish' "
-                  "and arguments {\"id\": %u}. The agent's commits and files, its own words:\n%s",
-                  (unsigned)id, agent ? agent : "(can't be shown)");
+   strbuf_appendf(
+       &sb,
+       " Read this to the user%s and ask them to confirm; if they say yes in their "
+       "reply, call coding_agent with action 'confirm_publish' and arguments "
+       "{\"id\": %u}. %s\n%s%s%s",
+       want.text_only ? "" : " (the protected paths too)", (unsigned)id,
+       want.text_only ? "The new text:" : "The agent's commits and files, its own words:", agent,
+       github ? "\n" : "", github ? github : "");
    free(agent);
+   free(github);
    return strbuf_steal(&sb);
 }
 
@@ -659,6 +812,15 @@ static char *publish_run(int user_id, const cp_pending_t *p, const char *body_sh
       if (body_sha != NULL && p->pr_desc[0] == '\0') { /* the user's own needs no binding */
          json_object_object_add(args, "expect_body_sha256", json_object_new_string(body_sha));
       }
+      /* An open pull request's description: replaced only while it is the one shown. */
+      if (p->edit_open && p->pr_desc[0] != '\0') {
+         json_object_object_add(args, "replaces_body_sha256",
+                                json_object_new_string(p->replaces_sha));
+      }
+      /* Shown as an edit: one merged or closed since is refused, never replaced. */
+      if (p->edit_open) {
+         json_object_object_add(args, "edit_open_pr", json_object_new_boolean(true));
+      }
    }
    struct json_object *ans = NULL;
    char *err = NULL;
@@ -670,8 +832,37 @@ static char *publish_run(int user_id, const cp_pending_t *p, const char *body_sh
    char pushed[CP_BRANCH_MAX + CODING_AGENT_REPO_MAX + 8];
    copy_whole(pushed, sizeof(pushed), coding_gateway_jstr(ans, "pushed"));
    const char *where = pushed[0] ? pushed : (p->branch[0] ? p->branch : "its branch");
-   char buf[sizeof(pushed) + CP_URL_MAX + CONV_TITLE_MAX + 96];
-   if (coding_publish_pr_url_ok(url)) {
+   char buf[sizeof(pushed) + CP_URL_MAX + CONV_TITLE_MAX + 160];
+   /* What of an open pull request's text was replaced (none: it already said that). */
+   struct json_object *jparts = json_object_object_get(ans, "pr_updated");
+   char updated[64] = "";
+   for (size_t i = 0; json_object_is_type(jparts, json_type_array) &&
+                      i < json_object_array_length(jparts) && i < 2;
+        i++) {
+      const char *part = json_object_get_string(json_object_array_get_idx(jparts, i));
+      if (part != NULL && (strcmp(part, "title") == 0 || strcmp(part, "description") == 0)) {
+         snprintf(updated + strlen(updated), sizeof(updated) - strlen(updated), "%s%s",
+                  updated[0] ? " and " : "", part);
+      }
+   }
+   if (json_object_is_type(jparts, json_type_array) && coding_publish_pr_url_ok(url)) {
+      char what[96];
+      if (updated[0] != '\0') {
+         snprintf(what, sizeof(what), "updated the pull request's %s", updated);
+      } else {
+         snprintf(what, sizeof(what), "the pull request already had this text");
+      }
+      if (pushed[0] != '\0') {
+         snprintf(buf, sizeof(buf), "Published coding job #%lld (\"%s\"): pushed %s; %s: %s",
+                  (long long)p->job, p->name, pushed, what, url);
+      } else {
+         snprintf(buf, sizeof(buf), "Coding job #%lld (\"%s\"): %s: %s", (long long)p->job, p->name,
+                  what, url);
+      }
+      if (pr_url != NULL) {
+         *pr_url = strdup(url);
+      }
+   } else if (coding_publish_pr_url_ok(url)) {
       snprintf(buf, sizeof(buf), "Published coding job #%lld (\"%s\"): pushed %s; pull request: %s",
                (long long)p->job, p->name, where, url);
       if (pr_url != NULL) {
@@ -1113,7 +1304,7 @@ static void body_refs(const char *body, struct json_object *mentions, struct jso
 struct json_object *coding_publish_preview(int user_id, int64_t job, char **err_out) {
    *err_out = NULL;
    cp_plan_t plan;
-   char *bad = publish_plan(user_id, job, true, &plan);
+   char *bad = publish_plan(user_id, job, true, false, &plan);
    if (bad != NULL) {
       *err_out = bad;
       return NULL;
@@ -1197,7 +1388,7 @@ char *coding_publish_click(int user_id,
       return coding_agent_error("What was shown can't be matched; open the preview again.");
    }
    cp_pending_t p = { .job = job, .pr = true };
-   bad = own_text(pr_title, pr_description, &p);
+   bad = own_text(pr_title, pr_description, NULL, &p);
    if (bad != NULL) {
       return bad;
    }
@@ -1294,26 +1485,37 @@ int coding_publish_describe(const char *value,
          lost_text(lost, sizeof(lost), p->commits, p->files);
          n = snprintf(out, out_len, "close %s, deleting %s", p->label, lost);
       } else {
-         n = snprintf(out, out_len,
-                      "publish coding job #%lld (\"%s\"): push %s of %s at %.12s (%d commit%s, "
-                      "%d file%s, %d protected)%s%s%s",
-                      (long long)p->job, p->name, p->branch, p->repo, p->head, p->commits,
-                      p->commits == 1 ? "" : "s", p->files, p->files == 1 ? "" : "s",
-                      p->protected_paths,
-                      p->pr ? " and open a pull request against " : ", no pull request",
-                      p->pr ? p->base : "", "");
+         if (p->text_only) {
+            n = snprintf(out, out_len, "change coding job #%lld (\"%s\")'s open pull request %s",
+                         (long long)p->job, p->name, p->pr_url);
+         } else {
+            n = snprintf(out, out_len,
+                         "publish coding job #%lld (\"%s\"): push %s of %s at %.12s (%d commit%s, "
+                         "%d file%s, %d protected)%s%s",
+                         (long long)p->job, p->name, p->branch, p->repo, p->head, p->commits,
+                         p->commits == 1 ? "" : "s", p->files, p->files == 1 ? "" : "s",
+                         p->protected_paths,
+                         p->edit_open ? " to its open pull request "
+                         : p->pr      ? " and open a pull request against "
+                                      : ", no pull request",
+                         p->edit_open ? p->pr_url
+                         : p->pr      ? p->base
+                                      : "");
+         }
          /* Text the model wrote that goes public: shown here, in DAWN's line,
           * not left to its read-back. */
          if (n > 0 && (size_t)n < out_len && p->pr_title[0]) {
             char t[CP_DESCRIBE_EXCERPT];
             str_excerpt_line(p->pr_title, sizeof(t) - CP_EXCERPT_MARK, t, sizeof(t));
-            n += snprintf(out + n, out_len - (size_t)n, ", titled \"%s\"", t);
+            n += snprintf(out + n, out_len - (size_t)n,
+                          p->edit_open ? ", its title becoming \"%s\"" : ", titled \"%s\"", t);
          }
          if (n > 0 && (size_t)n < out_len && p->pr_desc[0]) {
             char d[CP_DESCRIBE_EXCERPT];
             str_excerpt_line(p->pr_desc, sizeof(d) - CP_EXCERPT_MARK, d, sizeof(d));
             n += snprintf(out + n, out_len - (size_t)n,
-                          ", with a description of %zu bytes that begins \"%s\"",
+                          p->edit_open ? ", its description replaced by %zu bytes that begin \"%s\""
+                                       : ", with a description of %zu bytes that begins \"%s\"",
                           strlen(p->pr_desc), d);
          }
       }

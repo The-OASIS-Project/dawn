@@ -224,18 +224,26 @@ def build(runner, cfg) -> MCPServer:
                           title: str | None = None,
                           expect_body_sha256: str | None = None,
                           pr_title: str | None = None,
-                          pr_description: str | None = None) -> dict:
+                          pr_description: str | None = None,
+                          replaces_body_sha256: str | None = None,
+                          edit_open_pr: bool = False) -> dict:
       """Push a completed task's agent/* branch and optionally open a pull request.  DAWN
       calls this only after the user confirmed, passing the head commit they were shown;
       a branch that moved since is refused, and with `expect_body_sha256` (task_changes'
       pr_body_sha256) so is a description that changed since.  `pr_title` and
-      `pr_description` are the user's own text for a new pull request, sent instead of
-      the agent's (the description gets pr_footer appended); refused when the task's
-      pull request is still open.  A second call returns the first result while nothing
-      moved; after a revise it pushes the new commits, keeping an open PR."""
+      `pr_description` are the user's own text (the description gets pr_footer appended):
+      for a new pull request, instead of the agent's; when the task's pull request is
+      open, they replace its title and/or description after any push (with nothing new
+      to push, only they change), the description only while it is still the one shown
+      (`replaces_body_sha256`: task_changes' open_pr.body_sha256); with `edit_open_pr`
+      (the user was shown such an edit), one merged or closed since is refused, never
+      replaced by a new one.  A description ending in pr_footer gets it once.  The answer's
+      pr_updated names what was replaced.  A second call returns the first result while
+      nothing moved; after a revise it pushes the new commits, keeping an open PR."""
       t = task_of(dawn_user_id, task_id, client_ref)
       return await runner.publish(t["id"], dawn_user_id, open_pr, title, head,
-                                  expect_body_sha256, pr_title, pr_description)
+                                  expect_body_sha256, pr_title, pr_description,
+                                  replaces_body_sha256, edit_open_pr)
 
    # --- reading the work: from the gateway's mirror, never the agent's clone ---
 
@@ -244,11 +252,16 @@ def build(runner, cfg) -> MCPServer:
 
    @tool
    async def task_changes(dawn_user_id: int, task_id: str | None = None,
-                          client_ref: str | None = None, scope: str | None = None) -> dict:
+                          client_ref: str | None = None, scope: str | None = None,
+                          open_pr: bool = False) -> dict:
       """The task's work so far: changed files with +/- counts, its commits, paths only
       its commits changed (history_only), whether any path is a CI workflow, and the
       pull request publish would open: the title the agent wrote (pr_title; null when
-      none, then DAWN's) and the description (pr_body, with its pr_body_sha256).
+      none, then DAWN's) and the description (pr_body, with its pr_body_sha256).  With
+      `open_pr`, also the task's open pull request's title and description as GitHub
+      has them (open_pr: {url, title, body, body_sha256}; GitHub's text, written by
+      anyone who can edit it; null when none is open), or open_pr_error when it can't
+      be read.
       `scope` narrows the files to view: all (the default), since_push (after the last
       published head; since_push_available says whether there is one) or one of the
       task's commits by hash (a merge: its files with conflicts when merge_recorded, else
@@ -265,6 +278,8 @@ def build(runner, cfg) -> MCPServer:
       res = await runner.repos.changes(t["repo"], t["id"], t["base"], scope, published_head(t),
                                        merges)
       body = pr_body(t)
+      if open_pr:
+         res = {**res, **await runner.open_pr(t)}
       # task_id names refs/agent/<id> for looking locally
       return {**res, "task_id": t["id"], "pr_title": t["pr_title"], "pr_body": body,
               "pr_body_sha256": body_sha256(body), "pr_footer": PR_FOOTER}

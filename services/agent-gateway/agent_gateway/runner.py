@@ -41,7 +41,7 @@ from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKCli
 from claude_agent_sdk import tool as sdk_tool
 
 from . import github, policy, store as st
-from .github import GitError, pr_state
+from .github import GitError, pr_state, read_pull_request, state_of, update_pull_request
 from .repos import Repos, slug
 
 log = logging.getLogger("agent-gateway")
@@ -156,13 +156,27 @@ def edited_pr(title: str | None, description: str | None) -> tuple[str | None, s
                           "characters")
    body = None
    if description is not None:
-      if not description.strip():
+      description = footless(description)
+      if not description:
          raise ValueError("the pull request description is empty")
       body = description + PR_FOOTER
       if len(body) > PR_BODY_CAP:
          raise ValueError(f"the pull request description is over {PR_BODY_CAP - len(PR_FOOTER)} "
                           "characters")
    return title, body
+
+
+# What DAWN's C side strips as white space too, so its preview is what is sent.
+ASCII_SPACE = " \t\n\v\f\r"
+
+
+def footless(description: str) -> str:
+   """`description` without trailing white space and one trailing footer: text
+   that reuses the current description (footer and all) gets the footer once."""
+   description = description.rstrip(ASCII_SPACE)
+   if description.endswith(PR_FOOTER.strip()):
+      description = description[:-len(PR_FOOTER.strip())].rstrip(ASCII_SPACE)
+   return description
 
 
 def body_sha256(body: str) -> str:
@@ -1121,10 +1135,16 @@ class Runner:
    async def publish(self, task_id: str, dawn_user_id: int, open_pr: bool, title: str | None,
                      head: str, expect_body_sha256: str | None = None,
                      pr_title_text: str | None = None,
-                     pr_description: str | None = None) -> dict:
+                     pr_description: str | None = None,
+                     replaces_body_sha256: str | None = None,
+                     edit_open_pr: bool = False) -> dict:
       """`head` is the commit the user was shown; a branch that moved since is refused,
       and so is a description that changed since (`expect_body_sha256`, when given).
-      `pr_title_text` / `pr_description`: the user's text instead of the agent's."""
+      `pr_title_text` / `pr_description`: the user's text instead of the agent's, or
+      for the task's open pull request, whose description, when replaced, must
+      still be the one shown (`replaces_body_sha256`).  `edit_open_pr`: the user was
+      shown an edit of the open pull request, so one merged or closed since is
+      refused rather than a new one opened."""
       t = self.owned(task_id, dawn_user_id)
       if t["closed"]:
          raise ValueError("the task was closed; its work is gone from the gateway")
@@ -1133,27 +1153,64 @@ class Runner:
       self.busy.add(task_id)
       try:
          return await self.publish_held(t, open_pr, title, head, expect_body_sha256,
-                                        pr_title_text, pr_description)
+                                        pr_title_text, pr_description, replaces_body_sha256,
+                                        edit_open_pr)
       finally:
          self.busy.discard(task_id)
+
+   async def open_pr(self, t: dict) -> dict:
+      """The task's open pull request's title and description as GitHub has them
+      now (GitHub's text: anyone who can edit the pull request wrote it), as
+      {"open_pr": {url, title, body, body_sha256}}; {"open_pr": None} with none
+      open (always present: an older gateway leaves it out), or {"open_pr_error":
+      why} when it can't be read."""
+      pr = (json.loads(t["published"]) if t["published"] else {}).get("pr_url")
+      if not pr:
+         return {"open_pr": None}
+      if not self.cfg.github_token:
+         return {"open_pr_error": "no GitHub token configured (AGENT_GATEWAY_GITHUB_TOKEN)"}
+      got = await asyncio.to_thread(read_pull_request, pr, self.cfg.github_token)
+      if got is None:
+         return {"open_pr_error": github.NO_ANSWER}
+      if state_of(got) != "open":
+         return {"open_pr": None}
+      body = got.get("body") or ""
+      return {"open_pr": {"url": pr, "title": clip(got.get("title") or "", PR_TITLE_CAP),
+                          "body": clip(body, PR_BODY_CAP), "body_sha256": body_sha256(body)}}
+
+   @staticmethod
+   def edit_parts(got: dict, own_title: str | None, own_body: str | None,
+                  replaces_body_sha256: str | None) -> list[str]:
+      """What of the open pull request `got` (GitHub's) the user's text replaces
+      ([] when it already says this: a replayed publish).  A description is
+      replaced only while it is still the one shown (`replaces_body_sha256`)."""
+      body = got.get("body") or ""
+      parts = [name for name, want, have in (("title", own_title, got.get("title") or ""),
+                                             ("description", own_body, body))
+               if want is not None and want != have]
+      if "description" in parts and (not replaces_body_sha256 or body_sha256(body) !=
+                                     replaces_body_sha256.strip().lower()):
+         raise ValueError("the pull request's description changed since it was shown; look "
+                          "again")
+      return parts
 
    async def publish_held(self, t: dict, open_pr: bool, title: str | None, head: str,
                           expect_body_sha256: str | None = None,
                           pr_title_text: str | None = None,
-                          pr_description: str | None = None) -> dict:
+                          pr_description: str | None = None,
+                          replaces_body_sha256: str | None = None,
+                          edit_open_pr: bool = False) -> dict:
       task_id = t["id"]
       edited = pr_title_text is not None or pr_description is not None
       own_title, own_body = edited_pr(pr_title_text, pr_description)
       if edited and not open_pr:
          raise ValueError("a title or description is for a pull request; none is opened")
       prev = json.loads(t["published"]) if t["published"] else None
+      pushed = False  # this head is pushed already: at most its open PR's text changes
       if prev and t["status"] == st.COMPLETED and (prev.get("pr_url") or not open_pr):
          now, _ = await self.repos.agent_ref(t["repo"], task_id, t["base"])
-         if prev.get("head") == now and edited and prev.get("pr_url"):
-            # Done already, with the text it had: never reported as done with these.
-            raise ValueError(f"it is published already ({prev['pr_url']}): edit its title "
-                             "and description on GitHub")
-         if prev.get("head") == now:
+         pushed = prev.get("head") == now
+         if pushed and not (edited and prev.get("pr_url")):
             return prev  # already done: the same answer again (an older record has no
                          # head: pushed again, harmless when nothing moved)
       if t["status"] != st.COMPLETED:
@@ -1176,22 +1233,48 @@ class Runner:
       # it is open (a merged or closed one gets a new PR).
       pr = prev.get("pr_url") if prev else None
       earlier = None  # what a refused new PR falls back to: one whose state couldn't be read
+      got = None
       if pr:
-         state = await asyncio.to_thread(pr_state, pr, self.cfg.github_token)
+         got = await asyncio.to_thread(read_pull_request, pr, self.cfg.github_token)
+         state = state_of(got)
          if state != "open":
+            if state is None and edited:
+               # Its state unknown (the push may join it): never sent as done with
+               # text that wasn't used.
+               raise ValueError("its pull request couldn't be read; try again")
+            if edit_open_pr:  # shown as an edit: never a new pull request instead
+               raise ValueError("its pull request was merged or closed since it was shown; "
+                                "publish again")
+            if pushed:  # nothing to push, and no open pull request to edit
+               raise ValueError(f"its pull request is {state}, and there is nothing new to "
+                                "publish")
             earlier = pr if state is None else None
             pr = None
-      if (pr or earlier) and edited:
-         # Open, or its state unknown (the push may join it): never sent as done with
-         # text that wasn't used.
-         raise ValueError("its pull request is open: edit its title and description on GitHub")
-      res = await self.repos.publish(t["repo"], now, t["branch"], t["base"],
-                                     self.cfg.github_token, open_pr and not pr,
-                                     own_title or pr_title(t, title), body,
-                                     earlier)
-      if pr:
-         res["pr_url"] = pr
-      res["head"] = now
-      self.store.update_task(task_id, published=json.dumps(res))
-      self.store.add_event(task_id, "published", **res)
+      # The open pull request's new text: checked before anything is pushed.
+      parts = self.edit_parts(got, own_title, own_body, replaces_body_sha256) \
+         if pr and edited else []
+      if pushed:
+         res = {"pr_url": pr, "head": now}
+      else:
+         res = await self.repos.publish(t["repo"], now, t["branch"], t["base"],
+                                        self.cfg.github_token, open_pr and not pr,
+                                        own_title or pr_title(t, title), body,
+                                        earlier)
+         if pr:
+            res["pr_url"] = pr
+         res["head"] = now
+         self.store.update_task(task_id, published=json.dumps(res))
+         self.store.add_event(task_id, "published", **res)
+      if parts:
+         try:
+            await asyncio.to_thread(update_pull_request, pr, self.cfg.github_token,
+                                    own_title if "title" in parts else None,
+                                    own_body if "description" in parts else None)
+         except (OSError, ValueError) as e:
+            went = "" if pushed else "the push went up, but "
+            why = github.refusal(e, "the pull request", github.WRITE_NEED)
+            raise ValueError(f"{went}the pull request's new {' and '.join(parts)} didn't go "
+                             f"through: {why}") from e
+      if pr and edited:  # never stored: a later replay updates nothing
+         res = {**res, "pr_updated": parts}
       return res
