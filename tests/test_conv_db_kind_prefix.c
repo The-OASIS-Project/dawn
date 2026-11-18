@@ -1321,6 +1321,118 @@ static void test_v96_leaves_compacted_reasoning_behind(void) {
    sqlite3_close(db);
 }
 
+/* ---- v116: reasoning left behind where its replay dropped it ---- */
+
+static int64_t floor_of(int64_t conv) {
+   char sql[112];
+   snprintf(sql, sizeof(sql), "SELECT reasoning_floor_msg_id FROM conversations WHERE id = %lld",
+            (long long)conv);
+   return auth_db_query_int64(s_db.db, sql);
+}
+
+/* A usage-log row for @p conv recording @p drops prefix drops. */
+static void log_drops(int64_t conv, int drops) {
+   char sql[224];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO llm_usage_log (created_at, conversation_id, provider, kind, "
+            "binding_prefix_drops) VALUES (1, %lld, 'claude', 'chat', %d)",
+            (long long)conv, drops);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+}
+
+/* Only a conversation the log records drops for rises, to its newest row;
+ * one already above that keeps its floor; one with only clean calls, and a
+ * session-less call (conversation 0), change nothing.  A rerun changes
+ * nothing. */
+static void test_v116_raises_floor_where_replay_dropped(void) {
+   int64_t dropped = 0, high = 0, clean = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "d", &dropped));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "h", &high));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &clean));
+   add_row(dropped, "user", "Q", NULL);
+   const int64_t last = add_row(dropped, "assistant", "A", NULL);
+   add_row(high, "user", "Q", NULL);
+   add_row(clean, "user", "Q", NULL);
+   add_row(clean, "assistant", "A", NULL);
+   char sql[112];
+   snprintf(sql, sizeof(sql),
+            "UPDATE conversations SET reasoning_floor_msg_id = %lld WHERE id = %lld",
+            (long long)(last + 1000), (long long)high);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+   log_drops(dropped, 2);
+   log_drops(high, 1);
+   log_drops(clean, 0);
+   log_drops(0, 3);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v116(s_db.db));
+   TEST_ASSERT_EQUAL_INT64(last, floor_of(dropped));
+   TEST_ASSERT_EQUAL_INT64(last + 1000, floor_of(high)); /* never lowered */
+   TEST_ASSERT_EQUAL_INT64(0, floor_of(clean));
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v116(s_db.db));
+   TEST_ASSERT_EQUAL_INT64(last, floor_of(dropped));
+   TEST_ASSERT_EQUAL_INT64(last + 1000, floor_of(high));
+   TEST_ASSERT_EQUAL_INT64(0, floor_of(clean));
+}
+
+/* A database whose usage log has no drop count (before v91): nothing to act
+ * on, and the record table is still made. */
+static void test_v116_without_drop_column(void) {
+   sqlite3 *mem = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_open(":memory:", &mem));
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_exec(mem,
+                                      "CREATE TABLE conversations (id INTEGER PRIMARY KEY, "
+                                      "reasoning_floor_msg_id INTEGER NOT NULL DEFAULT 0);"
+                                      "CREATE TABLE llm_usage_log (id INTEGER PRIMARY KEY, "
+                                      "conversation_id INTEGER);"
+                                      "INSERT INTO conversations (id) VALUES (1);"
+                                      "INSERT INTO llm_usage_log (conversation_id) VALUES (1);",
+                                      NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v116(mem));
+   TEST_ASSERT_EQUAL_INT64(0, raw_int(mem, "SELECT reasoning_floor_msg_id FROM conversations"));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(mem, "SELECT COUNT(*) FROM sqlite_master WHERE name = "
+                                           "'memory_extract_ranges'"));
+   sqlite3_close(mem);
+}
+
+/* The record table on a new database and on one upgraded from v115 (where
+ * the floor rises through the migration runner), and a conversation's
+ * ranges going with it. */
+static void test_v116_table_on_new_and_upgraded(void) {
+   static const char k_has_table[] = "SELECT COUNT(*) FROM sqlite_master WHERE name = "
+                                     "'memory_extract_ranges'";
+   TEST_ASSERT_EQUAL_INT64(1, auth_db_query_int64(s_db.db, k_has_table));
+   TEST_ASSERT_EQUAL_INT64(AUTH_DB_SCHEMA_VERSION,
+                           auth_db_query_int64(s_db.db, "SELECT version FROM schema_version"));
+
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "d", &conv));
+   add_row(conv, "user", "Q", NULL);
+   const int64_t last = add_row(conv, "assistant", "A", NULL);
+   log_drops(conv, 1);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db,
+                                                 "DROP TABLE memory_extract_ranges;"
+                                                 "UPDATE schema_version SET version = 115;",
+                                                 NULL, NULL, NULL));
+   auth_db_shutdown();
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(TEST_DB));
+   TEST_ASSERT_EQUAL_INT64(1, auth_db_query_int64(s_db.db, k_has_table));
+   TEST_ASSERT_EQUAL_INT64(AUTH_DB_SCHEMA_VERSION,
+                           auth_db_query_int64(s_db.db, "SELECT version FROM schema_version"));
+   TEST_ASSERT_EQUAL_INT64(last, floor_of(conv));
+
+   char sql[160];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_extract_ranges (conversation_id, msg_id_start, msg_id_end, "
+            "created_at) VALUES (%lld, 1, 2, 1)",
+            (long long)conv);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_delete(conv, alice_id));
+   TEST_ASSERT_EQUAL_INT64(0, auth_db_query_int64(s_db.db,
+                                                  "SELECT COUNT(*) FROM memory_extract_ranges"));
+}
+
 /* ---- v98: messages rebuilt (images, kind triggers) ---- */
 
 /* The text a database stores for a messages object (NULL-safe copy). */
@@ -1964,6 +2076,9 @@ int main(void) {
    RUN_TEST(test_unprompted_rows);
    RUN_TEST(test_posts_after_and_not_replayed);
    RUN_TEST(test_v115_earlier_posts_keep_replaying);
+   RUN_TEST(test_v116_raises_floor_where_replay_dropped);
+   RUN_TEST(test_v116_without_drop_column);
+   RUN_TEST(test_v116_table_on_new_and_upgraded);
    RUN_TEST(test_post_cut_shows);
    RUN_TEST(test_v109_marks_earlier_posts);
    RUN_TEST(test_messages_fk_children);

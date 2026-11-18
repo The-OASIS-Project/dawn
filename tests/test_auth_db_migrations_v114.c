@@ -267,10 +267,12 @@ static void test_framed_tool_results_and_note_calls(void) {
 }
 
 /* A database stamped 115 by a later step before v114 reached it: v114 still
- * runs (columns and fills), after a backup, and the version stays 115. */
+ * runs (columns and fills), after a backup, and the version only moves on
+ * (to the current one, by the steps after 115). */
 static void test_later_stamp_still_migrated(void) {
    open_seeded(115);
-   TEST_ASSERT_EQUAL_INT64(115, auth_db_query_int64(s_db.db, "SELECT version FROM schema_version"));
+   TEST_ASSERT_EQUAL_INT64(AUTH_DB_SCHEMA_VERSION,
+                           auth_db_query_int64(s_db.db, "SELECT version FROM schema_version"));
    TEST_ASSERT_FALSE(auth_db_migrations_v114_pending(s_db.db));
    TEST_ASSERT_TRUE(auth_db_column_exists(s_db.db, "message_unprompted", "replayed"));
    TEST_ASSERT_EQUAL_INT(1, backups_from(115));

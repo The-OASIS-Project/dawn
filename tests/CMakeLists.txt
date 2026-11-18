@@ -153,6 +153,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v113.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v114.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v115.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v116.c
     ${SRC_ROOT}/src/core/tz.c
     ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
