@@ -211,8 +211,9 @@ char *llm_compaction_deterministic(struct json_object *to_summarize, int token_b
              ((unsigned char)content[snippet_len] & 0xC0) == 0x80)
          snippet_len--;
 
-      written = snprintf(buf + offset, remaining, "- %s: %.*s%s\n", role, snippet_len, content,
-                         (content_len > snippet_len) ? "..." : "");
+      written = snprintf(buf + offset, remaining, "- %s%s: %.*s%s\n", role,
+                         llm_history_is_stopped(msg) ? " (stopped by the user)" : "", snippet_len,
+                         content, (content_len > snippet_len) ? "..." : "");
       if (written >= remaining) {
          buf[offset] = '\0';
          break;
@@ -246,7 +247,10 @@ char *llm_compaction_summarize(struct json_object *to_summarize,
       if (level == LLM_COMPACT_DETERMINISTIC) {
          summary = llm_compaction_deterministic(to_summarize, LLM_CONTEXT_SUMMARY_TARGET_L3);
       } else if (summarize) {
-         summary = summarize(to_summarize, level, ctx);
+         /* A reply the user stopped reads as cut off, not as a whole answer. */
+         struct json_object *marked = llm_history_stopped_marked(to_summarize);
+         summary = marked ? summarize(marked, level, ctx) : NULL;
+         json_object_put(marked);
       }
       if (summary) {
          /* Written from history that holds untrusted text: what imitates DAWN's

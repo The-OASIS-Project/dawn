@@ -28,6 +28,8 @@
 #include "llm/llm_compaction.h"
 #include "llm/llm_compaction_range.h"
 #include "llm/llm_context.h"
+#include "llm/llm_history_kind.h"
+#include "prompts.h"
 #include "unity.h"
 
 void setUp(void) {
@@ -447,6 +449,31 @@ static void test_summarize_falls_through_to_l3(void) {
    json_object_put(h);
 }
 
+/* A reply the user stopped reads as cut off at every level: the summarizer is
+ * given the note after its text, and L3 labels it. */
+static char *seen_input(struct json_object *in, llm_compaction_level_t level, void *ctx) {
+   (void)level;
+   free(*(char **)ctx);
+   *(char **)ctx = strdup(json_object_to_json_string(in));
+   return NULL;
+}
+
+static void test_summary_input_marks_a_stopped_reply(void) {
+   struct json_object *h = two_messages();
+   json_object_object_add(json_object_array_get_idx(h, 1), LLM_HISTORY_STOPPED_KEY,
+                          json_object_new_boolean(1));
+   char *in = NULL;
+   llm_compaction_level_t level = LLM_COMPACT_NORMAL;
+   char *s = llm_compaction_summarize(h, 0, 10000, NULL, seen_input, &in, NULL, &level);
+   TEST_ASSERT_NOT_NULL(in);
+   TEST_ASSERT_NOT_NULL(strstr(in, STOPPED_REPLY_NOTE));
+   TEST_ASSERT_EQUAL_INT(LLM_COMPACT_DETERMINISTIC, level);
+   TEST_ASSERT_NOT_NULL(strstr(s, "- assistant (stopped by the user): "));
+   free(in);
+   free(s);
+   json_object_put(h);
+}
+
 static void test_summarize_stops_when_cancelled(void) {
    struct json_object *h = two_messages();
    fake_summarizer_t f = { .reply = { NULL, NULL } };
@@ -610,6 +637,7 @@ int main(void) {
    RUN_TEST(test_drop_leading_results);
    RUN_TEST(test_summarize_uses_a_fitting_l1);
    RUN_TEST(test_summarize_falls_through_to_l3);
+   RUN_TEST(test_summary_input_marks_a_stopped_reply);
    RUN_TEST(test_summarize_stops_when_cancelled);
    return UNITY_END();
 }

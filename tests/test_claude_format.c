@@ -33,6 +33,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "config/dawn_config.h"
 #include "core/image_rehydrate.h"
@@ -44,6 +45,7 @@
 #include "llm/llm_tool_defs.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
+#include "prompts.h"
 #include "toml.h"
 #include "unity.h"
 
@@ -504,6 +506,49 @@ static void test_final_answer_replays_its_blocks(void) {
    json_object_put(conv);
 }
 
+/* A reply the user stopped replays its signed reasoning and text as saved;
+ * the user's next message opens with the note. */
+static void test_stopped_reply_noted_in_the_next_question(void) {
+   json_object *conv = one_user_turn();
+   json_object *answer = json_object_new_object();
+   json_object_object_add(answer, "role", json_object_new_string("assistant"));
+   json_object_object_add(answer, "content", json_object_new_string("Half an ans"));
+   json_object *blocks = llm_turn_blocks_new();
+   llm_turn_blocks_add_reasoning(blocks, TEST_CLAUDE_CARRIER, LLM_FORMAT_ANTHROPIC,
+                                 "claude-opus-5-5",
+                                 json_tokener_parse("{\"type\":\"thinking\",\"thinking\":\"\","
+                                                    "\"signature\":\"SIG\"}"));
+   llm_turn_blocks_add_text(blocks, "Half an ans");
+   json_object_object_add(answer, LLM_TURN_BLOCKS_KEY, blocks);
+   json_object_object_add(answer, LLM_HISTORY_STOPPED_KEY, json_object_new_boolean(1));
+   json_object_array_add(conv, answer);
+   json_object *next = json_object_new_object();
+   json_object_object_add(next, "role", json_object_new_string("user"));
+   json_object_object_add(next, "content", json_object_new_string("Go on"));
+   json_object_array_add(conv, next);
+
+   json_object *req = convert_to_claude_format(conv, NULL, "claude-opus-5-5", TEST_CLAUDE_CARRIER,
+                                               0, false, true);
+   json_object *messages = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(req, "messages", &messages));
+   json_object *assistant = json_object_array_get_idx(messages, 1);
+   json_object *content = json_object_object_get(assistant, "content");
+   TEST_ASSERT_EQUAL_INT(2, json_object_array_length(content));
+   TEST_ASSERT_EQUAL_STRING("SIG", json_object_get_string(json_object_object_get(
+                                       json_object_array_get_idx(content, 0), "signature")));
+   TEST_ASSERT_EQUAL_STRING("Half an ans", json_object_get_string(json_object_object_get(
+                                               json_object_array_get_idx(content, 1), "text")));
+   json_object *user = json_object_array_get_idx(messages, 2);
+   json_object *parts = json_object_object_get(user, "content");
+   TEST_ASSERT_TRUE(json_object_is_type(parts, json_type_array));
+   TEST_ASSERT_EQUAL_STRING(
+       "[Operator note] " STOPPED_REPLY_USER_NOTE,
+       json_object_get_string(json_object_object_get(json_object_array_get_idx(parts, 0), "text")));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(req), "_stopped"));
+   json_object_put(req);
+   json_object_put(conv);
+}
+
 static toml_table_t *s_models;
 
 /* Results whose call isn't in the message before them (a compaction point
@@ -653,6 +698,7 @@ int main(void) {
    }
    llm_capabilities_load_registry(s_models);
    UNITY_BEGIN();
+   RUN_TEST(test_stopped_reply_noted_in_the_next_question);
    RUN_TEST(test_parallel_tool_results_no_double_free);
    RUN_TEST(test_single_tool_result_ok);
    RUN_TEST(test_an_image_that_doesnt_convert_is_a_stand_in);

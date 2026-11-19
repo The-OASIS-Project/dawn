@@ -29,6 +29,7 @@
 #include "llm/llm_history_kind.h"
 #include "llm/llm_history_rows.h"
 #include "llm/llm_turn_blocks.h"
+#include "prompts.h"
 #include "unity.h"
 
 void setUp(void) {
@@ -358,6 +359,81 @@ static void test_envelope_notes_never_join_an_envelope(void) {
    json_object_put(h);
 }
 
+/* The user's next question after a stopped reply carries the note in front of
+ * its context and words; the reply itself is left as it was saved, a later
+ * finished reply ends the note, and a history with none is shared. */
+static void test_stopped_note_goes_in_the_next_question(void) {
+   const char *in = "[{\"role\":\"user\",\"content\":\"Q1\",\"id\":1},"
+                    "{\"role\":\"assistant\",\"content\":\"Half\",\"_stopped\":true,\"id\":2},"
+                    "{\"role\":\"system\",\"content\":\"D\",\"_kind\":\"directive\"},"
+                    "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"CTX\","
+                    "\"_kind\":\"turn_context\"},{\"type\":\"text\",\"text\":\"Q2\"}],\"id\":3},"
+                    "{\"role\":\"assistant\",\"content\":\"Whole\",\"id\":4},"
+                    "{\"role\":\"user\",\"content\":\"Q3\",\"id\":5}]";
+   struct json_object *h = parse(in);
+   struct json_object *out = llm_history_stopped_noted(h);
+   TEST_ASSERT_NOT_NULL(out);
+   assert_json("[{\"role\":\"user\",\"content\":\"Q1\",\"id\":1},"
+               "{\"role\":\"assistant\",\"content\":\"Half\",\"_stopped\":true,\"id\":2},"
+               "{\"role\":\"system\",\"content\":\"D\",\"_kind\":\"directive\"},"
+               "{\"role\":\"user\",\"id\":3,\"content\":["
+               "{\"type\":\"text\",\"text\":\"[Operator note] " STOPPED_REPLY_USER_NOTE "\","
+               "\"_kind\":\"turn_context\"},"
+               "{\"type\":\"text\",\"text\":\"CTX\",\"_kind\":\"turn_context\"},"
+               "{\"type\":\"text\",\"text\":\"Q2\"}]},"
+               "{\"role\":\"assistant\",\"content\":\"Whole\",\"id\":4},"
+               "{\"role\":\"user\",\"content\":\"Q3\",\"id\":5}]",
+               out);
+   struct json_object *same = parse(in);
+   assert_json(json_object_to_json_string_ext(same, FLAGS), h); /* the history is untouched */
+   json_object_put(same);
+   json_object_put(out);
+   json_object_put(h);
+
+   h = parse("[{\"role\":\"user\",\"content\":\"Q\"},{\"role\":\"assistant\",\"content\":\"A\"}]");
+   out = llm_history_stopped_noted(h);
+   TEST_ASSERT_EQUAL_PTR(h, out);
+   json_object_put(out);
+   json_object_put(h);
+}
+
+/* A stopped reply that is the last message adds nothing yet; an envelope
+ * after one gets the note in a message of its own before it. */
+static void test_stopped_note_waits_and_never_joins_an_envelope(void) {
+   struct json_object *h = parse(
+       "[{\"role\":\"user\",\"content\":\"Q\"},"
+       "{\"role\":\"assistant\",\"content\":\"Half\",\"_stopped\":true}]");
+   struct json_object *out = llm_history_stopped_noted(h);
+   assert_json(json_object_to_json_string_ext(h, FLAGS), out);
+   json_object_put(out);
+   json_object_put(h);
+
+   h = parse("[{\"role\":\"assistant\",\"content\":\"Half\",\"_stopped\":true},"
+             "{\"role\":\"user\",\"content\":\"SMS\",\"_kind\":\"envelope\"}]");
+   out = llm_history_stopped_noted(h);
+   assert_json("[{\"role\":\"assistant\",\"content\":\"Half\",\"_stopped\":true},"
+               "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"[Operator "
+               "note] " STOPPED_REPLY_USER_NOTE "\",\"_kind\":\"turn_context\"}]},"
+               "{\"role\":\"user\",\"content\":\"SMS\",\"_kind\":\"envelope\"}]",
+               out);
+   json_object_put(out);
+   json_object_put(h);
+}
+
+/* A summarizer reads a stopped reply with the note after its text. */
+static void test_stopped_marked_for_a_summary(void) {
+   struct json_object *h = parse(
+       "[{\"role\":\"user\",\"content\":\"Q\"},"
+       "{\"role\":\"assistant\",\"content\":\"Half\",\"_stopped\":true}]");
+   struct json_object *out = llm_history_stopped_marked(h);
+   assert_json("[{\"role\":\"user\",\"content\":\"Q\"},"
+               "{\"role\":\"assistant\",\"_stopped\":true,"
+               "\"content\":\"Half\\n\\n" STOPPED_REPLY_NOTE "\"}]",
+               out);
+   json_object_put(out);
+   json_object_put(h);
+}
+
 /* The frozen prefix is the first message only when it is marked as one; its
  * in-force record is read without being made unless the caller asks. */
 static void test_prefix_and_its_in_force_record(void) {
@@ -401,5 +477,8 @@ int main(void) {
    RUN_TEST(test_notes_before_a_plain_question);
    RUN_TEST(test_notes_of_an_envelope_and_after_a_reply);
    RUN_TEST(test_envelope_notes_never_join_an_envelope);
+   RUN_TEST(test_stopped_note_goes_in_the_next_question);
+   RUN_TEST(test_stopped_note_waits_and_never_joins_an_envelope);
+   RUN_TEST(test_stopped_marked_for_a_summary);
    return UNITY_END();
 }

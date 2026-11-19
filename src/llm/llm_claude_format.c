@@ -793,20 +793,23 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
    char note_label[LLM_CONTEXT_TAG_MAX + 24];
    llm_operator_note_label(llm_history_tag(openai_conversation), note_label, sizeof(note_label));
    const bool mid_system = llm_model_mid_system(model_id);
+   /* The user's next message after a reply they stopped says so. */
+   json_object *stop_noted = llm_history_stopped_noted(openai_conversation);
    /* A model that takes no system message here reads a turn's notes in its
     * question, ahead of the user's words, so the words are what it reads last. */
    json_object *noted_history = NULL;
-   if (!mid_system) {
-      noted_history = llm_history_notes_before_words(openai_conversation);
-      if (!noted_history) {
-         json_object_put(system_array);
-         json_object_put(messages_array);
-         json_object_put(claude_request);
-         json_object_put(shown_history);
-         return NULL;
-      }
-      openai_conversation = noted_history;
+   if (stop_noted && !mid_system) {
+      noted_history = llm_history_notes_before_words(stop_noted);
    }
+   if (!stop_noted || (!mid_system && !noted_history)) {
+      json_object_put(stop_noted);
+      json_object_put(system_array);
+      json_object_put(messages_array);
+      json_object_put(claude_request);
+      json_object_put(shown_history);
+      return NULL;
+   }
+   openai_conversation = noted_history ? noted_history : stop_noted;
    int conv_len = json_object_array_length(openai_conversation);
    const char *last_role = NULL;
    json_object *last_message = NULL;
@@ -1244,6 +1247,7 @@ json_object *convert_to_claude_format(struct json_object *openai_conversation,
    }
    json_object_object_add(claude_request, "messages", messages_array);
    json_object_put(noted_history);
+   json_object_put(stop_noted);
    json_object_put(shown_history);
 
    return claude_request;

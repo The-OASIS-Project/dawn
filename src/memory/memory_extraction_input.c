@@ -725,6 +725,28 @@ static struct json_object *drop_unprompted(int user_id,
    return kept;
 }
 
+/* @p history without the replies the user stopped: cut off, often because
+ * they were going wrong, so nothing to learn from.  Shared when it has none;
+ * NULL on allocation failure. */
+static struct json_object *without_stopped(struct json_object *history) {
+   const size_t n = json_object_array_length(history);
+   size_t stopped = 0;
+   for (size_t i = 0; i < n; i++) {
+      stopped += llm_history_is_stopped(json_object_array_get_idx(history, i));
+   }
+   if (stopped == 0) {
+      return json_object_get(history);
+   }
+   struct json_object *kept = json_object_new_array_ext((int)(n - stopped));
+   for (size_t i = 0; kept && i < n; i++) {
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      if (!llm_history_is_stopped(msg)) {
+         json_object_array_add(kept, json_object_get(msg));
+      }
+   }
+   return kept;
+}
+
 int memory_extraction_history_outside(int user_id,
                                       int64_t conversation_id,
                                       struct json_object *history,
@@ -752,7 +774,9 @@ struct json_object *memory_extraction_build_input(int user_id,
     * then extracted without it. */
    *outside_out = memory_extraction_history_outside(user_id, conversation_id, conversation_history,
                                                     last_msg_id);
-   struct json_object *history = llm_history_strip_internal(conversation_history);
+   struct json_object *spoken = without_stopped(conversation_history);
+   struct json_object *history = spoken ? llm_history_strip_internal(spoken) : NULL;
+   json_object_put(spoken);
    if (!history) {
       return NULL;
    }
