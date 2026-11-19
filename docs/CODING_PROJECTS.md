@@ -49,6 +49,7 @@ what it is, how to set it up, and how to use it.
 | `kind` | `clone` | `local` |
 | Branch | DAWN tracks + can switch it | tracks whatever you have checked out (read-only) |
 | Who can | per `import_user_required` | **admin only** |
+| From | WebUI, `dawn-admin`, or by asking Friday (§3) | WebUI or `dawn-admin` |
 | Needs | host allowlist | `allowed_local_roots` + cbm read access (section 4) |
 
 Both index the repo into the code graph; once `ready`, ask Friday about it.
@@ -56,6 +57,30 @@ Both index the repo into the code graph; once `ready`, ask Friday about it.
 ---
 
 ## 3. Using it
+
+### Asking Friday to add a repo
+Say or type something like *"add The-OASIS-Project/dawn to my code projects"*. The
+`code_project` tool takes a GitHub `owner/repo`, any github.com URL (a page under
+the repo such as `/tree/main` works too), the SSH clone address
+(`git@github.com:owner/repo.git`), or an HTTPS clone URL on another allowed host.
+
+Nothing is cloned when you ask. Friday first checks the request the same way an
+import checks it (feature enabled, `import_user_required`, host allowlist, name,
+branch, duplicate), confirms the repository exists and is public, then reads it
+back: *"Ready to add https://github.com/The-OASIS-Project/dawn (its default branch)
+as the code project 'dawn'…"*. Your **yes in your next reply** starts the clone and
+the code-graph index in the background. If you change the subject first, ask again.
+Once the project is `ready`, ask Friday to make it active and ask about its code.
+
+- The project gets the repo's name (`socket.io` becomes `socket-io`) unless you
+  give one. Ask for a branch to track a branch other than the default.
+- A project added this way belongs to you and is never shared with other users.
+  Shared (global) projects and link-local stay in the WebUI and `dawn-admin`.
+- With the default `import_user_required = "admin"`, only admins can add projects
+  this way, the same rule as the WebUI.
+- Only a live conversation can add a project. A background job or scheduled task
+  can't, and a confirm that arrives by text from an unverified sender waits for
+  your reply code.
 
 ### WebUI
 Click the **Coding** icon in the header (visible to authenticated users when the
@@ -175,5 +200,7 @@ blocks the other (single shared process). If that latency matters, run a second
 | Link accepted but indexing fails | cbm can't read the path — section 4 (bind mount + traverse perms); check `cbm-mcp.log`. |
 | Stale answers after a cbm upgrade | `rebuild` (not refresh). |
 | Project not visible in the WebUI | operator/CLI imports show for admins only; regular users see their own + global. |
+| Friday says adding is restricted to administrators | `import_user_required = "admin"` (the default): add it as an admin, or set it to `""`. |
+| Friday can't find a repo you know exists | it's private. Only public repos can be added. |
 | `set-branch` rejected | the project is `local` — branch tracks your checkout; just `git checkout` then `refresh`. |
 | Row stuck `indexing` after a crash | it self-heals to `error: interrupted — rebuild to retry` on the next daemon start. |

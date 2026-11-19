@@ -321,6 +321,17 @@ dawn_add_unit_test(test_code_project_db
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# code_project tool: 'add' stages a repository and imports nothing until the
+# user's next turn confirms it; GitHub forms resolve to one clone URL. The import
+# service, DB and session are stubbed (no libgit2, no network).
+dawn_add_unit_test(test_code_project_tool
+   SOURCES test_code_project_tool.c
+           ${SRC_ROOT}/src/tools/code_project_tool.c
+           ${SRC_ROOT}/src/core/pending_slots.c
+           ${SRC_ROOT}/src/tools/tool_pending.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 # libgit2 clone wrapper — only when code projects (and thus libgit2) are enabled.
 if(DAWN_ENABLE_CODE_PROJECTS)
    dawn_add_unit_test(test_code_project_git
