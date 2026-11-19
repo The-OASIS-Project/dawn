@@ -33,6 +33,12 @@ bool webui_email_client_enabled(void) {
    return s_email_on;
 }
 
+/* Memory's check: likewise. */
+static bool s_memory_on;
+bool webui_memory_batches_enabled(void) {
+   return s_memory_on;
+}
+
 void setUp(void) {
 }
 
@@ -61,6 +67,8 @@ static void test_the_members_are_the_version_and_the_flags(void) {
    bool visual_guard = false;
    bool attachments = false;
    bool login_unavailable = false;
+   bool turn_wait = false;
+   bool stopped_saved = false;
    for (size_t i = 0; i < json_object_array_length(features); i++) {
       const char *f = json_object_get_string(json_object_array_get_idx(features, i));
       logout = logout || strcmp(f, "logout_closes_sockets") == 0;
@@ -71,6 +79,8 @@ static void test_the_members_are_the_version_and_the_flags(void) {
       visual_guard = visual_guard || strcmp(f, "visual_prompt_guard") == 0;
       attachments = attachments || strcmp(f, "document_attachments") == 0;
       login_unavailable = login_unavailable || strcmp(f, "login_unavailable") == 0;
+      turn_wait = turn_wait || strcmp(f, "turn_wait") == 0;
+      stopped_saved = stopped_saved || strcmp(f, "stopped_replies_saved") == 0;
    }
    TEST_ASSERT_TRUE(logout);
    TEST_ASSERT_TRUE(app_logins);
@@ -80,6 +90,8 @@ static void test_the_members_are_the_version_and_the_flags(void) {
    TEST_ASSERT_TRUE(visual_guard);
    TEST_ASSERT_TRUE(attachments);
    TEST_ASSERT_TRUE(login_unavailable);
+   TEST_ASSERT_TRUE(turn_wait);
+   TEST_ASSERT_TRUE(stopped_saved);
    json_object_put(root);
 }
 
@@ -97,6 +109,38 @@ static void test_email_client_follows_its_check(void) {
    struct json_object *root = json_tokener_parse(object);
    TEST_ASSERT_NOT_NULL(root);
    json_object_put(root);
+   s_email_on = false;
+}
+
+/* memory_batches is advertised only while memory is enabled; with every
+ * flag on, the members still fit (and parse). */
+static void test_memory_batches_follows_its_check(void) {
+   char members[WEBUI_PROTOCOL_JSON_MAX];
+   s_memory_on = false;
+   TEST_ASSERT_TRUE(webui_protocol_json_members(members, sizeof(members)) > 0);
+   TEST_ASSERT_NULL(strstr(members, "\"memory_batches\""));
+   s_memory_on = true;
+   s_email_on = true;
+   TEST_ASSERT_TRUE(webui_protocol_json_members(members, sizeof(members)) > 0);
+   TEST_ASSERT_NOT_NULL(strstr(members, "\"memory_batches\""));
+   char object[WEBUI_PROTOCOL_JSON_MAX + 2];
+   snprintf(object, sizeof(object), "{%s}", members);
+   struct json_object *root = json_tokener_parse(object);
+   TEST_ASSERT_NOT_NULL(root);
+   json_object_put(root);
+   s_memory_on = false;
+   s_email_on = false;
+}
+
+/* Every flag on still fits the buffer the callers give. */
+static void test_every_flag_fits(void) {
+   TEST_ASSERT_TRUE(webui_protocol_json_max_len() < WEBUI_PROTOCOL_JSON_MAX);
+   char members[WEBUI_PROTOCOL_JSON_MAX];
+   s_memory_on = true;
+   s_email_on = true;
+   const size_t n = webui_protocol_json_members(members, sizeof(members));
+   TEST_ASSERT_TRUE(n > 0 && n <= webui_protocol_json_max_len());
+   s_memory_on = false;
    s_email_on = false;
 }
 
@@ -169,54 +213,116 @@ static void test_req_is_taken_only_when_safe_to_echo(void) {
    json_object_put(p);
 }
 
-/* UNKNOWN_TYPE echoes the type and req when they are safe, and omits them
- * otherwise. */
-static void test_unknown_type_echoes_what_is_safe(void) {
-   char *json = webui_protocol_unknown_type_json("email_frobnicate", "q7");
-   TEST_ASSERT_NOT_NULL(json);
-   struct json_object *o = json_tokener_parse(json);
-   TEST_ASSERT_NOT_NULL(o);
-   struct json_object *payload, *f;
-   TEST_ASSERT_TRUE(json_object_object_get_ex(o, "type", &f));
-   TEST_ASSERT_EQUAL_STRING("error", json_object_get_string(f));
-   TEST_ASSERT_TRUE(json_object_object_get_ex(o, "payload", &payload));
-   TEST_ASSERT_TRUE(json_object_object_get_ex(payload, "code", &f));
-   TEST_ASSERT_EQUAL_STRING("UNKNOWN_TYPE", json_object_get_string(f));
-   TEST_ASSERT_TRUE(json_object_object_get_ex(payload, "request_type", &f));
-   TEST_ASSERT_EQUAL_STRING("email_frobnicate", json_object_get_string(f));
-   TEST_ASSERT_TRUE(json_object_object_get_ex(payload, "req", &f));
-   TEST_ASSERT_EQUAL_STRING("q7", json_object_get_string(f));
-   json_object_put(o);
-   free(json);
+static const char *field(struct json_object *o, const char *key) {
+   struct json_object *f;
+   return json_object_object_get_ex(o, key, &f) ? json_object_get_string(f) : NULL;
+}
 
+/* While a request is handled, frames to its connection carry its req (and its
+ * type on an error); frames to another connection, frames that already carry a
+ * req, and frames sent after it ended don't. */
+static void test_a_request_is_named_on_its_own_frames_only(void) {
+   int conn_a, conn_b;
+   struct json_object *req_payload = json_tokener_parse("{\"req\":\"q-1\"}");
+   struct json_object *p = json_object_new_object();
+
+   /* outside a request: nothing */
+   TEST_ASSERT_FALSE(webui_protocol_request_stamp(&conn_a, p, true));
+   TEST_ASSERT_EQUAL_INT(0, json_object_object_length(p));
+
+   webui_protocol_request_begin(&conn_a, "get_config", req_payload);
+
+   /* a reply: req only, and the caller is told it was added */
+   TEST_ASSERT_TRUE(webui_protocol_request_stamp(&conn_a, p, false));
+   TEST_ASSERT_EQUAL_STRING("q-1", field(p, "req"));
+   TEST_ASSERT_NULL(field(p, "request_type"));
+
+   /* an error: both; a req already there is kept and not reported as added */
+   TEST_ASSERT_FALSE(webui_protocol_request_stamp(&conn_a, p, true));
+   TEST_ASSERT_EQUAL_STRING("get_config", field(p, "request_type"));
+   json_object_object_add(p, "req", json_object_new_string("own"));
+   TEST_ASSERT_FALSE(webui_protocol_request_stamp(&conn_a, p, true));
+   TEST_ASSERT_EQUAL_STRING("own", field(p, "req"));
+   json_object_put(p);
+
+   /* another connection, no connection, no payload object */
+   p = json_object_new_object();
+   TEST_ASSERT_FALSE(webui_protocol_request_stamp(&conn_b, p, true));
+   TEST_ASSERT_FALSE(webui_protocol_request_stamp(NULL, p, true));
+   TEST_ASSERT_EQUAL_INT(0, json_object_object_length(p));
+   TEST_ASSERT_FALSE(webui_protocol_request_stamp(&conn_a, NULL, true));
+
+   webui_protocol_request_end();
+   TEST_ASSERT_FALSE(webui_protocol_request_stamp(&conn_a, p, true));
+   TEST_ASSERT_EQUAL_INT(0, json_object_object_length(p));
+   json_object_put(p);
+   json_object_put(req_payload);
+}
+
+/* A request with no req still names its type on an error; an unsafe type or
+ * req is left out; the next request doesn't inherit the last one's. */
+static void test_a_request_echoes_only_what_is_safe(void) {
+   int conn;
+   struct json_object *with_req = json_tokener_parse("{\"req\":\"q-2\"}");
+   struct json_object *bad_req = json_tokener_parse("{\"req\":\"a\\nb\"}");
+
+   /* a request with a req, ended, leaves nothing for the next */
+   webui_protocol_request_begin(&conn, "load_conversation", with_req);
+   webui_protocol_request_end();
+   webui_protocol_request_begin(&conn, "set_session_llm", NULL);
+   struct json_object *p = json_object_new_object();
+   TEST_ASSERT_FALSE(webui_protocol_request_stamp(&conn, p, true));
+   TEST_ASSERT_EQUAL_STRING("set_session_llm", field(p, "request_type"));
+   TEST_ASSERT_NULL(field(p, "req"));
+   json_object_put(p);
+   webui_protocol_request_end();
+
+   webui_protocol_request_begin(&conn, "bad\xff", bad_req);
+   p = json_object_new_object();
+   TEST_ASSERT_FALSE(webui_protocol_request_stamp(&conn, p, true));
+   TEST_ASSERT_EQUAL_INT(0, json_object_object_length(p));
+   json_object_put(p);
+   webui_protocol_request_end();
+
+   /* an empty type and req are valid, and echoed as they came */
+   struct json_object *empty_req = json_tokener_parse("{\"req\":\"\"}");
+   webui_protocol_request_begin(&conn, "", empty_req);
+   p = json_object_new_object();
+   TEST_ASSERT_TRUE(webui_protocol_request_stamp(&conn, p, true));
+   TEST_ASSERT_EQUAL_STRING("", field(p, "request_type"));
+   TEST_ASSERT_EQUAL_STRING("", field(p, "req"));
+   json_object_put(p);
+   webui_protocol_request_end();
+   json_object_put(empty_req);
+
+   /* a type or req one byte over the limit */
    char longer[WEBUI_REQ_MAX + 2];
    memset(longer, 't', sizeof(longer) - 1);
    longer[sizeof(longer) - 1] = '\0';
-   json = webui_protocol_unknown_type_json(longer, NULL);
-   TEST_ASSERT_NOT_NULL(json);
-   o = json_tokener_parse(json);
-   TEST_ASSERT_TRUE(json_object_object_get_ex(o, "payload", &payload));
-   TEST_ASSERT_FALSE(json_object_object_get_ex(payload, "request_type", &f));
-   TEST_ASSERT_FALSE(json_object_object_get_ex(payload, "req", &f));
-   json_object_put(o);
-   free(json);
+   struct json_object *long_req = json_object_new_object();
+   json_object_object_add(long_req, "req", json_object_new_string(longer));
+   webui_protocol_request_begin(&conn, longer, long_req);
+   p = json_object_new_object();
+   TEST_ASSERT_FALSE(webui_protocol_request_stamp(&conn, p, true));
+   TEST_ASSERT_EQUAL_INT(0, json_object_object_length(p));
+   json_object_put(p);
+   webui_protocol_request_end();
+   json_object_put(long_req);
 
-   json = webui_protocol_unknown_type_json("bad\xff", NULL);
-   TEST_ASSERT_NOT_NULL(json);
-   o = json_tokener_parse(json);
-   TEST_ASSERT_TRUE(json_object_object_get_ex(o, "payload", &payload));
-   TEST_ASSERT_FALSE(json_object_object_get_ex(payload, "request_type", &f));
-   json_object_put(o);
-   free(json);
+   json_object_put(with_req);
+   json_object_put(bad_req);
 }
 
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_the_members_are_the_version_and_the_flags);
    RUN_TEST(test_email_client_follows_its_check);
+   RUN_TEST(test_memory_batches_follows_its_check);
+   RUN_TEST(test_every_flag_fits);
    RUN_TEST(test_too_small_a_buffer_gives_nothing);
    RUN_TEST(test_a_client_is_noted_once);
    RUN_TEST(test_req_is_taken_only_when_safe_to_echo);
-   RUN_TEST(test_unknown_type_echoes_what_is_safe);
+   RUN_TEST(test_a_request_is_named_on_its_own_frames_only);
+   RUN_TEST(test_a_request_echoes_only_what_is_safe);
    return UNITY_END();
 }

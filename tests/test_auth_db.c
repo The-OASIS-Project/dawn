@@ -473,7 +473,7 @@ static void test_messages_ownership(void) {
    conv_db_create(user_id, "Public", &pub);
    conv_db_create(user_id, "Private", &priv);
    conv_db_create(other_id, "Someone else's", &foreign);
-   conv_db_set_private(priv, user_id, true);
+   conv_db_set_private(priv, user_id, true, NULL);
 
    int64_t p1 = 0, p2 = 0, x1 = 0, f1 = 0;
    conv_db_add_message_ex(pub, user_id, "user", "hello", &p1);
@@ -513,7 +513,7 @@ static void test_continuation_inherits_private(void) {
 
    int64_t parent = 0, child = 0, pub_parent = 0, pub_child = 0;
    conv_db_create(user_id, "Private parent", &parent);
-   conv_db_set_private(parent, user_id, true);
+   conv_db_set_private(parent, user_id, true, NULL);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
                          conv_db_create_continuation(user_id, parent, "summary", &child));
    bool is_private = false;
@@ -555,7 +555,7 @@ static void test_set_private_cascades_to_continuations(void) {
                          conv_db_continuation_chain(root, other, chain, CONV_CHAIN_MAX, &n));
    TEST_ASSERT_EQUAL_INT(0, n);
 
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(root, user_id, true));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(root, user_id, true, NULL));
    bool p = false;
    conv_db_is_private(child, user_id, &p);
    TEST_ASSERT_TRUE(p);
@@ -566,14 +566,14 @@ static void test_set_private_cascades_to_continuations(void) {
    conv_db_is_private(unrelated, user_id, &p);
    TEST_ASSERT_FALSE(p);
 
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(root, user_id, false));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(root, user_id, false, NULL));
    conv_db_is_private(root, user_id, &p);
    TEST_ASSERT_FALSE(p);
    conv_db_is_private(child, user_id, &p);
    TEST_ASSERT_TRUE(p);
 
    /* Not the owner: nothing changes. */
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_set_private(unrelated, other, true));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_set_private(unrelated, other, true, NULL));
    conv_db_is_private(unrelated, user_id, &p);
    TEST_ASSERT_FALSE(p);
 }
@@ -750,7 +750,7 @@ static void test_get_messages_by_range_filters_private_by_default(void) {
    TEST_ASSERT_EQUAL_INT(2, pub_ctx.count);
 
    /* Mark private — same call must now return 0 rows. */
-   rc = conv_db_set_private(conv_id, user_id, true);
+   rc = conv_db_set_private(conv_id, user_id, true, NULL);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
 
    struct mbr_count_ctx priv_ctx = { 0, 0 };
@@ -765,7 +765,7 @@ static void test_get_messages_by_range_returns_private_when_opted_in(void) {
    int64_t conv_id = 0;
    conv_db_create(user_id, "Private session", &conv_id);
    conv_db_add_message(conv_id, user_id, "user", "context_expand should still see this");
-   int rc = conv_db_set_private(conv_id, user_id, true);
+   int rc = conv_db_set_private(conv_id, user_id, true, NULL);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
 
    /* include_private=true is the context_expand path — user expanding their
@@ -1081,6 +1081,93 @@ static void test_user_settings_set_and_get(void) {
    TEST_ASSERT_EQUAL_STRING("New York", loaded.location);
    TEST_ASSERT_EQUAL_STRING("America/New_York", loaded.timezone);
    TEST_ASSERT_EQUAL_STRING("imperial", loaded.units);
+}
+
+/* The persona's two halves round-trip with their modes; a user with no row
+ * gets both modes "append". */
+static void test_user_settings_persona_halves(void) {
+   const int user_id = create_and_get_id("persona_halves", "hash", false);
+
+   auth_user_settings_t loaded;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user_settings(user_id, &loaded));
+   TEST_ASSERT_EQUAL_STRING("", loaded.persona_values);
+   TEST_ASSERT_EQUAL_STRING("append", loaded.persona_values_mode);
+   TEST_ASSERT_EQUAL_STRING("", loaded.persona_voice);
+   TEST_ASSERT_EQUAL_STRING("append", loaded.persona_voice_mode);
+
+   auth_user_settings_t settings = loaded;
+   safe_strscpy(settings.persona_values, "Tell me the truth.\n\nEven when it stings.");
+   safe_strscpy(settings.persona_values_mode, "replace");
+   safe_strscpy(settings.persona_voice, "Talk like a pirate.");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_set_user_settings(user_id, &settings));
+
+   memset(&loaded, 0, sizeof(loaded));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user_settings(user_id, &loaded));
+   TEST_ASSERT_EQUAL_STRING("Tell me the truth.\n\nEven when it stings.", loaded.persona_values);
+   TEST_ASSERT_EQUAL_STRING("replace", loaded.persona_values_mode);
+   TEST_ASSERT_EQUAL_STRING("Talk like a pirate.", loaded.persona_voice);
+   TEST_ASSERT_EQUAL_STRING("append", loaded.persona_voice_mode);
+   TEST_ASSERT_EQUAL_STRING("", loaded.persona_description);
+   TEST_ASSERT_EQUAL_STRING("append", loaded.persona_mode);
+}
+
+/* v112 on a v111 user_settings table (built here in that shape): the four
+ * columns appear, both modes read "append", the older single text and mode
+ * are untouched, and a rerun changes nothing. */
+static void test_v112_persona_halves(void) {
+   const int replacer = create_and_get_id("legacy_replace", "hash", false);
+   const int appender = create_and_get_id("legacy_append", "hash", false);
+   char sql[1024];
+   snprintf(sql, sizeof(sql),
+            "DROP TABLE user_settings;"
+            "CREATE TABLE user_settings (user_id INTEGER PRIMARY KEY, persona_description TEXT, "
+            "persona_mode TEXT DEFAULT 'append', location TEXT, timezone TEXT DEFAULT '', "
+            "units TEXT DEFAULT 'metric', tts_voice_model TEXT, tts_length_scale REAL DEFAULT "
+            "1.0, theme TEXT DEFAULT 'cyan', updated_at INTEGER NOT NULL, FOREIGN KEY (user_id) "
+            "REFERENCES users(id) ON DELETE CASCADE);"
+            "INSERT INTO user_settings (user_id, persona_description, persona_mode, updated_at) "
+            "VALUES (%d, 'You are a butler.\n\nVery formal.', 'replace', 1), "
+            "(%d, 'You''re a pirate', 'append', 1);",
+            replacer, appender);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+   TEST_ASSERT_FALSE(auth_db_column_exists(s_db.db, "user_settings", "persona_values"));
+
+   for (int run = 0; run < 2; run++) {
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v112(s_db.db));
+      static const char *const cols[] = { "persona_values", "persona_values_mode", "persona_voice",
+                                          "persona_voice_mode" };
+      for (int i = 0; i < 4; i++) {
+         TEST_ASSERT_TRUE(auth_db_column_exists(s_db.db, "user_settings", cols[i]));
+      }
+
+      auth_user_settings_t loaded;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user_settings(replacer, &loaded));
+      TEST_ASSERT_EQUAL_STRING("You are a butler.\n\nVery formal.", loaded.persona_description);
+      TEST_ASSERT_EQUAL_STRING("replace", loaded.persona_mode);
+      TEST_ASSERT_EQUAL_STRING("", loaded.persona_values);
+      TEST_ASSERT_EQUAL_STRING("append", loaded.persona_values_mode);
+      TEST_ASSERT_EQUAL_STRING("", loaded.persona_voice);
+      TEST_ASSERT_EQUAL_STRING("append", loaded.persona_voice_mode);
+
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_user_settings(appender, &loaded));
+      TEST_ASSERT_EQUAL_STRING("You're a pirate", loaded.persona_description);
+      TEST_ASSERT_EQUAL_STRING("append", loaded.persona_mode);
+      TEST_ASSERT_EQUAL_STRING("append", loaded.persona_values_mode);
+      TEST_ASSERT_EQUAL_STRING("append", loaded.persona_voice_mode);
+   }
+
+   /* The added defaults are stored values, not just the reader's fallback. */
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_prepare_v2(s_db.db,
+                                            "SELECT persona_values_mode, persona_voice_mode "
+                                            "FROM user_settings WHERE user_id = ?",
+                                            -1, &st, NULL));
+   sqlite3_bind_int(st, 1, replacer);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_STRING("append", (const char *)sqlite3_column_text(st, 0));
+   TEST_ASSERT_EQUAL_STRING("append", (const char *)sqlite3_column_text(st, 1));
+   sqlite3_finalize(st);
 }
 
 /* ============================================================================
@@ -1466,7 +1553,7 @@ void test_llm_usage_rows_follow_privacy_and_deletes(void) {
    }
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_llm_usage_insert(rows, 3));
 
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(priv, uid, true));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(priv, uid, true, NULL));
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_delete(gone, uid));
    char sql[128];
    snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM llm_usage_log WHERE conversation_id = %lld",
@@ -1546,6 +1633,8 @@ int main(void) {
    RUN_TEST(test_v108_scheduled_times);
    RUN_TEST(test_v111_scheduled_zones);
    RUN_TEST(test_user_settings_set_and_get);
+   RUN_TEST(test_user_settings_persona_halves);
+   RUN_TEST(test_v112_persona_halves);
 
    /* v43 schema (entity-merge / user-identity-dedup) */
    RUN_TEST(test_v43_schema_fresh_install);

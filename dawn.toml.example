@@ -25,8 +25,18 @@
                                   # Env: DAWN_GENERAL_LOG_FILE
 
 [persona]
-# description = ""                # Custom AI personality description
-                                  # Leave empty to use built-in persona
+# Two halves; leave either empty for the built-in one.
+# values = ""                     # Who the assistant is: name, role, judgment
+                                  # Env: DAWN_PERSONA_VALUES
+# voice = ""                      # How it talks: tone, humor, formality
+                                  # Env: DAWN_PERSONA_VOICE
+# Several lines go between triple quotes:
+# voice = '''
+# Your tone: dry and brief.
+# No exclamation marks.
+# '''
+# description = ""                # Older single text: the whole persona.  While set it
+                                  # replaces both halves, and values/voice are ignored.
                                   # Env: DAWN_PERSONA_DESCRIPTION
 
 [localization]
@@ -50,6 +60,11 @@
                                   # Env: DAWN_AUDIO_CAPTURE_DEVICE
 # playback_device = "default"     # Speaker device (use `aplay -L` to list)
                                   # Env: DAWN_AUDIO_PLAYBACK_DEVICE
+                                  # A named device is used only by that name: if it goes away,
+                                  # DAWN waits for it to come back rather than use another one.
+                                  # Name it so it survives replugging: ALSA "plughw:CARD=<name>,..."
+                                  # (not "hw:1"), PulseAudio the source/sink name (not its index).
+                                  # "default" follows the system's default device.
 # output_rate = 44100             # Playback sample rate (44100 or 48000)
                                   # Env: DAWN_AUDIO_OUTPUT_RATE
 # output_channels = 2             # Playback channels (2 = stereo, required for dmix)
@@ -177,7 +192,12 @@
 # type = "cloud"                  # "cloud" or "local"
                                   # Env: DAWN_LLM_TYPE
 # max_tokens = 16384              # Maximum response tokens (ceiling, not a target). 16384 is the
-                                  # universally-safe max (= GPT-4o's cap); Claude 4.x allows up to 64K.
+                                  # universally-safe max (= GPT-4o's cap). A streamed reply that
+                                  # reasons (Claude, OpenAI, Gemini) gets at least its
+                                  # effort's ceiling instead (low 16K, medium 32K, high 64K,
+                                  # xhigh/max 128K), held under the model's max_output in
+                                  # models.toml: reasoning counts toward it. A cloud reply's
+                                  # ceiling is also held to the room left in the model's window.
                                   # Env: DAWN_LLM_MAX_TOKENS
 # compact_soft_threshold = 0.60   # Async background compaction trigger
 # compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)
@@ -577,6 +597,15 @@
                                   # 2.4x the output tokens; extraction runs in the background.
                                   # Reasoning tokens count against [llm] max_tokens: keep it at
                                   # the default (16384) or higher when this is on.
+# consolidator = "prompt"         # How a conversation's extracted facts are stored: "prompt"
+                                  # (fixed rules: paraphrase merge at paraphrase_dedup_threshold,
+                                  # automatic replace of one-at-a-time relations) or "agent" (the
+                                  # extraction model, continued in the same request history, sees
+                                  # the stored facts near each one and decides: add, merge,
+                                  # replace, close a relation, defer or drop; code checks every
+                                  # decision and records each batch).  "agent" adds one reply
+                                  # to each conversation's extraction: two model calls, about
+                                  # 2x the extraction tokens.
 # note_extraction_guard = true    # Keep reference text filed via the document_manage
                                   # save_note/save_text tool out of semantic memory
                                   # facts. At extraction time the filed bodies (and
@@ -1203,9 +1232,21 @@ citation_reinforcement_boost = 0.05
 # stale_after_sec = 30               # Live reads older than this report "stale"
 
 # =============================================================================
+# Coding agent (coding_agent tool) — hands coding work to the agent gateway
+# ([[mcp.server]] role = "agent_gateway", below) and replies on its pull
+# requests' review threads on the user's yes.
+# =============================================================================
+[coding_agent]
+# sign_replies = true                # End each reply posted on GitHub "— <ai_name>"
+
+# =============================================================================
 # MCP Bridge (coding harness) — requires building with
 # -DDAWN_ENABLE_MCP_BRIDGE_TOOL=ON. DAWN is a pure MCP *client*; the operator
-# launches each MCP server (systemd/tmux/docker). Transport is HTTP+SSE only.
+# launches each MCP server (systemd/tmux/docker). Transports: "http+sse" (an SSE
+# stream, e.g. through mcp-proxy) or "http" (stateless: one POST per message,
+# JSON replies; a server that streams its replies or needs sessions uses
+# "http+sse"). With "http", request_timeout_seconds bounds each whole POST,
+# long-polls included.
 # =============================================================================
 # [mcp]
 # enabled = false                    # master switch for the bridge
@@ -1217,11 +1258,23 @@ citation_reinforcement_boost = 0.05
 # transport = "http+sse"
 # enabled = true
 # capabilities = "read_only"         # "dangerous" (default) or "read_only"
+#
+# [[mcp.server]]                     # a stateless server, e.g. the coding agents' gateway
+# alias = "agents"
+# url = "http://127.0.0.1:9760/mcp"
+# transport = "http"
+# request_timeout_seconds = 60
+# role = "agent_gateway"             # services/agent-gateway: Friday hands it coding tasks.
+#                                    # Only a server declared so gets them; none of its
+#                                    # tools are offered to the model.
+# (a bearer token is sent to another host only over https with tls_verify)
+#
+# Settings for either kind:
 # request_timeout_seconds = 30
 # idle_close_seconds = 600
 # tls_verify = true                  # false requires [mcp] dev_mode = true
-# auth_bearer_env = "CBM_TOKEN"      # env var holding the bearer token (Phase 1 source)
-# # auth_bearer_token_secret = "cbm_token"  # reserved: secrets.toml named-key (not yet wired)
+# auth_bearer_env = "CBM_TOKEN"      # an env var holding the token; when it has no value:
+# auth_bearer_token_secret = "agents"  # the token in secrets.toml [secrets.mcp], by this name
 
 # =============================================================================
 # Code Projects (coding harness) — [code_projects]

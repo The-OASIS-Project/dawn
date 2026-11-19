@@ -292,7 +292,7 @@ static void free_model_table(model_context_entry_t **arr) {
 }
 
 /* Load the model reference tables from models.toml: the context windows here,
- * cache pricing and reasoning capabilities in their modules.  Each table comes
+ * pricing and reasoning capabilities in their modules.  Each table comes
  * from the disk copy when it has it, else from the shipped copy compiled in. */
 static void load_model_registry(void) {
    llm_models_toml_t m;
@@ -300,7 +300,7 @@ static void load_model_registry(void) {
    s_openai_models = load_provider_table(llm_models_toml_root_for(&m, "openai"), "openai");
    s_claude_models = load_provider_table(llm_models_toml_root_for(&m, "anthropic"), "anthropic");
    s_gemini_models = load_provider_table(llm_models_toml_root_for(&m, "gemini"), "gemini");
-   llm_pricing_load_registry(llm_models_toml_root_for(&m, "cache_pricing"));
+   llm_pricing_load_registry(llm_models_toml_root_for(&m, "pricing"));
    llm_capabilities_load_registry(llm_models_toml_root_for(&m, "thinking"));
    llm_capabilities_load_mid_system(llm_models_toml_root_for(&m, "mid_system"));
    llm_capabilities_load_inline_tools(llm_models_toml_root_for(&m, "inline_tools"));
@@ -1120,6 +1120,37 @@ bool llm_context_over_threshold(uint32_t session_id,
                 session_id, threshold * 100.0f, tokens, estimated, max_tokens);
    }
    return over;
+}
+
+int llm_context_fit_reply(int max_tokens,
+                          struct json_object *history,
+                          const char *input_text,
+                          struct json_object *tools,
+                          llm_type_t type,
+                          cloud_provider_t provider,
+                          const char *model) {
+   const int window = llm_context_get_size(type, provider, model);
+   if (window <= 0 || max_tokens <= LLM_REPLY_ROOM_MIN) {
+      return max_tokens;
+   }
+   const int estimate = llm_compaction_request_estimate(history, input_text);
+   const int tool_tokens = tools ? (int)(strlen(json_object_to_json_string(tools)) / 4) : 0;
+   /* Measured by its session only when it is that session's own conversation
+    * request.  A side call (extraction, compaction, a briefing, a summarizer)
+    * or a call with no session is its own estimate: never the local session's
+    * (id 0) or another conversation's count. */
+   const session_t *session = llm_cache_monitor_conversation_session();
+   llm_compaction_calibration_t cal = { 0 };
+   if (session) {
+      llm_context_calibration(session->session_id, type, provider, model, &cal);
+   }
+   const int input = llm_compaction_reply_input(session ? &cal : NULL, estimate, tool_tokens);
+   const int fitted = llm_compaction_reply_room(max_tokens, window, input);
+   if (fitted < max_tokens) {
+      OLOG_INFO("llm_context: reply ceiling %d -> %d (~%d input tokens of a %d window)", max_tokens,
+                fitted, input, window);
+   }
+   return fitted;
 }
 
 void llm_context_note_compacted(uint32_t session_id, int estimate) {

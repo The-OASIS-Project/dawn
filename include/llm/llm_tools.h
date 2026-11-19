@@ -23,9 +23,6 @@
  * This module provides native tool calling support for OpenAI, Claude, and
  * local LLMs (via llama.cpp with --jinja flag). Tools are defined once and
  * converted to provider-specific formats (OpenAI functions vs Claude tools).
- *
- * Tool calling reduces system prompt size by ~70% and improves reliability
- * by using structured responses instead of parsing <command> tags from text.
  */
 
 #ifndef LLM_TOOLS_H
@@ -249,6 +246,8 @@ typedef struct llm_tool_response {
    int reasoning_tokens; /**< Reasoning token count (OpenAI o-series / Responses); 0 if none */
    /* OpenAI Responses API round-trip fields (NULL for chat-completions / Claude paths) */
    char *response_id; /**< response.id from /v1/responses (Mode A future use) */
+   bool stopped;      /**< The transfer was cut by a stop: the call failed (its rc says
+                           so) and the fields hold what had streamed (llm_stream_fill_stopped) */
 } llm_tool_response_t;
 
 /* =============================================================================
@@ -429,20 +428,6 @@ int llm_tools_get_all(tool_info_t *out, int max_tools);
  * @return 0 on success, 1 on failure (tool not found or not initialized)
  */
 int llm_tools_set_enabled(const char *tool_name, bool enabled_local, bool enabled_remote);
-
-/**
- * @brief Check if a device/tool is enabled for a session type
- *
- * Used by legacy <command> tag prompt builder to filter commands
- * based on the same enabled state as native tools.
- *
- * Thread-safe.
- *
- * @param device_name Device or tool name to check
- * @param is_remote true for remote sessions, false for local
- * @return true if enabled, false if disabled or not found
- */
-bool llm_tools_is_device_enabled(const char *device_name, bool is_remote);
 
 /**
  * @brief Apply per-tool enable/disable configuration (per local + remote surface).
@@ -709,11 +694,11 @@ void llm_tools_args_append(char *buf,
  * @brief Check if native tool calling is enabled and supported
  *
  * Checks:
- * 1. Config setting: g_config.llm.tools.native_tools_enabled
+ * 1. Config setting: g_config.llm.tools.enabled
  * 2. Provider support (OpenAI, Claude, or local with --jinja)
  *
  * @param config Resolved LLM config (NULL = use global)
- * @return true if native tools should be used, false for <command> fallback
+ * @return true if native tools should be used, false for a turn without tools
  */
 bool llm_tools_enabled(const llm_resolved_config_t *config);
 

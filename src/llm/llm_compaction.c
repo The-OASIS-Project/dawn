@@ -24,6 +24,7 @@
 
 #include <json-c/json.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -210,8 +211,10 @@ char *llm_compaction_deterministic(struct json_object *to_summarize, int token_b
              ((unsigned char)content[snippet_len] & 0xC0) == 0x80)
          snippet_len--;
 
-      written = snprintf(buf + offset, remaining, "- %s: %.*s%s\n", role, snippet_len, content,
-                         (content_len > snippet_len) ? "..." : "");
+      /* Said on the role: the snippet is cut long before a note at the reply's end. */
+      written = snprintf(buf + offset, remaining, "- %s%s: %.*s%s\n", role,
+                         llm_history_is_stopped(msg) ? " (stopped by the user)" : "", snippet_len,
+                         content, (content_len > snippet_len) ? "..." : "");
       if (written >= remaining) {
          buf[offset] = '\0';
          break;
@@ -232,6 +235,15 @@ char *llm_compaction_summarize(struct json_object *to_summarize,
                                void *ctx,
                                const atomic_bool *cancel,
                                llm_compaction_level_t *level_out) {
+   /* A reply the user stopped reads as cut off, not as a whole answer, at
+    * every level. */
+   struct json_object *marked = llm_history_stopped_marked(to_summarize);
+   if (!marked) {
+      OLOG_ERROR("llm_compaction: out of memory marking stopped replies; not summarizing");
+      return NULL;
+   }
+   to_summarize = marked;
+
    /* The input's own size, for the size gate below. */
    const int input_tokens = llm_compaction_estimate_range(
        to_summarize, 0, (int)json_object_array_length(to_summarize));
@@ -260,6 +272,7 @@ char *llm_compaction_summarize(struct json_object *to_summarize,
 
       if (!summary && cancel && atomic_load(cancel)) {
          OLOG_INFO("llm_compaction: summary cancelled");
+         json_object_put(marked);
          return NULL;
       }
       if (!summary) {
@@ -269,6 +282,7 @@ char *llm_compaction_summarize(struct json_object *to_summarize,
             continue;
          }
          OLOG_ERROR("llm_compaction: All compaction levels failed");
+         json_object_put(marked);
          return NULL;
       }
 
@@ -307,6 +321,7 @@ char *llm_compaction_summarize(struct json_object *to_summarize,
    if (level_out) {
       *level_out = level;
    }
+   json_object_put(marked);
    return summary;
 }
 
@@ -342,6 +357,53 @@ int llm_compaction_calibrated_tokens(const llm_compaction_calibration_t *cal, in
    }
    const float tokens = fixed_part(cal) + cal->factor * (float)estimate;
    return tokens > (float)INT_MAX ? INT_MAX : (int)tokens;
+}
+
+int llm_compaction_question_tokens(struct json_object *history, const char *input_text) {
+   if (!input_text) {
+      return 0;
+   }
+   const size_t n = history && json_object_is_type(history, json_type_array)
+                        ? json_object_array_length(history)
+                        : 0;
+   struct json_object *role = NULL;
+   if (n > 0 &&
+       json_object_object_get_ex(json_object_array_get_idx(history, n - 1), "role", &role) &&
+       strcmp(json_object_get_string(role), "user") == 0) {
+      return 0;
+   }
+   return (int)(strlen(input_text) / 4);
+}
+
+int llm_compaction_request_estimate(struct json_object *history, const char *input_text) {
+   const int n = history && json_object_is_type(history, json_type_array)
+                     ? (int)json_object_array_length(history)
+                     : 0;
+   return (n > 0 ? llm_compaction_estimate_range(history, 0, n) : 0) +
+          llm_compaction_question_tokens(history, input_text);
+}
+
+int llm_compaction_reply_input(const llm_compaction_calibration_t *cal,
+                               int estimate,
+                               int tool_tokens) {
+   if (usable(cal)) {
+      return llm_compaction_calibrated_tokens(cal, estimate);
+   }
+   const int input = estimate + tool_tokens;
+   return cal && cal->last_prompt > input ? cal->last_prompt : input;
+}
+
+int llm_compaction_reply_room(int max_tokens, int window, int input_tokens) {
+   if (window <= 0 || max_tokens <= LLM_REPLY_ROOM_MIN) {
+      return max_tokens;
+   }
+   /* The estimate reads ~4 characters a token; code, non-English text and
+    * images run denser.  A 10% margin on the input, and 2% of the window. */
+   const int64_t left = (int64_t)window - input_tokens - input_tokens / 10 - window / 50;
+   if (left >= max_tokens) {
+      return max_tokens;
+   }
+   return left > LLM_REPLY_ROOM_MIN ? (int)left : LLM_REPLY_ROOM_MIN;
 }
 
 int llm_compaction_estimate_budget(const llm_compaction_calibration_t *cal, int tokens) {

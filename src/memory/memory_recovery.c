@@ -79,6 +79,15 @@ static pthread_mutex_t s_state_mutex = PTHREAD_MUTEX_INITIALIZER;
  * Acquired at run_pass entry, released at exit. */
 static pthread_mutex_t s_pass_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Tests only (memory_recovery_set_test_wait): called in place of the pass's
+ * sleeps.  NULL in the daemon. */
+static void (*s_test_wait)(void);
+
+/* A pass goes on while the worker thread is up, or while a test drives it. */
+static bool pass_may_continue(void) {
+   return s_running || s_test_wait != NULL;
+}
+
 /* =============================================================================
  * Internal helpers
  * ============================================================================= */
@@ -198,13 +207,17 @@ static void record_attempt(int64_t conv_id) {
  */
 static bool wait_for_user_extraction(int user_id) {
    int waited = 0;
-   while (memory_extraction_in_progress(user_id) && s_running) {
+   while (memory_extraction_in_progress(user_id) && pass_may_continue()) {
       if (waited >= RECOVERY_PER_CONV_WAIT_SEC) {
          return false;
       }
-      /* s_pass_mutex only serializes recovery passes, never a hot path */
-      // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
-      sleep(RECOVERY_POLL_INTERVAL_SEC);
+      if (s_test_wait) {
+         s_test_wait();
+      } else {
+         /* s_pass_mutex only serializes recovery passes, never a hot path */
+         // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+         sleep(RECOVERY_POLL_INTERVAL_SEC);
+      }
       waited += RECOVERY_POLL_INTERVAL_SEC;
    }
    return true;
@@ -215,9 +228,10 @@ static bool wait_for_user_extraction(int user_id) {
  *        actually triggered (regardless of outcome).
  */
 static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
-   /* Read pre-trigger counter so we can detect successful advancement. */
-   int last_extracted_before = 0;
-   memory_db_get_last_extracted(row->conv_id, &last_extracted_before);
+   /* Read the pre-trigger id cursor to detect advancement: a stored count can
+    * be in older units, so a partial advance may lower it. */
+   int64_t last_id_before = 0;
+   memory_db_get_last_extracted_msg_id(row->conv_id, &last_id_before);
 
    /* If extraction is already running for this user (e.g. live session),
     * skip this row this pass — the live extraction will handle it. */
@@ -244,7 +258,7 @@ static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
       OLOG_INFO("memory_recovery: conv %lld has %zu chars of text after image strip "
                 "(< %d threshold); marking as extracted (no-op)",
                 (long long)row->conv_id, total_text_len, RECOVERY_MIN_TEXT_CHARS);
-      memory_db_set_last_extracted(row->conv_id, row->message_count, 0);
+      memory_db_set_last_extracted(row->conv_id, row->message_count, 0, OUTSIDE_NONE);
       json_object_put(history);
       return false;
    }
@@ -277,7 +291,11 @@ static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
    }
 
    /* Wait briefly to confirm extraction actually started (vs. a no-op skip). */
-   usleep(RECOVERY_TRIGGER_SETTLE_MS * 1000);
+   if (s_test_wait) {
+      s_test_wait();
+   } else {
+      usleep(RECOVERY_TRIGGER_SETTLE_MS * 1000);
+   }
    if (!memory_extraction_in_progress(row->user_id)) {
       /* No-op skip — extraction was disabled, conv too short, or capacity hit.
        * Attempts already counted; future passes will hit the cap and stop. */
@@ -293,14 +311,14 @@ static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
       return true;
    }
 
-   /* Inspect counter advancement for log clarity. */
-   int last_extracted_after = 0;
-   memory_db_get_last_extracted(row->conv_id, &last_extracted_after);
-   if (last_extracted_after > last_extracted_before) {
-      OLOG_INFO("memory_recovery: extracted conv %lld (%d -> %d msgs)", (long long)row->conv_id,
-                last_extracted_before, last_extracted_after);
+   /* Advanced if the id cursor moved, even with rows still above it. */
+   int64_t last_id_after = 0;
+   memory_db_get_last_extracted_msg_id(row->conv_id, &last_id_after);
+   if (last_id_after > last_id_before) {
+      OLOG_INFO("memory_recovery: extracted conv %lld (msg_id %lld -> %lld)",
+                (long long)row->conv_id, (long long)last_id_before, (long long)last_id_after);
    } else {
-      /* Extraction ran but didn't produce a counter advance.  Two
+      /* Extraction ran but the id cursor did not move.  Two
        * sub-cases: (a) transient network failure — roll back the attempt
        * stamp so the next pass picks the conv up again; (b) genuine
        * non-advance — apply the standard give-up-at-cap heuristic. */
@@ -316,7 +334,7 @@ static bool process_stuck_conv(const stuck_conv_t *row, int max_attempts) {
             OLOG_INFO("memory_recovery: conv %lld hit attempt cap (%d) without success; "
                       "marking as extracted (give-up)",
                       (long long)row->conv_id, max_attempts);
-            memory_db_set_last_extracted(row->conv_id, row->message_count, 0);
+            memory_db_set_last_extracted(row->conv_id, row->message_count, 0, OUTSIDE_NONE);
          } else {
             OLOG_INFO("memory_recovery: conv %lld extraction completed without advancing "
                       "counter (attempt %d/%d)",
@@ -367,7 +385,7 @@ void memory_recovery_run_pass(int *triggered_out, int *skipped_out) {
 
    OLOG_INFO("memory_recovery: pass starting — %d stuck conversation(s) to process", list.count);
 
-   for (int i = 0; i < list.count && s_running; i++) {
+   for (int i = 0; i < list.count && pass_may_continue(); i++) {
       if (process_stuck_conv(&list.rows[i], max_attempts)) {
          triggered++;
       } else {
@@ -429,6 +447,10 @@ static void *recovery_thread_func(void *arg) {
 
    OLOG_INFO("memory_recovery: thread stopped");
    return NULL;
+}
+
+void memory_recovery_set_test_wait(void (*wait)(void)) {
+   s_test_wait = wait;
 }
 
 int memory_recovery_start(void) {

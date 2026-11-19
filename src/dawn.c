@@ -67,7 +67,9 @@
 #include "core/command_executor.h"
 #include "core/command_router.h"
 #include "core/component_status.h"
+#include "core/conv_post.h"
 #include "core/conv_stream.h"
+#include "core/conv_turn_lease.h"
 #include "core/dawn_events.h"
 #include "core/embedding_engine.h"
 #include "core/endpointer.h"
@@ -625,15 +627,15 @@ static void dawn_tts_sentence_callback(const char *sentence, void *userdata) {
 
    // The expression tag first (its name opens this sentence on the robot;
    // removing it can join the text around it, which the later strips must see).
-   // Then command tags + <end_of_turn> (processed from the full response later),
-   // then the <cited> memory-citation tag — shared whole-string strips, the same
-   // ones the response finalizer and WebUI-audio TTS use.  Both truncate on an
-   // orphan opener so a sentence that breaks mid-tag can't leak a partial into TTS.
+   // Then <end_of_turn> and the <cited> memory-citation tag — shared whole-string
+   // strips, the same ones the response finalizer and WebUI-audio TTS use.  The
+   // cited strip truncates on an orphan opener so a sentence that breaks mid-tag
+   // can't leak a partial into TTS.
    char expression[EMOTE_NAME_MAX];
    if (text_filter_emote_strip(cleaned, expression, sizeof(expression))) {
       snprintf(s_pending_expression, sizeof(s_pending_expression), "%s", expression);
    }
-   text_filter_command_strip(cleaned, true); /* per-sentence TTS: drop a mid-split tag */
+   text_filter_end_of_turn_strip(cleaned);
    text_filter_cited_strip(cleaned);
 
    // Remove special characters that cause problems
@@ -2033,6 +2035,9 @@ int main(int argc, char *argv[]) {
       return 1;
    }
 
+   // Step 6a: A stored copy of a built-in persona would hide the current one
+   llm_persona_drop_builtin_copy();
+
    // Step 6b: Check cloud LLM API key availability (graceful fallback to local)
    if (strcmp(g_config.llm.type, "cloud") == 0) {
       int has_api_key = 0;
@@ -2236,6 +2241,10 @@ int main(int argc, char *argv[]) {
       OLOG_ERROR("Failed to initialize session manager");
       return 1;
    }
+   /* One turn per conversation: posts from outside a turn are written through
+    * the lease, and a turn waiting past a job's runtime limit is reported. */
+   conv_post_init();
+   conv_turn_lease_set_stale_after(g_config.jobs.max_runtime_sec);
 
    // Register the prompt builder before any turn can run.
    /* The focus-source adapters, before the prompt builder that uses them.
@@ -2397,9 +2406,6 @@ int main(int argc, char *argv[]) {
       audio_capture_ctx = audio_capture_start(pcm_capture_device, 262144, 1);
       if (!audio_capture_ctx) {
          OLOG_ERROR("Failed to start audio capture thread");
-         OLOG_ERROR("  Hint: Check that capture device '%s' exists and isn't in use by another "
-                    "application",
-                    pcm_capture_device);
          return 1;
       }
    } else {
@@ -4208,6 +4214,10 @@ server_shutdown:
    OLOG_INFO("Shutdown: webui_server_quiesce");
    webui_server_quiesce();
 #endif
+   /* No turn waits for a conversation from here on (each ends unsent), and
+    * posts queued behind running turns are written while the database is up. */
+   OLOG_INFO("Shutdown: conv_turn_lease_shutdown");
+   conv_turn_lease_shutdown();
 
    // Stop heartbeat immediately — no dependencies on other subsystems
    OLOG_INFO("Shutdown: stopping heartbeat");
@@ -4258,6 +4268,13 @@ server_shutdown:
    OLOG_INFO("Shutdown: webui_email_exec_stop");
    webui_email_exec_stop();
 #endif
+   /* Tools' own threads (stop hooks) call into jobs and the database: stop them
+    * before either goes. */
+   if (tools_available) {
+      OLOG_INFO("Shutdown: tool_registry_stop_tools");
+      tool_registry_stop_tools();
+   }
+
    /* Background jobs: cancel running jobs before auth/DB teardown (their workers
     * use sessions + conv_db).  Unregisters the resolver + requests cancellation;
     * detached workers observe it and tear down their own sessions. */

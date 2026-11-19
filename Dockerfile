@@ -39,7 +39,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Build tools (patchelf: packaging/deb points the libraries it bundles at /usr/lib/dawn)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cmake build-essential pkg-config git wget ca-certificates \
+    cmake build-essential pkg-config git wget unzip ca-certificates \
     autotools-dev automake autoconf libtool patchelf \
     # Core required
     libcurl4-openssl-dev libjson-c-dev libssl-dev libsqlite3-dev \
@@ -58,35 +58,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- ONNX Runtime (pre-built, arch-specific) ---
-# amd64: v1.22.0, arm64: v1.19.2 — arm64 uses older version because
-# v1.22.0 has no pre-built aarch64 tarball. Matches scripts/lib/libs.sh.
+# Microsoft's NuGet package (Microsoft.ML.OnnxRuntime): one package carries the
+# Linux x64 and arm64 libraries and the C headers.  amd64: v1.22.0, arm64:
+# v1.19.2, as scripts/lib/libs.sh installs.  The library's SONAME is
+# libonnxruntime.so.1, so the versioned file gets the .so.1 and .so links.
 ARG TARGETARCH
 ARG ONNX_VERSION_AMD64=1.22.0
-ARG ONNX_SHA256_AMD64=8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3
+ARG ONNX_SHA256_AMD64=d571e63a2329baacb713f441e65ad75284de354db6e1ac435fe4bebbb417986a
 ARG ONNX_VERSION_ARM64=1.19.2
-ARG ONNX_SHA256_ARM64=5e30145277d6d6fcb0e8f14f0d0ab5048af7b13ffd608023bb1e2875621fab07
+ARG ONNX_SHA256_ARM64=fa133c8fe6238445a0dd3e8447baa5c7d16f418caa8e576c7e253ba77b27b61b
 RUN set -e; \
     if [ "$TARGETARCH" = "arm64" ]; then \
         ONNX_VERSION="${ONNX_VERSION_ARM64}"; \
         ONNX_SHA256="${ONNX_SHA256_ARM64}"; \
-        ONNX_ARCH="aarch64"; \
+        ONNX_RID="linux-arm64"; \
     else \
         ONNX_VERSION="${ONNX_VERSION_AMD64}"; \
         ONNX_SHA256="${ONNX_SHA256_AMD64}"; \
-        ONNX_ARCH="x64"; \
+        ONNX_RID="linux-x64"; \
     fi; \
-    ONNX_TARBALL="onnxruntime-linux-${ONNX_ARCH}-${ONNX_VERSION}.tgz"; \
-    ONNX_DIR="onnxruntime-linux-${ONNX_ARCH}-${ONNX_VERSION}"; \
+    ONNX_PKG="microsoft.ml.onnxruntime.${ONNX_VERSION}.nupkg"; \
     cd /tmp \
-    && wget -q "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/${ONNX_TARBALL}" \
-    && echo "${ONNX_SHA256}  ${ONNX_TARBALL}" | sha256sum -c \
-    && tar xzf "${ONNX_TARBALL}" \
-    && cp -a "${ONNX_DIR}/lib/"* /usr/local/lib/ \
-    && cp -r "${ONNX_DIR}/include/"* /usr/local/include/ \
+    && wget -q "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ONNX_VERSION}/${ONNX_PKG}" \
+    && echo "${ONNX_SHA256}  ${ONNX_PKG}" | sha256sum -c \
+    && mkdir ort && unzip -q "${ONNX_PKG}" -d ort \
+       "runtimes/${ONNX_RID}/native/*" "build/native/include/*" LICENSE ThirdPartyNotices.txt \
+    && cp "ort/runtimes/${ONNX_RID}/native/libonnxruntime.so" "/usr/local/lib/libonnxruntime.so.${ONNX_VERSION}" \
+    && cp "ort/runtimes/${ONNX_RID}/native/libonnxruntime_providers_shared.so" /usr/local/lib/ \
+    && ln -sf "libonnxruntime.so.${ONNX_VERSION}" /usr/local/lib/libonnxruntime.so.1 \
+    && ln -sf libonnxruntime.so.1 /usr/local/lib/libonnxruntime.so \
+    && cp -r ort/build/native/include/* /usr/local/include/ \
     && mkdir -p /usr/local/share/doc/onnxruntime \
-    && cp "${ONNX_DIR}/LICENSE" "${ONNX_DIR}/ThirdPartyNotices.txt" /usr/local/share/doc/onnxruntime/ \
+    && cp ort/LICENSE ort/ThirdPartyNotices.txt /usr/local/share/doc/onnxruntime/ \
     && ldconfig \
-    && rm -rf /tmp/onnxruntime-*
+    && rm -rf /tmp/ort "/tmp/${ONNX_PKG}"
 
 # --- espeak-ng (rhasspy fork, pinned commit) ---
 # espeak-ng compiles <prefix>/share/espeak-ng-data in as its data path, so the
@@ -151,7 +156,7 @@ RUN cmake --install build-server --prefix /opt/dawn
 # -----------------------------------------------------------------------------
 # Stage 3: Runtime
 # -----------------------------------------------------------------------------
-FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS dawn-runtime
+FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 AS dawn-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 

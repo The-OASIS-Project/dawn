@@ -1559,6 +1559,7 @@ static int phone_describe_call(const char *action,
 
 static const tool_metadata_t phone_metadata = {
    .name = "phone",
+   .results = TOOL_RESULTS_OUTSIDE,
    .action_kinds = s_phone_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_phone_action_kinds),
    .classify_call = phone_classify_call,

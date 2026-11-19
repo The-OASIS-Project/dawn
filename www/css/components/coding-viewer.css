@@ -1,0 +1,638 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * By contributing to this project, you agree to license your contributions
+ * under the GPLv3 (or any later version) or any future licenses chosen by
+ * the project author(s).
+ *
+ * The coding job changes viewer (coding-viewer.js) on the dawn-dialog base.
+ */
+
+.coding-viewer[open] {
+   display: flex;
+   flex-direction: column;
+   width: min(1200px, 96vw);
+   height: 88dvh;
+}
+
+.cv-headref {
+   font-family: var(--font-mono);
+   font-size: 0.75rem;
+   color: var(--text-secondary);
+   background: var(--bg-primary);
+   border: 1px solid var(--border-color);
+   border-radius: 999px;
+   padding: 1px 10px;
+}
+
+.cv-headref:empty {
+   display: none;
+}
+
+.cv-back {
+   display: none;
+}
+
+.cv-body {
+   flex: 1;
+   min-height: 0;
+   display: grid;
+   grid-template-columns: minmax(220px, 28%) 1fr;
+}
+
+.cv-list {
+   overflow: auto;
+   border-right: 1px solid var(--border-color);
+   padding: 0.25rem 0 0.75rem;
+   background: var(--bg-primary);
+}
+
+.cv-section {
+   margin: 0.9rem 1rem 0.35rem;
+   padding-bottom: 0.3rem;
+   border-bottom: 1px solid var(--border-color);
+   font-family: var(--font-mono);
+   font-size: 0.7rem;
+   letter-spacing: 0.08em;
+   text-transform: uppercase;
+   color: var(--text-secondary);
+}
+
+.cv-files,
+.cv-scopes,
+.cv-commits {
+   list-style: none;
+   margin: 0;
+   padding: 0;
+}
+
+/* A long history scrolls on its own, so the files stay in reach. */
+.cv-commits {
+   max-height: 40vh;
+   overflow: auto;
+}
+
+.cv-group {
+   margin: 0.5rem 1rem 0.2rem;
+   font-size: 0.72rem;
+   color: var(--text-secondary);
+}
+
+.cv-section .cv-hash {
+   text-transform: none;
+   letter-spacing: normal;
+}
+
+.cv-filebtn,
+.cv-scopebtn {
+   display: block;
+   width: 100%;
+   text-align: left;
+   background: none;
+   border: none;
+   border-left: 2px solid transparent;
+   color: var(--text-primary);
+   padding: 0.35rem 1rem;
+   cursor: pointer;
+   font-size: 0.82rem;
+}
+
+.cv-filebtn:hover,
+.cv-scopebtn:hover {
+   background: var(--accent-subtle);
+}
+
+.cv-filebtn[aria-current='true'],
+.cv-scopebtn[aria-current='true'],
+.cv-scopebtn.cv-inview {
+   background: var(--accent-subtle);
+   border-left-color: var(--accent);
+}
+
+.cv-filebtn:focus-visible,
+.cv-scopebtn:focus-visible,
+.cv-viewbtn:focus-visible,
+.cv-back:focus-visible,
+.cv-pane:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: -2px;
+}
+
+.cv-fileline {
+   display: flex;
+   align-items: baseline;
+   flex-wrap: wrap;
+   gap: 0.4rem;
+}
+
+.cv-name,
+.cv-dir,
+.cv-barpath {
+   overflow-wrap: anywhere;
+   unicode-bidi: isolate;
+}
+
+.cv-dir {
+   display: block;
+   color: var(--text-secondary);
+   font-size: 0.75rem;
+}
+
+.cv-counts {
+   margin-left: auto;
+   font-family: var(--font-mono);
+   font-size: 0.75rem;
+   display: inline-flex;
+   gap: 0.35rem;
+}
+
+.cv-add {
+   color: var(--success);
+}
+
+.cv-del {
+   color: var(--error-text);
+}
+
+.cv-bin {
+   color: var(--text-secondary);
+}
+
+.cv-scopebtn {
+   display: flex;
+   align-items: baseline;
+   gap: 0.5rem;
+   padding: 0.3rem 1rem;
+   font-size: 0.8rem;
+}
+
+.cv-hash {
+   font-family: var(--font-mono);
+   font-size: 0.72rem;
+   color: var(--accent);
+   background: var(--accent-subtle);
+   border-radius: 4px;
+   padding: 0 5px;
+   flex: none;
+}
+
+.cv-scopebtn[aria-current='true'] .cv-hash,
+.cv-scopebtn.cv-inview .cv-hash {
+   background: var(--bg-primary);
+}
+
+.cv-subject {
+   overflow-wrap: anywhere;
+   unicode-bidi: isolate;
+}
+
+.cv-file {
+   min-width: 0;
+   min-height: 0;
+   display: flex;
+   flex-direction: column;
+}
+
+.cv-bar {
+   display: flex;
+   align-items: center;
+   flex-wrap: wrap;
+   gap: 0.6rem;
+   padding: 0.5rem 1rem;
+   border-bottom: 1px solid var(--border-color);
+   background: var(--bg-secondary);
+   font-size: 0.82rem;
+}
+
+.cv-barpath {
+   font-family: var(--font-mono);
+   font-weight: 600;
+}
+
+.cv-bar:empty {
+   display: none;
+}
+
+.cv-views {
+   margin-left: auto;
+   display: inline-flex;
+   gap: 0.25rem;
+}
+
+.cv-viewbtn {
+   background: none;
+   border: 1px solid var(--border-color);
+   color: var(--text-secondary);
+   border-radius: var(--border-radius-sm);
+   padding: 2px 10px;
+   min-height: 28px;
+   font-size: 0.75rem;
+   cursor: pointer;
+}
+
+.cv-viewbtn[aria-pressed='true'] {
+   border-color: var(--accent);
+   background: var(--accent-subtle);
+   color: var(--text-primary);
+   font-weight: 600;
+}
+
+.cv-banner {
+   padding: 0.4rem 1rem;
+   font-size: 0.8rem;
+   color: var(--warning);
+   border-bottom: 1px solid var(--border-color);
+}
+
+.cv-pane {
+   flex: 1;
+   overflow: auto;
+   min-height: 0;
+   background: var(--bg-primary);
+   font-size: 0.78rem;
+   line-height: 1.45;
+}
+
+.cv-note {
+   padding: 1rem;
+   font-family: inherit;
+   color: var(--text-secondary);
+   font-size: 0.85rem;
+}
+
+/* A message alone in the pane sits in its middle, not its corner. */
+.cv-pane > .cv-note:only-child {
+   min-height: 100%;
+   display: flex;
+   flex-direction: column;
+   align-items: center;
+   justify-content: center;
+   text-align: center;
+   max-width: 46ch;
+   margin: 0 auto;
+}
+
+.cv-note-sub {
+   margin-top: 0.5rem;
+}
+
+.cv-how {
+   user-select: all;
+   font-family: var(--font-mono);
+}
+
+.cv-hunk {
+   padding-top: 0.15rem;
+   content-visibility: auto;
+   contain-intrinsic-size: auto 600px;
+}
+
+.cv-row {
+   font-family: var(--font-mono);
+   display: grid;
+   grid-template-columns: 5ch 5ch 2ch 1fr;
+}
+
+.cv-o::before {
+   content: attr(data-o);
+}
+
+.cv-n::before {
+   content: attr(data-n);
+}
+
+.cv-o,
+.cv-n {
+   color: var(--text-secondary);
+   text-align: right;
+   padding-right: 0.5ch;
+   user-select: none;
+}
+
+.cv-s {
+   text-align: center;
+   user-select: none;
+}
+
+.cv-c {
+   white-space: pre-wrap;
+   overflow-wrap: anywhere;
+   tab-size: 4;
+   unicode-bidi: isolate;
+   padding-right: 0.5rem;
+}
+
+.cv-plus {
+   background: var(--success-subtle);
+}
+
+.cv-plus .cv-s {
+   color: var(--success);
+}
+
+.cv-minus {
+   background: var(--error-subtle);
+}
+
+.cv-minus .cv-s {
+   color: var(--error-text);
+}
+
+.cv-at {
+   color: var(--accent);
+   background: var(--accent-subtle);
+   border-left: 2px solid var(--accent-medium);
+}
+
+.cv-meta {
+   color: var(--text-secondary);
+}
+
+.cv-hidden {
+   color: var(--warning);
+   border: 1px solid var(--warning);
+   border-radius: 3px;
+   padding: 0 2px;
+   font-size: 0.85em;
+}
+
+@media (max-width: 759px) {
+   .coding-viewer[open] {
+      width: 100vw;
+      height: 100dvh;
+      max-width: 100vw;
+      max-height: 100dvh;
+      border-radius: 0;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+         env(safe-area-inset-left);
+   }
+
+   .cv-body {
+      grid-template-columns: 1fr;
+   }
+
+   .cv-file {
+      display: none;
+   }
+
+   .coding-viewer.show-file .cv-list {
+      display: none;
+   }
+
+   .coding-viewer.show-file .cv-file {
+      display: flex;
+   }
+
+   .coding-viewer.show-file .cv-back {
+      display: inline-block;
+   }
+
+   .cv-back {
+      background: none;
+      border: none;
+      color: var(--accent);
+      cursor: pointer;
+      min-height: 44px;
+      padding: 0 0.5rem;
+   }
+
+   .cv-pane {
+      font-size: 0.72rem;
+   }
+
+   .cv-filebtn {
+      padding: 0.6rem 1rem;
+   }
+
+   .cv-scopebtn,
+   .cv-filebtn {
+      min-height: 44px;
+      padding-block: 0.55rem;
+   }
+
+   /* The list is the whole screen here: one scroll, not a scroll inside it. */
+   .cv-commits {
+      max-height: none;
+   }
+
+   .cv-viewbtn {
+      min-height: 36px;
+   }
+}
+
+/* ---- publish and close (coding-viewer-actions.js) ------------------------ */
+
+.cv-actions {
+   flex: none;
+   display: flex;
+   align-items: center;
+   flex-wrap: wrap;
+   gap: 0.5rem 1rem;
+   padding: 0.6rem 1rem;
+   border-top: 1px solid var(--border-color);
+   background: var(--bg-secondary);
+   font-size: 0.82rem;
+}
+
+.cv-actions[hidden] {
+   display: none;
+}
+
+.cv-actions > p {
+   flex: 1 1 16rem;
+   margin: 0;
+   color: var(--text-secondary);
+   overflow-wrap: anywhere;
+}
+
+.cv-actions > div {
+   display: flex;
+   flex-wrap: wrap;
+   gap: 0.5rem;
+   margin-left: auto;
+}
+
+.cv-actions a,
+.cv-action a {
+   color: var(--accent);
+}
+
+/* The panel takes the whole body, in both layouts. */
+.cv-action {
+   display: none;
+   flex: 1;
+   min-height: 0;
+   overflow: auto;
+   padding: 1rem 1.25rem;
+   background: var(--bg-primary);
+   border-left: 3px solid var(--border-color);
+   font-size: 0.85rem;
+}
+
+.cv-action.publish {
+   border-left-color: var(--accent);
+}
+
+.cv-action.lose {
+   border-left-color: var(--error);
+}
+
+.coding-viewer.show-action .cv-body,
+.coding-viewer.show-action .cv-back {
+   display: none;
+}
+
+.coding-viewer.show-action .cv-action {
+   display: block;
+}
+
+.cv-action h3 {
+   margin: 0 0 0.75rem;
+   font-size: 1rem;
+}
+
+.cv-action h3:focus {
+   outline: none;
+}
+
+.cv-action h3:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+.cv-action h4 {
+   margin: 1rem 0 0.4rem;
+   font-family: var(--font-mono);
+   font-size: 0.7rem;
+   letter-spacing: 0.08em;
+   text-transform: uppercase;
+   color: var(--text-secondary);
+}
+
+.cv-action p {
+   margin: 0 0 0.6rem;
+   max-width: 72ch;
+}
+
+.cv-action [data-tone='warning'] {
+   color: var(--warning);
+}
+
+.cv-action section[data-tone='warning'] {
+   border: 1px solid var(--warning);
+   background: var(--warning-subtle);
+   border-radius: var(--border-radius-sm);
+   padding: 0.2rem 0.75rem 0.6rem;
+   margin: 0.75rem 0;
+}
+
+.cv-action dl {
+   display: grid;
+   grid-template-columns: max-content 1fr;
+   gap: 0.3rem 1rem;
+   margin: 0.75rem 0;
+}
+
+.cv-action dt {
+   color: var(--text-secondary);
+}
+
+.cv-action dd {
+   margin: 0;
+   overflow-wrap: anywhere;
+}
+
+/* The user's own pull request title and description. */
+.cv-action .cv-pr-label {
+   display: block;
+   margin: 0.75rem 0 0.3rem;
+   color: var(--text-secondary);
+}
+
+.cv-action .cv-pr-desc {
+   margin-top: 0.3rem;
+   font-family: var(--font-mono);
+}
+
+.cv-action ul {
+   list-style: none;
+   margin: 0;
+   padding: 0;
+   font-family: var(--font-mono);
+   font-size: 0.78rem;
+}
+
+.cv-action li {
+   padding: 0.15rem 0;
+}
+
+.cv-action .cv-banner {
+   padding: 0 0 0.4rem;
+   border-bottom: none;
+}
+
+/* The agent's description, framed so it reads as theirs. */
+.cv-action .coding-quote {
+   border: 1px solid var(--border-color);
+   border-radius: var(--border-radius-sm);
+   padding: 0.5rem 0.75rem;
+   max-height: 16rem;
+   color: var(--text-primary);
+}
+
+.cv-action .coding-quote:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+}
+
+/* Close anyway: the one solid danger button. */
+.cv-actions .coding-card-btn.danger[data-act='close-anyway'] {
+   background: var(--error);
+   border-color: var(--error);
+   color: var(--bg-primary);
+}
+
+/* Brighter, not darker: the dark text keeps its contrast (as primary's hover). */
+.cv-actions .coding-card-btn.danger[data-act='close-anyway']:hover:not([aria-disabled='true']) {
+   background: var(--error);
+   border-color: var(--error);
+   color: var(--bg-primary);
+   filter: brightness(1.1);
+}
+
+/* The close question's Close: set apart from Keep before any hover. */
+.cv-actions .coding-card-btn.danger[data-act='close-yes'] {
+   border-color: var(--error);
+   color: var(--error-text);
+}
+
+@media (max-width: 759px) {
+   .cv-action {
+      padding: 0.75rem 1rem;
+   }
+
+   /* One scroll on a phone: the panel's, not a nested one. */
+   .cv-action .coding-quote {
+      max-height: none;
+   }
+
+   .cv-action dl {
+      grid-template-columns: 1fr;
+      gap: 0.1rem;
+   }
+
+   .cv-action dd {
+      margin-bottom: 0.4rem;
+   }
+}

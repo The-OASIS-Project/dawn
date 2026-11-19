@@ -204,10 +204,14 @@ int conv_db_event_prune_expired(int retention_days, int *nulled_out, int *delete
    /* Payload-null the bulky, secret-risk-bearing kinds but KEEP the row: the seq
     * chain stays dense enough that replay ordering and the client's last_seq
     * bookkeeping are unaffected, and the step is still visible as "payload
-    * expired" rather than vanishing from the job's history. */
+    * expired" rather than vanishing from the job's history.  A coding agent's
+    * steps (agent_step) are its commands and words, the bulk of its trail: an
+    * expired one drops out of the trail; its requests and end report stay as
+    * the job's record. */
    static const char *SQL_NULL = "UPDATE conversation_events SET payload = NULL "
                                  "WHERE created_at < ? AND payload IS NOT NULL "
-                                 "AND kind IN ('tool_call', 'tool_result', 'terminal_chunk')";
+                                 "AND kind IN ('tool_call', 'tool_result', 'terminal_chunk', "
+                                 "'agent_step')";
 
    /* status rows are pure heartbeat — the payload IS the content, so nulling
     * would leave a dead row.  Deleting is safe because reads are `seq > last_seq`

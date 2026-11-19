@@ -39,8 +39,8 @@
 extern "C" {
 #endif
 
-struct session;
 struct json_object;
+struct session;
 struct session_prefix_turn;
 
 
@@ -63,6 +63,16 @@ struct session_prefix_turn;
 void session_prefix_apply_turn(struct session *session,
                                const composed_prompt_t *cp,
                                const char *turn_note);
+
+/**
+ * @brief Caller holds history_mutex.  The history this turn's prompt is built
+ *        on (session_prefix_apply_turn's), the conversation it holds into
+ *        @p conv_out (0: none yet; SESSION_HISTORY_CONV_MIXED), and the turn's
+ *        question in it into @p question_out (NULL: none).  Borrowed.
+ */
+struct json_object *session_prefix_turn_history_locked(struct session *session,
+                                                       int64_t *conv_out,
+                                                       struct json_object **question_out);
 
 /**
  * @brief A turn's question was saved to @p conv_id as row @p row_id
@@ -122,6 +132,22 @@ struct session_prefix_turn *session_prefix_take_back_locked(struct session *sess
 /** Save @p turn (from session_prefix_take_back_locked) with its
  *  conversation.  Takes the history lock; NULL-safe. */
 void session_prefix_save_taken(struct session *session, struct session_prefix_turn *turn);
+
+/**
+ * @brief A running turn that failed (no reply, not stopped) takes back the
+ *        tool changes it appended that no model answered, live and stored
+ *
+ * Left after its question, such a change would sit in front of the next
+ * turn's question, no longer in place, and fold into the request's tools
+ * (dropping the conversation's replayed reasoning).  Taken back, the next
+ * seam finds it again and appends it after that question.  Its question
+ * stays; a change a model answered (a tool exchange followed it) stays too.
+ * The change budgets get back what it counted.  For the turn's own code,
+ * before it ends; takes the history lock.
+ *
+ * @return How many changes were taken back
+ */
+int session_prefix_take_back_changes(struct session *session);
 
 /**
  * @brief Before a voice session saves its whole history: a withdrawal kept

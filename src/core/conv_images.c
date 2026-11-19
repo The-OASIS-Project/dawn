@@ -28,10 +28,17 @@
 #include "document_original_store.h"
 #include "image_store.h"
 #include "logging.h"
+#include "memory/memory_db_consolidation.h"
 
 int conv_images_delete_conversation(int64_t conv_id, int user_id) {
    conv_image_files_t files = { 0 };
-   const int rc = conv_db_delete_ex(conv_id, user_id, user_id == 0, CONV_IMAGES_DELETE, &files);
+   conv_db_batches_t batches = { .n = 0 };
+   const int rc = conv_db_delete_ex(conv_id, user_id, user_id == 0, CONV_IMAGES_DELETE, &files,
+                                    &batches);
+   /* What memory recorded of it went too: the owner's tabs drop those batches. */
+   for (int i = 0; i < batches.n; i++) {
+      memory_consolidation_batch_notify(batches.user_id, 0, batches.ids[i]);
+   }
    /* The rows are gone with the conversation; their files go now, with no
     * lock held. */
    for (int i = 0; i < files.count; i++) {

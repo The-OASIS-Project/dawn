@@ -32,6 +32,7 @@
 @import url('components/documents.css');
 @import url('components/history.css');
 @import url('components/memory.css');
+@import url('components/memory-batches.css');
 @import url('components/input.css');
 @import url('components/metrics.css');
 @import url('components/modals.css');
@@ -53,6 +54,7 @@
 @import url('components/doc-library.css');
 @import url('components/code-projects.css');
 @import url('components/jobs.css');
+@import url('components/coding-viewer.css');
 @import url('components/calendar-accounts.css');
 @import url('components/email-accounts.css');
 @import url('components/contacts.css');

@@ -66,6 +66,7 @@ static void populate_summary_from_row(sqlite3_stmt *stmt, memory_summary_t *summ
    summary->message_count = sqlite3_column_int(stmt, 7);
    summary->duration_seconds = sqlite3_column_int(stmt, 8);
    summary->consolidated = sqlite3_column_int(stmt, 9) != 0;
+   summary->outside = sqlite3_column_int(stmt, 10);
 }
 
 /* =============================================================================
@@ -104,6 +105,7 @@ int memory_db_summary_create_at(int user_id,
    sqlite3_bind_int(stmt, 7, message_count);
    sqlite3_bind_int(stmt, 8, duration_seconds);
    memory_db_internal_bind_provenance(stmt, 9, prov);
+   sqlite3_bind_int(stmt, 12, prov ? prov->outside : OUTSIDE_NONE);
 
    int rc = sqlite3_step(stmt);
    sqlite3_reset(stmt);
@@ -138,13 +140,21 @@ int memory_db_summary_create(int user_id,
                                       /*created_at_override*/ 0, id_out);
 }
 
-int memory_db_summary_list(int user_id,
-                           memory_summary_t *out_summaries,
-                           int max_summaries,
-                           int offset,
-                           int *count_out) {
-   return memory_db_summary_list_sorted(user_id, MEMORY_SORT_DEFAULT, out_summaries, max_summaries,
-                                        offset, count_out);
+/* Run a summary list statement (user / limit / offset bound positionally). */
+static int summary_list_run(sqlite3_stmt *const *stmtp,
+                            int user_id,
+                            memory_summary_t *out_summaries,
+                            int max_summaries,
+                            int offset,
+                            int *count_out);
+
+int memory_db_summary_list_untainted(int user_id,
+                                     memory_summary_t *out_summaries,
+                                     int max_summaries,
+                                     int offset,
+                                     int *count_out) {
+   return summary_list_run(&s_db.stmt_memory_summary_list_untainted, user_id, out_summaries,
+                           max_summaries, offset, count_out);
 }
 
 int memory_db_summary_list_sorted(int user_id,
@@ -153,6 +163,19 @@ int memory_db_summary_list_sorted(int user_id,
                                   int max_summaries,
                                   int offset,
                                   int *count_out) {
+   /* Only CREATED_ASC differs; DEFAULT and CREATED_DESC are both newest-first. */
+   return summary_list_run((sort == MEMORY_SORT_CREATED_ASC)
+                               ? &s_db.stmt_memory_summary_list_created_asc
+                               : &s_db.stmt_memory_summary_list,
+                           user_id, out_summaries, max_summaries, offset, count_out);
+}
+
+static int summary_list_run(sqlite3_stmt *const *stmtp,
+                            int user_id,
+                            memory_summary_t *out_summaries,
+                            int max_summaries,
+                            int offset,
+                            int *count_out) {
    if (count_out)
       *count_out = 0;
    if (!out_summaries || max_summaries <= 0) {
@@ -161,14 +184,10 @@ int memory_db_summary_list_sorted(int user_id,
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   /* Only CREATED_ASC differs; DEFAULT and CREATED_DESC are both newest-first.
-    * Both statements share the positional user / limit / offset binding. */
-   sqlite3_stmt *stmt = (sort == MEMORY_SORT_CREATED_ASC)
-                            ? s_db.stmt_memory_summary_list_created_asc
-                            : s_db.stmt_memory_summary_list;
+   sqlite3_stmt *stmt = *stmtp;
    if (!stmt) {
       AUTH_DB_UNLOCK();
-      OLOG_ERROR("memory_db_summary_list_sorted: statement not prepared (sort=%d)", (int)sort);
+      OLOG_ERROR("summary_list_run: statement not prepared");
       return MEMORY_DB_FAILURE;
    }
 
@@ -524,11 +543,12 @@ int memory_db_summary_search_semantic(int user_id,
     * lock across both, so this can't happen in practice — but the code is
     * tolerant), we simply produce fewer survivors than the heap held. */
    sqlite3_stmt *fetch = NULL;
-   int rc = sqlite3_prepare_v2(s_db.db,
-                               "SELECT id, user_id, session_id, summary, topics, sentiment, "
-                               "       created_at, message_count, duration_seconds, consolidated "
-                               "FROM memory_summaries WHERE id = ? AND user_id = ?",
-                               -1, &fetch, NULL);
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, session_id, summary, topics, sentiment, "
+       "       created_at, message_count, duration_seconds, consolidated, outside "
+       "FROM memory_summaries WHERE id = ? AND user_id = ?",
+       -1, &fetch, NULL);
    if (rc != SQLITE_OK) {
       OLOG_ERROR("memory_db: summary_search_semantic prepare fetch failed: %s",
                  sqlite3_errmsg(s_db.db));
@@ -549,24 +569,7 @@ int memory_db_summary_search_semantic(int user_id,
 
       memory_summary_t *s = &out_summaries[produced];
       memset(s, 0, sizeof(*s));
-      s->id = sqlite3_column_int64(fetch, 0);
-      s->user_id = sqlite3_column_int(fetch, 1);
-      const unsigned char *sid = sqlite3_column_text(fetch, 2);
-      if (sid)
-         safe_strscpy(s->session_id, (const char *)sid);
-      const unsigned char *txt = sqlite3_column_text(fetch, 3);
-      if (txt)
-         safe_strscpy(s->summary, (const char *)txt);
-      const unsigned char *topics = sqlite3_column_text(fetch, 4);
-      if (topics)
-         safe_strscpy(s->topics, (const char *)topics);
-      const unsigned char *sent = sqlite3_column_text(fetch, 5);
-      if (sent)
-         safe_strscpy(s->sentiment, (const char *)sent);
-      s->created_at = (time_t)sqlite3_column_int64(fetch, 6);
-      s->message_count = sqlite3_column_int(fetch, 7);
-      s->duration_seconds = sqlite3_column_int(fetch, 8);
-      s->consolidated = (sqlite3_column_int(fetch, 9) != 0);
+      populate_summary_from_row(fetch, s);
 
       out_scores[produced] = heap[i].score;
       produced++;

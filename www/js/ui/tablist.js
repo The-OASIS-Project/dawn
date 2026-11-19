@@ -44,7 +44,8 @@
  *     nodes, which the GC collects with the nodes themselves so it's
  *     not catastrophic — just untidy.
  *
- * Keys: ←/→ cycle (wrapping), Home/End jump to first/last.
+ * Keys: ←/→ cycle (wrapping), Home/End jump to first/last; a tab with the
+ * `hidden` attribute is skipped.
  * Automatic-activation pattern — focus + selection move together
  * (no separate Space/Enter step).
  */
@@ -90,20 +91,22 @@
          if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') {
             return;
          }
-         if (tabs.length === 0) return;
+         /* A hidden tab (a feature the server lacks) is skipped. */
+         const shown = tabs.filter((t) => !t.hidden);
+         if (shown.length === 0) return;
          const active = getActive();
-         const currentIdx = tabs.findIndex((t) => nameOf(t) === active);
+         const currentIdx = shown.findIndex((t) => nameOf(t) === active);
          let nextIdx;
          if (key === 'Home') {
             nextIdx = 0;
          } else if (key === 'End') {
-            nextIdx = tabs.length - 1;
+            nextIdx = shown.length - 1;
          } else if (key === 'ArrowLeft') {
-            nextIdx = currentIdx <= 0 ? tabs.length - 1 : currentIdx - 1;
+            nextIdx = currentIdx <= 0 ? shown.length - 1 : currentIdx - 1;
          } else {
-            nextIdx = currentIdx >= tabs.length - 1 ? 0 : currentIdx + 1;
+            nextIdx = currentIdx >= shown.length - 1 ? 0 : currentIdx + 1;
          }
-         const nextTab = tabs[nextIdx];
+         const nextTab = shown[nextIdx];
          if (!nextTab) return;
          e.preventDefault();
          const name = nameOf(nextTab);

@@ -192,6 +192,7 @@ static const treg_param_t shutdown_params[] = {
 static const tool_metadata_t shutdown_metadata = {
    /* Identity */
    .name = "shutdown",
+   .results = TOOL_RESULTS_OWN,
    /* Kind of action: act (the default): stops the daemon. */
    .device_string = "shutdown",
    .topic = "dawn",

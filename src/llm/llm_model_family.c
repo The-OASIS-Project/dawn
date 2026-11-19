@@ -94,3 +94,31 @@ cloud_provider_t llm_model_anthropic_id(const char *model, char *id_out, size_t 
    llm_model_route(LLM_CLOUD, provider, model, id_out, id_len);
    return provider;
 }
+
+/* OpenAI's o-series: "o", digits, then '-' or the end ("o3", "o4-mini"). */
+static bool is_openai_o_series(const char *model) {
+   if (model[0] != 'o' || model[1] < '0' || model[1] > '9') {
+      return false;
+   }
+   const char *p = model + 1;
+   while (*p >= '0' && *p <= '9') {
+      p++;
+   }
+   return *p == '-' || *p == '\0';
+}
+
+cloud_provider_t llm_model_provider_from_name(const char *model) {
+   if (model == NULL) {
+      return CLOUD_PROVIDER_NONE;
+   }
+   if (strncmp(model, "gpt-", 4) == 0 || is_openai_o_series(model)) {
+      return CLOUD_PROVIDER_OPENAI;
+   }
+   if (strncmp(model, "claude-", 7) == 0) {
+      return CLOUD_PROVIDER_CLAUDE;
+   }
+   if (strncmp(model, "gemini-", 7) == 0) {
+      return CLOUD_PROVIDER_GEMINI;
+   }
+   return CLOUD_PROVIDER_NONE;
+}

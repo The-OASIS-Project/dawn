@@ -62,7 +62,7 @@ extern "C" {
  * cap (also the MCP bridge's property limit). 20 admits real MCP tools like cbm's
  * search_graph (14 params) while still bounding an untrusted upstream schema. */
 #define TOOL_PARAM_MAX 20
-#define TOOL_PARAM_ENUM_MAX 24        /* Max enum values per parameter */
+#define TOOL_PARAM_ENUM_MAX 25        /* Max enum values per parameter */
 #define TOOL_ALIAS_MAX 8              /* Max aliases per tool */
 #define TOOL_DEVICE_MAP_MAX 8         /* Max device map entries for meta-tools */
 #define TOOL_REPEATABLE_ACTIONS_MAX 4 /* Max non-deterministic actions per tool */
@@ -187,6 +187,19 @@ typedef enum {
 } tool_action_kind_t;
 
 /**
+ * @brief Whose text a tool's results are.  Memory extraction marks a batch
+ *        that read a result of anything but DAWN's own as having read outside
+ *        text (core/outside_kind.h).  Every tool decides
+ *        (scripts/check_tool_action_kinds.sh); an undecided one counts as
+ *        OUTSIDE.
+ */
+typedef enum {
+   TOOL_RESULTS_UNDECIDED = 0, /**< not set: read as OUTSIDE (an action entry: the tool's) */
+   TOOL_RESULTS_OWN,           /**< DAWN writes them from the user's data or its own services */
+   TOOL_RESULTS_OUTSIDE,       /**< they can carry text others wrote */
+} tool_results_t;
+
+/**
  * @brief One action's kind.  A PREPARE entry names its confirm: the action
  *        that carries out what it staged, itself listed in the same table.
  */
@@ -195,17 +208,25 @@ typedef struct {
    tool_action_kind_t kind;
    const char *confirm; /**< TOOL_KIND_PREPARE only: the action that confirms it (listed ACT) */
    /** The frame its successful result goes in when it is someone else's text
-    *  (TOOL_FRAME_EMAIL, TOOL_FRAME_WEB), or NULL */
+    *  (TOOL_FRAME_EMAIL, TOOL_FRAME_WEB, ...), or NULL */
    const char *third_party;
+   /** Whose text this action's results are; UNDECIDED: the tool's */
+   tool_results_t results;
 } tool_action_kind_entry_t;
 
 /* Frames for third-party text in a tool's result (llm/llm_third_party.h).
- * A new frame goes in TOOL_FRAMES_ALL too: test_llm_tools_finish checks each
- * one is written, found again, defused by the neutralizer and stored. */
+ * A new frame goes in TOOL_FRAMES_ALL too, and gets its line in
+ * llm_third_party.c, the neutralizer's word lists (llm_context_text.c) and a
+ * stored id (TOOL_RESULTS_FRAME_*): test_llm_tools_finish and
+ * test_tool_result_store check each one is written, found again, defused by
+ * the neutralizer and stored. */
 #define TOOL_FRAME_EMAIL "EMAIL CONTENT"
 #define TOOL_FRAME_WEB "WEB CONTENT"
+#define TOOL_FRAME_DOCUMENT "DOCUMENT CONTENT"
+#define TOOL_FRAME_CALENDAR "CALENDAR CONTENT"
+#define TOOL_FRAME_AGENT "AGENT CONTENT"
 #define TOOL_FRAMES_ALL \
-   { TOOL_FRAME_EMAIL, TOOL_FRAME_WEB }
+   { TOOL_FRAME_EMAIL, TOOL_FRAME_WEB, TOOL_FRAME_DOCUMENT, TOOL_FRAME_CALENDAR, TOOL_FRAME_AGENT }
 
 /** Entries in an action_kinds table: .action_kind_count = TOOL_KIND_COUNT(t) */
 #define TOOL_KIND_COUNT(table) ((int)(sizeof(table) / sizeof((table)[0])))
@@ -302,6 +323,16 @@ typedef int (*tool_init_fn)(void);
  * @return 0 on success, non-zero on error
  */
 typedef int (*tool_start_fn)(void);
+
+/**
+ * @brief Tool stop function type
+ *
+ * Called early in shutdown, after the WebUI stops taking requests and before
+ * background jobs, the database and MQTT are torn down: stop here what start() started (threads
+ * that call into them), and wait for it.  Cleanup comes later.  Must be safe when start() never ran
+ * (a shutdown during startup).
+ */
+typedef void (*tool_stop_fn)(void);
 
 /**
  * @brief Tool cleanup function type
@@ -508,6 +539,8 @@ typedef struct {
    /* The frame an action not in action_kinds puts its successful result in
     * (tool_action_kind_entry_t.third_party), or NULL. */
    const char *third_party;
+   /** Whose text its results are (an action entry may say otherwise). */
+   tool_results_t results;
    /** A call of this tool can't be approved by reply code (a plan: its
     *  steps would each need their own): a call that would need one is refused. */
    bool no_reply_code;
@@ -560,6 +593,7 @@ typedef struct {
    /* Lifecycle (optional - NULL if not needed) */
    tool_init_fn init;       /**< Called after config parse */
    tool_start_fn start;     /**< Called once the daemon has finished starting */
+   tool_stop_fn stop;       /**< Called early in shutdown; stops what start started */
    tool_cleanup_fn cleanup; /**< Called at shutdown */
 
    /* Callback (required) */
@@ -626,6 +660,13 @@ int tool_registry_init_tools(void);
  * @return 0 on success, non-zero if any tool start fails
  */
 int tool_registry_start_tools(void);
+
+/**
+ * @brief Stop every tool that has a stop function, in reverse registration order.
+ *
+ * Call once, early in shutdown, before job_manager_shutdown() and the database.
+ */
+void tool_registry_stop_tools(void);
 
 /**
  * @brief Lock the registry to prevent further registrations
@@ -845,6 +886,12 @@ tool_action_kind_t tool_action_kind(const tool_metadata_t *meta,
  *        the tool's); NULL when its text is the tool's own
  */
 const char *tool_third_party_frame(const tool_metadata_t *meta, const char *action);
+
+/**
+ * @brief Whether a result of @p action is DAWN's own text: its entry's
+ *        results, else the tool's; false for NULL @p meta or an undecided tool
+ */
+bool tool_results_own(const tool_metadata_t *meta, const char *action);
 
 /**
  * @brief A frame any action of the tool uses (its default, else the first

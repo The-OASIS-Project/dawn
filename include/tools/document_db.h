@@ -30,6 +30,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "core/outside_kind.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -64,6 +66,9 @@ typedef struct {
    bool is_global;
    int64_t created_at;
    char owner_name[65]; /* Populated only by document_db_list_all (JOIN) */
+   int outside;         /* outside_kind_t of its text (documents.outside): where it
+                           came from; NONE for a note the user or DAWN wrote */
+   bool own;            /* the user vouched for its text (documents.own) */
 } document_t;
 
 typedef struct {
@@ -76,6 +81,8 @@ typedef struct {
    char doc_filename[DOC_FILENAME_MAX];
    char doc_filetype[DOC_FILETYPE_MAX];
    int64_t created_at; /* v35 — chunk origin timestamp; 0 = unknown */
+   bool own;           /* the reader's own document of their (or DAWN's) own words
+                          (document_is_own); set by document_db_chunks_get_by_ids only */
 } document_chunk_t;
 
 /* v62: one row of a document/note's version history (metadata + text preview).
@@ -112,7 +119,19 @@ typedef struct {
    int64_t document_id;
    char filename[DOC_FILENAME_MAX]; /* for the citation */
    int num_chunks;                  /* parent doc chunk count — clamps the context window */
+   bool own; /* the reader's own document of their own words (document_is_own) */
 } doc_grep_hit_t;
+
+/**
+ * @brief Whether @p doc is @p user_id's own words: theirs, and either vouched
+ *        for (documents.own) or carrying no outside text (documents.outside
+ *        NONE or UNKNOWN), as the chunk reads decide it (OUTSIDE_OWN_SQL).
+ *        Another user's document, a shared one included, never is.
+ */
+static inline bool document_is_own(const document_t *doc, int user_id) {
+   return doc && user_id > 0 && doc->user_id == user_id &&
+          (doc->own || !outside_is_tainted(doc->outside));
+}
 
 /* =============================================================================
  * Document CRUD
@@ -286,6 +305,10 @@ int document_db_version_list_deleted(int user_id,
  * @param text_out     Heap string on success (caller frees); NULL otherwise.
  * @param filename_out Optional out buffer for the archived filename.
  * @param doc_id_out   Optional out for the original document id.
+ * @param outside_out  Optional out for the outside kind its document carried
+ *                     when archived (document_versions.outside), read with the
+ *                     text: a restore archives and may prune this version
+ *                     before the kind is applied.  OTHER when unreadable.
  * @return SUCCESS (0) / FAILURE (1 = not found / not owned / OOM).
  */
 int document_db_version_get_text(int64_t version_id,
@@ -293,7 +316,8 @@ int document_db_version_get_text(int64_t version_id,
                                  char **text_out,
                                  char *filename_out,
                                  size_t fn_sz,
-                                 int64_t *doc_id_out);
+                                 int64_t *doc_id_out,
+                                 int *outside_out);
 
 /**
  * @brief Re-point a deleted doc's version rows onto the doc created on recover.
@@ -420,6 +444,51 @@ int document_db_note_update(int user_id,
                             int dims,
                             float norm,
                             const char *new_hash);
+
+/**
+ * @brief Record the outside kind a document's text carries (documents.outside,
+ *        outside_kind_t): a research report's, or one written in a turn that
+ *        read outside text
+ *
+ * A tainted @p turn_outside also clears the user's vouch (documents.own): the
+ * user vouched for the old text, not text written in a turn that read
+ * outside text.
+ *
+ * @param user_id Owner (gate)
+ * @param doc_id  Document id
+ * @param outside The kind of the text just written
+ * @param combine True for an edit that keeps part of the old text: the stored
+ *                kind and @p outside read together (outside_combine)
+ * @param turn_outside The kind the writing turn read (memory_turn_outside),
+ *                or NONE for a write no turn made (a restore in the panel)
+ * @return SUCCESS, or FAILURE when not owned / a database error
+ */
+int document_db_set_outside(int user_id,
+                            int64_t doc_id,
+                            int outside,
+                            bool combine,
+                            int turn_outside);
+
+/**
+ * @brief Vouch for a document's text as the user's own, or take that back
+ *        (documents.own).  Its provenance (documents.outside) is kept: on sets
+ *        the flag only; off clears it, and a document with no recorded kind
+ *        (NONE or UNKNOWN) becomes DOCUMENT, since the user says it isn't
+ *        their words.  A recalled chunk of an own document (document_is_own)
+ *        reads as the user's words.
+ *
+ * Only the user sets this, from the document library (set_document_own).  No
+ * tool action may call it: a model steered by outside text must not be able
+ * to vouch for that text.
+ *
+ * @param user_id Owner (gate: another user's document, global or not, is refused)
+ * @param doc_id  Document id
+ * @param own     True: the user's own words
+ * @param outside_out Optional: the kind stored (it then reads as own exactly
+ *                when @p own: off leaves no untainted kind)
+ * @return SUCCESS, or FAILURE when not owned / a database error
+ */
+int document_db_set_own(int user_id, int64_t doc_id, bool own, int *outside_out);
 
 /**
  * @brief Rename a note OR document in place, without touching its content.

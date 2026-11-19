@@ -16,7 +16,7 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * models.toml, the read-only model reference data (context windows, cache
+ * models.toml, the read-only model reference data (context windows,
  * pricing, reasoning capabilities): the copy on disk, and the shipped copy
  * compiled into DAWN.  Each table comes from the disk copy when it has it and
  * from the built-in copy otherwise, so an older models.toml (a service install

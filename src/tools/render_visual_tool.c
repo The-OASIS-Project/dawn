@@ -322,6 +322,7 @@ static const treg_param_t load_guidelines_params[] = {
 
 static const tool_metadata_t load_guidelines_metadata = {
    .name = "render_visual_load_guidelines",
+   .results = TOOL_RESULTS_OWN,
    .default_kind = TOOL_KIND_READ,
    .device_string = "visual guidelines",
    .topic = "dawn",
@@ -373,6 +374,7 @@ static const treg_param_t render_visual_params[] = {
 
 static const tool_metadata_t render_visual_metadata = {
    .name = "render_visual",
+   .results = TOOL_RESULTS_OWN,
    /* Kind of action: act (the default): its markup runs in the user's browser. */
    .device_string = "visual renderer",
    .topic = "dawn",

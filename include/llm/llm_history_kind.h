@@ -77,6 +77,34 @@ struct json_object *llm_history_in_force(struct json_object *prefix, bool create
 
 /** @} */
 
+/** Key on an assistant message the user stopped before it finished (true;
+ *  message_stopped; never sent).  The message replays as it was saved; the
+ *  request tells the model at the user's next message
+ *  (llm_history_stopped_noted). */
+#define LLM_HISTORY_STOPPED_KEY "_stopped"
+
+/** Whether @p msg is a reply the user stopped (LLM_HISTORY_STOPPED_KEY). */
+bool llm_history_is_stopped(struct json_object *msg);
+
+/**
+ * @p history with the user's next message after each reply they stopped
+ * carrying a note that the reply was cut off: a context part in front of its
+ * words, headed with the operator-note label (for an envelope, a context
+ * message of its own just before it).  Nothing while no user message follows
+ * yet.  Built at request time from saved state only, so live and reloaded
+ * requests read the same bytes; never stored.  Shares what it doesn't change:
+ * the history itself when it has no stopped reply (caller puts either), or
+ * NULL on allocation failure.
+ */
+struct json_object *llm_history_stopped_noted(struct json_object *history);
+
+/**
+ * @p history for a summarizer: each reply the user stopped with
+ * STOPPED_REPLY_NOTE after its text, so the summary doesn't present it as a
+ * whole answer.  Shares as llm_history_stopped_noted(); NULL on failure.
+ */
+struct json_object *llm_history_stopped_marked(struct json_object *history);
+
 /** Key on a loaded request-context message holding the row id of the question
  *  it was saved with (messages.context_of; never sent). */
 #define LLM_HISTORY_CONTEXT_OF_KEY "_context_of"

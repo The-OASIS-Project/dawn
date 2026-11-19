@@ -57,6 +57,15 @@ _Static_assert(IMAGE_FILENAME_MAX <= CONV_IMAGE_FILENAME_MAX,
    "UPDATE images SET retention_policy = 1 WHERE retention_policy = 3 AND source = 5 " \
    "AND user_id = ?2 AND id IN (SELECT value FROM json_each(?1))"
 
+/* A replay leaves out what DAWN posted into the conversation (a job's report, a
+ * channel post): two assistant messages in a row are merged by some providers
+ * and refused by strict chat templates, and the turn after a post tells it in
+ * its own context (conv_db_posted_after()), which replays with its question.
+ * A post stored before that was so (replayed, v115) replays as it did. */
+#define NOT_POSTED_SQL                                                             \
+   "AND NOT EXISTS (SELECT 1 FROM message_unprompted p WHERE p.message_id = m.id " \
+   "AND p.replayed = 0) "
+
 /* Rows the watermark GC clears per statement: each is its own short hold of
  * the database lock, since clearing a row frees its blocks' pages. */
 #define GC_BATCH_ROWS 32
@@ -85,9 +94,11 @@ static const auth_db_stmt_def_t s_msg_stmts[] = {
      "CASE WHEN m.id > MAX(?4, c.reasoning_floor_msg_id) AND c.reasoning_floor_pending = 0 "
      "AND m.llm_blocks_len IS NOT NULL "
      "THEN m.llm_blocks END, "
-     "m.created_at, m.is_error, m.kind, m.context_of, m.images FROM messages m "
-     "INNER JOIN conversations c ON m.conversation_id = c.id "
-     "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 ORDER BY m.id ASC",
+     "m.created_at, m.is_error, m.kind, m.context_of, m.images, " CONV_MSG_STOPPED_COL(
+         m) " FROM messages m "
+            "INNER JOIN conversations c ON m.conversation_id = c.id "
+            "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 " NOT_POSTED_SQL
+            "ORDER BY m.id ASC",
      &s_db.stmt_msg_get_llm },
    { "msg_bind_images", IMAGES_BIND_SQL, &s_db.stmt_msg_bind_images },
    { "msg_ref_captures", IMAGES_REF_SQL("source = 5"), &s_db.stmt_msg_ref_captures },
@@ -101,6 +112,28 @@ static const auth_db_stmt_def_t s_msg_stmts[] = {
      "AND m.llm_blocks_len IS NOT NULL "
      "ORDER BY m.id DESC",
      &s_db.stmt_msg_llm_sizes },
+   /* What DAWN posted into a conversation after ?3, newest first (one more
+    * than asked for, so the caller can say earlier ones were left), each cut
+    * to ?5 characters (the caller cuts to its bytes). */
+   { "msg_posted_after",
+     "SELECT m.id, substr(m.content, 1, ?5) FROM messages m "
+     "INNER JOIN conversations c ON m.conversation_id = c.id "
+     "INNER JOIN message_unprompted p ON p.message_id = m.id AND p.replayed = 0 "
+     "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 AND m.kind IS NULL "
+     "ORDER BY m.id DESC LIMIT ?4",
+     &s_db.stmt_msg_posted_after },
+   /* kind-rows: the replay reads every row, so its newest is any row's.
+    * What a reload of the conversation is built from: its newest row (through
+    * idx_messages_conversation) and the columns the replay reads. */
+   { "conv_sync_point",
+     "SELECT (SELECT COALESCE(MAX(m.id), 0) FROM messages m WHERE m.conversation_id = c.id), "
+     "c.context_watermark_msg_id, c.reasoning_floor_msg_id, c.reasoning_floor_pending, "
+     "c.prefix_hash, c.tools_hash, c.in_force_hash FROM conversations c "
+     "WHERE c.id = ?1 AND c.user_id = ?2",
+     &s_db.stmt_conv_sync_point },
+   /* A frozen prompt, tool set or in-force record, by its hash. */
+   { "prompt_blob_get", "SELECT bytes FROM prompt_blobs WHERE hash = ?",
+     &s_db.stmt_prompt_blob_get },
    /* The v67 watermark, with a monotonic guard so a stale async compaction
     * can't rewind one a later pass already advanced. */
    { "conv_set_watermark",
@@ -400,6 +433,24 @@ static char *tool_change_blob_locked(const conversation_llm_row_t *row) {
    return bytes;
 }
 
+/* Record row @p id in a side table with @p sql (one id parameter).  Caller
+ * holds the lock, in its transaction. */
+static bool mark_row_locked(const char *sql, int64_t id) {
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, id);
+      rc = sqlite3_step(st) == SQLITE_DONE ? SQLITE_OK : SQLITE_ERROR;
+   }
+   sqlite3_finalize(st);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("conv_db_add_row: marking row %lld failed: %s", (long long)id,
+                 sqlite3_errmsg(s_db.db));
+      return false;
+   }
+   return true;
+}
+
 int msg_insert_locked(int64_t conv_id,
                       int user_id,
                       const conv_message_row_t *row,
@@ -476,30 +527,22 @@ int msg_insert_locked(int64_t conv_id,
    }
    *id_out = sqlite3_last_insert_rowid(s_db.db);
 
-   /* DAWN's own post (only an ordinary assistant row with text and no tool
-    * calls can be one), marked in the caller's transaction so it is never
-    * extracted unmarked. */
-   const bool can_post = strcmp(row->role, "assistant") == 0 && kind == MESSAGE_KIND_NONE &&
+   /* DAWN's own post, or a reply the user stopped (only an ordinary assistant
+    * row with text and no tool calls can be either), marked in the caller's
+    * transaction so it is never extracted unmarked. */
+   const bool can_mark = strcmp(row->role, "assistant") == 0 && kind == MESSAGE_KIND_NONE &&
                          !row->tool_calls && row->content[0] != '\0';
-   if (row->unprompted && !can_post) {
-      OLOG_WARNING("conv_db_add_row: a %s row in conv %lld can't be a post; saved unmarked",
+   if ((row->unprompted || row->stopped) && !can_mark) {
+      OLOG_WARNING("conv_db_add_row: a %s row in conv %lld can't be a post or a stopped reply; "
+                   "saved unmarked",
                    row->role, (long long)conv_id);
    }
-   if (row->unprompted && can_post) {
-      sqlite3_stmt *post = NULL;
-      int prc = sqlite3_prepare_v2(s_db.db,
-                                   "INSERT INTO message_unprompted (message_id) VALUES (?)", -1,
-                                   &post, NULL);
-      if (prc == SQLITE_OK) {
-         sqlite3_bind_int64(post, 1, *id_out);
-         prc = sqlite3_step(post) == SQLITE_DONE ? SQLITE_OK : SQLITE_ERROR;
-      }
-      sqlite3_finalize(post);
-      if (prc != SQLITE_OK) {
-         OLOG_ERROR("conv_db_add_row: marking post failed: %s", sqlite3_errmsg(s_db.db));
-         *id_out = 0;
-         return AUTH_DB_FAILURE;
-      }
+   if ((row->unprompted && can_mark &&
+        !mark_row_locked("INSERT INTO message_unprompted (message_id) VALUES (?)", *id_out)) ||
+       (row->stopped && can_mark &&
+        !mark_row_locked("INSERT INTO message_stopped (message_id) VALUES (?)", *id_out))) {
+      *id_out = 0;
+      return AUTH_DB_FAILURE;
    }
 
    /* The conversation names the images the row holds (a tool row's captures,
@@ -545,8 +588,9 @@ int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row,
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   /* A row naming images, or a post, is one transaction with what records it. */
-   const bool txn = images || row->unprompted ||
+   /* A row naming images, a post or a stopped reply is one transaction with
+    * what records it. */
+   const bool txn = images || row->unprompted || row->stopped ||
                     (strcmp(row->role, "user") == 0 && strstr(row->content, "[IMAGE:"));
    if (txn && auth_db_txn_begin_locked("messages") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
@@ -781,6 +825,7 @@ int conv_db_get_messages_for_llm(int64_t conv_id,
       row.kind = (const char *)sqlite3_column_text(st, 8);
       row.context_of = sqlite3_column_int64(st, 9);
       row.images = (const char *)sqlite3_column_text(st, 10);
+      row.stopped = sqlite3_column_int(st, 11) != 0;
       char *stored = tool_change_blob_locked(&row);
       if (stored) {
          row.content = stored;
@@ -795,6 +840,110 @@ int conv_db_get_messages_for_llm(int64_t conv_id,
    AUTH_DB_UNLOCK();
 
    return (rc == SQLITE_ROW || rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
+int conv_db_posted_after(int64_t conv_id,
+                         int user_id,
+                         int64_t after_id,
+                         int text_max,
+                         conv_posted_row_t *rows,
+                         int max,
+                         int *count_out,
+                         bool *more_out) {
+   if (count_out) {
+      *count_out = 0;
+   }
+   if (more_out) {
+      *more_out = false;
+   }
+   if (conv_id <= 0 || !rows || max <= 0 || !count_out || after_id < 0 || text_max <= 0) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = s_db.stmt_msg_posted_after;
+   sqlite3_reset(st);
+   sqlite3_bind_int64(st, 1, conv_id);
+   sqlite3_bind_int(st, 2, user_id);
+   sqlite3_bind_int64(st, 3, after_id);
+   sqlite3_bind_int(st, 4, max + 1);
+   sqlite3_bind_int(st, 5, text_max + 1); /* one over: the caller sees it was cut */
+   int n = 0;
+   int rc;
+   int result = AUTH_DB_SUCCESS;
+   while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+      if (n == max) {
+         if (more_out) {
+            *more_out = true;
+         }
+         break;
+      }
+      const char *content = (const char *)sqlite3_column_text(st, 1);
+      rows[n].id = sqlite3_column_int64(st, 0);
+      rows[n].content = strdup(content ? content : "");
+      if (!rows[n].content) {
+         result = AUTH_DB_FAILURE;
+         break;
+      }
+      n++;
+   }
+   if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
+      result = AUTH_DB_FAILURE;
+   }
+   sqlite3_reset(st);
+   AUTH_DB_UNLOCK();
+   if (result != AUTH_DB_SUCCESS) {
+      conv_db_posted_free(rows, n);
+      n = 0;
+   }
+   for (int i = 0; i < n / 2; i++) { /* read newest first; returned oldest first */
+      const conv_posted_row_t t = rows[i];
+      rows[i] = rows[n - 1 - i];
+      rows[n - 1 - i] = t;
+   }
+   *count_out = n;
+   return result;
+}
+
+void conv_db_posted_free(conv_posted_row_t *rows, int n) {
+   for (int i = 0; rows && i < n; i++) {
+      free(rows[i].content);
+      rows[i].content = NULL;
+   }
+}
+
+/* A nullable hash column into @p out ("" when NULL). */
+static void hash_column(sqlite3_stmt *st, int col, char out[DAWN_SHA256_HEX_LEN]) {
+   const char *v = (const char *)sqlite3_column_text(st, col);
+   snprintf(out, DAWN_SHA256_HEX_LEN, "%s", v ? v : "");
+}
+
+int conv_db_sync_point_get(int64_t conv_id, int user_id, conv_sync_point_t *out) {
+   if (!out) {
+      return AUTH_DB_INVALID;
+   }
+   memset(out, 0, sizeof(*out));
+   if (conv_id <= 0 || user_id <= 0) {
+      return AUTH_DB_NOT_FOUND;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = s_db.stmt_conv_sync_point;
+   sqlite3_reset(st);
+   sqlite3_bind_int64(st, 1, conv_id);
+   sqlite3_bind_int(st, 2, user_id);
+   const int rc = sqlite3_step(st);
+   if (rc == SQLITE_ROW) {
+      out->max_id = sqlite3_column_int64(st, 0);
+      out->watermark = sqlite3_column_int64(st, 1);
+      out->floor = sqlite3_column_int64(st, 2);
+      out->floor_pending = sqlite3_column_int64(st, 3);
+      hash_column(st, 4, out->prefix_hash);
+      hash_column(st, 5, out->tools_hash);
+      hash_column(st, 6, out->in_force_hash);
+   }
+   sqlite3_reset(st);
+   AUTH_DB_UNLOCK();
+   return rc == SQLITE_ROW ? AUTH_DB_SUCCESS
+                           : (rc == SQLITE_DONE ? AUTH_DB_NOT_FOUND : AUTH_DB_FAILURE);
 }
 
 /* Clear stored blocks at or below @p watermark in @p conv_id, a batch per lock

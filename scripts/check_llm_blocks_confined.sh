@@ -129,7 +129,7 @@ check "loader key outside the loader" '_blocks_raw' 'src/memory/memory_history_l
 
 check "in-memory block keys outside the turn-block path" \
    'LLM_TURN_BLOCKS_KEY|LLM_HISTORY_ROW_STORED_KEY|"_blocks"|"_stored"' \
-   'include/llm/llm_turn_blocks\.h|include/llm/llm_history_rows\.h|src/llm/llm_turn_blocks(_stored)?\.c|src/llm/llm_history_rows\.c|src/llm/llm_claude_format\.c|src/llm/llm_openai_history\.c|src/llm/llm_tool_loop\.c|src/memory/memory_history_loader\.c|src/webui/webui_restore\.c|src/core/session_history\.c|src/core/session_voice_save\.c'
+   'include/llm/llm_turn_blocks\.h|include/llm/llm_history_rows\.h|src/llm/llm_turn_blocks(_stored)?\.c|src/llm/llm_history_rows\.c|src/llm/llm_claude_format\.c|src/llm/llm_openai_history\.c|src/llm/llm_tool_loop\.c|src/llm/llm_tool_history\.c|src/memory/memory_history_loader\.c|src/webui/webui_restore\.c|src/core/session_history\.c|src/core/session_voice_save\.c'
 
 check "SELECT * over messages" 'SELECT[^;]*([[:space:],]|[a-z]\.)\*[^;]*FROM[[:space:]]+messages([^_a-z]|$)' 'src/auth/auth_db_migrations\.c'
 

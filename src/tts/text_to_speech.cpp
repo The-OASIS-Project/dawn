@@ -253,21 +253,15 @@ static ssize_t tts_convert_audio(const int16_t *in_samples,
 }
 
 /**
- * @brief Open TTS playback device using runtime audio backend abstraction
- *
- * Opens the playback device using audio_backend API for runtime backend selection.
- * Configures audio conversion if hardware doesn't match TTS native format.
+ * @brief Open the TTS playback stream: tts_handle.playback_handle and its params
  *
  * @param pcm_device Device name (format depends on backend - ALSA or PulseAudio name)
- * @return 0 on success, 1 on failure
+ * @return 0, or 1 if the device couldn't be opened
  */
-static int openPlaybackDevice(const char *pcm_device) {
-   OLOG_INFO("TTS playback device: %s (backend: %s)", pcm_device,
-             audio_backend_type_name(audio_backend_get_type()));
-
+static int open_playback_stream(const char *pcm_device) {
    // Guard: should not be called when audio backend is NONE (server mode)
    if (audio_backend_get_type() == AUDIO_BACKEND_NONE) {
-      OLOG_WARNING("openPlaybackDevice called with no audio backend — skipping");
+      OLOG_WARNING("open_playback_stream called with no audio backend — skipping");
       return 1;
    }
 
@@ -289,8 +283,6 @@ static int openPlaybackDevice(const char *pcm_device) {
    tts_handle.playback_handle = audio_stream_playback_open(pcm_device, &params,
                                                            &tts_handle.hw_params);
    if (!tts_handle.playback_handle) {
-      OLOG_ERROR("Failed to open playback device: %s", pcm_device);
-      OLOG_ERROR("  Hint: Check device with: aplay -L. Set [audio] playback_device in dawn.toml");
       return 1;
    }
 
@@ -303,6 +295,32 @@ static int openPlaybackDevice(const char *pcm_device) {
    OLOG_INFO("TTS playback: rate=%u ch=%u period=%zu buffer=%zu", tts_handle.hw_rate,
              tts_handle.hw_channels, tts_handle.hw_params.period_frames,
              tts_handle.hw_params.buffer_frames);
+   return 0;
+}
+
+/** Frees the conversion state (resampler and buffers). */
+static void free_conversion(void) {
+   if (tts_handle.resampler) {
+      src_delete(tts_handle.resampler);
+      tts_handle.resampler = NULL;
+   }
+   free(tts_handle.resample_in);
+   tts_handle.resample_in = NULL;
+   free(tts_handle.resample_out);
+   tts_handle.resample_out = NULL;
+   free(tts_handle.convert_out);
+   tts_handle.convert_out = NULL;
+}
+
+/**
+ * @brief Set up conversion from TTS output to the device as opened
+ *
+ * Configures audio conversion if hardware doesn't match TTS native format.
+ *
+ * @return 0, or 1 when it couldn't be (the stream is closed)
+ */
+static int setup_conversion(void) {
+   free_conversion();
 
    // Determine if conversion is needed (format, rate, or channels differ from TTS output)
    tts_handle.needs_conversion = (tts_handle.hw_format != AUDIO_FORMAT_S16_LE) ||
@@ -367,6 +385,100 @@ static int openPlaybackDevice(const char *pcm_device) {
    }
 
    return 0;
+}
+
+/**
+ * @brief Open TTS playback device using runtime audio backend abstraction
+ *
+ * @param pcm_device Device name (format depends on backend - ALSA or PulseAudio name)
+ * @return 0 on success, 1 if the device couldn't be opened, 2 if conversion
+ *         couldn't be set up
+ */
+static int openPlaybackDevice(const char *pcm_device) {
+   OLOG_INFO("TTS playback device: %s (backend: %s)", pcm_device,
+             audio_backend_type_name(audio_backend_get_type()));
+   if (open_playback_stream(pcm_device) != 0) {
+      return 1;
+   }
+   return setup_conversion() == 0 ? 0 : 2;
+}
+
+/* How to find the device when it's missing, for the log. */
+#define TTS_PLAYBACK_HINT "check `pactl list sinks short` (PulseAudio) or `aplay -L` (ALSA)"
+
+/* The playback device went away, or wasn't there at start: speech is dropped
+ * and the same device is tried again at an utterance once it's due (1, 2, then
+ * every 5 s).  TTS-thread state, set at init before the thread starts. */
+#define TTS_REOPEN_RETRY_SEC 5
+static bool s_playback_lost = false;
+static time_t s_playback_next_try = 0;
+static int s_playback_tries = 0;
+
+/* Seconds on the monotonic clock: a step of the wall clock can't delay a retry. */
+static time_t mono_sec(void) {
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return ts.tv_sec;
+}
+
+static void playback_mark_lost(void) {
+   s_playback_lost = true;
+   s_playback_next_try = mono_sec() + 1;
+   s_playback_tries = 0;
+}
+
+/** Opens the device again (the handle is NULL), redoing conversion only if its
+ *  params changed; true when it's open. */
+static bool playback_reopen(void) {
+   const audio_hw_params_t was = tts_handle.hw_params;
+   if (open_playback_stream(tts_handle.pcm_playback_device) != 0) {
+      return false;
+   }
+   const bool changed = was.period_frames == 0 ||
+                        was.sample_rate != tts_handle.hw_params.sample_rate ||
+                        was.channels != tts_handle.hw_params.channels ||
+                        was.format != tts_handle.hw_params.format;
+   if (changed && setup_conversion() != 0) {
+      /* setup_conversion closed it; the next open sets conversion up again. */
+      tts_handle.hw_params.period_frames = 0;
+      return false;
+   }
+   if (!changed && tts_handle.resampler) {
+      src_reset(tts_handle.resampler);
+   }
+   return true;
+}
+
+/** The device failed a write.  A stream the server dropped while TTS was idle
+ *  fails only now, though its device may be back, so it's opened again at once:
+ *  true when it is (write the chunk again); else it's lost until it returns. */
+static bool playback_reopen_or_lose(int err) {
+   audio_stream_playback_close(tts_handle.playback_handle);
+   tts_handle.playback_handle = NULL;
+   if (playback_reopen()) {
+      OLOG_INFO("TTS playback: reopened '%s'", tts_handle.pcm_playback_device);
+      return true;
+   }
+   OLOG_WARNING("TTS playback: lost device '%s' (%s); speech is dropped until it's back - %s",
+                tts_handle.pcm_playback_device, audio_error_string((audio_error_t)err),
+                TTS_PLAYBACK_HINT);
+   playback_mark_lost();
+   return false;
+}
+
+/** Tries the missing device again, when due.  Never waits. */
+static void playback_try_reopen(void) {
+   time_t now = mono_sec();
+   if (!s_playback_lost || now < s_playback_next_try) {
+      return;
+   }
+   if (!playback_reopen()) {
+      s_playback_tries++;
+      s_playback_next_try = now + (s_playback_tries == 1 ? 2 : TTS_REOPEN_RETRY_SEC);
+      return;
+   }
+   s_playback_lost = false;
+   OLOG_INFO("TTS playback: device '%s' is back", tts_handle.pcm_playback_device);
 }
 
 /**
@@ -458,6 +570,9 @@ void *tts_thread_function(void *arg) {
       tts_item_in_hand.store(true);
       pthread_mutex_unlock(&tts_queue_mutex);
 
+      // A missing device is tried again here, between utterances
+      playback_try_reopen();
+
       /* What it says goes on dawn/events only when it reaches a speaker (server
        * mode synthesizes alarms with no playback device). */
       const bool announce = tts_handle.playback_handle != NULL;
@@ -495,9 +610,12 @@ void *tts_thread_function(void *arg) {
              pthread_mutex_lock(&tts_mutex);
              tts_playback_state = TTS_PLAYBACK_PLAY;
 #ifdef ENABLE_AEC
-             // Start calibration capture if pending (checked via calibration module API)
-             if (aec_cal_is_pending()) {
+             // Start calibration capture if pending (checked via calibration module API);
+             // with no speaker it waits for the first utterance that plays
+             bool cal_started = false;
+             if (aec_cal_is_pending() && tts_handle.playback_handle) {
                 aec_cal_start();
+                cal_started = true;
                 OLOG_INFO("AEC calibration: started capture for greeting");
              }
              // Start AEC recording for this TTS session (if enabled)
@@ -515,6 +633,7 @@ void *tts_thread_function(void *arg) {
              // Skip entire write loop when no local playback device (server mode) —
              // audio data is already captured in audioBuffer for WebSocket delivery
              const size_t chunk_frames = tts_handle.period_frames;
+             bool reopened = false; /* at most one reopen-and-retry per utterance */
              for (size_t i = 0; tts_handle.playback_handle && i < audioBuffer.size();
                   i += chunk_frames) {
                 // Check for shutdown request
@@ -608,6 +727,7 @@ void *tts_thread_function(void *arg) {
                 // Write audio frames (blocking I/O - cannot hold mutex here)
                 size_t samples_this_chunk = std::min(chunk_frames, audioBuffer.size() - i);
                 ssize_t frames_written = 0;
+                bool device_write = true; /* false: the conversion failed, not the device */
 
                 // Skip local audio write when no playback device (server mode)
                 if (!tts_handle.playback_handle) {
@@ -624,6 +744,7 @@ void *tts_thread_function(void *arg) {
                                                                    (size_t)converted_frames);
                    } else {
                       frames_written = -AUDIO_ERR_IO;
+                      device_write = false;
                       OLOG_ERROR("Audio conversion failed");
                    }
                 } else {
@@ -638,12 +759,26 @@ void *tts_thread_function(void *arg) {
                    int err = (int)(-frames_written);
                    if (err == AUDIO_ERR_UNDERRUN) {
                       OLOG_ERROR("Audio underrun occurred");
-                   } else {
-                      OLOG_ERROR("Audio write error: %s", audio_error_string((audio_error_t)err));
                    }
-                   // Attempt recovery
-                   if (tts_handle.playback_handle) {
-                      audio_stream_playback_recover(tts_handle.playback_handle, err);
+                   if ((err == AUDIO_ERR_UNDERRUN || err == AUDIO_ERR_SUSPENDED) &&
+                       audio_stream_playback_recover(tts_handle.playback_handle, err) ==
+                           AUDIO_SUCCESS) {
+                      /* recovered in place */
+                   } else if (device_write) {
+                      if (!reopened && playback_reopen_or_lose(err)) {
+                         reopened = true;
+                         i -= chunk_frames; /* this chunk again, on the new stream */
+                         continue;
+                      }
+                      if (tts_handle.playback_handle) { /* reopened before: give up */
+                         audio_stream_playback_close(tts_handle.playback_handle);
+                         tts_handle.playback_handle = NULL;
+                         OLOG_WARNING("TTS playback: device '%s' fails writes; speech is "
+                                      "dropped until it's back",
+                                      tts_handle.pcm_playback_device);
+                         playback_mark_lost();
+                      }
+                      /* No handle: ends this loop. */
                    }
                 }
                 rc = (int)frames_written;  // For AEC compatibility
@@ -714,7 +849,7 @@ void *tts_thread_function(void *arg) {
              tts_playback_state = TTS_PLAYBACK_IDLE;
 #ifdef ENABLE_AEC
              // Finish calibration if it was pending (atomically clear flag)
-             if (aec_cal_check_and_clear_pending()) {
+             if (cal_started && aec_cal_check_and_clear_pending()) {
                 int measured_delay_ms = 0;
                 int cal_result = aec_cal_finish(&measured_delay_ms);
                 if (cal_result == AEC_CAL_SUCCESS) {
@@ -724,6 +859,8 @@ void *tts_thread_function(void *arg) {
                    aec_set_delay_hint(measured_delay_ms);
                    metrics_record_aec_calibration(true, measured_delay_ms, correlation);
                    metrics_update_aec_enabled(true);  // AEC confirmed working
+                } else if (cal_result == AEC_CAL_ERR_NO_MIC_DATA) {
+                   aec_cal_set_pending(); /* the next utterance, once the mic is back */
                 } else {
                    OLOG_WARNING("AEC calibration: failed (error %d), using default delay",
                                 cal_result);
@@ -851,10 +988,14 @@ void initialize_text_to_speech(char *pcm_device) {
    // In server mode (AUDIO_BACKEND_NONE), skip local playback — TTS output goes via WebSocket
    if (audio_backend_get_type() != AUDIO_BACKEND_NONE) {
       int rc = openPlaybackDevice(tts_handle.pcm_playback_device);
-      if (rc) {
-         OLOG_ERROR("Error creating audio playback device");
-         OLOG_ERROR("  Hint: Check that playback device is available and not in use. List devices: "
-                    "aplay -L");
+      if (rc == 1) {
+         /* Not there yet (a USB speaker switched off): speak once it is. */
+         OLOG_WARNING("TTS playback: device '%s' not available; speech is dropped until it is - %s",
+                      tts_handle.pcm_playback_device, TTS_PLAYBACK_HINT);
+         playback_mark_lost();
+      } else if (rc) {
+         OLOG_ERROR("TTS playback: couldn't set up audio conversion for '%s'",
+                    tts_handle.pcm_playback_device);
          // Cleanup Piper
          terminate(tts_handle.config);
          // Cleanup synchronization primitives
@@ -1232,22 +1373,7 @@ void cleanup_text_to_speech() {
    }
 
    // Clean up conversion resources (always cleanup, not just ALSA)
-   if (tts_handle.resampler) {
-      src_delete(tts_handle.resampler);
-      tts_handle.resampler = NULL;
-   }
-   if (tts_handle.resample_in) {
-      free(tts_handle.resample_in);
-      tts_handle.resample_in = NULL;
-   }
-   if (tts_handle.resample_out) {
-      free(tts_handle.resample_out);
-      tts_handle.resample_out = NULL;
-   }
-   if (tts_handle.convert_out) {
-      free(tts_handle.convert_out);
-      tts_handle.convert_out = NULL;
-   }
+   free_conversion();
    tts_handle.needs_conversion = false;
 
    // Destroy synchronization primitives

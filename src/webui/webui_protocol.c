@@ -29,6 +29,7 @@
 #include "logging.h"
 #include "utils/string_utils.h"
 #include "webui/webui_email_client.h"
+#include "webui/webui_memory_batches.h"
 
 /* The feature flags, one line in docs/WEBSOCKET_PROTOCOL.md each.  Names are
  * stable snake_case; a flag is never removed while the protocol version
@@ -65,11 +66,26 @@ static const char *const s_features[] = {
     * connecting socket closed with 1013; a shutdown closes sockets with 1012
     * first.  So UNAUTHORIZED, authenticated:false and 4002 mean it ended. */
    "login_unavailable",
+   /* A message may carry `req` in its payload: every error and every reply
+    * sent as a JSON response to that connection while the message is handled
+    * echoes it, and an error also names the message's type as request_type. */
+   "request_refs",
+   /* One turn per conversation: a turn sent while another runs on its
+    * conversation waits (turn_waiting, then the reply; or turn_unsent if
+    * stopped first, nothing saved), and stop_other_reply stops the turn it
+    * waits for. */
+   "turn_wait",
+   /* A reply the user stops mid-stream is saved as far as it streamed: its
+    * stream_end has reason "stopped" (will_persist when it is saved), its
+    * message_appended and its rows wherever they are read carry stopped: true. */
+   "stopped_replies_saved",
 };
 
 /* The email panel's check (webui_email_panel.c); a build without the panel has
  * none, and the flag isn't advertised. */
 #pragma weak webui_email_client_enabled
+/* Memory's (webui_memory_batches.c): likewise. */
+#pragma weak webui_memory_batches_enabled
 
 /* Flags that depend on how the daemon runs, each with its check.  Same rules
  * as s_features. */
@@ -84,6 +100,10 @@ static const struct {
     * and message id); the model reads it with the email tool, and the question
     * row comes back with email_ref (docs/WEBSOCKET_PROTOCOL.md, Email). */
    { "email_refs", webui_email_client_enabled },
+   /* What memory learned per batch: list_memory_batches, undo_memory_batch,
+    * keep_memory_op, and the memory_batch push (docs/WEBSOCKET_PROTOCOL.md,
+    * Memory, Consolidation).  While memory is enabled. */
+   { "memory_batches", webui_memory_batches_enabled },
 };
 
 static bool append_feature(char *out, size_t size, size_t *len, bool first, const char *name) {
@@ -94,6 +114,26 @@ static bool append_feature(char *out, size_t size, size_t *len, bool first, cons
    return true;
 }
 
+size_t webui_protocol_json_max_len(void) {
+   char head[64];
+   size_t len = (size_t)snprintf(head, sizeof(head), "\"protocol\":%d,\"features\":[",
+                                 WEBUI_PROTOCOL_VERSION);
+   for (size_t i = 0; i < sizeof(s_features) / sizeof(s_features[0]); i++) {
+      len += strlen(s_features[i]) + 3; /* quotes and a comma */
+   }
+   for (size_t i = 0; i < sizeof(s_runtime_features) / sizeof(s_runtime_features[0]); i++) {
+      len += strlen(s_runtime_features[i].name) + 3;
+   }
+   return len + 1; /* the closing bracket (one comma fewer than counted) */
+}
+
+/* Not every flag fit: none are sent (a client then assumes the oldest DAWN). */
+static size_t overflow(char *out) {
+   OLOG_ERROR("webui_protocol: the feature flags don't fit their buffer; none advertised");
+   out[0] = '\0';
+   return 0;
+}
+
 size_t webui_protocol_json_members(char *out, size_t size) {
    if (!out || size == 0) {
       return 0;
@@ -101,15 +141,13 @@ size_t webui_protocol_json_members(char *out, size_t size) {
    size_t len = 0;
    int n = snprintf(out, size, "\"protocol\":%d,\"features\":[", WEBUI_PROTOCOL_VERSION);
    if (n < 0 || (size_t)n >= size) {
-      out[0] = '\0';
-      return 0;
+      return overflow(out);
    }
    len = (size_t)n;
    bool first = true;
    for (size_t i = 0; i < sizeof(s_features) / sizeof(s_features[0]); i++) {
       if (!append_feature(out, size, &len, first, s_features[i])) {
-         out[0] = '\0';
-         return 0;
+         return overflow(out);
       }
       first = false;
    }
@@ -117,14 +155,12 @@ size_t webui_protocol_json_members(char *out, size_t size) {
       if (!s_runtime_features[i].on || !s_runtime_features[i].on())
          continue;
       if (!append_feature(out, size, &len, first, s_runtime_features[i].name)) {
-         out[0] = '\0';
-         return 0;
+         return overflow(out);
       }
       first = false;
    }
    if (len + 2 > size) {
-      out[0] = '\0';
-      return 0;
+      return overflow(out);
    }
    out[len++] = ']';
    out[len] = '\0';
@@ -207,27 +243,36 @@ bool webui_protocol_payload_req(struct json_object *payload,
    return true;
 }
 
-char *webui_protocol_unknown_type_json(const char *type, const char *req) {
-   struct json_object *obj = json_object_new_object();
-   struct json_object *payload = json_object_new_object();
-   if (!obj || !payload) {
-      json_object_put(obj);
-      json_object_put(payload);
-      return NULL;
-   }
-   json_object_object_add(payload, "code", json_object_new_string("UNKNOWN_TYPE"));
-   json_object_object_add(payload, "message",
-                          json_object_new_string("This server doesn't handle that message type"));
-   json_object_object_add(payload, "severity", json_object_new_string("error"));
-   json_object_object_add(payload, "recoverable", json_object_new_boolean(1));
-   if (webui_protocol_echo_ok(type))
-      json_object_object_add(payload, "request_type", json_object_new_string(type));
-   if (webui_protocol_echo_ok(req))
-      json_object_object_add(payload, "req", json_object_new_string(req));
-   json_object_object_add(obj, "type", json_object_new_string("error"));
-   json_object_object_add(obj, "payload", payload);
-   const char *json = json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PLAIN);
-   char *out = json ? strdup(json) : NULL;
-   json_object_put(obj);
-   return out;
+/* The request this thread is handling (see webui_protocol_request_begin). */
+static __thread const void *t_request_owner;
+static __thread char t_request_type[WEBUI_REQ_MAX + 1];
+static __thread char t_request_req[WEBUI_REQ_MAX + 1];
+static __thread bool t_request_has_type; /* an empty one is echoed too */
+static __thread bool t_request_has_req;
+
+void webui_protocol_request_begin(const void *owner,
+                                  const char *type,
+                                  struct json_object *payload) {
+   t_request_owner = owner;
+   t_request_has_type = webui_protocol_echo_ok(type);
+   snprintf(t_request_type, sizeof(t_request_type), "%s", t_request_has_type ? type : "");
+   t_request_has_req = webui_protocol_payload_req(payload, WEBUI_REQ_MAX, t_request_req,
+                                                  sizeof(t_request_req));
+}
+
+void webui_protocol_request_end(void) {
+   t_request_owner = NULL;
+   t_request_has_type = false;
+   t_request_has_req = false;
+}
+
+bool webui_protocol_request_stamp(const void *owner, struct json_object *payload, bool with_type) {
+   if (!owner || owner != t_request_owner || !json_object_is_type(payload, json_type_object))
+      return false;
+   if (with_type && t_request_has_type && !json_object_object_get_ex(payload, "request_type", NULL))
+      json_object_object_add(payload, "request_type", json_object_new_string(t_request_type));
+   if (!t_request_has_req || json_object_object_get_ex(payload, "req", NULL))
+      return false;
+   json_object_object_add(payload, "req", json_object_new_string(t_request_req));
+   return true;
 }

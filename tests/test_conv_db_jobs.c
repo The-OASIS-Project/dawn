@@ -285,6 +285,41 @@ static void test_resume_claim_is_exclusive(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(job, alice_id, false));
 }
 
+/* A coding job runs in its gateway, not a DAWN worker: the plain resume never
+ * takes it, whoever asks. */
+static void test_coding_job_is_not_plain_resumable(void) {
+   int64_t cjob = 0;
+   conv_db_create_job(alice_id, "fix the oracle", 0, "detached", "notify", NULL, 1, "task", &cjob);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_kind(cjob, JOB_KIND_CODING));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_running(cjob, 100));
+   job_record_t only[4];
+   int n = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_job_scan_active_kind(JOB_KIND_CODING, only, 4, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(cjob, only[0].id);
+   conv_db_job_set_terminal(cjob, "failed", "x", 200);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(cjob, alice_id, false));
+   conv_db_job_set_terminal(cjob, "cancelled", NULL, 200);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_reset_for_resume(cjob, alice_id, true));
+}
+
+/* An end reported twice keeps the first. */
+static void test_terminal_if_active_first_wins(void) {
+   int64_t job = 0;
+   conv_db_create_job(alice_id, "t", 0, "detached", "notify", NULL, 1, "goal", &job);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_job_set_terminal_if_active(job, "cancelled", NULL, 100));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND,
+                         conv_db_job_set_terminal_if_active(job, "done", NULL, 200));
+   job_record_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(job, alice_id, &r));
+   TEST_ASSERT_EQUAL_STRING("cancelled", r.job_status);
+   TEST_ASSERT_EQUAL_INT(100, (int)r.finished_at);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND,
+                         conv_db_job_set_terminal_if_active(987654, "done", NULL, 1));
+}
+
 /* A job_kind='research' row is NEVER handed to the plain job worker's resume: the
  * research controller drives it, so a plain-worker resume would run the generic
  * loop on a message-less research conversation and corrupt the run (DEEP_RESEARCH
@@ -632,7 +667,7 @@ static void test_restart_safety_leaves_the_disposition_alone(void) {
 static void test_job_inherits_parent_privacy(void) {
    int64_t priv = 0, pub = 0, child_of_priv = 0, child_of_pub = 0, rootless = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "private chat", &priv));
-   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(priv, alice_id, true));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_set_private(priv, alice_id, true, NULL));
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "public chat", &pub));
 
    conv_db_create_job(alice_id, "j1", priv, "detached", "notify", NULL, 1, "g", &child_of_priv);
@@ -714,6 +749,84 @@ static void test_list_children(void) {
    TEST_ASSERT_EQUAL_INT64(other, out[0].id);
 }
 
+/* What the delete guard reads: a coding job holds agent work once its trail has
+ * a gateway event, until one says the task was closed. */
+static void test_coding_job_holds_agent_work(void) {
+   int64_t cjob = 0, plain = 0;
+   conv_db_create_job(alice_id, "fix it", 0, "detached", "notify", NULL, 1, "task", &cjob);
+   conv_db_create_job(alice_id, "plain", 0, "detached", "notify", NULL, 1, "goal", &plain);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_kind(cjob, JOB_KIND_CODING));
+   int64_t holds = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(cjob, alice_id, &holds));
+   TEST_ASSERT_EQUAL_INT64(0, holds); /* never reached the gateway */
+   conv_db_event_append(cjob, "note", "not json", NULL);
+   conv_db_event_append(cjob, "agent_step", "{\"gw\":\"tool\",\"tool\":\"Bash\"}", NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(cjob, alice_id, &holds));
+   TEST_ASSERT_EQUAL_INT64(cjob, holds);
+   conv_db_event_append(cjob, "agent_request", "{\"gw\":\"closed\"}", NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(cjob, alice_id, &holds));
+   TEST_ASSERT_EQUAL_INT64(0, holds);
+   conv_db_event_append(plain, "agent_step", "{\"gw\":\"tool\"}", NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(plain, alice_id, &holds));
+   TEST_ASSERT_EQUAL_INT64(0, holds); /* not a coding job */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_FORBIDDEN, conv_db_job_holds_agent_work(cjob, bob_id, &holds));
+
+   /* Started but cancelled before any event reached the trail: still held. */
+   int64_t early = 0;
+   conv_db_create_job(alice_id, "early", 0, "detached", "notify", NULL, 1, "task", &early);
+   conv_db_job_set_kind(early, JOB_KIND_CODING);
+   conv_db_job_set_running(early, 1000);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(early, alice_id, &holds));
+   TEST_ASSERT_EQUAL_INT64(early, holds);
+
+   /* A chat whose child coding job holds work: deleting the chat would drop it. */
+   int64_t chat = 0, child = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "chat", &chat));
+   conv_db_create_job(alice_id, "child", chat, "detached", "notify", NULL, 1, "task", &child);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(chat, alice_id, &holds));
+   TEST_ASSERT_EQUAL_INT64(0, holds); /* a plain child job */
+   conv_db_job_set_kind(child, JOB_KIND_CODING);
+   conv_db_event_append(child, "agent_step", "{\"gw\":\"tool\"}", NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_holds_agent_work(chat, alice_id, &holds));
+   TEST_ASSERT_EQUAL_INT64(child, holds);
+}
+
+/* A job moves under another chat of its owner's; nothing else moves or is moved under. */
+static void test_set_parent(void) {
+   int64_t a = 0, b = 0, bobs = 0, job = 0;
+   conv_db_create(alice_id, "chat a", &a);
+   conv_db_create(alice_id, "chat b", &b);
+   conv_db_create(bob_id, "bob's chat", &bobs);
+   conv_db_create_job(alice_id, "fix it", a, "detached", "notify", NULL, 1, "task", &job);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_parent(job, alice_id, b));
+   job_record_t r;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(job, alice_id, &r));
+   TEST_ASSERT_EQUAL_INT64(b, r.parent_id);
+
+   /* Another user's job, a parent of another user's, a chat that isn't a job. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_set_parent(job, bob_id, bobs));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_set_parent(job, alice_id, bobs));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, conv_db_job_set_parent(a, alice_id, b));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, conv_db_job_set_parent(job, alice_id, job)); /* itself */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(job, alice_id, &r));
+   TEST_ASSERT_EQUAL_INT64(b, r.parent_id);
+
+   /* Moved under a private chat it turns private; moved back, it stays private. */
+   int64_t priv = 0;
+   bool is_private = true;
+   conv_db_create(alice_id, "private chat", &priv);
+   conv_db_set_private(priv, alice_id, true, NULL);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(job, alice_id, &is_private));
+   TEST_ASSERT_FALSE(is_private);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_parent(job, alice_id, priv));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(job, alice_id, &is_private));
+   TEST_ASSERT_TRUE(is_private);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_set_parent(job, alice_id, b));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(job, alice_id, &is_private));
+   TEST_ASSERT_TRUE(is_private);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_create_and_get);
@@ -727,6 +840,9 @@ int main(void) {
    RUN_TEST(test_goal_is_stored_at_create);
    RUN_TEST(test_resume_claim_is_exclusive);
    RUN_TEST(test_research_job_is_not_plain_resumable);
+   RUN_TEST(test_coding_job_is_not_plain_resumable);
+   RUN_TEST(test_coding_job_holds_agent_work);
+   RUN_TEST(test_terminal_if_active_first_wins);
    RUN_TEST(test_resume_claim_is_ownership_scoped);
    RUN_TEST(test_set_running_loses_to_a_cancel);
    RUN_TEST(test_resume_rejects_non_resumable_states);
@@ -741,5 +857,6 @@ int main(void) {
    RUN_TEST(test_job_inherits_parent_privacy);
    RUN_TEST(test_last_assistant_text);
    RUN_TEST(test_list_children);
+   RUN_TEST(test_set_parent);
    return UNITY_END();
 }

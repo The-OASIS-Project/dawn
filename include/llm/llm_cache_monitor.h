@@ -37,17 +37,18 @@ struct json_object;
 
 /** What an LLM call is for; tags the usage record. */
 typedef enum {
-   LLM_CALL_TURN = 0,   /**< A turn's first provider call */
-   LLM_CALL_TOOL_ITER,  /**< A later call in a turn's tool loop */
-   LLM_CALL_JOB,        /**< A background job's call */
-   LLM_CALL_RESEARCH,   /**< A deep-research run's call */
-   LLM_CALL_EXTRACTION, /**< Memory extraction / summarization */
-   LLM_CALL_COMPACTION, /**< Conversation compaction */
-   LLM_CALL_BRIEFING,   /**< A scheduled briefing */
-   LLM_CALL_OBSERVE,    /**< Silent observation */
-   LLM_CALL_SUMMARIZER, /**< A tool's own helper call (search summarizer) */
-   LLM_CALL_SYNTHESIS,  /**< A research run's synthesis, critic or completion take */
-   LLM_CALL_OTHER,      /**< No session and no tag */
+   LLM_CALL_TURN = 0,      /**< A turn's first provider call */
+   LLM_CALL_TOOL_ITER,     /**< A later call in a turn's tool loop */
+   LLM_CALL_JOB,           /**< A background job's call */
+   LLM_CALL_RESEARCH,      /**< A deep-research run's call */
+   LLM_CALL_EXTRACTION,    /**< Memory extraction / summarization */
+   LLM_CALL_COMPACTION,    /**< Conversation compaction */
+   LLM_CALL_BRIEFING,      /**< A scheduled briefing */
+   LLM_CALL_OBSERVE,       /**< Silent observation */
+   LLM_CALL_SUMMARIZER,    /**< A tool's own helper call (search summarizer) */
+   LLM_CALL_SYNTHESIS,     /**< A research run's synthesis, critic or completion take */
+   LLM_CALL_CONSOLIDATION, /**< Memory extraction read back by its consolidation reply */
+   LLM_CALL_OTHER,         /**< No session and no tag */
    LLM_CALL_KIND_COUNT
 } llm_call_kind_t;
 
@@ -134,12 +135,26 @@ void llm_cache_monitor_pop_kind(int previous);
 bool llm_cache_monitor_in_side_call(void);
 
 /**
+ * @brief The session whose conversation the calling thread's call belongs to:
+ *        its command context, or NULL for a side call (extraction, compaction,
+ *        a briefing, a summarizer) or a call with no command context
+ */
+struct session *llm_cache_monitor_conversation_session(void);
+
+/**
  * @brief Whether the calling thread's call is sent once and never again (a
  *        compaction's summary, a memory extraction): a cache write for it would
  *        only cost (a write is billed above an uncached read, and nothing reads
  *        it back)
  */
 bool llm_cache_monitor_one_off_call(void);
+
+/**
+ * @brief What the calling thread's calls used since the last take: their
+ *        whole prompts summed (cached included) and the largest output, then
+ *        both start again from zero
+ */
+void llm_cache_monitor_take_usage(int *prompt_out, int *output_out);
 
 /**
  * @brief The tool-loop iteration the calling thread's next call belongs to

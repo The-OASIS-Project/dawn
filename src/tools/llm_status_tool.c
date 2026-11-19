@@ -44,6 +44,7 @@ static char *llm_status_tool_callback(const char *action, char *value, int *shou
 
 static const tool_metadata_t llm_status_metadata = {
    .name = "llm_status",
+   .results = TOOL_RESULTS_OWN,
    .default_kind = TOOL_KIND_READ,
    .device_string = "llm",
    .topic = "dawn",

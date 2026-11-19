@@ -53,7 +53,7 @@
 /** Volume while someone speaks, as a share of the set volume */
 #define SPEAKER_DUCK_FACTOR 0.3f
 
-/** At most one "can't open the device" log per this long */
+/** At most one write-failure log (and reopen of a device that fails writes) per this long */
 #define SPEAKER_OPEN_LOG_MS 5000
 
 /** How long an interruption's pause waits for the lock, then for the device
@@ -72,7 +72,8 @@ typedef struct {
    bool converter_stale;                   /**< Rebuild before the next write */
    int16_t *out_buf;                       /**< Converted audio */
    size_t out_samples;                     /**< out_buf's size in samples */
-   uint64_t last_open_log_ms;              /**< Throttles the open-failure log */
+   bool missing;                           /**< The device won't open: said once until it does */
+   unsigned missing_gen;                   /**< The device_gen `missing` was said for */
    uint64_t last_write_fail_ms;            /**< Throttles write-failure logs (and reopens') */
    unsigned device_gen;                    /**< s_device_gen when the device opened */
 } speaker_output_t;
@@ -126,13 +127,22 @@ static bool device_open(speaker_output_t *o) {
    audio_hw_params_t hw;
    memset(&hw, 0, sizeof(hw));
    o->handle = audio_stream_playback_open(device, &params, &hw);
+   /* A switch to another device starts over: its own "not available" or nothing. */
+   if (o->missing && o->missing_gen != o->device_gen) {
+      o->missing = false;
+   }
    if (!o->handle) {
-      uint64_t now = get_time_ms();
-      if (now - o->last_open_log_ms >= SPEAKER_OPEN_LOG_MS || o->last_open_log_ms == 0) {
-         OLOG_ERROR("Music speaker: Can't open playback device %s", device);
-         o->last_open_log_ms = now;
+      if (!o->missing) {
+         OLOG_WARNING("Music speaker: device %s not available; music is silent until it's back",
+                      device);
+         o->missing = true;
+         o->missing_gen = o->device_gen;
       }
       return false;
+   }
+   if (o->missing) {
+      OLOG_INFO("Music speaker: device %s is back", device);
+      o->missing = false;
    }
    if (hw.sample_rate != o->hw_rate || hw.channels != o->hw_channels) {
       o->converter_stale = true;

@@ -271,6 +271,36 @@ static void test_wrap_description_truncates(void) {
    free(wrapped);
 }
 
+/* A gateway lists task_start and task_events; either alone is not one. */
+static void test_agent_gateway_detected_by_its_tools(void) {
+   struct json_object *gw = json_tokener_parse(
+       "[{\"name\":\"agents_list\"},{\"name\":\"task_start\"},{\"name\":\"task_events\"}]");
+   struct json_object *half = json_tokener_parse("[{\"name\":\"task_start\"},{\"name\":7}]");
+   struct json_object *other = json_tokener_parse("[{\"name\":\"search_graph\"}]");
+   TEST_ASSERT_TRUE(mcp_schema_is_agent_gateway(gw));
+   TEST_ASSERT_FALSE(mcp_schema_is_agent_gateway(half));
+   TEST_ASSERT_FALSE(mcp_schema_is_agent_gateway(other));
+   TEST_ASSERT_FALSE(mcp_schema_is_agent_gateway(NULL));
+   json_object_put(gw);
+   json_object_put(half);
+   json_object_put(other);
+}
+
+static void test_takes_user_id(void) {
+   struct json_object *with = json_tokener_parse(
+       "{\"type\":\"object\",\"properties\":{\"dawn_user_id\":{\"type\":\"integer\"}}}");
+   struct json_object *without = json_tokener_parse(
+       "{\"type\":\"object\",\"properties\":{\"user\":{\"type\":\"string\"}}}");
+   TEST_ASSERT_TRUE(mcp_schema_takes_user_id(with));
+   TEST_ASSERT_FALSE(mcp_schema_takes_user_id(without));
+   TEST_ASSERT_FALSE(mcp_schema_takes_user_id(NULL));
+   struct json_object *odd = json_tokener_parse("{\"properties\":[\"dawn_user_id\"]}");
+   TEST_ASSERT_FALSE(mcp_schema_takes_user_id(odd));
+   json_object_put(odd);
+   json_object_put(with);
+   json_object_put(without);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_basic_types);
@@ -286,5 +316,7 @@ int main(void) {
    RUN_TEST(test_wrap_description_strips_before_defusing);
    RUN_TEST(test_unplain_names_and_enum_values_are_rejected);
    RUN_TEST(test_wrap_description_next_line_is_a_break);
+   RUN_TEST(test_agent_gateway_detected_by_its_tools);
+   RUN_TEST(test_takes_user_id);
    return UNITY_END();
 }

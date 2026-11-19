@@ -391,5 +391,14 @@ const char *llm_stream_get_response_ref(llm_stream_context_t *ctx);
  */
 const char *llm_stream_get_thinking_ref(llm_stream_context_t *ctx);
 
+/**
+ * @brief What a stream had produced when a stop cut it, into @p result
+ *
+ * Marks @p result stopped, with the reply text streamed so far (never the
+ * thinking in its place) and the thinking.  No tool calls: none of them ran.
+ * The provider adds the turn's finished blocks.  The call still fails.
+ */
+void llm_stream_fill_stopped(llm_stream_context_t *ctx, llm_tool_response_t *result);
+
 
 #endif  // LLM_STREAMING_H

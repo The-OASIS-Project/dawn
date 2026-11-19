@@ -44,6 +44,7 @@
 #include "core/image_rehydrate.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
+#include "core/session_stop.h"
 #include "core/text_input_dispatch.h"
 #include "core/turn_queue.h"
 #include "core/worker_pool.h"
@@ -137,7 +138,8 @@ static void write_prior_exchange(session_t *session,
       char *stored = llm_turn_blocks_answer_stored(reply_blocks);
       const conv_message_row_t row = { .role = "assistant",
                                        .content = reply,
-                                       .llm_blocks = stored };
+                                       .llm_blocks = stored,
+                                       .stopped = session_claimed_reply_stopped(session) };
       (void)conv_db_add_row(conv_id, user_id, &row, &reply_row);
       free(stored);
    }
@@ -330,7 +332,7 @@ static void webui_text_dispatch_on_user_msg(void *ctx,
          /* The sender's copy names its turn too, in case its echo was dropped. */
          webui_broadcast_message_appended_origin(conn->auth_user_id, conv_id, message_id, "user",
                                                  body, NULL, 0, session, webui_turn_ref_get(),
-                                                 uctx->email_ref);
+                                                 uctx->email_ref, false);
       }
    }
 }
@@ -445,7 +447,12 @@ static void *text_worker_thread(void *arg) {
    if (!session || REQUEST_SUPERSEDED(session, expected_gen)) {
       OLOG_INFO("WebUI: Session disconnected or request superseded, aborting text processing");
       if (session) {
+         /* Stopped before it ran (a Stop meant for the turn before it can land
+          * here): nothing was saved, and its sender is told so, not left
+          * waiting for an echo that never comes. */
+         session_turn_waiting_notice(session, work->conv_id, SESSION_TURN_WAIT_UNSENT, 0);
          finish_turn(session); /* begun at dequeue; never ran */
+         atomic_fetch_sub(&session->turn_in_flight, 1);
       }
       text_worker_cleanup(work, session, text);
       return NULL;
@@ -465,6 +472,7 @@ static void *text_worker_thread(void *arg) {
       free(defused_persist);
       webui_send_error(session, "PROCESSING_ERROR", "Your message couldn't be prepared.");
       finish_turn(session);
+      atomic_fetch_sub(&session->turn_in_flight, 1);
       text_worker_cleanup(work, session, text);
       return NULL;
    }
@@ -475,18 +483,8 @@ static void *text_worker_thread(void *arg) {
       work->persist_content = defused_persist;
    }
 
-   /* Mark a turn in flight so session_cleanup_expired won't reap this session
-    * out from under us while it generates (a disconnected client no longer
-    * aborts the turn — background-jobs Phase 1).  Cleared by text_worker_end()
-    * at every subsequent exit. */
-   /* Stamp this turn's input modality (voice vs typed) onto the session on
-    * THIS worker thread, before the turn counts as in flight (always-on's
-    * watchdog reads it with turn_in_flight).  Setting it at the entry point
-    * (LWS/always-on thread) instead left a window where a concurrent always-on
-    * voice turn could clobber a typed turn's reset.  The prompt builder reads
-    * session->input_was_voice to gate the ASR hint. */
-   session->input_was_voice = work->input_was_voice;
-   atomic_fetch_add(&session->turn_in_flight, 1);
+   /* The turn has counted as in flight since before its wait for the
+    * conversation (text_turn_thread_entry); text_worker_end() clears it. */
 
    OLOG_INFO("WebUI: Processing text input for session %u: %zu bytes (%d image(s))",
              session->session_id, strlen(text), work->image_id_count);
@@ -610,6 +608,13 @@ static void *text_worker_thread(void *arg) {
       image_store_update_retention(work->image_ids[i], turn_user_id, IMAGE_RETAIN_PERMANENT);
    }
 
+   /* No reply (failed, empty, stopped or superseded): the tool changes no model
+    * answered go back, to be appended again after the next question.  A reply
+    * stashed by a late stop is already in the history, so its change stays. */
+   if (!response || !response[0]) {
+      (void)session_prefix_take_back_changes(session);
+   }
+
    /* Check if request was superseded during LLM call */
    if (REQUEST_SUPERSEDED(session, expected_gen)) {
       /* Request superseded - don't send the response live.  G4 (SERVER_AUTHORITATIVE §9):
@@ -627,6 +632,11 @@ static void *text_worker_thread(void *arg) {
       if (superseded_reply != NULL && superseded_reply[0] != '\0') {
          text_worker_persist_final(session, session->stream_conversation_id, turn_user_id,
                                    superseded_reply);
+      }
+      /* A Stop can race the model's first thinking frame past the idle the
+       * cancel already sent: say idle again so the client closes it. */
+      if (atomic_load(&session->cancel_requested)) {
+         webui_send_state(session, "idle");
       }
       text_worker_end(session);
       free(superseded_reply); /* frees response OR the taken stash (mutually exclusive) */
@@ -763,15 +773,36 @@ static void *text_turn_thread_entry(void *arg) {
          turn_queue_turn_done(sid);
          return NULL;
       }
+      /* Fresh flags for THIS turn (G2), before it may wait for its
+       * conversation: a Stop pressed during that wait must count. */
+      session_begin_turn_flags(work->session);
+      /* Its input modality, then in flight, both on THIS thread and before the
+       * wait: session_cleanup_expired never reaps a session whose turn waits or
+       * runs (a disconnected client no longer aborts it), and always-on's
+       * watchdog reads the modality with turn_in_flight.  The prompt builder
+       * reads input_was_voice to gate the ASR hint. */
+      work->session->input_was_voice = work->input_was_voice;
+      atomic_fetch_add(&work->session->turn_in_flight, 1);
+   }
+   /* The turn's errors, its user echo and its wait, raised on this thread, name it. */
+   webui_turn_ref_set(work != NULL ? work->client_ref : NULL);
+   if (work != NULL && work->session != NULL) {
       session_turn_begin(work->session, work->conv_id, (int)work->session->metrics.user_id);
+      if (session_turn_unsent(work->session)) {
+         /* Stopped while another turn had the conversation: nothing ran or was
+          * saved (the client was told, and its text goes back to it). */
+         session_turn_end(work->session);
+         atomic_fetch_sub(&work->session->turn_in_flight, 1);
+         webui_text_turn_free(work);
+         webui_turn_ref_set(NULL);
+         turn_queue_turn_done(sid);
+         return NULL;
+      }
       if (work->conv_id <= 0) {
          /* A new chat's first message: its conversation is created after it. */
          session_turn_await_conversation(work->session);
       }
-      session_begin_turn_flags(work->session); /* fresh flags for THIS turn (G2) */
    }
-   /* The turn's errors and its user echo, raised on this thread, name it. */
-   webui_turn_ref_set(work != NULL ? work->client_ref : NULL);
    text_worker_thread(work); /* existing turn body — frees work, releases session */
    webui_turn_ref_set(NULL);
    turn_queue_turn_done(sid); /* chain the next queued turn for this session */

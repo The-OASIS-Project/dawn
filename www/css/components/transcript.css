@@ -7,6 +7,7 @@
  * Transcript
  * ============================================================================= */
 #transcript {
+   position: relative; /* absolute children (screen-reader labels) stay inside its scroll */
    flex: 1;
    overflow-y: auto;
    background-color: var(--bg-secondary);
@@ -328,11 +329,7 @@ body.debug-mode .transcript-entry.debug {
    word-break: break-word;
 }
 
-/* Inline highlight tags inside debug text (formatCommandText) — theme tokens, not hex. */
-.cmd-tag {
-   color: var(--accent);
-}
-
+/* Inline highlight tags inside debug text (formatDebugText) — theme tokens, not hex. */
 .tool-result-tag {
    color: var(--success);
 }
@@ -345,16 +342,6 @@ body.debug-mode .transcript-entry.debug {
 
 .transcript-entry.debug.tool-result .role {
    color: var(--success);
-}
-
-/* Command specific styling (accent theme) */
-.transcript-entry.debug.command {
-   background-color: var(--accent-border);
-   border-left: 3px solid var(--accent);
-}
-
-.transcript-entry.debug.command .role {
-   color: var(--accent);
 }
 
 /* Tool call specific styling (purple theme) */
@@ -674,7 +661,8 @@ body.debug-mode .transcript-entry.debug {
    border-radius: var(--border-radius);
 }
 
-.transcript-entry .role {
+.transcript-entry .role,
+.transcript-entry .transcript-stopped {
    /* System font: labels */
    font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
    font-size: 0.65rem;
@@ -682,6 +670,11 @@ body.debug-mode .transcript-entry.debug {
    margin-bottom: 0.25rem;
    text-transform: uppercase;
    letter-spacing: 0.08em;
+}
+
+/* A reply the user stopped before it finished (DawnTranscript.markStopped). */
+.transcript-entry .transcript-stopped {
+   margin: 0.25rem 0 0;
 }
 
 .transcript-entry .text {
@@ -1070,4 +1063,40 @@ body.debug-mode .transcript-entry.debug {
    font-family: inherit;
    font-style: italic;
    color: var(--text-tertiary);
+}
+
+/* A question waiting for another reply on its conversation (turn-wait.js):
+ * a user bubble with a status line and, after a while, a stop button. */
+.turn-wait-entry .turn-wait-text {
+   white-space: pre-wrap;
+   word-break: break-word;
+   /* Not sent yet: a step back from the questions already in the conversation. */
+   opacity: 0.75;
+}
+
+.turn-wait-entry.unsent .turn-wait-text,
+.turn-wait-entry.unsent .turn-wait-voice {
+   opacity: 0.5;
+}
+
+.turn-wait-entry .turn-wait-voice {
+   color: var(--text-secondary);
+   font-style: italic;
+}
+
+.turn-wait-status-row {
+   display: flex;
+   flex-wrap: wrap;
+   align-items: center;
+   gap: 0.5rem;
+   margin-top: 0.5rem;
+}
+
+.turn-wait-status {
+   font-size: 0.75rem;
+   color: var(--text-primary);
+}
+
+.turn-wait-entry.unsent .turn-wait-status {
+   color: var(--warning);
 }

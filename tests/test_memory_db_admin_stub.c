@@ -29,10 +29,13 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
+#include "dawn_error.h"
+#include "llm/llm_interface.h"
 
 auth_db_state_t s_db = {
    .db = NULL,
@@ -119,4 +122,29 @@ int memory_db_internal_prune_with_history(int user_id,
       *count_out = 0;
    }
    return 0;
+}
+
+/* llm_models_toml.c (linked with llm_pricing.c) reads the config search path;
+ * the test loads models.toml by name. */
+int config_file_readable(const char *path) {
+   (void)path;
+   return 0;
+}
+
+/* llm_interface.c's provider names, aliases included, so the tests prove the estimate's own
+ * list of the providers extraction accepts. */
+int cloud_provider_from_string(const char *str, llm_type_t *type, cloud_provider_t *provider) {
+   *type = LLM_CLOUD;
+   if (strcmp(str, "claude") == 0 || strcmp(str, "anthropic") == 0) {
+      *provider = CLOUD_PROVIDER_CLAUDE;
+   } else if (strcmp(str, "openai") == 0) {
+      *provider = CLOUD_PROVIDER_OPENAI;
+   } else if (strcmp(str, "openrouter") == 0) {
+      *provider = CLOUD_PROVIDER_OPENROUTER;
+   } else if (strcmp(str, "gemini") == 0) {
+      *provider = CLOUD_PROVIDER_GEMINI;
+   } else {
+      return FAILURE;
+   }
+   return SUCCESS;
 }

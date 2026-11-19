@@ -44,6 +44,7 @@ static char *time_tool_callback(const char *action, char *value, int *should_res
 
 static const tool_metadata_t date_metadata = {
    .name = "date",
+   .results = TOOL_RESULTS_OWN,
    .default_kind = TOOL_KIND_READ,
    .device_string = "date",
    .topic = "dawn",
@@ -73,6 +74,7 @@ static const tool_metadata_t date_metadata = {
 
 static const tool_metadata_t time_metadata = {
    .name = "time",
+   .results = TOOL_RESULTS_OWN,
    .default_kind = TOOL_KIND_READ,
    .device_string = "time",
    .topic = "dawn",

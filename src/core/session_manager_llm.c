@@ -40,7 +40,7 @@
 #include "core/llm_response_finalize.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
-#include "core/text_filter.h"
+#include "core/session_stop.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_turn_blocks.h"
@@ -55,8 +55,8 @@
 /* =============================================================================
  * Streaming chunk callback
  *
- * Sends text to WebUI for real-time display.  Command-tag filtering is
- * handled by webui_send_stream_delta() internally.  Tracks timing metrics
+ * Sends text to WebUI for real-time display (webui_send_stream_delta() strips
+ * the <cited> tag and starts the stream).  Tracks timing metrics
  * for TTFT and token-rate visualization.  Used by session_llm_call() and
  * session_llm_call_with_tts_no_add() — the paths that don't run
  * through the sentence-buffer (TTS) layer.
@@ -112,7 +112,7 @@ static void session_text_chunk_callback(const char *chunk, void *userdata) {
          }
       }
 
-      /* Send to WebUI/satellite — filtering and stream_start handled internally */
+      /* Send to WebUI/satellite — tag strip and stream_start handled internally */
       webui_send_stream_delta(session, chunk);
    }
 #endif
@@ -144,15 +144,48 @@ static void keep_reply_blocks(session_t *session, struct json_object *blocks) {
    }
 }
 
-/* A cancelled reply the caller saves anyway: its blocks, as the history would
- * have held them. */
-static void keep_cancelled_reply_blocks(session_t *session, const char *text) {
+/* The turn's reply into its history, with its blocks (the model's reasoning,
+ * and the answer as DAWN keeps it): the message a reload of its saved row
+ * rebuilds.  @p stopped: a reply the user stopped, as far as it streamed. */
+static void add_reply_to_history(session_t *session, const char *text, bool stopped) {
    struct json_object *blocks = NULL;
-   if (session->final_answer.blocks && text && *text) {
-      blocks = llm_turn_blocks_with_final_text(session->final_answer.blocks, text);
+   if (session->final_answer.blocks) {
+      blocks = stopped ? llm_turn_blocks_stopped_reply(session->final_answer.blocks, text)
+                       : llm_turn_blocks_with_final_text(session->final_answer.blocks, text);
+      json_object_put(session->final_answer.blocks);
+      session->final_answer.blocks = NULL;
    }
-   json_object_put(session->final_answer.reply_blocks);
-   session->final_answer.reply_blocks = blocks;
+   keep_reply_blocks(session, blocks);
+   session_add_turn_assistant(session, text, blocks, stopped);
+   json_object_put(blocks);
+}
+
+/* The reply as far as it streamed when the user pressed Stop (the tool loop
+ * kept it: final_answer.stopped_text), made safe as a finished reply is, for
+ * the turn's caller to save; NULL when there is none to keep: no Stop of the
+ * user's (@p user_stop) cut it, or nothing is left of it.  The loop kept the
+ * text only for a turn whose caller saves it.  Decided before the stream ends,
+ * so the end promises the save only when one follows. */
+static char *take_stopped_partial(session_t *session, bool user_stop) {
+   char *raw = session->final_answer.stopped_text;
+   session->final_answer.stopped_text = NULL;
+   if (!raw || !user_stop) {
+      free(raw);
+      return NULL;
+   }
+   response_final_t fin;
+   const int rc = llm_response_finalize(session, raw, &fin);
+   free(raw);
+   if (rc != SUCCESS) {
+      OLOG_ERROR("Session %u: out of memory finalizing a stopped reply; dropped",
+                 session->session_id);
+      return NULL;
+   }
+   if (!*fin.text) {
+      free(fin.text);
+      return NULL;
+   }
+   return fin.text;
 }
 
 /**
@@ -167,12 +200,19 @@ static int llm_call_prepare(session_t *session,
                             bool skip_add_message) {
    memset(ctx, 0, sizeof(*ctx));
 
-   /* Turn-start reset of the cancel-at-buzzer stash (SERVER_AUTHORITATIVE §9/G4):
-    * free any completed-but-cancelled reply a PRIOR turn stashed and no caller
-    * consumed (only the persist-owning reinvoke worker takes it; other surfaces
-    * leave it), so it can never persist onto the wrong row.  The current turn's
-    * stash, if any, is written later in llm_call_finalize. */
+   /* Turn-start reset of the cancel-at-buzzer stash (SERVER_AUTHORITATIVE §9/G4).
+    * Only a turn whose caller armed will_persist_turn stashes a reply (the WebUI
+    * text worker, the WebUI voice worker incl. Tier-2 satellites, and the live
+    * reinvoke), and each of them takes it whenever its dispatch returns NULL, so
+    * a stash left here was never saved although its reply is in the history.
+    * Freed so it can never persist onto the wrong row.  The current turn's stash,
+    * if any, is written later in llm_call_finalize (one call per dispatch). */
    if (session->cancelled_final_response != NULL) {
+      if (session->cancelled_final_response[0] != '\0') {
+         OLOG_WARNING("Session %u: a stopped reply kept in the history was never saved; "
+                      "dropping it",
+                      session->session_id);
+      }
       free(session->cancelled_final_response);
       session->cancelled_final_response = NULL;
    }
@@ -245,12 +285,10 @@ static int llm_call_prepare(session_t *session,
    // Set command context for tool callbacks
    session_set_command_context(session);
 
-   // Reset streaming filter state for WebSocket, satellite, and job sessions
+   // Reset streaming state for WebSocket, satellite, and job sessions
    // (jobs stream too — see the callback above).
    if (session->type == SESSION_TYPE_WEBUI || session->type == SESSION_TYPE_DAP2 ||
        session->type == SESSION_TYPE_JOB) {
-      session->cmd_tag_filter.nesting_depth = 0;
-      session->cmd_tag_filter.len = 0;
       session->stream_had_content = false;
    }
 
@@ -292,6 +330,11 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
     * read LLM_ERR_NONE here.  All current callers (session_llm_call,
     * session_llm_call_no_add) satisfy this. */
    int post_call_error = llm_last_error();
+   /* What a Stop the user pressed leaves of the reply: the caller saves it
+    * (cancelled_final_response), and it joins the history below. */
+   const bool user_stop = !response && atomic_load(&session->cancel_requested) &&
+                          session_turn_stopped_by_user(session);
+   session->cancelled_final_response = take_stopped_partial(session, user_stop);
 #ifdef ENABLE_WEBUI
    // End WebSocket streaming.  JOB is included so a viewed job's stream is
    // properly closed (webui_send_stream_end finalizes the replay ring + fans out
@@ -310,6 +353,8 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
          const char *reason;
          if (response) {
             reason = "complete";
+         } else if (user_stop) {
+            reason = "stopped"; /* promises a save only with a reply kept */
          } else if (post_call_error == LLM_ERR_TRANSIENT_NETWORK) {
             reason = "transient_error";
          } else {
@@ -318,7 +363,7 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
          webui_send_stream_end(session, reason);
       }
       // Fallback for non-streaming LLMs
-      if (response && !session->stream_had_content && session->cmd_tag_filter.nesting_depth == 0) {
+      if (response && !session->stream_had_content) {
          if (*response) {
             OLOG_INFO("Session %u: LLM didn't stream, sending full transcript",
                       session->session_id);
@@ -360,15 +405,25 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
        * persist PROMISE (will_persist_turn) AND the reply actually completed, the
        * streamed viewer already stood down from client-saving — a plain free would
        * lose a finished reply.  Finalize + stash it so the persist-owning caller
-       * (the reinvoke worker) can persist it post-dispatch.  Only under the promise:
-       * an ordinary barge-in (no will_persist) keeps today's abort semantics, so
-       * voice/messaging/local/research are byte-for-byte unaffected. */
+       * can persist it post-dispatch, and add it to the history as a finished
+       * turn's reply is: the caller saves it, so the next request carries it as
+       * a reload would.  Only under the promise (the WebUI text and voice
+       * workers, Tier-2 satellite voice, the live reinvoke): a caller that doesn't
+       * arm it (the local mic, Tier-1 satellites, jobs, messaging, the detached
+       * reinvoke, research) keeps today's abort semantics, byte-for-byte. */
+      if (response && *response) {
+         /* The whole reply arrived: whatever cut it after, it isn't a stopped
+          * turn (the user saw the read-back of what it staged). */
+         session_turn_stop_forget(session);
+      }
       if (response && *response && atomic_load(&session->will_persist_turn)) {
          response_final_t fin;
          if (llm_response_finalize(session, response, &fin) == SUCCESS) {
             free(response);
+            if (*fin.text) {
+               add_reply_to_history(session, fin.text, false);
+            }
             session->cancelled_final_response = fin.text; /* caller takes + frees */
-            keep_cancelled_reply_blocks(session, fin.text);
          } else {
             /* It couldn't be made safe (out of memory): dropped, never kept
              * as it came (a reply is neutralized before it is kept). */
@@ -379,6 +434,9 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
          }
       } else {
          free(response);
+         if (session->cancelled_final_response) {
+            add_reply_to_history(session, session->cancelled_final_response, true);
+         }
       }
       return NULL;
    }
@@ -418,18 +476,9 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
       response = fin.text;  // take ownership of the clean buffer
    }
 
-   // Add assistant response to history (only if non-empty to avoid Claude API errors),
-   // with its blocks: the model's reasoning, and the answer as DAWN keeps it
+   // Add assistant response to history (only if non-empty to avoid Claude API errors)
    if (*response) {
-      struct json_object *blocks = NULL;
-      if (session->final_answer.blocks) {
-         blocks = llm_turn_blocks_with_final_text(session->final_answer.blocks, response);
-         json_object_put(session->final_answer.blocks);
-         session->final_answer.blocks = NULL;
-      }
-      keep_reply_blocks(session, blocks);
-      session_add_turn_assistant(session, response, blocks);
-      json_object_put(blocks);
+      add_reply_to_history(session, response, false);
    } else {
       OLOG_WARNING("Session %u: LLM returned empty response, not adding to history",
                    session->session_id);
@@ -504,15 +553,10 @@ static void combined_sentence_callback(const char *sentence, void *userdata) {
 }
 
 /**
- * @brief Combined chunk callback - does text streaming AND feeds sentence buffer
+ * @brief Combined chunk callback - streams the text AND feeds the sentence buffer
  *
- * Each chunk is:
- * 1. Filtered to remove <command>...</command> tags
- * 2. Sent to WebUI for real-time text display
- * 3. Fed to sentence buffer for TTS audio generation
- *
- * By filtering once and passing to both consumers, we avoid duplicate
- * command tag tracking in the sentence buffer.
+ * The chunk goes to the WebUI for real-time display and to the sentence buffer
+ * for TTS audio.
  */
 static void combined_chunk_callback(const char *chunk, void *userdata) {
    combined_stream_ctx_t *ctx = (combined_stream_ctx_t *)userdata;
@@ -534,56 +578,34 @@ static void combined_chunk_callback(const char *chunk, void *userdata) {
    session->stream_token_count++;
    session->last_token_ms = now_ms;
 
-   /* Filter command tags ONCE for both consumers (WebUI and TTS).
-    * This updates session state and returns filtered text.
-    * Both consumers use the same filtered output for consistency. */
-   char filtered[256];
-   int len;
-
-   if (session->cmd_tag_filter_bypass) {
-      /* Native tools mode: no command tags to filter, pass through */
-      size_t chunk_len = strlen(chunk);
-      len = chunk_len < sizeof(filtered) - 1 ? (int)chunk_len : (int)(sizeof(filtered) - 1);
-      memcpy(filtered, chunk, (size_t)len);
-      filtered[len] = '\0';
-   } else {
-      /* Legacy mode: filter <command>...</command> tags */
-      len = text_filter_command_tags_to_buffer(&session->cmd_tag_filter, chunk, filtered,
-                                               sizeof(filtered));
-   }
-
-   if (len > 0) {
 #ifdef ENABLE_WEBUI
-      // 1. Send filtered text to WebUI for real-time display
-      if (session->type == SESSION_TYPE_WEBUI) {
-         /* Calculate metrics */
-         int ttft_ms = 0;
-         float token_rate = 0.0f;
+   /* Browser metrics and the text (WebSocket only) */
+   if (session->type == SESSION_TYPE_WEBUI) {
+      int ttft_ms = 0;
+      float token_rate = 0.0f;
 
-         if (session->stream_start_ms > 0) {
-            ttft_ms = (int)(session->first_token_ms - session->stream_start_ms);
+      if (session->stream_start_ms > 0) {
+         ttft_ms = (int)(session->first_token_ms - session->stream_start_ms);
 
-            uint64_t streaming_duration_ms = now_ms - session->first_token_ms;
-            if (streaming_duration_ms > 0 && session->stream_token_count > 1) {
-               token_rate = (float)(session->stream_token_count - 1) * 1000.0f /
-                            (float)streaming_duration_ms;
-            }
+         /* Calculate tokens per second based on elapsed time since first token */
+         uint64_t streaming_duration_ms = now_ms - session->first_token_ms;
+         if (streaming_duration_ms > 0 && session->stream_token_count > 1) {
+            token_rate = (float)(session->stream_token_count - 1) * 1000.0f /
+                         (float)streaming_duration_ms;
          }
-
-         /* Send metrics update periodically */
-         if (session->stream_token_count % 5 == 0 || session->stream_token_count == 1) {
-            webui_send_metrics_update(session, "thinking", ttft_ms, token_rate, -1);
-         }
-
-         /* Send pre-filtered text (no command tags to filter) */
-         webui_send_stream_delta(session, filtered);
       }
+
+      /* Send metrics update periodically (every 5 tokens to avoid flooding) */
+      if (session->stream_token_count % 5 == 0 || session->stream_token_count == 1) {
+         webui_send_metrics_update(session, "thinking", ttft_ms, token_rate, -1);
+      }
+
+      webui_send_stream_delta(session, chunk);
+   }
 #endif
 
-      // 2. Feed filtered text to sentence buffer for TTS
-      if (ctx->sentence_buffer) {
-         sentence_buffer_feed(ctx->sentence_buffer, filtered);
-      }
+   if (ctx->sentence_buffer) {
+      sentence_buffer_feed(ctx->sentence_buffer, chunk);
    }
 }
 

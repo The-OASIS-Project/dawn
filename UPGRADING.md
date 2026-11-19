@@ -12,7 +12,7 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
-## 2026-10-30 — The music library is read again once
+## 2026-11-19 — The music library is read again once
 
 **What changed.** DAWN now stores each track's album artist, track number and disc number, so
 it can play a whole album in order. The first library scan after the upgrade reads every local
@@ -21,6 +21,88 @@ music file again, and the first Plex sync rewrites every Plex track.
 **What you need to do.** Nothing. On a large library the first scan takes longer than usual,
 with more disk activity; music plays meanwhile, and albums play in track order once the scan
 has finished.
+
+---
+
+## 2026-11-18 — models.toml: `[cache_pricing]` is now `[pricing]`
+
+**What changed.** `models.toml` keeps every price DAWN uses in one table per provider,
+`[pricing.<provider>]`: the base prices the memory re-extraction estimate uses (until now
+compiled into DAWN) and the prompt-cache multiples that `[cache_pricing.<provider>]` held.
+
+**What you need to do.** Nothing if you use the shipped `models.toml`. A service install
+reads `/usr/local/etc/dawn/models.toml` (`/var/lib/dawn/models.toml` is a symlink to it), and
+the installer doesn't overwrite it: it saves the shipped copy beside it as `models.toml.new`.
+Copy the `[pricing.*]` tables from `models.toml.new` into your `models.toml`, in place of its
+`[cache_pricing.*]` tables. Until you do, DAWN uses its built-in prices and logs a warning at
+every start, and any cache multiple you changed by hand is ignored until you move it into
+`[pricing]`.
+
+---
+
+## 2026-11-16 — Gemini 2.5 Flash and 2.5 Pro are retired on December 1, 2026
+
+**What changed.** Google is retiring `gemini-2.5-flash` and `gemini-2.5-pro`. From December 1,
+2026, Google answers requests to `gemini-2.5-flash` with `gemini-3.5-flash-lite`, and requests to
+`gemini-2.5-pro` with `gemini-3.8-flash`, billed at those models' rates. Neither can be picked in
+Google AI Studio any more, and only accounts that already used them can call them. Before August 2026, DAWN's default
+Gemini model list began with these two, so an install set up then may still have them in
+`dawn.toml`.
+
+**What you need to do.** In `dawn.toml`, look for `gemini-2.5-flash` and `gemini-2.5-pro` in
+`[llm.cloud] gemini_models`, in any task's model setting (`compact_model`, `[llm.silent_observe]
+model`, `[memory] extraction_model`), and `google/gemini-2.5-flash` / `google/gemini-2.5-pro` in
+`openrouter_models`. Replace `gemini-2.5-flash` with `gemini-3.5-flash-lite`, Google's named
+replacement at the same list price, and `gemini-2.5-pro` with `gemini-3.8-flash`, or edit the
+lists in the WebUI's LLM settings. Nothing else changes: DAWN keeps sending the reasoning level
+you pick, and Google maps it to the newer models' thinking levels. `gemini-2.5-flash-lite` is not
+being retired.
+
+---
+
+## 2026-11-15 — A reply's token ceiling follows its reasoning effort
+
+**What changed.** Reasoning counts toward a reply's token limit, so at a high effort a reply could
+end after its reasoning with no answer. A streamed reply that reasons, on Claude, OpenAI or Gemini,
+now gets a ceiling by its effort: low 16K, medium 32K, high 64K, xhigh and max 128K, up to the
+model's maximum (64K on Gemini). `[llm] max_tokens` is now the lowest ceiling these replies get,
+and stays the ceiling for everything else: replies without reasoning, local models, gpt-5.3, and
+calls that aren't streamed (briefings and memory extraction on Claude and on models that use Chat
+Completions; on the OpenAI Responses API, gpt-5.4 and later, every call is streamed, so these get
+their effort's ceiling too). Every cloud reply's ceiling is also held
+to the room left in the model's context window, so a long conversation's reply never asks for more
+than fits.
+
+**What you need to do.** Nothing, unless you lowered `max_tokens` to cap what reasoning replies
+cost. That no longer caps them. Lower the reasoning effort instead: it's what decides how much the
+model thinks, and with it what a reply costs.
+
+**If you already use a GPT-6 model, a Gemini 4 model or Claude Mythos.** DAWN now knows these
+models' reasoning settings and sends them the conversation's effort. Before, GPT-6 (Astra, Sol,
+6.1 Sol, 6.1 Terra, Luna) and Gemini 4 ran at the provider's default (Gemini 4 Hydrogen's is
+high), and Mythos was offered only low to high. Check the effort in the WebUI's reasoning menu.
+GPT-6 Cyber still gets no reasoning setting: OpenAI doesn't list its levels.
+
+**If you use GPT-5.6 Cyber.** DAWN took its context window to be GPT-5.6's 1,050,000 tokens; it's
+400,000. Its conversations are now compacted well before they reach that, where a long one could
+fail before.
+
+---
+
+## 2026-11-03 — A named audio device is no longer swapped for another
+
+**What changed.** When the microphone or speaker named in `[audio] capture_device` /
+`playback_device` goes away (unplugged, powered off), DAWN no longer carries on with whatever
+device PulseAudio moves it to. It waits, silent, for that device to come back, reconnects by
+itself, and logs one warning when it goes and one line when it's back. DAWN also starts when the
+device is missing, instead of stopping. PulseAudio users can no longer move DAWN's stream on a
+named device to another one in pavucontrol.
+
+**What you need to do.** Nothing, if your devices are named the way you want them. If you relied
+on DAWN falling back to another device, or you route DAWN's audio in pavucontrol, set the device
+to `"default"`. Name devices so they survive replugging: ALSA `plughw:CARD=<name>,DEV=0` rather
+than `hw:1`, PulseAudio the source or sink name rather than its number. If the mic seems dead,
+look for the "not available" or "lost device" warning in the log.
 
 ---
 
@@ -38,6 +120,26 @@ home. Ducking while someone speaks no longer leaves the volume low after the mus
 **What you need to do.** Nothing, unless several people use the speaker: if someone else's
 music request is refused, that's this rule. Assign the local mic to the user who should own the
 speaker (or set `default_voice_user_id`).
+
+---
+
+## 2026-10-23 — The persona has two parts; Preferred address takes several
+
+**What changed.** The persona is two parts, Values (who the assistant is) and Voice (how it
+talks), in Settings → Default Persona (`[persona] values` and `voice`) and in My Settings →
+AI Persona, where each user adds to or replaces each part. Older texts keep working, each
+shown in its own box until you move its text into Values and Voice: Default Persona's shows as
+*Whole persona (older setting: replaces Values and Voice)*; a personal one shows as *Your
+persona from an earlier version*.
+Saving settings no longer copies the built-in persona into `dawn.toml`, and a stored copy that
+matches a built-in word for word is dropped at startup (logged), so the current built-in
+applies. Preferred address (now *Ways to address you*) takes several forms, comma-separated,
+and DAWN uses one now and then.
+
+**What you need to do.** If Settings → Default Persona shows a *Whole persona* you edited from
+the old prefilled text, move what you want into Values and Voice and clear it: while it is
+set, it replaces the built-in persona. A personal one in My Settings keeps working; move it the
+same way when convenient.
 
 ---
 
@@ -60,13 +162,15 @@ place to get the new default.
 
 ## 2026-10-22 — The built-in persona is new
 
-**What changed.** The built-in persona is new and longer (values, then tone). A custom
-`[persona]` (Settings → Default Persona) or a replace-mode personal persona is unaffected; an
-append-mode one now adds to the new text.
+**What changed.** The built-in persona is new and longer (values, then tone). A `[persona]`
+you wrote yourself (Settings → Default Persona) or a replace-mode personal persona is
+unaffected; an append-mode one now adds to the new text. A `[persona]` that is a copy of the
+older built-in text (saving any setting in the WebUI used to store one) kept the old persona;
+see the 2026-10-23 entry, which drops such a copy.
 
 **What you need to do.** If a personal persona appends to the built-in one (My Settings → AI
-Persona, *Add to base persona*), read it again on top of the new text (*Show full* under Base
-Persona shows it) and trim anything that now repeats or contradicts it.
+Persona), read it again on top of the new text (*Show full* under each base shows it) and trim
+anything that now repeats or contradicts it.
 
 ---
 

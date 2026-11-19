@@ -229,8 +229,7 @@ void handle_set_tools_config(ws_connection_t *conn, struct json_object *payload)
 
    pthread_rwlock_unlock(&g_config_rwlock);
 
-   /* Invalidate cached prompts so they rebuild with new tool enabled states.
-    * This affects both native tool schemas and legacy <command> tag prompts. */
+   /* Invalidate cached prompts so they rebuild with new tool enabled states. */
    if (updated > 0) {
       invalidate_system_instructions();
       /* A conversation's next turn says what is unavailable now (its standing

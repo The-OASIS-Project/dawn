@@ -215,7 +215,8 @@ Everything above, plus:
 > this guide opens with: same silence, same "everything is green", same user-visible result of *the setting
 > isn't there*. `check_settings_sections_rendered.sh` now guards it.
 
-**Conditional sections** (emitted only when they hold content — `[persona]`, `[url_fetcher]`) are fine and
+**Conditional sections** (emitted only when they hold content — `[persona]` when any of `description`,
+`values` or `voice` is set, `[url_fetcher]`) are fine and
 safe *provided the emit condition derives from the parsed content*, so anything the user actually set is
 written back. If you add one, give it a triggering value in the round-trip test so the guard stays strict.
 

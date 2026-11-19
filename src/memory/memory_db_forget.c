@@ -30,6 +30,7 @@
 #include "dawn_error.h"
 #include "logging.h"
 #include "memory/memory_db.h"
+#include "memory/memory_db_consolidation.h"
 #include "memory/memory_db_internal.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
@@ -172,7 +173,8 @@ static int forget_in_tx_locked(int user_id,
                                const char *ids,
                                const forget_fact_t *facts,
                                int n_facts,
-                               memory_conv_learned_t *d) {
+                               memory_conv_learned_t *d,
+                               memory_consolidation_touched_t *touched) {
    memset(d, 0, sizeof(*d));
    bool ok = auth_db_txn_begin_locked("memory_db: forget") == AUTH_DB_SUCCESS;
    ok = ok && sqlite3_exec(s_db.db,
@@ -221,6 +223,12 @@ static int forget_in_tx_locked(int user_id,
                   "INSERT OR IGNORE INTO forget_relations " MEMORY_FORGET_RELATION_IDS_IN(
                       "SELECT id FROM forget_facts"),
                   user_id, ids, &n) == SUCCESS;
+   /* The consolidation record holds the text of what goes: its rows naming a
+    * going fact, and the conversations' own batches. */
+   ok = ok && memory_db_consolidation_scrub_facts_locked(user_id, "SELECT id FROM forget_facts",
+                                                         touched) == MEMORY_DB_SUCCESS;
+   ok = ok && memory_db_consolidation_drop_conversations_locked(user_id, ids, touched) ==
+                  MEMORY_DB_SUCCESS;
    /* Entities the forgotten rows point at: removed below if nothing else does. */
    ok = ok && run_forget_sql_locked(
                   "INSERT OR IGNORE INTO forget_entities "
@@ -317,6 +325,7 @@ static int forget_in_tx_locked(int user_id,
    FORGET_STEP("DELETE FROM memory_entities WHERE user_id = ?1 AND ?2 IS NOT NULL AND "
                "id IN (SELECT id FROM forget_entities) AND " MEMORY_ENTITY_UNREFERENCED,
                d->entities);
+   ok = ok && memory_db_consolidation_scrub_entities_locked(user_id, touched) == MEMORY_DB_SUCCESS;
    /* Forgetting means what was learned so far: the conversations count as
     * extracted, so memory recovery (or a reextract) doesn't learn them again
     * (what is said in them from now on is extracted as usual). */
@@ -353,6 +362,7 @@ int memory_db_conversations_forget(int user_id,
    }
 
    memory_conv_learned_t d;
+   memory_consolidation_touched_t touched = { .n = 0 };
    int rc = FORGET_SET_CHANGED;
    for (int attempt = 0; attempt < FORGET_ATTEMPTS && rc == FORGET_SET_CHANGED; attempt++) {
       forget_fact_t *facts = NULL;
@@ -360,8 +370,9 @@ int memory_db_conversations_forget(int user_id,
       if (collect_facts(user_id, ids, &facts, &n_facts) != MEMORY_DB_SUCCESS) {
          return MEMORY_DB_FAILURE;
       }
+      touched.n = 0;
       AUTH_DB_LOCK_OR_RETURN((free(facts), MEMORY_DB_FAILURE));
-      rc = forget_in_tx_locked(user_id, ids, facts, n_facts, &d);
+      rc = forget_in_tx_locked(user_id, ids, facts, n_facts, &d, &touched);
       AUTH_DB_UNLOCK();
       free(facts);
    }
@@ -377,6 +388,7 @@ int memory_db_conversations_forget(int user_id,
    if (d.facts + d.outdated + d.restored > 0) {
       memory_embeddings_invalidate_cache_for_user(user_id); /* another user's copy stays */
    }
+   memory_consolidation_touched_notify(user_id, &touched);
    if (deleted_out) {
       *deleted_out = d;
    }
@@ -494,7 +506,8 @@ static int forget_fact_tx_locked(int user_id,
                                  int n,
                                  int64_t *ids,
                                  memory_forget_result_t *out,
-                                 int *entities_gone) {
+                                 int *entities_gone,
+                                 memory_consolidation_touched_t *touched) {
    if (auth_db_txn_begin_locked("memory_db: forget fact") != AUTH_DB_SUCCESS) {
       return MEMORY_DB_FAILURE;
    }
@@ -515,6 +528,10 @@ static int forget_fact_tx_locked(int user_id,
       ok = memory_db_internal_exec_locked("INSERT INTO fact_going VALUES (?2)", user_id,
                                           facts[i].id, 0) == SQLITE_DONE;
    }
+   /* The consolidation record's rows that name what goes, and the candidates
+    * its teaching batches set aside, while its sources are still there. */
+   ok = ok && memory_db_consolidation_scrub_facts_locked(user_id, "SELECT id FROM fact_going",
+                                                         touched) == MEMORY_DB_SUCCESS;
    ok = ok && memory_db_internal_settle_going_locked(user_id) == MEMORY_DB_SUCCESS;
    /* Deepest first, the fact last: a merged fact is never left pointing at a
     * deleted one. */
@@ -535,6 +552,7 @@ static int forget_fact_tx_locked(int user_id,
    if (out) {
       out->restored = restored;
    }
+   ok = ok && memory_db_consolidation_scrub_entities_locked(user_id, touched) == MEMORY_DB_SUCCESS;
    (void)sqlite3_exec(s_db.db, "DELETE FROM fact_going;", NULL, NULL, NULL);
    return auth_db_txn_end_locked(ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
                                  "memory_db: forget fact") == AUTH_DB_SUCCESS
@@ -555,6 +573,7 @@ int memory_db_fact_forget(int64_t fact_id, int user_id, memory_forget_result_t *
    }
    int rc = FORGET_SET_CHANGED;
    int entities_gone = 0;
+   memory_consolidation_touched_t touched = { .n = 0 };
    for (int attempt = 0; attempt < FORGET_ATTEMPTS && rc == FORGET_SET_CHANGED; attempt++) {
       forget_fact_t *facts = NULL;
       int n = 0;
@@ -573,8 +592,9 @@ int memory_db_fact_forget(int64_t fact_id, int user_id, memory_forget_result_t *
          memset(out, 0, sizeof(*out));
       }
       entities_gone = 0;
+      touched.n = 0;
       AUTH_DB_LOCK_OR_RETURN((free(facts), free(ids), MEMORY_DB_FAILURE));
-      rc = forget_fact_tx_locked(user_id, fact_id, facts, n, ids, out, &entities_gone);
+      rc = forget_fact_tx_locked(user_id, fact_id, facts, n, ids, out, &entities_gone, &touched);
       AUTH_DB_UNLOCK();
       free(facts);
    }
@@ -589,6 +609,8 @@ int memory_db_fact_forget(int64_t fact_id, int user_id, memory_forget_result_t *
          memory_embeddings_invalidate_entity_cache_for_user(user_id);
       }
       memory_embeddings_invalidate_cache_for_user(user_id);
+      /* Off the lock: the batches whose record changed, to their tabs. */
+      memory_consolidation_touched_notify(user_id, &touched);
    } else if (out) {
       memset(out, 0, sizeof(*out));
    }

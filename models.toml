@@ -1,6 +1,6 @@
-# DAWN model context-window registry
-# =====================================
-# Maps a model-id PREFIX to its maximum input context window (in tokens).
+# DAWN model reference data
+# =========================
+# Per model-id PREFIX: context windows, prices and reasoning capabilities.
 #
 # Longest-prefix-match wins: DAWN sorts every provider's entries by prefix length
 # (descending) at load, so file order does NOT matter — "gpt-5.6" always beats the
@@ -13,17 +13,28 @@
 # If this file is missing, or a model isn't listed, DAWN falls back to a
 # per-provider default (OpenAI/OpenRouter 128K, Claude/Gemini their own). That
 # default is conservative — i.e. safe against over-running the window — ONLY for
-# models whose real window is >= the default (every modern model). The legacy
-# sub-128K entries below (gpt-4 8K, gpt-3.5 16K, gpt-4-32k 32K) would be
-# OVER-estimated by the 128K default, so those models require this file present.
+# models whose real window is >= the default (every model listed here).
 # Only the DIRECT providers below live here — OpenRouter and local (llama.cpp/
 # Ollama) context windows are fetched LIVE from the provider (/api/v1/models,
 # /props) and are intentionally not listed.
 #
 # Keys must be quoted (model ids contain '.' and '-').
-# Sources: developers.openai.com model reference, platform.claude.com (Aug 2026).
+# Sources: developers.openai.com model reference, platform.claude.com (Aug 2026;
+# the GPT-6 family, gpt-5.6-cyber and Gemini 4, with ai.google.dev, Nov 2026).
+# OpenAI models shut down by 2026-10-23 are left out of every table here
+# (developers.openai.com/api/docs/deprecations, 2026-11-18).
 
 [openai]
+# GPT-6 family — 1,050,000 each.  Listed one by one, no "gpt-6" catch-all: an
+# alias can have a smaller window than its family (gpt-5.6-cyber below).
+"gpt-6-astra" = 1050000
+"gpt-6-sol" = 1050000
+"gpt-6.1-sol" = 1050000
+"gpt-6.1-terra" = 1050000
+"gpt-6-luna" = 1050000
+"gpt-6-cyber" = 1050000
+# GPT-5.6 Cyber — 400,000 (the gpt-5.6 row below would give it 1,050,000)
+"gpt-5.6-cyber" = 400000
 # GPT-5.6 family — 1,050,000 (gpt-5.6, gpt-5.6-luna, gpt-5.6-sol, ...)
 "gpt-5.6" = 1050000
 # GPT-5.5 — 1,050,000 API window (the Codex surface caps it at 400K, not the API)
@@ -38,30 +49,13 @@
 "gpt-5" = 400000
 # GPT-4.1 family — 1,047,576
 "gpt-4.1-mini" = 1047576
-"gpt-4.1-nano" = 1047576
 "gpt-4.1" = 1047576
 # O-series reasoning models
-"o4-mini" = 200000
 "o3-pro" = 200000
-"o3-mini" = 200000
 "o3" = 200000
-"o1-pro" = 200000
-"o1-mini" = 128000
-"o1-preview" = 128000
-"o1" = 200000
 # GPT-4o family
 "gpt-4o-mini" = 128000
 "gpt-4o" = 128000
-# GPT-4 Turbo
-"gpt-4-turbo" = 128000
-"gpt-4-0125" = 128000
-"gpt-4-1106" = 128000
-# Legacy GPT-4
-"gpt-4-32k" = 32768
-"gpt-4" = 8192
-# Legacy GPT-3.5
-"gpt-3.5-turbo-16k" = 16384
-"gpt-3.5-turbo" = 16384
 
 [anthropic]
 # 1M context is GA at standard pricing since March 2026 (no beta header). The
@@ -94,7 +88,9 @@
 "claude-3-haiku" = 200000
 
 [gemini]
-# All current Gemini families use a 1,048,576 (1M) input window.
+# All current Gemini families use a 1,048,576 (1M) input window (Gemini 4's is
+# shared by input and output).
+"gemini-4" = 1048576
 "gemini-3.1-pro" = 1048576
 "gemini-3-flash" = 1048576
 "gemini-3-pro" = 1048576
@@ -107,34 +103,88 @@
 "gemini-1.5-flash" = 1048576
 
 # -----------------------------------------------------------------------------
-# Prompt-cache pricing, as multiples of each model's base input price:
+# Pricing.  A row carries base prices, cache multiples, or both:
+#   input     $ per million input tokens (list price)
+#   output    $ per million output tokens; a row lists both or neither
+# and the prompt-cache prices, as multiples of the input price:
 #   read      a token read from the provider's prompt cache
-#   write_5m  a token written to it with the default 5-minute lifetime
-#   write_1h  a token written with the 1-hour lifetime
+#   write_5m  a token written to it with the provider's default lifetime: the
+#             one DAWN writes at, and the only write rate it estimates with
+#             (Anthropic 5 minutes; OpenAI GPT-5.6 and later 30 minutes)
+#   write_1h  a token written with the provider's longer lifetime (Anthropic
+#             1 hour; OpenAI GPT-5.6 and later 12 hours, Responses API only).
+#             DAWN doesn't ask for it; the rate is listed for completeness.
 # 1.0 means no premium (OpenAI before GPT-5.6 and Gemini don't charge for
-# writes).  Same longest-prefix matching as the context windows; a model not
-# listed gets its provider's default (Anthropic 0.10/1.25/2.00, OpenAI and
-# Gemini 0.10/1.00).  OpenRouter models ("anthropic/...") use their vendor's
-# table.  Used for DAWN's "saved by caching" estimates and cost telemetry only.
-# Sources (list prices, Sep 2026): platform.claude.com, developers.openai.com
-# /api/docs/pricing, ai.google.dev/gemini-api/docs/pricing.
+# writes).  Same longest-prefix matching as the context windows, for each group
+# on its own: a row with only cache multiples takes its base prices from the
+# longest shorter row that has them, and the other way round.  A model with no
+# cache multiples gets its provider's default (Anthropic 0.10/1.25/2.00, OpenAI
+# and Gemini 0.10/1.00); a model with no base price gets no cost estimate.
+# OpenRouter models ("anthropic/...") use their vendor's table.  Used for
+# DAWN's "saved by caching" estimates, cost telemetry and the memory
+# re-extraction cost estimate only.
+# Sources (list prices, Sep 2026; Anthropic, GPT-6 and Gemini 4 rows Nov 2026):
+# platform.claude.com/docs/en/about-claude/pricing (base prices 2026-11-15),
+# developers.openai.com model pages (base prices 2026-11-16, prompts up to 272K
+# tokens) and /api/docs/pricing (every GPT-5.x, GPT-4.1, o3 and GPT-6.2 row,
+# standard tier incl. deprecated models, 2026-11-18; the pro models take no
+# cached input), ai.google.dev/gemini-api/docs/pricing.
 
-[cache_pricing.anthropic]
-"claude-opus-5-5" = { read = 0.05, write_5m = 1.25, write_1h = 2.0 }   # $0.20 on $4
-"claude-fable-5-1" = { read = 0.025, write_5m = 1.25, write_1h = 2.0 } # $0.25 on $10
-# Mythos 5.1 shares Fable 5.1's price, but whether its cache reads do was open
-# at launch: the default (0.10) until confirmed.
-"claude" = { read = 0.10, write_5m = 1.25, write_1h = 2.0 }
+[pricing.anthropic]
+"claude-opus-5-5" = { input = 4.00, output = 20.00, read = 0.05, write_5m = 1.25, write_1h = 2.0 }
+"claude-opus" = { input = 5.00, output = 25.00 } # Opus 4.5 through 5 (4 and 4.1 are retired)
+"claude-sonnet-5-5" = { read = 0.05, write_5m = 1.25, write_1h = 2.0 }
+"claude-sonnet-5" = { input = 2.00, output = 10.00 } # Sonnet 5 and 5.5
+"claude-sonnet" = { input = 3.00, output = 15.00 }   # Sonnet 4.5 and 4.6
+"claude-fable-5-2" = { input = 8.00, output = 40.00, read = 0.025, write_5m = 1.25, write_1h = 2.0 }
+"claude-fable-5-1" = { read = 0.025, write_5m = 1.25, write_1h = 2.0 }
+"claude-fable-5" = { input = 10.00, output = 50.00 } # Fable 5 and 5.1
+"claude-mythos-5-2" = { input = 8.00, output = 40.00, read = 0.025, write_5m = 1.25, write_1h = 2.0 }
+"claude-mythos-5-1" = { read = 0.025, write_5m = 1.25, write_1h = 2.0 }
+"claude-mythos-5" = { input = 10.00, output = 50.00 } # Mythos 5 and 5.1
+"claude-haiku-5-5" = { input = 0.10, output = 0.50 } # prompts up to 100K tokens (5x above)
+"claude-haiku-4-5" = { input = 1.00, output = 5.00 }
+"claude-3-5-haiku" = { input = 0.80, output = 4.00 }
+# Any other Claude model; Fable 5 and Mythos 5 read at its 0.10 too.
+"claude" = { input = 1.00, output = 5.00, read = 0.10, write_5m = 1.25, write_1h = 2.0 }
 
-[cache_pricing.openai]
-"gpt-5.6" = { read = 0.10, write_5m = 1.25, write_1h = 1.25 } # sol, terra, luna
-"gpt-5" = { read = 0.10, write_5m = 1.0, write_1h = 1.0 }     # 5.0-5.5, mini, nano
-"gpt-4.1" = { read = 0.25, write_5m = 1.0, write_1h = 1.0 }
-"o3" = { read = 0.25, write_5m = 1.0, write_1h = 1.0 }
-"o4-mini" = { read = 0.25, write_5m = 1.0, write_1h = 1.0 }
-"gpt-4o" = { read = 0.50, write_5m = 1.0, write_1h = 1.0 }
+[pricing.openai]
+"gpt-6.2-astra" = { input = 8.00, output = 40.00, read = 0.05, write_5m = 1.25, write_1h = 2.5 }
+"gpt-6.2-sol" = { input = 2.00, output = 10.00, read = 0.05, write_5m = 1.25, write_1h = 2.5 }
+"gpt-6-astra" = { input = 10.00, output = 50.00, read = 0.10, write_5m = 1.25, write_1h = 2.5 }
+"gpt-6-sol" = { input = 2.00, output = 10.00, read = 0.10, write_5m = 1.25, write_1h = 2.5 }
+"gpt-6.1-sol" = { input = 2.00, output = 10.00, read = 0.05, write_5m = 1.25, write_1h = 2.5 }
+"gpt-6.1-terra" = { input = 1.00, output = 5.00, read = 0.05, write_5m = 1.25, write_1h = 2.5 }
+"gpt-6-luna" = { input = 0.10, output = 0.50, read = 0.10, write_5m = 1.25, write_1h = 2.5 }
+"gpt-6-cyber" = { input = 20.00, output = 100.00, read = 0.10, write_5m = 1.25, write_1h = 2.5 }
+"gpt-5.6-cyber" = { input = 12.50, output = 75.00 }
+"gpt-5.6-sol" = { input = 4.00, output = 20.00 }
+"gpt-5.6-terra" = { input = 2.00, output = 12.00 }
+"gpt-5.6-luna" = { input = 0.20, output = 1.20 }
+"gpt-5.6" = { read = 0.10, write_5m = 1.25, write_1h = 2.5 }
+"gpt-5.5-pro" = { input = 30.00, output = 180.00 }
+"gpt-5.5" = { input = 5.00, output = 30.00 }
+"gpt-5.4-pro" = { input = 30.00, output = 180.00 }
+"gpt-5.4-mini" = { input = 0.75, output = 4.50 }
+"gpt-5.4-nano" = { input = 0.20, output = 1.25 }
+"gpt-5.4" = { input = 2.50, output = 15.00 }
+"gpt-5.2-pro" = { input = 21.00, output = 168.00 }
+"gpt-5.2" = { input = 1.75, output = 14.00 }
+"gpt-5.1" = { input = 1.25, output = 10.00 }
+"gpt-5-pro" = { input = 15.00, output = 120.00 }
+"gpt-5-mini" = { input = 0.25, output = 2.00 }
+"gpt-5-nano" = { input = 0.05, output = 0.40 }
+"gpt-5" = { input = 1.25, output = 10.00, read = 0.10, write_5m = 1.0, write_1h = 1.0 }
+"gpt-4.1-mini" = { input = 0.40, output = 1.60 }
+"gpt-4.1" = { input = 2.00, output = 8.00, read = 0.25, write_5m = 1.0, write_1h = 1.0 }
+"o3-pro" = { input = 20.00, output = 80.00 }
+"o3" = { input = 2.00, output = 8.00, read = 0.25, write_5m = 1.0, write_1h = 1.0 }
+"gpt-4o-mini" = { input = 0.15, output = 0.60 }
+"gpt-4o" = { input = 2.50, output = 10.00, read = 0.50, write_5m = 1.0, write_1h = 1.0 }
 
-[cache_pricing.gemini]
+[pricing.gemini]
+# No base prices listed yet: Gemini models get no cost estimate.
+"gemini-4" = { read = 0.05, write_5m = 1.0, write_1h = 1.0 } # implicit caching only: $0.075 on $1.50
 "gemini" = { read = 0.10, write_5m = 1.0, write_1h = 1.0 } # 2.5 and 3.x families
 
 
@@ -158,6 +208,12 @@
 #   efforts  effort levels for "adaptive" (Claude output_config.effort) or, on
 #            OpenAI/Gemini, for "enabled"; lowest first.  Claude "enabled" uses
 #            the budget levels instead.
+#   max_output  the most output tokens (reasoning included) one request may
+#            ask for.  A streamed reply that reasons gets a max_tokens by
+#            its effort (low 16K, medium 32K, high 64K, xhigh/max 128K), held
+#            under this; a model without it, a reply that doesn't reason, and
+#            a call that isn't streamed get [llm] max_tokens.  Either way the
+#            ceiling is held to the room the context window leaves.
 #
 # A prefix matches every model it starts, so a family row catches its future
 # and specialty variants too: those get a row with no modes (below) until
@@ -167,53 +223,64 @@
 # and a thinking.type "disabled" probe per model, 2026-09-28 (Claude Haiku 5.5:
 # 2026-10-07).  On the 5.x rows "disabled" takes no effort above high; DAWN
 # sends no effort with it.  OpenAI and Gemini rows encode DAWN's shipped
-# effort rules for those families.
+# effort rules for those families.  max_output: platform.claude.com models
+# overview, developers.openai.com and ai.google.dev model pages, 2026-11-15.
 
 [thinking.anthropic]
-"claude-opus-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-fable-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-opus-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-sonnet-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-haiku-5-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-sonnet-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-opus-4-8" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-opus-4-7" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"] }
-"claude-opus-4-6" = { modes = ["disabled", "adaptive", "enabled"], efforts = ["low", "medium", "high", "max"] }
-"claude-sonnet-4-6" = { modes = ["disabled", "adaptive", "enabled"], efforts = ["low", "medium", "high", "max"] }
-"claude-opus-4-5" = { modes = ["disabled", "enabled"], efforts = [] }
-"claude-sonnet-4-5" = { modes = ["disabled", "enabled"], efforts = [] }
-"claude-haiku-4-5" = { modes = ["disabled", "enabled"], efforts = [] }
+"claude-opus-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-fable-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-mythos-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 } # each the same model as its Fable
+"claude-opus-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-sonnet-5-5" = { modes = ["adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-haiku-5-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-sonnet-5" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-opus-4-8" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-opus-4-7" = { modes = ["disabled", "adaptive"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"claude-opus-4-6" = { modes = ["disabled", "adaptive", "enabled"], efforts = ["low", "medium", "high", "max"], max_output = 128000 }
+"claude-sonnet-4-6" = { modes = ["disabled", "adaptive", "enabled"], efforts = ["low", "medium", "high", "max"], max_output = 128000 }
+"claude-opus-4-5" = { modes = ["disabled", "enabled"], efforts = [], max_output = 64000 }
+"claude-sonnet-4-5" = { modes = ["disabled", "enabled"], efforts = [], max_output = 64000 }
+"claude-haiku-4-5" = { modes = ["disabled", "enabled"], efforts = [], max_output = 64000 }
 # Older models, budget thinking only (the 4.5+ rows above are longer, so they win):
-"claude-opus-4-1" = { modes = ["disabled", "enabled"], efforts = [] }
-"claude-opus-4" = { modes = ["disabled", "enabled"], efforts = [] }
-"claude-sonnet-4" = { modes = ["disabled", "enabled"], efforts = [] }
-"claude-3-7-sonnet" = { modes = ["disabled", "enabled"], efforts = [] }
+"claude-opus-4-1" = { modes = ["disabled", "enabled"], efforts = [], max_output = 32000 }
+"claude-opus-4" = { modes = ["disabled", "enabled"], efforts = [], max_output = 32000 }
+"claude-sonnet-4" = { modes = ["disabled", "enabled"], efforts = [], max_output = 64000 }
+"claude-3-7-sonnet" = { modes = ["disabled", "enabled"], efforts = [], max_output = 64000 }
 "claude-3" = { modes = [], efforts = [] } # 3.5 and earlier: no extended thinking
 # Default for an unlisted Claude model: adaptive, low/medium/high, no "disabled".
 
 [thinking.openai]
-"gpt-5.6" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
-"gpt-5.5" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
-"gpt-5.4" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
+# GPT-6: each model's own effort set ("disabled" is effort "none", which only
+# some take).  No "gpt-6" family row, so an unlisted gpt-6 model (gpt-6-cyber,
+# whose page lists no effort levels) gets the OpenAI default: no reasoning
+# parameters, the same guard "gpt-5." gives a newer gpt-5.x.
+"gpt-6-astra" = { modes = ["enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"gpt-6-sol" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"gpt-6.1-sol" = { modes = ["enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"gpt-6.1-terra" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"gpt-6-luna" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"gpt-5.6" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }
+"gpt-5.5" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }
+"gpt-5.4" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }
 "gpt-5.3" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
-"gpt-5.2" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"] }
-"gpt-5.1" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high"] }
-"gpt-5" = { modes = ["enabled"], efforts = ["minimal", "low", "medium", "high"] } # 5, mini, nano
+"gpt-5.2" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 128000 }
+"gpt-5.1" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high"], max_output = 128000 }
+"gpt-5" = { modes = ["enabled"], efforts = ["minimal", "low", "medium", "high"], max_output = 128000 } # 5, mini, nano
 "gpt-5." = { modes = [], efforts = [] } # a gpt-5.x newer than the rows above: unknown until listed
 "gpt-5-chat" = { modes = [], efforts = [] } # the chat alias takes no reasoning parameter
-"o1" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
-"o1-mini" = { modes = [], efforts = [] } # takes no reasoning_effort
-"o1-preview" = { modes = [], efforts = [] }
-"o3" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
-"o4-mini" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
-"gpt-4" = { modes = [], efforts = [] } # 4o, 4.1: no reasoning
-# Default for an unlisted OpenAI model: no reasoning control (nothing sent).
+"o3" = { modes = ["enabled"], efforts = ["low", "medium", "high"], max_output = 100000 }
+# Default for an unlisted OpenAI model (GPT-4o, GPT-4.1): no reasoning control
+# (nothing sent).
 # An OpenAI-compatible endpoint can serve anything, so only models listed
 # here get reasoning parameters.
 
 [thinking.gemini]
-"gemini-3" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
-"gemini-2.5" = { modes = ["enabled"], efforts = ["low", "medium", "high"] }
+# Gemini 4 can't turn reasoning off; xhigh is Hydrogen's alone.  DAWN sends
+# reasoning_effort, which Google's OpenAI endpoint maps to thinking_level.
+"gemini-4" = { modes = ["enabled"], efforts = ["low", "medium", "high"], max_output = 65536 }
+"gemini-4-hydrogen" = { modes = ["enabled"], efforts = ["low", "medium", "high", "xhigh"], max_output = 65536 }
+"gemini-3" = { modes = ["enabled"], efforts = ["low", "medium", "high"], max_output = 65536 }
+"gemini-2.5" = { modes = ["enabled"], efforts = ["low", "medium", "high"], max_output = 65536 }
 "gemini-2.5-flash-image" = { modes = [], efforts = [] } # image generation: no reasoning
 # Default for an unlisted Gemini model: no reasoning control.
 #
@@ -246,13 +313,15 @@ anthropic = ["claude-opus-5", "claude-opus-4-8", "claude-fable-5", "claude-mytho
 # adds or changes mid-conversation is sent where it happened, so the
 # conversation's `tools` stay byte for byte what it started with and its
 # reasoning stays valid.  Any other model (or another host) gets the change
-# folded into `tools`, a declared boundary.  The [mid_system] models whose
-# support for it is documented (not yet Claude Sonnet 5.5 or Haiku 5.5).
-# Prefixes, matched like the tables above.  Source: platform.claude.com
-# (mid-conversation system messages and tool changes), Sep 2026.
+# folded into `tools`, a declared boundary.  Every [mid_system] model: the
+# docs list mid-conversation tool changes "on the same models".  Prefixes,
+# matched like the tables above.  Source: platform.claude.com
+# (mid-conversation system messages and tool changes), Sep 2026; Claude Sonnet
+# 5.5 and Haiku 5.5 Nov 2026.
 
 [inline_tools]
-anthropic = ["claude-opus-5", "claude-opus-4-8", "claude-fable-5", "claude-mythos-5"]
+anthropic = ["claude-opus-5", "claude-opus-4-8", "claude-fable-5", "claude-mythos-5",
+             "claude-sonnet-5-5", "claude-haiku-5-5"]
 
 # -----------------------------------------------------------------------------
 # The images one request may carry, per vendor: `count` images, `bytes` of them

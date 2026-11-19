@@ -129,6 +129,25 @@ struct json_object *memory_history_request_context(int64_t conv_id,
                                                    int *rows_out);
 
 /**
+ * @brief The rows of @p conv_id after @p after_id (0: every row), as
+ *        memory_history_request_context() renders them there
+ *
+ * For a history built from the conversation up to @p after_id that only
+ * lacks what was written since: appended, it is what a reload builds.  When
+ * the rows can't stand alone (they start inside a tool exchange, or request
+ * context in them goes with a question at or before @p after_id) nothing is
+ * returned and *@p rebuild_out is set: the history must be built again.
+ * Reads image files: never call it holding a lock.
+ *
+ * @return owned array (empty when there are none), or NULL (*@p rebuild_out
+ *         says why: set = build again, clear = a read or allocation failure)
+ */
+struct json_object *memory_history_request_tail(int64_t conv_id,
+                                                int user_id,
+                                                int64_t after_id,
+                                                bool *rebuild_out);
+
+/**
  * @brief memory_history_request_context() for a conversation, by id
  *
  * NULL when it is missing or not @p user_id's.
@@ -158,6 +177,20 @@ char *memory_history_strip_image_markers(const char *src);
  *         allocation failure, logged): use @p content as it is
  */
 char *memory_history_strip_visuals(const char *content);
+
+/**
+ * @brief The text a reply with visuals is saved as: @p body, then "\n",
+ *        @p visual (its `<dawn-visual ...>` blocks) and "\n", the form
+ *        memory_history_strip_visuals() takes back off on reload.  The
+ *        browser reads the same form (extractVisuals in
+ *        www/js/ui/visual-render.js).
+ *
+ * @param body   The reply's text; not NULL
+ * @param visual The visual blocks; not NULL
+ * @return A new heap string, or NULL on allocation failure (the caller saves
+ *         the bare body)
+ */
+char *memory_history_join_visual(const char *body, const char *visual);
 
 #ifdef __cplusplus
 }

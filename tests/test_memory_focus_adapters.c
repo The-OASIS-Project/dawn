@@ -30,6 +30,8 @@
 #include <string.h>
 #include <time.h>
 
+#define AUTH_DB_INTERNAL_ALLOWED /* the stored-row scan SQL, a string */
+#include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "core/focus/focus_source.h"
 #include "core/focus/focus_source_internal.h"
@@ -1193,6 +1195,31 @@ static void test_score_breakdowns_aligned(void) {
    TEST_ASSERT_EQUAL_INT(0, result.candidate_count);
 }
 
+
+/* Every memory source a turn context names is one the stored-row scan strips
+ * the outside word from (CONV_TURN_CONTEXT_FOREIGN_SQL), as the live scan
+ * skips any OUTSIDE_MARKER_MEMORY_SOURCE source: a new one must join it. */
+static void test_memory_sources_in_stored_scan(void) {
+   TEST_ASSERT_EQUAL_INT(SUCCESS, memory_focus_adapters_register_all());
+   const float dummy[1] = { 0.0f };
+   focus_compose_result_t result = { 0 };
+   TEST_ASSERT_EQUAL_INT(SUCCESS, focus_compose(1, false, "anything", dummy, 1, 0, 5, &result));
+   const char *sql = CONV_TURN_CONTEXT_FOREIGN_SQL("m");
+   int memory = 0;
+   for (int i = 0; i < result.source_count; i++) {
+      const char *id = result.sources[i].source_id;
+      if (strncmp(id, OUTSIDE_MARKER_MEMORY_SOURCE, strlen(OUTSIDE_MARKER_MEMORY_SOURCE)) != 0) {
+         continue;
+      }
+      char strip[64];
+      snprintf(strip, sizeof(strip), "'%s " OUTSIDE_MARKER_ITEM_KIND "'", id);
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(sql, strip), id);
+      memory++;
+   }
+   TEST_ASSERT_EQUAL_INT(4, memory);
+   focus_result_free(&result);
+}
+
 int main(void) {
    UNITY_BEGIN();
 
@@ -1245,6 +1272,7 @@ int main(void) {
 
    /* Phase 1g-i: parallel score_breakdowns */
    RUN_TEST(test_score_breakdowns_aligned);
+   RUN_TEST(test_memory_sources_in_stored_scan);
 
    return UNITY_END();
 }

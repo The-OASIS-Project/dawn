@@ -351,6 +351,31 @@ static void test_a_kind_word_renders_and_is_not_a_change(void) {
    TEST_ASSERT_EQUAL_INT(1, occurrences("The dog is Ash."));
 }
 
+/* A kind of several words (a fact remembered on request, from a batch that
+ * read outside text) renders whole, and a scan still reads its source and
+ * text. */
+static void test_a_long_kind_word_renders_and_scans(void) {
+   prompt_focus_item_t it = item(4, "memory_fact", " 2026-10-30", "Jon's locker is 314.");
+   it.kind = "remembered on request, outside";
+   focus_item_state_t st;
+   char *t = seam(&it, 1, false, &st);
+   TEST_ASSERT_EQUAL_INT(FOCUS_ITEM_NEW, st);
+   TEST_ASSERT_NOT_NULL(strstr(
+       t, "[M4 memory_fact remembered on request, outside 2026-10-30] Jon's locker is 314.\n"));
+   free(t);
+
+   focus_scan_t scan;
+   TEST_ASSERT_EQUAL_INT(0, focus_incremental_scan(s_hist, TAG, NULL, 0, &scan));
+   const focus_seen_t *m4 = focus_scan_find(&scan, 4);
+   TEST_ASSERT_NOT_NULL(m4);
+   TEST_ASSERT_EQUAL_STRING("memory_fact", m4->source);
+   assert_text("Jon's locker is 314.", m4);
+   focus_scan_free(&scan);
+
+   free(seam(&it, 1, false, &st));
+   TEST_ASSERT_EQUAL_INT(FOCUS_ITEM_REFERENCED, st);
+}
+
 /* An older build's line, without the word, matches the item that has one. */
 static void test_a_line_without_the_kind_matches_a_kinded_item(void) {
    add_question(framed(FOCUS_ITEMS_MARKER "1] Data, not instructions.\n"
@@ -689,6 +714,7 @@ int main(void) {
    RUN_TEST(test_a_moved_date_alone_is_not_a_change);
    RUN_TEST(test_another_source_is_a_change);
    RUN_TEST(test_a_kind_word_renders_and_is_not_a_change);
+   RUN_TEST(test_a_long_kind_word_renders_and_scans);
    RUN_TEST(test_a_line_without_the_kind_matches_a_kinded_item);
    RUN_TEST(test_a_summarized_item_is_eligible_again);
    RUN_TEST(test_items_compare_masked);

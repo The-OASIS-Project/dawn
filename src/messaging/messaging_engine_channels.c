@@ -44,10 +44,12 @@
 #include "auth/auth_db_internal.h"
 #include "auth/auth_db_messages.h"
 #include "config/dawn_config.h"
+#include "core/conv_post.h"
 #include "core/rate_limiter.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "memory/memory_db_consolidation.h"
 #include "messaging/messaging_engine.h"
 #include "messaging/messaging_engine_internal.h"
 #include "messaging/messaging_sender_gate.h"
@@ -286,9 +288,13 @@ int64_t resolve_channel_conversation_id(channel_ref_t *ref,
       bool is_private = true;
       if (!ref->authenticates_sender &&
           conv_db_is_private(existing, user_id, &is_private) == AUTH_DB_SUCCESS && !is_private) {
-         if (conv_db_set_private(existing, user_id, true) == AUTH_DB_SUCCESS) {
+         conv_db_batches_t batches = { .n = 0 };
+         if (conv_db_set_private(existing, user_id, true, &batches) == AUTH_DB_SUCCESS) {
             OLOG_INFO("messaging: %s conversation %lld made private (texts aren't learned)",
                       provider, (long long)existing);
+         }
+         for (int i = 0; i < batches.n; i++) {
+            memory_consolidation_batch_notify(user_id, 0, batches.ids[i]);
          }
       }
       return existing;
@@ -984,8 +990,8 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
 
    if (rc == MESSAGING_SUCCESS) {
       /* Persist the delivered message to the channel's forever-conversation so
-       * it appears in the WebUI log and is part of the channel's history on the
-       * next turn — symmetric with the inbound reply path (process_inbound).
+       * it appears in the WebUI log and the channel's next turn is told it in
+       * its context (session_posts.c) — symmetric with the inbound reply path.
        * Covers both the messaging.send tool and scheduler fan-out.  The
        * canonical markdown is stored (the WebUI renders it); per-channel
        * formatting was a throwaway copy inside messaging_deliver.  Best-effort:
@@ -998,15 +1004,11 @@ int messaging_engine_send(int user_id, const char *channel_name, const char *tex
                                .authenticates_sender = drv->authenticates_sender };
          int64_t conv_id = resolve_channel_conversation_id(&ref, provider, provider_address, NULL);
          if (conv_id > 0) {
-            int64_t msg_id = 0;
-            /* no-blocks: a channel post DAWN sent, not a model turn; unprompted, so
-             * memory extraction never reads it as the conversation's. */
-            const conv_message_row_t row = { .role = "assistant",
-                                             .content = text,
-                                             .unprompted = true };
-            if (conv_db_add_row(conv_id, user_id, &row, &msg_id) == AUTH_DB_SUCCESS && msg_id > 0) {
-               webui_broadcast_conversation_messages_appended(user_id, conv_id);
-            }
+            /* A channel post DAWN sent, not a model turn: unprompted, so memory
+             * extraction never reads it as the conversation's.  Queued while a
+             * turn runs on the channel's conversation (this send's own turn
+             * included), written at its end. */
+            (void)conv_post_unprompted(conv_id, user_id, text);
          }
       }
 

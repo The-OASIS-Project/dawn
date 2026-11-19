@@ -193,6 +193,51 @@ void webui_jobs_send_history(ws_connection_t *conn,
  */
 void webui_jobs_handle_action(ws_connection_t *conn, struct json_object *payload);
 
+/** stop_other_reply {conversation_id}: stop the turn the user's own turn waits
+ *  for on that conversation (webui_turn_wait.c). */
+void webui_handle_stop_other_reply(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief stop_other_reply's decision and action, without a connection
+ *
+ * Stops the turn holding @p conv_id's lease when it is @p user_id's on
+ * another session: a job's own turn through the job's cancel, any other only
+ * while that same turn still holds it.
+ *
+ * @param requester The asking session's id
+ * @return NULL when stopped; "FORBIDDEN" when the holder is @p requester
+ *         itself; "NOT_RUNNING" otherwise (nothing holds it, another user's
+ *         turn holds it, or it ended meanwhile)
+ */
+const char *webui_stop_other_reply_core(uint32_t requester, int user_id, int64_t conv_id);
+
+#ifdef DAWN_ENABLE_CODING_AGENT_TOOL
+/** coding_pending {jobs}: what those coding jobs wait on (webui_coding.c). */
+void webui_coding_handle_pending(ws_connection_t *conn, struct json_object *payload);
+
+/** coding_view {job, what, path?, view?, nonce}: the changes viewer (webui_coding.c). */
+void webui_coding_handle_view(ws_connection_t *conn, json_object *payload);
+
+/** coding_grants {}: the user's standing approvals (webui_coding.c). */
+void webui_coding_handle_grants(ws_connection_t *conn, json_object *payload);
+
+/** coding_grant_revoke {id}: remove one, answered with the list. */
+void webui_coding_handle_grant_revoke(ws_connection_t *conn, json_object *payload);
+
+/** coding_reply {job, request_id, decision, answer?, line?}: the card's answer. */
+void webui_coding_handle_reply(ws_connection_t *conn, struct json_object *payload);
+
+/** coding_publish_preview {job, nonce}: what Publish would push (webui_coding.c). */
+void webui_coding_handle_publish_preview(ws_connection_t *conn, struct json_object *payload);
+
+/** coding_publish {job, head, pr_body_sha256?, pr_title?, pr_description?, nonce}: the user's
+ *  click on Publish (the hash is needed unless the description is the user's own). */
+void webui_coding_handle_publish(ws_connection_t *conn, struct json_object *payload);
+
+/** coding_close {job, nonce, confirm?, head?}: the user's click on Close. */
+void webui_coding_handle_close(ws_connection_t *conn, struct json_object *payload);
+#endif
+
 /**
  * @brief Nudge the owner's browsers to re-sync their job views.
  *
@@ -209,6 +254,14 @@ void webui_broadcast_jobs_invalidate(int user_id);
  * @brief Delete a conversation
  */
 void handle_delete_conversation(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Delete one of @p conn's user's conversations, with its child jobs and
+ *        images (lws thread).  Refused for a job still queued or running, and
+ *        for a coding job whose work the agent gateway still holds.
+ * @return NULL on success, else why not (a static string for the user)
+ */
+const char *webui_delete_conversation(ws_connection_t *conn, int64_t conv_id);
 
 /**
  * @brief Rename a conversation
@@ -328,6 +381,25 @@ void handle_list_memory_superseded(ws_connection_t *conn, struct json_object *pa
  *        (webui_memory_merged.c)
  */
 void handle_restore_memory_fact(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief What memory learned per consolidation batch, newest first, a page at
+ *        a time (webui_memory_batches.c; payload: optional conversation_id,
+ *        before_batch_id, limit)
+ */
+void handle_list_memory_batches(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Undo a batch, or one op of it ("batch_id", optional "op_id"), on a
+ *        worker; undo_memory_batch_response when it ends (webui_memory_batches.c)
+ */
+void handle_undo_memory_batch(ws_connection_t *conn, struct json_object *payload);
+
+/**
+ * @brief Keep a candidate a batch dropped or set aside ("batch_id", "op_id"),
+ *        on a worker; keep_memory_op_response when it ends (webui_memory_batches.c)
+ */
+void handle_keep_memory_op(ws_connection_t *conn, struct json_object *payload);
 
 /**
  * @brief List memory preferences for the current user (paginated)

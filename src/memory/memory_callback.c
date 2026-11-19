@@ -54,6 +54,7 @@
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
 #include "memory/memory_extraction.h"
+#include "memory/memory_extraction_input.h"
 #include "memory/memory_fact_search.h"
 #include "memory/memory_forget.h" /* MEMORY_FORGET_WAIT_SEC */
 #include "utils/string_utils.h"
@@ -281,9 +282,19 @@ static int append_source_excerpt_from_range(int user_id,
    if (coll.filled > 1)
       qsort(coll.slots, (size_t)coll.filled, sizeof(struct top_k_slot), slot_order_cmp);
 
-   /* Header — emitted only when we have something to render under it. */
-   int hdr = strbuf_appendf(sb, "[source: conv=%lld msgs=%lld-%lld]\n", (long long)conv_id,
-                            (long long)start_id, (long long)end_id);
+   /* Header — emitted only when we have something to render under it.  It
+    * says "outside" when the conversation had read outside text (its floor):
+    * the row it backs may be clean while this range, a later mention's, isn't.
+    * Unreadable: outside.  The model reads the mark, and so does extraction
+    * (memory_extraction_input.c): a memory result holding such a header
+    * quotes outside text, so its batch reads as tainted. */
+   int floor = OUTSIDE_NONE;
+   if (conv_db_get_outside(conv_id, user_id, &floor) != AUTH_DB_SUCCESS) {
+      floor = OUTSIDE_OTHER;
+   }
+   int hdr = strbuf_appendf(sb, "[source: conv=%lld msgs=%lld-%lld]%s\n", (long long)conv_id,
+                            (long long)start_id, (long long)end_id,
+                            outside_is_tainted(floor) ? MEMORY_OUTSIDE_MARK : "");
    if (hdr > 0)
       *budget_remaining -= hdr;
 
@@ -453,7 +464,8 @@ static void append_graph_context(int user_id,
       }
 
       for (int r = 0; r < rel_count; r++) {
-         strbuf_appendf(sb, "  %s: %s\n", rels[r].relation, rels[r].object_name);
+         strbuf_appendf(sb, "  %s: %s%s\n", rels[r].relation, rels[r].object_name,
+                        outside_is_tainted(rels[r].outside) ? MEMORY_OUTSIDE_MARK : "");
          if (render_rel_source && out_conv[r] > 0 && *source_budget > 0) {
             append_source_excerpt_from_range(user_id, out_conv[r], out_start[r], out_end[r],
                                              keywords, rels[r].object_name, sb, source_budget,
@@ -464,8 +476,9 @@ static void append_graph_context(int user_id,
       }
 
       for (int r = 0; r < in_count; r++) {
-         strbuf_appendf(sb, "  %s %s %s\n", in_rels[r].object_name, in_rels[r].relation,
-                        entity_names[i]);
+         strbuf_appendf(sb, "  %s %s %s%s\n", in_rels[r].object_name, in_rels[r].relation,
+                        entity_names[i],
+                        outside_is_tainted(in_rels[r].outside) ? MEMORY_OUTSIDE_MARK : "");
       }
    }
 }
@@ -695,7 +708,8 @@ char *memory_action_search(int user_id,
          strbuf_append(&sb, "\n");
       strbuf_append(&sb, "Preferences:\n");
       for (int i = 0; i < pref_count; i++)
-         strbuf_appendf(&sb, "- %s: %s\n", prefs[i].category, prefs[i].value);
+         strbuf_appendf(&sb, "- %s: %s%s\n", prefs[i].category, prefs[i].value,
+                        outside_is_tainted(prefs[i].outside) ? MEMORY_OUTSIDE_MARK : "");
    }
 
    /* Search summaries */
@@ -744,7 +758,8 @@ char *memory_action_search(int user_id,
       /* Topics inline, no time prefix: extraction leads a summary with its
        * date. */
       for (int i = 0; i < summary_count; i++)
-         strbuf_appendf(&sb, "- %s (Topics: %s)\n", summaries[i].summary, summaries[i].topics);
+         strbuf_appendf(&sb, "- %s (Topics: %s)%s\n", summaries[i].summary, summaries[i].topics,
+                        outside_is_tainted(summaries[i].outside) ? MEMORY_OUTSIDE_MARK : "");
    }
 
    /* The top facts' evidence first, so relation excerpts below get what is
@@ -828,6 +843,23 @@ static int remember_record_source(int64_t fact_id, int user_id, bool created) {
       memory_db_fact_mark_unsourced(fact_id, user_id);
    }
    return where;
+}
+
+int memory_turn_outside(int user_id) {
+   session_t *session = session_get_command_context();
+   if (!session) {
+      return OUTSIDE_NONE;
+   }
+   int64_t conv = 0;
+   struct json_object *hist = session_snapshot_turn_history(session, &conv);
+   const int read = hist ? memory_extraction_history_outside(user_id, conv, hist, 0)
+                         : OUTSIDE_OTHER;
+   json_object_put(hist);
+   int floor = OUTSIDE_NONE;
+   if (conv > 0 && conv_db_get_outside(conv, user_id, &floor) != AUTH_DB_SUCCESS) {
+      floor = OUTSIDE_OTHER;
+   }
+   return outside_combine(read, floor);
 }
 
 static char *memory_action_remember_single(int user_id,
@@ -938,7 +970,10 @@ static char *memory_action_remember_single(int user_id,
     * was learned in (checked to still exist and be this user's, atomically with
     * the write), or keep it waiting for one. */
    int64_t fact_id = 0;
-   int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", NULL, &fact_id);
+   const memory_provenance_t requested = { .origin = MEMORY_ORIGIN_REQUESTED,
+                                           .outside = memory_turn_outside(user_id) };
+   int create_rc = memory_db_fact_create(user_id, fact_text, 1.0f, "explicit", &requested,
+                                         &fact_id);
 
    if (create_rc != MEMORY_DB_SUCCESS) {
       return strdup(TOOL_RESULT_ERROR_MARK "Failed to store the fact. Please try again.");
@@ -991,8 +1026,10 @@ static char *memory_action_remember_single(int user_id,
          memory_fact_t nf;
          if (memory_db_fact_get(neighbor_ids[i], user_id, &nf) != MEMORY_DB_SUCCESS)
             continue; /* vanished between scan and render — skip */
-         strbuf_appendf(&sb, "\n  - " SURFACED_ID_FMT " %.200s (sim %.2f)",
-                        (long long)neighbor_ids[i], nf.fact_text, neighbor_scores[i]);
+         const char *kind = memory_fact_kind_word(&nf);
+         strbuf_appendf(&sb, "\n  - " SURFACED_ID_FMT "%s%s%s %.200s (sim %.2f)",
+                        (long long)neighbor_ids[i], kind ? " (" : "", kind ? kind : "",
+                        kind ? ")" : "", nf.fact_text, neighbor_scores[i]);
          memory_citation_record_tool_fact_current(neighbor_ids[i]);
       }
    }
@@ -1137,7 +1174,7 @@ static char *memory_action_get(int user_id, const char *value) {
       /* memory_db_fact_get is user-scoped at the SQL layer, so a foreign or
        * absent ID simply misses — no cross-user leak. */
       if (memory_db_fact_get(ids[i], user_id, &fact) == MEMORY_DB_SUCCESS) {
-         strbuf_appendf(&sb, "- " SURFACED_ID_FMT " %s\n", (long long)ids[i], fact.fact_text);
+         append_fact_line(&sb, &fact);
          memory_citation_record_tool_fact_current(ids[i]);
          found++;
       } else if (nf_len < sizeof(nf_ids) - 1) {
@@ -1224,8 +1261,11 @@ static char *memory_action_find_duplicates(int user_id, const char *value) {
          memory_fact_t fact;
          /* Skip NOT_FOUND (a just-deleted fact / cache-vs-DB race). */
          if (memory_db_fact_get(clusters[c].ids[k], user_id, &fact) == MEMORY_DB_SUCCESS) {
-            strbuf_appendf(&sb, "  - " SURFACED_ID_FMT " %.160s%s\n", (long long)clusters[c].ids[k],
-                           fact.fact_text, strlen(fact.fact_text) > 160 ? "..." : "");
+            const char *kind = memory_fact_kind_word(&fact);
+            strbuf_appendf(&sb, "  - " SURFACED_ID_FMT "%s%s%s %.160s%s\n",
+                           (long long)clusters[c].ids[k], kind ? " (" : "", kind ? kind : "",
+                           kind ? ")" : "", fact.fact_text,
+                           strlen(fact.fact_text) > 160 ? "..." : "");
             memory_citation_record_tool_fact_current(clusters[c].ids[k]);
          }
       }
@@ -1380,7 +1420,8 @@ char *memory_action_recent(int user_id,
          strbuf_append(&sb, "\n");
       strbuf_append(&sb, sort_asc ? "Oldest conversations:\n" : "Recent conversations:\n");
       for (int i = 0; i < summary_count; i++) {
-         if (strbuf_appendf(&sb, "- %s (Topics: %s)\n", summaries[i].summary, summaries[i].topics) <
+         if (strbuf_appendf(&sb, "- %s (Topics: %s)%s\n", summaries[i].summary, summaries[i].topics,
+                            outside_is_tainted(summaries[i].outside) ? MEMORY_OUTSIDE_MARK : "") <
              0)
             break;
       }

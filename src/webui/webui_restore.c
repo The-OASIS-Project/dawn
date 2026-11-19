@@ -32,6 +32,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_model_family.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
@@ -90,18 +91,16 @@ static bool conversation_llm_config(const conversation_t *conv,
       safe_strscpy(cfg.model, conv->model);
 
       /* Infer provider from model name if not explicitly stored. OpenRouter IDs are
-       * "vendor/model" slugs and match none of the bare prefixes below, so an
+       * "vendor/model" slugs and name no provider, so an
        * OpenRouter conversation's provider/model are left as stored. */
-      if (conv->cloud_provider[0] == '\0') {
-         if (strncmp(conv->model, "gpt-", 4) == 0 || strncmp(conv->model, "o1-", 3) == 0 ||
-             strncmp(conv->model, "o3-", 3) == 0) {
-            cfg.cloud_provider = CLOUD_PROVIDER_OPENAI;
-         } else if (strncmp(conv->model, "claude-", 7) == 0) {
-            cfg.cloud_provider = CLOUD_PROVIDER_CLAUDE;
-         } else if (strncmp(conv->model, "gemini-", 7) == 0) {
-            cfg.cloud_provider = CLOUD_PROVIDER_GEMINI;
-         }
+      const cloud_provider_t named = llm_model_provider_from_name(conv->model);
+      if (conv->cloud_provider[0] == '\0' && named != CLOUD_PROVIDER_NONE) {
+         cfg.cloud_provider = named;
       }
+   } else if (cfg.type != base->type || cfg.cloud_provider != base->cloud_provider) {
+      /* No stored model means its type's and provider's own default, not the
+       * model the session carried on another type or provider. */
+      cfg.model[0] = '\0';
    }
 
    /* The conversation's reasoning: its mode and its effort, both. */
@@ -143,12 +142,19 @@ static int webui_restore_session_context(session_t *session,
    if (count_out) {
       *count_out = 0;
    }
+   /* The point the history is built at: read first, and only when @p conv
+    * (read by the caller before it) still has its compaction, whose summary
+    * the build uses. */
+   conv_sync_point_t at;
+   const bool at_ok = conv_db_sync_point_get(conv_id, user_id, &at) == AUTH_DB_SUCCESS &&
+                      at.watermark == conv->context_watermark_msg_id;
    int count = 0;
    json_object *hist = webui_build_conversation_context(user_id, conv, conv_id, &count);
    if (!hist) {
       return FAILURE;
    }
-   session_replace_history(session, hist, conv_id); /* a new context: its dedup state too */
+   /* A new context (its dedup state too), and the point it was built at. */
+   session_replace_history_at(session, hist, conv_id, user_id, at_ok ? &at : NULL);
    webui_apply_conversation_llm_config(session, conv);
    if (count_out) {
       *count_out = count;

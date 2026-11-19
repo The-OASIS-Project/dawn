@@ -1,0 +1,46 @@
+[Unit]
+Description=agent-gateway: coding agents for DAWN (MCP on 127.0.0.1)
+After=network.target
+
+[Service]
+Type=simple
+User=dawn
+Group=dawn
+SupplementaryGroups=dawn-agent
+UMask=0077
+WorkingDirectory=/var/lib/dawn-gateway
+Environment="HOME=/var/lib/dawn-gateway"
+EnvironmentFile=/usr/local/etc/agent-gateway/env
+ExecStart=/usr/local/lib/agent-gateway/current/bin/python -m agent_gateway \
+   --config /usr/local/etc/agent-gateway/agent-gateway.toml
+KillMode=control-group
+Restart=on-failure
+RestartSec=10s
+
+# The agent's processes stay in this unit's cgroup (sudo opens no session
+# scope here), so these limits keep a big build from starving DAWN's voice
+# loop; if memory runs out, the agent goes first.
+MemoryHigh=3G
+MemoryMax=4G
+OOMScoreAdjust=500
+CPUWeight=20
+Nice=10
+IOSchedulingClass=idle
+
+# The gateway starts the agent through sudo (to a LESS privileged user), so
+# NoNewPrivileges can't be set, and bubblewrap needs user namespaces.  The
+# agent runs in Claude Code's sandbox under the root-owned managed settings.
+ProtectHome=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/dawn-gateway /var/lib/dawn-agent
+ProtectControlGroups=true
+# No ProtectKernelTunables/Modules/Logs, LockPersonality or RestrictRealtime: for a
+# service with a User=, each of them turns on NoNewPrivileges, and the gateway runs
+# every agent and git command as dawn-agent through sudo (agent-gateway.sudoers).
+# What sudo (or anything exploiting it) can ever hold instead: switching users and
+# PAM's limits and audit, nothing more (no modules, mounts or /proc/sys writes).
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE CAP_SYS_RESOURCE
+
+[Install]
+WantedBy=multi-user.target

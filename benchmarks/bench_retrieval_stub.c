@@ -34,6 +34,10 @@
 #include "config/dawn_config.h"
 #include "core/tool_result_store.h"
 
+/* The session unit's functions here (and the turn token) are weak: a test
+ * that links the real session unit (a turn, then an extraction, in one
+ * binary) gets the real ones, or its own. */
+
 /* g_config and g_secrets are now defined by src/config/config_defaults.c
  * (linked into the bench for memory-pipeline mode). Pre-memory-pipeline the
  * bench used its own copies here.
@@ -63,40 +67,43 @@
 session_t *g_stub_command_context = NULL;
 int g_stub_defer_result = 1; /* FAILURE */
 int64_t g_stub_defer_conv = 0;
+const char *g_stub_turn_history = NULL; /* the turn's history, as JSON (NULL: none) */
+int64_t g_stub_turn_conv = 0;
 
 /* No live conversations here: nothing to withdraw a forgotten memory from. */
-int session_withdraw_forgotten(int user_id, bool memory_bodies) {
+__attribute__((weak)) int session_withdraw_forgotten(int user_id, bool memory_bodies) {
    (void)user_id;
    (void)memory_bodies;
    return 0;
 }
-bool session_prefix_tag(session_t *session, char *out, size_t size) {
+__attribute__((weak)) bool session_prefix_tag(session_t *session, char *out, size_t size) {
    (void)session;
    if (out && size) {
       out[0] = '\0';
    }
    return false;
 }
-char *session_prefix_mask_secret(session_t *session, char *text) {
+__attribute__((weak)) char *session_prefix_mask_secret(session_t *session, char *text) {
    (void)session;
    return text;
 }
-void session_prefix_inline_tools_rejected(session_t *session) {
+__attribute__((weak)) void session_prefix_inline_tools_rejected(session_t *session) {
    (void)session;
 }
-void session_withdraw_forgotten_async(int user_id, bool memory_bodies) {
+__attribute__((weak)) void session_withdraw_forgotten_async(int user_id, bool memory_bodies) {
    (void)user_id;
    (void)memory_bodies;
 }
 
 /* The history loader's continue-a-conversation half needs these; the bench
  * only loads a conversation for extraction, which never replays a prefix. */
-struct json_object *prefix_message_stored(int64_t conv_id, int user_id) {
+__attribute__((weak)) struct json_object *prefix_message_stored(int64_t conv_id, int user_id) {
    (void)conv_id;
    (void)user_id;
    return NULL;
 }
-bool prefix_message_install(struct json_object *history, struct json_object *prefix) {
+__attribute__((weak)) bool prefix_message_install(struct json_object *history,
+                                                  struct json_object *prefix) {
    (void)history;
    (void)prefix;
    return false;
@@ -110,23 +117,23 @@ void session_set_command_context(session_t *session) {
 }
 /* With a command context set, the harness's tool calls run as the user's
  * turn (core/tool_call_policy.h); with none, as an unattended one. */
-bool session_turn_user_originated(session_t *session) {
+__attribute__((weak)) bool session_turn_user_originated(session_t *session) {
    (void)session;
    return true;
 }
-bool session_turn_is_background(session_t *session) {
+__attribute__((weak)) bool session_turn_is_background(session_t *session) {
    (void)session;
    return false;
 }
-bool session_turn_carries_third_party(session_t *session) {
+__attribute__((weak)) bool session_turn_carries_third_party(session_t *session) {
    (void)session;
    return false;
 }
 static __thread bool s_stub_code_redeemed;
-bool session_call_code_redeemed(void) {
+__attribute__((weak)) bool session_call_code_redeemed(void) {
    return s_stub_code_redeemed;
 }
-void session_set_call_code_redeemed(bool redeemed) {
+__attribute__((weak)) void session_set_call_code_redeemed(bool redeemed) {
    s_stub_code_redeemed = redeemed;
 }
 /* The session layer's user rule (session_effective_user_id): its user, the
@@ -380,27 +387,34 @@ void webui_send_compaction_complete(session_t *s,
    (void)level;
 }
 /* Headless bench: no session history to attribute. */
-int64_t session_history_conversation_of(session_t *s, struct json_object *history) {
+__attribute__((weak)) int64_t session_history_conversation_of(session_t *s,
+                                                              struct json_object *history) {
    (void)s;
    (void)history;
    return 0;
 }
-uint64_t session_turn_token(void) {
+__attribute__((weak)) uint64_t session_turn_token(void) {
    return 0;
 }
-int64_t session_turn_conversation(session_t *session) {
+__attribute__((weak)) int64_t session_turn_conversation(session_t *session) {
    (void)session;
    return 0;
 }
-bool session_turn_is_caller(session_t *session) {
+__attribute__((weak)) struct json_object *session_snapshot_turn_history(session_t *session,
+                                                                        int64_t *conv_out) {
+   (void)session;
+   *conv_out = g_stub_turn_conv;
+   return json_tokener_parse(g_stub_turn_history ? g_stub_turn_history : "[]");
+}
+__attribute__((weak)) bool session_turn_is_caller(session_t *session) {
    (void)session;
    return false;
 }
-int session_defer_fact_source(session_t *session,
-                              int64_t fact_id,
-                              int user_id,
-                              bool created,
-                              int64_t *conv_out) {
+__attribute__((weak)) int session_defer_fact_source(session_t *session,
+                                                    int64_t fact_id,
+                                                    int user_id,
+                                                    bool created,
+                                                    int64_t *conv_out) {
    (void)session;
    (void)fact_id;
    (void)user_id;
@@ -408,17 +422,34 @@ int session_defer_fact_source(session_t *session,
    *conv_out = g_stub_defer_conv;
    return g_stub_defer_result;
 }
-void session_set_turn_token(uint64_t token) {
+__attribute__((weak)) void session_set_turn_token(uint64_t token) {
    (void)token;
 }
 void session_set_llm_config_override(const session_t *session, const session_llm_config_t *config) {
    (void)session;
    (void)config;
 }
-void session_history_append(struct json_object *history, struct json_object *msg) {
+__attribute__((weak)) void session_history_append(struct json_object *history,
+                                                  struct json_object *msg) {
    json_object_array_add(history, msg);
 }
-void session_history_replace_contents(struct json_object *history, struct json_object *from) {
+/* A row's id on its history message, as the session unit stamps it. */
+__attribute__((weak)) void session_stamp_row_id(session_t *session,
+                                                struct json_object *obj,
+                                                const char *key,
+                                                int64_t row_id) {
+   (void)session;
+   if (obj && key && row_id > 0 && !json_object_object_get_ex(obj, key, NULL)) {
+      json_object_object_add(obj, key, json_object_new_int64(row_id));
+   }
+}
+__attribute__((weak)) void session_stamp_message_id(session_t *session,
+                                                    struct json_object *message,
+                                                    int64_t row_id) {
+   session_stamp_row_id(session, message, "id", row_id);
+}
+__attribute__((weak)) void session_history_replace_contents(struct json_object *history,
+                                                            struct json_object *from) {
    for (int i = (int)json_object_array_length(history) - 1; i >= 0; i--) {
       json_object_array_del_idx(history, i, 1);
    }
@@ -516,14 +547,15 @@ bool llm_silent_observe_provider_is_valid(const char *provider) {
  * so these no-ops return MEMORY_DB_NOT_FOUND / sane defaults that keep
  * memory_extraction.c's branches falling through to the non-merge path.
  *
- * Signatures mirror include/memory/memory_db_aliases.h:304/595/597.
+ * Signatures mirror include/memory/memory_db_aliases.h.  Weak, so a test that
+ * links the real alias module gets it.
  * ============================================================================= */
 #include "memory/memory_db_aliases.h"
 #include "memory/memory_types.h"
 
-int memory_db_entity_consider_auto_merge(int user_id,
-                                         int64_t entity_id,
-                                         memory_alias_evaluate_t *out_eval) {
+__attribute__((weak)) int memory_db_entity_consider_auto_merge(int user_id,
+                                                               int64_t entity_id,
+                                                               memory_alias_evaluate_t *out_eval) {
    (void)user_id;
    (void)entity_id;
    if (out_eval != NULL) {
@@ -532,7 +564,38 @@ int memory_db_entity_consider_auto_merge(int user_id,
    return MEMORY_DB_NOT_FOUND;
 }
 
-int memory_db_entity_get_user_self_id(int user_id, int64_t *out_id) {
+__attribute__((weak)) int memory_db_entity_link_candidates(int user_id,
+                                                           int64_t entity_id,
+                                                           int64_t *out_ids,
+                                                           int max,
+                                                           int *count_out) {
+   (void)user_id;
+   (void)entity_id;
+   (void)out_ids;
+   (void)max;
+   if (count_out != NULL) {
+      *count_out = 0;
+   }
+   return MEMORY_DB_SUCCESS;
+}
+
+__attribute__((weak)) int memory_db_entity_consider_nominated_merge(
+    int user_id,
+    int64_t source_id,
+    int64_t target_id,
+    bool propose_only,
+    memory_alias_evaluate_t *out_eval) {
+   (void)user_id;
+   (void)source_id;
+   (void)target_id;
+   (void)propose_only;
+   if (out_eval != NULL) {
+      memset(out_eval, 0, sizeof(*out_eval));
+   }
+   return MEMORY_DB_NOT_FOUND;
+}
+
+__attribute__((weak)) int memory_db_entity_get_user_self_id(int user_id, int64_t *out_id) {
    (void)user_id;
    if (out_id != NULL) {
       *out_id = 0;
@@ -540,10 +603,10 @@ int memory_db_entity_get_user_self_id(int user_id, int64_t *out_id) {
    return MEMORY_DB_SUCCESS;
 }
 
-int memory_db_entity_maybe_auto_promote_user_self(int user_id,
-                                                  int64_t entity_id,
-                                                  const char *canonical_name,
-                                                  bool *out_promoted) {
+__attribute__((weak)) int memory_db_entity_maybe_auto_promote_user_self(int user_id,
+                                                                        int64_t entity_id,
+                                                                        const char *canonical_name,
+                                                                        bool *out_promoted) {
    (void)user_id;
    (void)entity_id;
    (void)canonical_name;
@@ -556,10 +619,10 @@ int memory_db_entity_maybe_auto_promote_user_self(int user_id,
 /* memory_extraction.c aliases an abstract "user" entity to the user_self
  * anchor during extraction; the bench has no user_self anchor so this is a
  * no-op, but the symbol must resolve. */
-int memory_db_entity_maybe_alias_user_to_self(int user_id,
-                                              int64_t entity_id,
-                                              const char *canonical_name,
-                                              bool *out_aliased) {
+__attribute__((weak)) int memory_db_entity_maybe_alias_user_to_self(int user_id,
+                                                                    int64_t entity_id,
+                                                                    const char *canonical_name,
+                                                                    bool *out_aliased) {
    (void)user_id;
    (void)entity_id;
    (void)canonical_name;
@@ -571,14 +634,14 @@ int memory_db_entity_maybe_alias_user_to_self(int user_id,
 
 /* memory_callback.c's `merge_entities` tool action calls this; the bench
  * never reaches that path but the symbol must resolve. */
-int memory_db_entity_alias_link(int user_id,
-                                int64_t source_id,
-                                int64_t target_id,
-                                const char *link_kind,
-                                const char *reason,
-                                float composite_score,
-                                const char *evidence_json,
-                                int64_t *out_link_id) {
+__attribute__((weak)) int memory_db_entity_alias_link(int user_id,
+                                                      int64_t source_id,
+                                                      int64_t target_id,
+                                                      const char *link_kind,
+                                                      const char *reason,
+                                                      float composite_score,
+                                                      const char *evidence_json,
+                                                      int64_t *out_link_id) {
    (void)user_id;
    (void)source_id;
    (void)target_id;
@@ -593,11 +656,11 @@ int memory_db_entity_alias_link(int user_id,
 }
 
 /* The turn-end compaction trigger (session_compaction.c): nothing to summarize here. */
-void session_compaction_trigger(struct session *session,
-                                struct json_object *hist,
-                                llm_type_t type,
-                                cloud_provider_t provider,
-                                const char *model) {
+__attribute__((weak)) void session_compaction_trigger(struct session *session,
+                                                      struct json_object *hist,
+                                                      llm_type_t type,
+                                                      cloud_provider_t provider,
+                                                      const char *model) {
    (void)session;
    (void)hist;
    (void)type;
@@ -656,4 +719,9 @@ void tool_result_store_tree_seed(struct session *session,
 void tool_result_store_set_read_budget(struct session *session, size_t chars) {
    (void)session;
    (void)chars;
+}
+
+/* A preview staged in a session is noted there (the session unit isn't linked). */
+__attribute__((weak)) void turn_origin_note_prepare(struct session *session) {
+   (void)session;
 }

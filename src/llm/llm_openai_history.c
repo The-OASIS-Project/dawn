@@ -32,6 +32,7 @@
 #include "llm/llm_claude_parts.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_history_kind.h"
+#include "llm/llm_history_rows.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools.h"
@@ -166,28 +167,32 @@ int convert_claude_tool_to_openai(struct json_object *msg, struct json_object *o
                 "OpenAI: dropping Claude tool_result with no tool_use_id during conversion");
             continue;
          }
-         struct json_object *tool_msg = json_object_new_object();
-         json_object_object_add(tool_msg, "role", json_object_new_string("tool"));
-         json_object_object_add(tool_msg, "tool_call_id", json_object_get(tuid));
          /* A string, or its text parts joined (not the parts' JSON); a
           * result that carried images keeps its parts, as a tool message
           * holds them (llm_tool_images_render.h). */
          struct json_object *parts = NULL;
+         struct json_object *content = NULL;
          if (json_object_object_get_ex(elem, "content", &parts) &&
-             json_object_is_type(parts, json_type_array)) {
-            if (llm_parts_have_image(parts)) {
-               json_object_object_add(tool_msg, "content", json_object_get(parts));
-               json_object_array_add(out_array, tool_msg);
-               appended++;
-               continue;
+             json_object_is_type(parts, json_type_array) && llm_parts_have_image(parts)) {
+            content = json_object_get(parts);
+         } else {
+            char *result = llm_claude_content_text(elem);
+            if (!result) {
+               OLOG_WARNING("OpenAI: tool result text not converted (out of memory); sent empty");
             }
+            content = json_object_new_string(result ? result : "");
+            free(result);
          }
-         char *result = llm_claude_content_text(elem);
-         if (!result) {
-            OLOG_WARNING("OpenAI: tool result text not converted (out of memory); sent empty");
+         /* As a reload builds the result's row (memory_history_loader.c),
+          * its row id included, so both are the same request. */
+         struct json_object *tool_msg = json_object_new_object();
+         json_object_object_add(tool_msg, "role", json_object_new_string("tool"));
+         json_object_object_add(tool_msg, "content", content);
+         json_object_object_add(tool_msg, "tool_call_id", json_object_get(tuid));
+         struct json_object *row_id = NULL;
+         if (json_object_object_get_ex(elem, LLM_HISTORY_PART_ROW_ID_KEY, &row_id)) {
+            json_object_object_add(tool_msg, "id", json_object_get(row_id));
          }
-         json_object_object_add(tool_msg, "content", json_object_new_string(result ? result : ""));
-         free(result);
          json_object_array_add(out_array, tool_msg);
          appended++;
       }
@@ -799,14 +804,20 @@ json_object *llm_openai_prepare_chat_history(struct json_object *conversation_hi
                                              const char *carrier,
                                              const char *model) {
    const bool system_notes = takes_mid_system(carrier);
-   /* Notes as text go in the question, ahead of the user's words. */
-   json_object *noted = system_notes ? NULL : llm_history_notes_before_words(conversation_history);
-   if (!system_notes && !noted) {
+   /* The user's next message after a reply they stopped says so. */
+   json_object *stop_noted = llm_history_stopped_noted(conversation_history);
+   if (!stop_noted) {
       return NULL;
    }
-   json_object *in_place = render_context_for_chat(noted ? noted : conversation_history,
-                                                   system_notes);
+   /* Notes as text go in the question, ahead of the user's words. */
+   json_object *noted = system_notes ? NULL : llm_history_notes_before_words(stop_noted);
+   if (!system_notes && !noted) {
+      json_object_put(stop_noted);
+      return NULL;
+   }
+   json_object *in_place = render_context_for_chat(noted ? noted : stop_noted, system_notes);
    json_object_put(noted);
+   json_object_put(stop_noted);
    if (!in_place) {
       return NULL;
    }

@@ -1,0 +1,15 @@
+[Unit]
+Description=agent-gateway: update Claude Code (staged, checked, switched only if it passes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Root: it installs into /usr/local/lib/agent-gateway and restarts the gateway.
+# A standard-library script on the managed interpreter, isolated: root runs no
+# code from PyPI.  The checks run the new version as the gateway user.
+ExecStart=/usr/local/lib/agent-gateway/bin/python3 -I -S /usr/local/lib/agent-gateway/update.py
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=true
+TimeoutStartSec=1h

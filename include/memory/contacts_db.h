@@ -99,6 +99,25 @@ int contacts_find(int user_id,
                   int *count_out);
 
 /**
+ * @brief Find contacts whose value is exactly @p value (byte-for-byte, as
+ *        strcmp), first by entity name: reverse lookup of a number or address.
+ *
+ * @param user_id     User ID for isolation
+ * @param field_type  Exact type ("email", "phone", "address")
+ * @param value       The value to match exactly
+ * @param out         Output array
+ * @param max_results Maximum results to return
+ * @param count_out   Output: number of results found (may be NULL)
+ * @return SUCCESS (0) on success, FAILURE (1) on a database error
+ */
+int contacts_find_by_value(int user_id,
+                           const char *field_type,
+                           const char *value,
+                           contact_result_t *out,
+                           int max_results,
+                           int *count_out);
+
+/**
  * @brief Add a contact info record for an entity.
  *
  * @param user_id    User ID

@@ -125,10 +125,14 @@ Pre-built packages are available for **x86_64** and **aarch64** (Raspberry Pi, n
 
 ```bash
 # aarch64 (Raspberry Pi 5, etc.)
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-aarch64-1.19.2.tgz
-tar xzf onnxruntime-linux-aarch64-1.19.2.tgz
-sudo cp -a onnxruntime-linux-aarch64-1.19.2/lib/libonnxruntime*.so* /usr/local/lib/
-sudo cp onnxruntime-linux-aarch64-1.19.2/include/*.h /usr/local/include/
+# Microsoft's NuGet package carries the Linux libraries and headers
+wget https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.19.2/microsoft.ml.onnxruntime.1.19.2.nupkg
+unzip -q microsoft.ml.onnxruntime.1.19.2.nupkg -d ort "runtimes/linux-arm64/native/*" "build/native/include/*"
+sudo cp ort/runtimes/linux-arm64/native/libonnxruntime.so /usr/local/lib/libonnxruntime.so.1.19.2
+sudo cp ort/runtimes/linux-arm64/native/libonnxruntime_providers_shared.so /usr/local/lib/
+sudo ln -sf libonnxruntime.so.1.19.2 /usr/local/lib/libonnxruntime.so.1
+sudo ln -sf libonnxruntime.so.1 /usr/local/lib/libonnxruntime.so
+sudo cp -r ort/build/native/include/* /usr/local/include/
 sudo ldconfig
 
 # x86_64 — see docs/GETTING_STARTED_SERVER.md for the x86_64 package URL
@@ -437,26 +441,12 @@ The token grants read-only access to non-private images (search results, generat
 
 ### Headless Setup (No Microphone)
 
-If your device has no physical microphone (e.g., a Raspberry Pi used as a WebUI-only server, or a board where you plan to add audio hardware later), the daemon will exit on startup because ALSA cannot open the default capture device.
-
-**Workaround**: Load the kernel dummy sound driver to provide a virtual capture device:
-
-```bash
-# Load the dummy ALSA driver
-sudo modprobe snd-dummy
-
-# Persist across reboots
-echo "snd-dummy" | sudo tee /etc/modules-load.d/snd-dummy.conf
-```
-
-Then configure `dawn.toml` to use the dummy device:
-
-```toml
-[audio]
-capture_device = "plughw:CARD=Dummy,DEV=0"
-```
-
-Voice input still works through the WebUI and DAP2 satellites — only the local microphone path uses the dummy device. When you later connect a USB microphone or audio HAT, update `capture_device` to the real device (use `arecord -L` to list available devices) and remove the snd-dummy module.
+DAWN starts without a microphone or speaker (e.g., a Raspberry Pi used as a WebUI-only server, or a
+board where you plan to add audio hardware later). It logs one warning that the capture (or
+playback) device isn't available and keeps running; voice input still works through the WebUI and
+DAP2 satellites. When you connect a USB microphone or audio HAT, set `capture_device` to it (use
+`arecord -L` to list devices) and restart DAWN once. After that it connects within seconds
+whenever the device is plugged in, and again after each unplug and replug.
 
 > **Tip**: For a dedicated x86_64 server with no local audio hardware at all, consider [server mode](docs/GETTING_STARTED_SERVER.md) which skips local audio initialization entirely.
 
@@ -714,6 +704,29 @@ into a code graph. Three pieces are required:
 3. **Runtime config** — `[code_projects] enabled = true` plus the `[mcp]` / `[[mcp.server]]` block pointing at cbm.
 
 Full usage — import vs. link-local, branch tracking, refresh/rebuild, permissions/sandbox, and sharing with a coding assistant — is in **[docs/CODING_PROJECTS.md](docs/CODING_PROJECTS.md)**.
+
+### Coding Agents (Claude Code)
+
+Let DAWN hand coding work to Claude Code: it works in its own clone of the repo, as a separate
+sandboxed user, and DAWN follows it, puts its questions to you, shows its changes, and publishes
+the branch as a pull request when you say so. DAWN never starts the agent itself; a small gateway
+service you run does. Three pieces are required:
+
+1. **Build flags** — `DAWN_ENABLE_MCP_BRIDGE_TOOL=ON` with the WebUI on (`DAWN_ENABLE_CODING_AGENT_TOOL`
+   is on by default). The `default`, `full`, `debug` and `server` presets have both, and so does
+   the `.deb` package.
+2. **The gateway** — install it from **[services/agent-gateway/README.md](services/agent-gateway/README.md#install)**:
+   `sudo apt install bubblewrap socat`, then `cd services/agent-gateway && sudo UV=$(command -v uv) ./install.sh`.
+   Give the `dawn-agent` user a Claude login or an API key, list the repos it may work in under
+   `[[repos]]` in `/usr/local/etc/agent-gateway/agent-gateway.toml`, and restart it.
+3. **Runtime config** — the gateway's `[[mcp.server]]` block in `dawn.toml` (`transport = "http"`,
+   `role = "agent_gateway"`, see the commented example in [dawn.toml.example](dawn.toml.example)), its
+   token in `secrets.toml` under `[secrets.mcp]`, then restart DAWN.
+
+Publishing pull requests is optional: it needs a fine-grained GitHub token in the gateway's
+environment (Contents and Pull requests read/write, Workflows left at no access); without one,
+DAWN can still delegate, review and close tasks. Then just ask: "Friday, have Claude add a test
+for the calendar parser in dawn."
 
 ### JavaScript-Heavy Sites (FlareSolverr)
 

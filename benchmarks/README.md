@@ -367,6 +367,27 @@ python3 benchmarks/run_benchmark.py \
 # the load.  Result JSON also reports cache_hits / cache_misses counters.
 ```
 
+**What else the fingerprint keys on.**  `extraction_prompt_sha256` hashes the
+template together with everything else that changes what a batch stores from
+the same prompt: the bench's real entity linking, entity merging turned off
+(`[memory.entity_merge] enabled = false`), the consolidator
+(`[memory] consolidator`), its extraction sample count, and the fixed text of
+the consolidator's prompts (its lead, link rule, list headers and repair
+message).  A change to any of them makes old snapshots miss rather than load.
+How each list item is written (code) and the persona half (each install's own
+text) are not part of it.
+
+**Comparing the two consolidators.**  The arm comes from the config: run each
+with its own `--config` (a copy of `dawn.toml` differing only in
+`[memory] consolidator = "prompt"` or `"agent"`) and **its own `--cache-dir`**,
+so neither arm's snapshots or judge and generator caches mix with the other's.
+Keep `--conv-workers` the same for both.  Driven directly, `bench_retrieval
+--memory-pipeline` also takes `--consolidator prompt|agent` (over the config's)
+and `--samples 1|2` (the consolidator's extraction samples per batch; 1, the
+daemon's, by default), and the `{"cmd":"import_forgotten","texts":[...]}`
+command, which seeds forgotten-fact records every later batch is checked
+against (a seeded comeback run; `llm_testing/memory_audit` uses it).
+
 Use `--no-cache` to force re-extraction (e.g., when validating non-determinism
 or after manually editing extracted facts).  Override the location with
 `--cache-dir <path>` if you want to keep multiple cache pools (one per model

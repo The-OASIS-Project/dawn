@@ -50,6 +50,7 @@
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
+#include "core/session_stop.h"
 #include "dawn.h"
 #include "document_original_store.h"
 #include "image_store.h"
@@ -57,6 +58,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_context.h"
 #include "llm/llm_local_provider.h"
+#include "llm/llm_model_family.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "utils/string_utils.h"
@@ -334,7 +336,9 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    } else {
       struct json_object *payload = NULL;
       json_object_object_get_ex(root, "payload", &payload);
+      webui_protocol_request_begin(conn->wsi, json_object_get_string(type_obj), payload);
       dispatch_message(conn, json_object_get_string(type_obj), payload);
+      webui_protocol_request_end();
    }
    json_object_put(root);
    free(json_str);
@@ -627,6 +631,7 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          }
 
          /* Parse model */
+         bool model_set = false; /* this request named an accepted model */
          struct json_object *model_obj;
          if (json_object_object_get_ex(payload, "model", &model_obj)) {
             const char *new_model = json_object_get_string(model_obj);
@@ -634,6 +639,7 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
                /* Validate model name to prevent injection attacks */
                if (llm_local_is_valid_model_name(new_model)) {
                   has_changes = true;
+                  model_set = true;
                   safe_strscpy(config.model, new_model);
                   /* "requested", not "set": under the OpenRouter gateway a bare
                    * (non vendor/model) id is dropped below and the resolver
@@ -645,26 +651,43 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
                   /* Infer provider from model name if not explicitly set
                    * (handles old conversations and frontend bugs).
                    * Only infer if the inferred provider has an API key available.
-                   * OpenRouter IDs are "vendor/model" slugs and match none of the bare
-                   * prefixes below, so an OpenRouter session's model is left untouched. */
-                  if (!provider_explicitly_set) {
-                     if ((strncmp(new_model, "gpt-", 4) == 0 || strncmp(new_model, "o1-", 3) == 0 ||
-                          strncmp(new_model, "o3-", 3) == 0) &&
-                         llm_has_openai_key()) {
-                        config.cloud_provider = CLOUD_PROVIDER_OPENAI;
-                        OLOG_INFO("WebUI: Inferred OpenAI provider from model '%s'", new_model);
-                     } else if (strncmp(new_model, "claude-", 7) == 0 && llm_has_claude_key()) {
-                        config.cloud_provider = CLOUD_PROVIDER_CLAUDE;
-                        OLOG_INFO("WebUI: Inferred Claude provider from model '%s'", new_model);
-                     } else if (strncmp(new_model, "gemini-", 7) == 0 && llm_has_gemini_key()) {
-                        config.cloud_provider = CLOUD_PROVIDER_GEMINI;
-                        OLOG_INFO("WebUI: Inferred Gemini provider from model '%s'", new_model);
+                   * OpenRouter IDs are "vendor/model" slugs and name no provider, so an
+                   * OpenRouter session's model is left untouched. */
+                  /* Not on an explicit local pick: a local model may share a
+                   * cloud prefix (Ollama's gpt-oss). */
+                  bool local_pick = type_explicitly_set && config.type == LLM_LOCAL;
+                  if (!provider_explicitly_set && !local_pick) {
+                     const cloud_provider_t named = llm_model_provider_from_name(new_model);
+                     const bool has_key = (named == CLOUD_PROVIDER_OPENAI &&
+                                           llm_has_openai_key()) ||
+                                          (named == CLOUD_PROVIDER_CLAUDE &&
+                                           llm_has_claude_key()) ||
+                                          (named == CLOUD_PROVIDER_GEMINI && llm_has_gemini_key());
+                     if (has_key) {
+                        config.cloud_provider = named;
+                        OLOG_INFO("WebUI: Inferred %s provider from model '%s'",
+                                  cloud_provider_to_string(named), new_model);
                      }
                   }
                } else {
                   OLOG_WARNING("WebUI: Rejected invalid model name from client");
                }
             }
+         }
+
+         bool model_is_cloud = llm_model_provider_from_name(config.model) != CLOUD_PROVIDER_NONE;
+
+         /* An explicit switch to local that names no model drops the one carried over
+          * from a cloud session (any name, an OpenRouter slug included) or a bare cloud
+          * name: the local endpoint would be asked for a model it doesn't have.  Empty
+          * means the configured local model; a client that lists the endpoint's models
+          * names one in a follow-up.  A model named with the switch is kept: a local
+          * model may share a cloud prefix (Ollama's gpt-oss). */
+         if (type_explicitly_set && config.type == LLM_LOCAL && !model_set &&
+             config.model[0] != '\0' && (old_type != LLM_LOCAL || model_is_cloud)) {
+            OLOG_INFO("WebUI: Dropped cloud model '%s' on the switch to local", config.model);
+            config.model[0] = '\0';
+            model_is_cloud = false;
          }
 
          /* Reconcile type with the selected cloud model/provider (frontend-bug guard).
@@ -675,7 +698,9 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
           * local type, and the follow-up ran on llama.cpp).  The existing provider inference
           * above only corrects the PROVIDER and is gated on !provider_explicitly_set, so it
           * misses this.  Force type=cloud on either cloud signal:
-          *   (a) the effective model name matches a bare cloud prefix — local models are gguf
+          *   (a) a model named this request matches a bare cloud prefix (a request that
+          *       names none, a reasoning change say, leaves a local session local whatever
+          *       its model is called) — local models are gguf
           *       paths that match none, so this never misfires on a local pick; or
           *   (b) the client explicitly set a cloud provider this request (covers OpenRouter,
           *       whose "vendor/model" slug matches no prefix) — an active cloud selection.
@@ -683,20 +708,13 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
           * silently substituting local.
           *
           * Gated on !type_explicitly_set: this only reconciles the case where the client
-          * OMITS type. A client that explicitly sends type='local' this request means it —
-          * the carried-over cloud model name is just stale (the client updates the model in
-          * a follow-up set_session_llm once the local list arrives). Firing here on an
-          * explicit local pick reverts it straight back to cloud, which the WebUI's async
-          * flow (send {type:local}, THEN fetch models) can never recover from. */
-         bool model_is_cloud = strncmp(config.model, "gpt-", 4) == 0 ||
-                               strncmp(config.model, "o1-", 3) == 0 ||
-                               strncmp(config.model, "o3-", 3) == 0 ||
-                               strncmp(config.model, "claude-", 7) == 0 ||
-                               strncmp(config.model, "gemini-", 7) == 0;
+          * OMITS type. A client that explicitly sends type='local' this request means it,
+          * and the cloud model name was dropped above. Firing here on an explicit local
+          * pick would revert it straight back to cloud. */
          bool provider_is_cloud = provider_explicitly_set &&
                                   config.cloud_provider != CLOUD_PROVIDER_NONE;
          if (!type_explicitly_set && config.type != LLM_CLOUD &&
-             (model_is_cloud || provider_is_cloud)) {
+             ((model_set && model_is_cloud) || provider_is_cloud)) {
             config.type = LLM_CLOUD;
             has_changes = true;
             OLOG_INFO("WebUI: Corrected stale local type to cloud for model '%s'", config.model);
@@ -752,6 +770,15 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          struct json_object *restore_obj;
          if (json_object_object_get_ex(payload, "from_restore", &restore_obj)) {
             from_restore = json_object_get_boolean(restore_obj);
+         }
+
+         /* A change made for one conversation is not saved to another: the user may
+          * have opened a different one before this request arrived. */
+         struct json_object *for_conv_obj;
+         if (!from_restore &&
+             json_object_object_get_ex(payload, "conversation_id", &for_conv_obj) &&
+             json_object_get_int64(for_conv_obj) != conn->active_conversation_id) {
+            from_restore = true;
          }
 
          /* Apply config if changes were made.  The reasoning pick is stored as
@@ -1252,6 +1279,16 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
       }
    } else if (strcmp(type, "list_memory_superseded") == 0) {
       handle_list_memory_superseded(conn, payload);
+   } else if (strcmp(type, "list_memory_batches") == 0) {
+      handle_list_memory_batches(conn, payload);
+   } else if (strcmp(type, "undo_memory_batch") == 0) {
+      if (payload) {
+         handle_undo_memory_batch(conn, payload);
+      }
+   } else if (strcmp(type, "keep_memory_op") == 0) {
+      if (payload) {
+         handle_keep_memory_op(conn, payload);
+      }
    } else if (strcmp(type, "restore_memory_fact") == 0) {
       if (payload) {
          handle_restore_memory_fact(conn, payload);
@@ -1356,6 +1393,8 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
       if (payload) {
          handle_doc_library_toggle_global(conn, payload);
       }
+   } else if (strcmp(type, "set_document_own") == 0) {
+      handle_set_document_own(conn, payload);
    } else if (strcmp(type, "doc_library_note_save") == 0) {
       if (payload) {
          handle_doc_library_note_save(conn, payload);
@@ -1647,6 +1686,52 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
             limit = json_object_get_int(o);
       }
       webui_jobs_send_history(conn, before_created_at, before_id, limit);
+#ifdef DAWN_ENABLE_CODING_AGENT_TOOL
+   } else if (strcmp(type, "coding_pending") == 0) {
+      /* What the user's coding jobs wait on.  Ownership is checked per job inside. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_pending(conn, payload);
+   } else if (strcmp(type, "coding_reply") == 0) {
+      /* The card's answer; checked against the live request inside. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_reply(conn, payload);
+   } else if (strcmp(type, "coding_view") == 0) {
+      /* The changes viewer; the job's owner is checked inside. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_view(conn, payload);
+   } else if (strcmp(type, "coding_publish_preview") == 0) {
+      /* The viewer's Publish and Close: the click is the user's confirm.  The
+       * job's owner is checked inside; the gateway binds the push to what was
+       * shown. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_publish_preview(conn, payload);
+   } else if (strcmp(type, "coding_publish") == 0) {
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_publish(conn, payload);
+   } else if (strcmp(type, "coding_close") == 0) {
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_close(conn, payload);
+   } else if (strcmp(type, "coding_grants") == 0) {
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_grants(conn, payload);
+   } else if (strcmp(type, "coding_grant_revoke") == 0) {
+      /* The gateway removes only the user's own. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_grant_revoke(conn, payload);
+#endif
+   } else if (strcmp(type, "stop_other_reply") == 0) {
+      /* Same user only, checked inside against the turn holding the conversation. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_handle_stop_other_reply(conn, payload);
    } else if (strcmp(type, "job_action") == 0) {
       /* cancel | resume.  Ownership is checked inside, against conn->auth_user_id. */
       if (!conn_require_auth(conn))
@@ -1836,13 +1921,9 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          OLOG_DEBUG("WebUI: Ignoring %s message (feature not compiled in)", shown);
       else
          OLOG_WARNING("WebUI: Unknown message type: %s", shown);
-      char req[WEBUI_REQ_MAX + 1];
-      char *reply = webui_protocol_unknown_type_json(
-          type, webui_protocol_payload_req(payload, WEBUI_REQ_MAX, req, sizeof(req)) ? req : NULL);
-      if (reply) {
-         send_json_message(conn->wsi, reply);
-         free(reply);
-      }
+      /* Names the type and the req, as every error sent for a request does. */
+      send_error_frame(conn->wsi, "UNKNOWN_TYPE", "This server doesn't handle that message type",
+                       WS_SEVERITY_ERROR, NULL);
    }
 }
 
@@ -1854,7 +1935,7 @@ static void handle_cancel_message(ws_connection_t *conn) {
        * manager hands &session->cancel_requested to llm_set_cancel_flag before
        * each LLM call, so the CURL progress callback aborts THIS session only.
        * (llm_request_interrupt() is NOT used — its global flag hits all users.) */
-      session_cancel_turn(conn->session);
+      session_stop_turn_by_user(conn->session);
       send_state_impl(conn->wsi, "idle", NULL);
    }
 }

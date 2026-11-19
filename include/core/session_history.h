@@ -114,6 +114,13 @@ bool session_add_turn_message_object(session_t *session, struct json_object *mes
  *  has one. */
 void session_stamp_message_id(session_t *session, struct json_object *message, int64_t row_id);
 
+/** Stamp @p obj (a message in the session's history, or a part of one) with
+ *  its row's id under @p key, unless it has one. */
+void session_stamp_row_id(session_t *session,
+                          struct json_object *obj,
+                          const char *key,
+                          int64_t row_id);
+
 /** history_conversation_id value: the history holds more than one conversation's turns */
 #define SESSION_HISTORY_CONV_MIXED ((int64_t)-1)
 
@@ -133,13 +140,16 @@ void session_bind_history_conversation(session_t *session, int64_t conv_id);
 /**
  * @brief Snapshot the session's live history for memory extraction
  *
- * Returns a deep copy (provider state stripped) taken under history_mutex, with
- * the conversation it holds read in the same critical section, so a turn
- * appending concurrently can neither corrupt the copy nor change its attribution.
+ * Returns a deep copy taken under history_mutex, with the conversation it holds
+ * read in the same critical section, so a turn appending concurrently can
+ * neither corrupt the copy nor change its attribution.  The copy keeps which
+ * messages and parts are request context (llm_history_copy_marked): extraction
+ * reads what outside text they carried, then strips them.
  *
  * @param session   Session
  * @param conv_out  Receives history_conversation_id (may be NULL)
- * @param count_out Receives the copy's message count (may be NULL)
+ * @param count_out Receives the copy's message count, request context left
+ *                  out (may be NULL)
  * @return New array (caller owns), or NULL
  */
 struct json_object *session_snapshot_history(session_t *session, int64_t *conv_out, int *count_out);
@@ -175,6 +185,72 @@ typedef struct json_object *(*session_history_loader_fn)(int user_id,
 /** Register the loader session_turn_begin() uses (NULL to unregister). */
 void session_set_history_loader(session_history_loader_fn loader);
 
+/** The registered loader (NULL = none). */
+session_history_loader_fn session_history_loader_get(void);
+
+/**
+ * @brief A conversation's rows after a row, as a reload renders them there
+ *
+ * The contract of memory_history_request_tail(): an owned array (empty when
+ * there are none), or NULL with *@p rebuild_out set when the rows can't be
+ * appended on their own (the history must be built again) or clear on a read
+ * failure.
+ */
+typedef struct json_object *(*session_history_tail_loader_fn)(int64_t conv_id,
+                                                              int user_id,
+                                                              int64_t after_id,
+                                                              bool *rebuild_out);
+
+/** Register the tail loader a turn's catch-up uses (NULL to unregister). */
+void session_set_history_tail_loader(session_history_tail_loader_fn loader);
+
+/**
+ * @brief session_replace_history() for a history loaded from the database,
+ *        recording the point it was loaded at
+ *
+ * Read @p at (conv_db_sync_point_get) before loading the history; it is read
+ * again here, with no lock held, and recorded only when nothing changed in
+ * between (else the next turn builds the history again).  NULL @p at records
+ * nothing.
+ *
+ * @param session Session
+ * @param history New history array (ownership transferred)
+ * @param conv_id Conversation the history holds
+ * @param user_id Its owner
+ * @param at      The point read before the load, or NULL
+ */
+void session_replace_history_at(session_t *session,
+                                struct json_object *history,
+                                int64_t conv_id,
+                                int user_id,
+                                const conv_sync_point_t *at);
+
+/**
+ * @brief Bring the live history up to date with @p conv_id for the turn
+ *        starting or binding on this thread
+ *
+ * Session unit: called by session_turn_begin() and
+ * session_turn_set_conversation() once the turn holds the conversation's
+ * lease, with no lock held.  When the live history holds @p conv_id, the
+ * conversation's sync point is compared with the one the history was built
+ * at: the same, nothing; only rows added, they are appended as a reload has
+ * them (the tail loader); anything else, the history is built again (the
+ * loader) as a restore builds it.  A turn pinned on the live history moves
+ * with it.  Does nothing without the loaders, or when the turn already wrote
+ * into the live history.
+ */
+void session_catch_up(session_t *session, int64_t conv_id, int user_id);
+
+/**
+ * @brief Install @p history as the live history holding @p conv_id
+ *
+ * Session unit: session_replace_history()'s step, with history_mutex held.
+ * Ownership of @p history is taken.
+ */
+void session_install_history_locked(session_t *session,
+                                    struct json_object *history,
+                                    int64_t conv_id);
+
 /**
  * @brief Start a turn: pin the history it runs on
  *
@@ -187,11 +263,43 @@ void session_set_history_loader(session_history_loader_fn loader);
  * Call when a turn is dequeued, before anything touches the history; pair with
  * session_turn_end().
  *
+ * For @p conv_id > 0 it first takes the conversation's lease, waiting (on this
+ * thread, with no lock held) while another turn holds it, so turns on one
+ * conversation never overlap.  Call it with the turn's flags already reset
+ * (session_begin_turn_flags), so a Stop during the wait counts.  A stopped wait
+ * leaves the turn unsent: check session_turn_unsent() and end it.
+ *
  * @param session Session
  * @param conv_id Conversation the turn belongs to (0 = not yet known)
  * @param user_id Owner, for loading the conversation
  */
 void session_turn_begin(session_t *session, int64_t conv_id, int user_id);
+
+/**
+ * @brief session_turn_begin() for a turn the session's client didn't send (a
+ *        job's result re-engaging the conversation)
+ *
+ * Marked background from the start; a wait stopped before it began isn't
+ * reported to the client as its message given back.
+ */
+void session_turn_begin_background(session_t *session, int64_t conv_id, int user_id);
+
+/**
+ * @brief session_turn_begin() with @p conv_id's lease already taken
+ *
+ * For a caller that must not wait for a held conversation: it takes the lease
+ * itself with conv_turn_lease_try_acquire() under @p lease_token and does
+ * something else while the conversation is held.  The turn owns the lease from
+ * here and session_turn_end() releases it.  A @p lease_token of 0 is
+ * session_turn_begin().
+ *
+ * @param lease_token The token the lease was taken under (from
+ *                    conv_turn_lease_new_token()), or 0
+ */
+void session_turn_begin_leased(session_t *session,
+                               int64_t conv_id,
+                               int user_id,
+                               uint64_t lease_token);
 
 /**
  * @brief Record the running turn's conversation once it is resolved late
@@ -207,9 +315,114 @@ void session_turn_begin(session_t *session, int64_t conv_id, int user_id);
  * stream tag and persistence follow @p conv_id.  This is the one writer of the
  * turn's stream_conversation_id after session_turn_begin().
  *
+ * With @p may_load, a turn that holds no conversation yet first takes this
+ * one's lease, waiting like session_turn_begin(); a stopped wait leaves the turn
+ * unsent and unbound (session_turn_unsent()).
+ *
  * @param may_load Loading allowed (the turn's own worker thread)
  */
 void session_turn_set_conversation(session_t *session, int64_t conv_id, bool may_load);
+
+/* What session_turn_waiting_notice() reports. */
+#define SESSION_TURN_WAIT_BEGIN 0   /* the turn waits for another turn on its conversation */
+#define SESSION_TURN_WAIT_GRANTED 1 /* it has the conversation now; the reply follows */
+#define SESSION_TURN_WAIT_UNSENT 2  /* it stopped waiting; its question was never saved */
+
+/* How long a waiting client shows its status line before it offers to stop
+ * the reply it waits for (turn_waiting's stop_after_ms). */
+#define CONV_TURN_WAIT_STOP_OFFER_MS 5000
+
+/**
+ * @brief Tell the session's client how its turn's wait for conversation
+ *        @p conv_id goes (SESSION_TURN_WAIT_*)
+ *
+ * One turn runs on a conversation at a time (conv_turn_lease.h): a turn begun
+ * or bound while another holds the conversation waits for it, on its own thread.
+ * Called on that thread with no lock held.  A weak no-op here; the WebUI
+ * replaces it.
+ *
+ * @param holder The holding session's id (SESSION_TURN_WAIT_BEGIN only), or
+ *               CONV_TURN_LEASE_POST_SESSION while a post is written
+ */
+void session_turn_waiting_notice(session_t *session, int64_t conv_id, int what, uint32_t holder);
+
+/**
+ * @brief Take @p conv's lease for the turn starting or binding on this thread
+ *
+ * Session unit, with no lock held: waits while another turn holds it; a wait
+ * that ends is logged and told to the client (a stopped one only when not
+ * @p background).
+ *
+ * @return CONV_TURN_LEASE_GRANTED, _STOPPED, or another lease result (no lease)
+ */
+int session_turn_lease_wait(session_t *session, int64_t conv, uint64_t token, bool background);
+
+/**
+ * @brief Free a lease a turn still marked running holds while a new one begins
+ *
+ * Session unit: a bug if it finds one (logged); a new turn on the same
+ * conversation would otherwise wait for itself.
+ */
+void session_release_stray_lease(session_t *session);
+
+/**
+ * @brief The running turn, on its own thread, binds to @p conv_id: take that
+ *        conversation's lease unless it holds one already (or one was claimed
+ *        in the turn's name when the conversation was created)
+ *
+ * Session unit, with no lock held.
+ *
+ * @param took Out: the turn got the lease now
+ * @return false when the wait was stopped: the turn is unsent and must not bind
+ */
+bool session_bind_lease(session_t *session, int64_t conv_id, bool *took);
+
+/**
+ * @brief Stop the turn holding @p conv_id's lease under @p token, if it still does
+ *
+ * Checked and cancelled under the lock that guards the turn's token, so a
+ * cancel never lands on a later turn of the session.
+ *
+ * @return true when that turn was told to stop
+ */
+bool session_turn_cancel_if_holds(session_t *session, int64_t conv_id, uint64_t token);
+
+/**
+ * @brief Whether the running turn stopped waiting for its conversation
+ *
+ * Then nothing of it may run or be saved: the caller ends the turn before
+ * dispatch (the client was told, SESSION_TURN_WAIT_UNSENT).  A Stop, the
+ * session's teardown or daemon shutdown stops a wait.
+ */
+bool session_turn_unsent(session_t *session);
+
+/**
+ * @brief The token to claim a new conversation's lease in the running turn's
+ *        name (conv_db_create_claimed), or 0
+ *
+ * Non-zero while a turn runs that holds no conversation yet: with
+ * @p own_thread, when the caller is that turn's own thread; without, when the
+ * turn waits for a conversation created for it (a new chat's first message).  A
+ * conversation claimed with it is the turn's once it binds to it
+ * (session_turn_set_conversation, session_turn_keep_created_lease); until
+ * then the creator releases it.
+ */
+uint64_t session_turn_claim_token(session_t *session, bool own_thread);
+
+/**
+ * @brief Hand a conversation claimed with @p token to the running turn, once
+ *        session_bind_created_conversation() bound the turn to it
+ * @return true when the turn holds it now (it releases it at its end; also
+ *         when it already recorded it under @p token); false when the caller
+ *         must release it (no such turn)
+ */
+bool session_turn_keep_created_lease(session_t *session, int64_t conv_id, uint64_t token);
+
+/**
+ * @brief Whether the running turn holds @p conv_id's lease under @p token
+ * @param user_out Out (may be NULL): the turn's user
+ */
+bool session_turn_holds_lease(session_t *session, int64_t conv_id, uint64_t token, int *user_out);
 
 /**
  * @brief Release the turn's pinned history (safe when nothing is pinned)
@@ -268,6 +481,18 @@ int session_turn_finish(session_t *session, session_turn_unsaved_t *out);
  * for anything a turn writes or reads on behalf of its conversation.
  */
 int64_t session_turn_conversation(session_t *session);
+
+/**
+ * @brief A copy of the running turn's history (else the session history),
+ *        its request context still marked (llm_history_copy_marked), and its
+ *        conversation (session_turn_conversation), read under one lock
+ *
+ * For a tool call that judges what outside text the turn has read.
+ *
+ * @param conv_out Receives the conversation (0 = none yet)
+ * @return New array (caller owns), or NULL
+ */
+struct json_object *session_snapshot_turn_history(session_t *session, int64_t *conv_out);
 
 /**
  * @brief The conversation @p history holds

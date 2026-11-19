@@ -38,6 +38,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_internal.h"
@@ -1824,6 +1825,21 @@ static void test_alias_link_to_an_alias(void) {
    TEST_ASSERT_EQUAL_INT64(root, ids[0]);
 }
 
+/* Two scored candidates over the review threshold: both are link candidates,
+ * the cascade's winner (the best match) included. */
+static void test_link_candidates_keep_the_winner(void) {
+   g_config.memory.entity_merge_review_threshold = 0.0f;
+   const int64_t a = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   const int64_t b = insert_entity_typed(g_test_user_id, "Jon Smith", "person");
+   const int64_t inbound = insert_entity_typed(g_test_user_id, "Jonathan R Smith", "person");
+   int64_t ids[4] = { 0 };
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_link_candidates(g_test_user_id, inbound, ids, 4, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_TRUE((ids[0] == a && ids[1] == b) || (ids[0] == b && ids[1] == a));
+}
+
 /* The abstract "user" alias isn't a name: it never names the user. */
 static void test_alias_names_leave_out_user_placeholder(void) {
    int64_t self = insert_entity_typed(g_test_user_id, "Pat Example", "person");
@@ -3498,6 +3514,95 @@ static void test_entity_upsert_at_overrides_take_effect(void) {
  * timestamps must always be ~now even though the call shape is the same
  * as it was before the _at split.  Keeps live-extraction callers
  * behaviorally unchanged. */
+/* ============================================================================
+ * memory_db_entity_sweep_orphans — the nightly sweep of entities nothing names
+ * ============================================================================ */
+
+static void exec_sql(const char *sql) {
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+}
+
+static bool entity_exists(int64_t id) {
+   char sql[96];
+   snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM memory_entities WHERE id = %lld",
+            (long long)id);
+   return count_db_rows(sql) == 1;
+}
+
+static void test_sweep_removes_only_old_entities_nothing_names(void) {
+   const int64_t old_orphan = insert_entity_typed(g_test_user_id, "Old Orphan", "thing");
+   const int64_t young_orphan = insert_entity_typed(g_test_user_id, "Young Orphan", "thing");
+   const int64_t alias = insert_entity_typed(g_test_user_id, "Jon", "person");
+   const int64_t canonical = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   const int64_t subject = insert_entity_typed(g_test_user_id, "Dawn Smith", "person");
+   const int64_t object = insert_entity_typed(g_test_user_id, "Acme", "organization");
+   const int64_t self = insert_entity_typed(g_test_user_id, "Kim Smith", "person");
+   mark_entity_user_self(self);
+   insert_open_relation(g_test_user_id, subject, "works_at", object, NULL);
+   char sql[160];
+   snprintf(sql, sizeof(sql), "UPDATE memory_entities SET canonical_id = %lld WHERE id = %lld",
+            (long long)canonical, (long long)alias);
+   exec_sql(sql);
+   const int64_t now = (int64_t)time(NULL);
+   snprintf(sql, sizeof(sql), "UPDATE memory_entities SET first_seen = %lld WHERE id != %lld",
+            (long long)(now - 30 * 86400), (long long)young_orphan);
+   exec_sql(sql);
+
+   int deleted = -1;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_sweep_orphans(g_test_user_id, now - 7 * 86400, &deleted));
+   TEST_ASSERT_EQUAL_INT(1, deleted);
+   TEST_ASSERT_FALSE(entity_exists(old_orphan));
+   TEST_ASSERT_TRUE(entity_exists(young_orphan));
+   TEST_ASSERT_TRUE(entity_exists(alias));
+   TEST_ASSERT_TRUE(entity_exists(canonical));
+   TEST_ASSERT_TRUE(entity_exists(subject));
+   TEST_ASSERT_TRUE(entity_exists(object));
+   TEST_ASSERT_TRUE(entity_exists(self));
+}
+
+/* A reinforcement's undo puts back the fact's old subject, so an entity only
+ * its pre-image names is kept; once the op is undone it no longer holds it. */
+static void test_sweep_keeps_an_entity_a_pre_image_holds(void) {
+   const int64_t held = insert_entity_typed(g_test_user_id, "Old Subject", "person");
+   const int64_t now = (int64_t)time(NULL);
+   char sql[512];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_consolidation_batches (user_id, path, stop, created_at) "
+            "VALUES (%d, 'agent', 'finish', %lld);"
+            "INSERT INTO memory_consolidation_ops (batch_id, user_id, seq, op, pre_image, "
+            "created_at) SELECT MAX(id), %d, 1, 'reinforced', "
+            "'{\"subject_entity_id\":%lld}', %lld FROM memory_consolidation_batches UNION ALL "
+            "SELECT MAX(id), %d, 2, 'added', 'not json', %lld FROM memory_consolidation_batches;"
+            "UPDATE memory_entities SET first_seen = %lld WHERE id = %lld;",
+            g_test_user_id, (long long)now, g_test_user_id, (long long)held, (long long)now,
+            g_test_user_id, (long long)now, (long long)(now - 30 * 86400), (long long)held);
+   exec_sql(sql);
+
+   int deleted = -1;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_sweep_orphans(g_test_user_id, now - 7 * 86400, &deleted));
+   TEST_ASSERT_EQUAL_INT(0, deleted);
+   TEST_ASSERT_TRUE(entity_exists(held));
+
+   exec_sql("UPDATE memory_consolidation_ops SET status = 'undone' WHERE op = 'reinforced'");
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_sweep_orphans(g_test_user_id, now - 7 * 86400, &deleted));
+   TEST_ASSERT_EQUAL_INT(1, deleted);
+   TEST_ASSERT_FALSE(entity_exists(held));
+}
+
+/* A user left with only entities is still one the nightly sweep visits. */
+static void test_user_ids_include_one_with_only_entities(void) {
+   insert_entity_typed(g_test_user_id, "Lone Entity", "thing");
+   exec_sql("DELETE FROM memory_facts; DELETE FROM memory_preferences;");
+   int ids[8] = { 0 };
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_get_all_user_ids(ids, 8, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT(g_test_user_id, ids[0]);
+}
+
 static void test_entity_upsert_wrapper_uses_now(void) {
    int64_t before = (int64_t)time(NULL);
    int64_t eid = 0;
@@ -3606,108 +3711,243 @@ static void test_summary_list_window_asc_returns_oldest_first(void) {
 }
 
 /* ============================================================================
- * Relation list with canonical-root resolution
+ * Relations of listed entities, attributed to their cards
  *
- * Verifies that memory_db_relation_list_with_canonical_roots_by_user
- * returns each relation along with the SQL-resolved canonical-root for
- * both subject and object sides.  Consumed by build_entities_json_array
- * and memory_export to attribute relations to the canonical entity for
- * the equivalence class, not the row they happen to be attached to.
+ * memory_db_relation_list_for_entities feeds the Graph tab's cards and the
+ * export: a card is an entity and its aliases, and its rows must not depend
+ * on how large the rest of the user's graph is.
  * ============================================================================ */
 
-static void test_relation_list_with_canonical_roots_subject_resolves_to_canonical(void) {
-   /* Insert a canonical "Jonathan Smith" with an alias "Jon".  Attach a
-    * relation against the ALIAS row (subject_entity_id = alias).  Verify
-    * subj_roots[0] resolves to the canonical's id, not the alias row. */
+/* @p n literal-object relations on @p subj, distinct predicates. */
+static void insert_relations_bulk(int64_t subj, int n, const char *prefix) {
+   sqlite3_stmt *stmt = NULL;
+   TEST_ASSERT_EQUAL_INT(
+       SQLITE_OK,
+       sqlite3_prepare_v2(s_db.db,
+                          "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n "
+                          "WHERE i < ?3) "
+                          "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
+                          "object_value, confidence) SELECT ?1, ?2, ?4 || i, 'value', 0.8 FROM n",
+                          -1, &stmt, NULL));
+   sqlite3_bind_int(stmt, 1, g_test_user_id);
+   sqlite3_bind_int64(stmt, 2, subj);
+   sqlite3_bind_int(stmt, 3, n);
+   sqlite3_bind_text(stmt, 4, prefix, -1, SQLITE_TRANSIENT);
+   TEST_ASSERT_EQUAL_INT(SQLITE_DONE, sqlite3_step(stmt));
+   sqlite3_finalize(stmt);
+}
+
+static int count_card_rows(const memory_card_relation_t *rows, int n, int64_t card, bool incoming) {
+   int c = 0;
+   for (int i = 0; i < n; i++) {
+      if (rows[i].card_id == card && rows[i].incoming == incoming) {
+         c++;
+      }
+   }
+   return c;
+}
+
+static void test_relation_list_for_entities_alias_rows_roll_up(void) {
+   /* A relation stored on the ALIAS row belongs on the canonical's card. */
    int64_t canonical = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
    int64_t alias = insert_entity_typed(g_test_user_id, "Jon", "person");
-   /* Soft-link alias → canonical (sets memory_entities.canonical_id). */
    int64_t link_id = 0;
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
                          memory_db_entity_alias_link(g_test_user_id, alias, canonical, "soft",
                                                      "test-fixture", -1.0f, NULL, &link_id));
-
-   /* Relation attached to the ALIAS row. */
    insert_open_relation(g_test_user_id, alias, "works_at", 0, "Acme");
 
-   memory_relation_t out[8];
-   int64_t subj_roots[8] = { 0 };
-   int64_t obj_roots[8] = { 0 };
-   int count = 0;
-   int rc = memory_db_relation_list_with_canonical_roots_by_user(g_test_user_id, out, subj_roots,
-                                                                 obj_roots, 8, &count);
-   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
-   TEST_ASSERT_EQUAL_INT(1, count);
-   TEST_ASSERT_EQUAL_INT64(alias, out[0].subject_entity_id); /* raw row pointer */
-   TEST_ASSERT_EQUAL_INT64(canonical, subj_roots[0]);        /* SQL-resolved root */
-   TEST_ASSERT_EQUAL_INT64(0, obj_roots[0]);                 /* literal object */
+   memory_card_relation_t *rows = NULL;
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_relation_list_for_entities(g_test_user_id, &canonical, 1, 50,
+                                                              true, &rows, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT64(canonical, rows[0].card_id);
+   TEST_ASSERT_FALSE(rows[0].incoming);
+   TEST_ASSERT_EQUAL_INT64(alias, rows[0].rel.subject_entity_id);
+   TEST_ASSERT_EQUAL_INT64(0, rows[0].rel.object_entity_id);
+   TEST_ASSERT_EQUAL_STRING("Acme", rows[0].rel.object_name);
+   TEST_ASSERT_EQUAL_INT(1, rows[0].total);
+   free(rows);
+
+   /* Listing the alias itself lists nothing: its rows are the canonical's. */
+   rows = NULL;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_relation_list_for_entities(
+                                                g_test_user_id, &alias, 1, 50, true, &rows, &n));
+   TEST_ASSERT_EQUAL_INT(0, n);
+   free(rows);
 }
 
-static void test_relation_list_with_canonical_roots_object_resolves_to_canonical(void) {
-   /* Mirror case: relation's OBJECT side is the alias.  obj_roots[0]
-    * should resolve to the canonical. */
+static void test_relation_list_for_entities_incoming_names_subject_card(void) {
+   /* (other, employs, alias): on the canonical's card it's an incoming edge
+    * naming the other end; on the other's card an outgoing one. */
    int64_t canonical = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
    int64_t alias = insert_entity_typed(g_test_user_id, "Jon", "person");
    int64_t link_id = 0;
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
                          memory_db_entity_alias_link(g_test_user_id, alias, canonical, "soft",
                                                      "test-fixture", -1.0f, NULL, &link_id));
-
    int64_t other = insert_entity_typed(g_test_user_id, "Acme Corp", "org");
-   /* (other, employs, alias) — object side points at the alias row. */
    insert_open_relation(g_test_user_id, other, "employs", alias, NULL);
+   /* Within one card: listed once, as outgoing, never again as incoming. */
+   insert_open_relation(g_test_user_id, canonical, "also_known_as", alias, NULL);
 
-   memory_relation_t out[8];
-   int64_t subj_roots[8] = { 0 };
-   int64_t obj_roots[8] = { 0 };
-   int count = 0;
-   int rc = memory_db_relation_list_with_canonical_roots_by_user(g_test_user_id, out, subj_roots,
-                                                                 obj_roots, 8, &count);
-   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
-   TEST_ASSERT_EQUAL_INT(1, count);
-   TEST_ASSERT_EQUAL_INT64(other, subj_roots[0]);    /* canonical itself */
-   TEST_ASSERT_EQUAL_INT64(canonical, obj_roots[0]); /* alias resolved up */
+   const int64_t ids[2] = { canonical, other };
+   memory_card_relation_t *rows = NULL;
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_relation_list_for_entities(
+                                                g_test_user_id, ids, 2, 50, true, &rows, &n));
+   TEST_ASSERT_EQUAL_INT(3, n);
+   TEST_ASSERT_EQUAL_INT(1, count_card_rows(rows, n, canonical, false));
+   TEST_ASSERT_EQUAL_INT(1, count_card_rows(rows, n, canonical, true));
+   TEST_ASSERT_EQUAL_INT(1, count_card_rows(rows, n, other, false));
+   TEST_ASSERT_EQUAL_INT(0, count_card_rows(rows, n, other, true));
+   for (int i = 0; i < n; i++) {
+      if (rows[i].card_id == canonical && rows[i].incoming) {
+         TEST_ASSERT_EQUAL_INT64(other, rows[i].rel.object_entity_id);
+         TEST_ASSERT_EQUAL_STRING("Acme Corp", rows[i].rel.object_name);
+      }
+      if (rows[i].card_id == other) {
+         TEST_ASSERT_EQUAL_INT64(alias, rows[i].rel.object_entity_id); /* as stored */
+      }
+   }
+   free(rows);
+
+   /* Without incoming: outgoing rows only. */
+   rows = NULL;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_relation_list_for_entities(
+                                                g_test_user_id, ids, 2, 0, false, &rows, &n));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_INT(0, count_card_rows(rows, n, canonical, true));
+   free(rows);
 }
 
-static void test_relation_list_with_canonical_roots_literal_object_zero_root(void) {
-   /* Relation with no object_entity_id (literal object_value).  obj_roots
-    * must be 0 so callers know to skip "in" attribution. */
-   int64_t subj = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
-   insert_open_relation(g_test_user_id, subj, "favorite_color", 0, "blue");
+static void test_relation_list_for_entities_beyond_the_old_cap(void) {
+   /* More relations than the old 2000-row global pull: a small card keeps
+    * every edge, a hub card keeps its limit and says how many it has, and
+    * with no limit every relation comes back. */
+   int64_t hub = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t small = insert_entity_typed(g_test_user_id, "Acme Corp", "org");
+   insert_relations_bulk(hub, 2100, "hub_rel_");
+   insert_relations_bulk(small, 30, "small_rel_");
+   /* The hub's most-seen edge comes first. */
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db,
+                                                 "UPDATE memory_relations SET mention_count = 9 "
+                                                 "WHERE relation = 'hub_rel_7'",
+                                                 NULL, NULL, NULL));
 
-   memory_relation_t out[8];
-   int64_t subj_roots[8] = { 0 };
-   int64_t obj_roots[8] = { 0 };
-   int count = 0;
-   int rc = memory_db_relation_list_with_canonical_roots_by_user(g_test_user_id, out, subj_roots,
-                                                                 obj_roots, 8, &count);
-   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
-   TEST_ASSERT_EQUAL_INT(1, count);
-   TEST_ASSERT_EQUAL_INT64(subj, subj_roots[0]);
-   TEST_ASSERT_EQUAL_INT64(0, obj_roots[0]);
+   memory_card_relation_t *rows = NULL;
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_relation_list_for_entities(
+                                                g_test_user_id, &small, 1, 50, true, &rows, &n));
+   TEST_ASSERT_EQUAL_INT(30, n);
+   TEST_ASSERT_EQUAL_INT(30, rows[0].total);
+   free(rows);
+
+   const int64_t ids[2] = { hub, small };
+   rows = NULL;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_relation_list_for_entities(
+                                                g_test_user_id, ids, 2, 50, true, &rows, &n));
+   TEST_ASSERT_EQUAL_INT(80, n);
+   for (int i = 1; i < n; i++) {
+      TEST_ASSERT_TRUE(rows[i - 1].card_id <= rows[i].card_id); /* Sorted by card */
+   }
+   TEST_ASSERT_EQUAL_INT(50, count_card_rows(rows, n, hub, false));
+   TEST_ASSERT_EQUAL_INT(30, count_card_rows(rows, n, small, false));
+   for (int i = 0; i < n; i++) {
+      if (rows[i].card_id == hub) {
+         TEST_ASSERT_EQUAL_INT(2100, rows[i].total);
+         TEST_ASSERT_EQUAL_STRING("hub_rel_7", rows[i].rel.relation);
+         break;
+      }
+   }
+   free(rows);
+
+   rows = NULL;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_relation_list_for_entities(
+                                                g_test_user_id, ids, 2, 0, false, &rows, &n));
+   TEST_ASSERT_EQUAL_INT(2130, n);
+   TEST_ASSERT_EQUAL_INT(2100, count_card_rows(rows, n, hub, false));
+   free(rows);
 }
 
-static void test_relation_list_with_canonical_roots_rejects_null_arrays(void) {
-   /* The new function requires all three output arrays non-NULL. */
-   memory_relation_t out[1];
-   int64_t roots[1] = { 0 };
-   int count = 0;
-   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_relation_list_with_canonical_roots_by_user(
-                                                g_test_user_id, NULL, roots, roots, 1, &count));
-   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_relation_list_with_canonical_roots_by_user(
-                                                g_test_user_id, out, NULL, roots, 1, &count));
-   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_relation_list_with_canonical_roots_by_user(
-                                                g_test_user_id, out, roots, NULL, 1, &count));
+/* Incoming edges past the limit: the card keeps its strongest across its
+ * members (the entity and its alias) and its total counts them all. */
+static void test_relation_list_for_entities_incoming_beyond_limit(void) {
+   int64_t card = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   int64_t alias = insert_entity_typed(g_test_user_id, "Jon", "person");
+   int64_t source = insert_entity_typed(g_test_user_id, "Acme Corp", "org");
+   int64_t link_id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_entity_alias_link(g_test_user_id, alias, card, "soft",
+                                                     "test-fixture", -1.0f, NULL, &link_id));
+   char sql[512];
+   snprintf(sql, sizeof(sql),
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 90) "
+            "INSERT INTO memory_relations (user_id, subject_entity_id, relation, "
+            "object_entity_id, confidence) SELECT %d, %lld, 'in_rel_' || i, "
+            "CASE WHEN i <= 60 THEN %lld ELSE %lld END, 0.8 FROM n",
+            g_test_user_id, (long long)source, (long long)card, (long long)alias);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+   /* The alias's edges hold the most-seen one. */
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db,
+                                                 "UPDATE memory_relations SET mention_count = 9 "
+                                                 "WHERE relation = 'in_rel_75'",
+                                                 NULL, NULL, NULL));
+
+   memory_card_relation_t *rows = NULL;
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_relation_list_for_entities(
+                                                g_test_user_id, &card, 1, 50, true, &rows, &n));
+   TEST_ASSERT_EQUAL_INT(50, n);
+   TEST_ASSERT_EQUAL_INT(50, count_card_rows(rows, n, card, true));
+   TEST_ASSERT_EQUAL_INT(90, rows[0].total);
+   TEST_ASSERT_EQUAL_STRING("in_rel_75", rows[0].rel.relation);
+   TEST_ASSERT_EQUAL_INT64(source, rows[0].rel.object_entity_id);
+   free(rows);
+
+   rows = NULL;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_relation_list_for_entities(
+                                                g_test_user_id, &card, 1, 0, true, &rows, &n));
+   TEST_ASSERT_EQUAL_INT(90, n);
+   TEST_ASSERT_EQUAL_INT(90, rows[89].total);
+   free(rows);
+}
+
+/* Stats: an empty store is a success with zero counts; a read that fails is
+ * a failure, never zeros passed off as the counts. */
+static void test_get_stats_empty_and_failure(void) {
+   memory_stats_t stats;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_get_stats(g_test_user_id, &stats));
+   TEST_ASSERT_EQUAL_INT(0, stats.fact_count);
+   TEST_ASSERT_EQUAL_INT(0, stats.entity_count);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_exec(s_db.db, "DROP TABLE memory_summaries", NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_get_stats(g_test_user_id, &stats));
+}
+
+static void test_relation_list_for_entities_arguments(void) {
+   int64_t id = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   memory_card_relation_t *rows = (memory_card_relation_t *)&id; /* must be reset */
+   int n = -1;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_relation_list_for_entities(
+                                                g_test_user_id, NULL, 0, 50, true, &rows, &n));
+   TEST_ASSERT_NULL(rows);
+   TEST_ASSERT_EQUAL_INT(0, n);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_relation_list_for_entities(
+                                                g_test_user_id, &id, 1, 50, true, NULL, &n));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_FAILURE, memory_db_relation_list_for_entities(
+                                                g_test_user_id, NULL, 1, 50, true, &rows, &n));
 }
 
 static void test_relation_list_class_aware_mention_count_surfaces(void) {
    /* v49: per-row mention_count flows through the read path to memory_relation_t.
     * Insert two relations against different alias members of a single
     * equivalence class — each goes in at column-default mention_count=1.
-    * Both rows surface with class-canonical subj_roots resolution; JS-side
-    * aggregation will sum 1 + 1 = 2 for the "× N" display badge.  This test
-    * pins the per-row read; aggregation is JS-side and covered by manual UI
-    * inspection during verification. */
+    * Both rows surface on the canonical's card; JS-side aggregation sums
+    * 1 + 1 = 2 for the "× N" display badge.  This test pins the per-row
+    * read; aggregation is JS-side. */
    int64_t canonical = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
    int64_t alias = insert_entity_typed(g_test_user_id, "Jon", "person");
    int64_t link_id = 0;
@@ -3720,25 +3960,36 @@ static void test_relation_list_class_aware_mention_count_surfaces(void) {
    insert_open_relation(g_test_user_id, canonical, "works_at", 0, "Acme Corp");
    insert_open_relation(g_test_user_id, alias, "works_at", 0, "Acme Corp");
 
-   memory_relation_t out[8];
-   int64_t subj_roots[8] = { 0 };
-   int64_t obj_roots[8] = { 0 };
+   memory_card_relation_t *rows = NULL;
    int count = 0;
-   int rc = memory_db_relation_list_with_canonical_roots_by_user(g_test_user_id, out, subj_roots,
-                                                                 obj_roots, 8, &count);
+   int rc = memory_db_relation_list_for_entities(g_test_user_id, &canonical, 1, 50, true, &rows,
+                                                 &count);
    TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, rc);
    TEST_ASSERT_EQUAL_INT(2, count);
-   /* Both rows roll up to the canonical via subj_roots. */
-   TEST_ASSERT_EQUAL_INT64(canonical, subj_roots[0]);
-   TEST_ASSERT_EQUAL_INT64(canonical, subj_roots[1]);
-   /* Per-row mention_count surfaces — JS will sum these for the badge. */
-   TEST_ASSERT_EQUAL_INT(1, out[0].mention_count);
-   TEST_ASSERT_EQUAL_INT(1, out[1].mention_count);
+   TEST_ASSERT_EQUAL_INT64(canonical, rows[0].card_id);
+   TEST_ASSERT_EQUAL_INT64(canonical, rows[1].card_id);
+   TEST_ASSERT_EQUAL_INT(1, rows[0].rel.mention_count);
+   TEST_ASSERT_EQUAL_INT(1, rows[1].rel.mention_count);
+   free(rows);
 }
 
 /* ============================================================================
  * Main
  * ============================================================================ */
+
+/* Entity merging off: a nominated pair is neither linked nor proposed. */
+static void test_nominated_merge_honors_merging_off(void) {
+   g_config.memory.entity_merge_enabled = false;
+   const int64_t a = insert_entity_typed(g_test_user_id, "Jonathan Smith", "person");
+   const int64_t b = insert_entity_typed(g_test_user_id, "Jonathan Smith Jr", "person");
+   memory_alias_evaluate_t eval;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_entity_consider_nominated_merge(
+                                                g_test_user_id, b, a, false, &eval));
+   TEST_ASSERT_EQUAL_INT(MEMORY_ALIAS_OUTCOME_NO_CANDIDATES, eval.outcome);
+   TEST_ASSERT_EQUAL_INT(0, count_db_rows("SELECT COUNT(*) FROM memory_entities WHERE "
+                                          "canonical_id IS NOT NULL"));
+   TEST_ASSERT_EQUAL_INT(0, count_db_rows("SELECT COUNT(*) FROM memory_entity_merge_proposals"));
+}
 
 int main(void) {
    UNITY_BEGIN();
@@ -3802,10 +4053,12 @@ int main(void) {
    RUN_TEST(test_link_user_self_propose_skips_swap_when_self_has_dependents);
 
    /* Relation list with SQL-resolved canonical roots */
-   RUN_TEST(test_relation_list_with_canonical_roots_subject_resolves_to_canonical);
-   RUN_TEST(test_relation_list_with_canonical_roots_object_resolves_to_canonical);
-   RUN_TEST(test_relation_list_with_canonical_roots_literal_object_zero_root);
-   RUN_TEST(test_relation_list_with_canonical_roots_rejects_null_arrays);
+   RUN_TEST(test_relation_list_for_entities_alias_rows_roll_up);
+   RUN_TEST(test_relation_list_for_entities_incoming_names_subject_card);
+   RUN_TEST(test_relation_list_for_entities_beyond_the_old_cap);
+   RUN_TEST(test_relation_list_for_entities_incoming_beyond_limit);
+   RUN_TEST(test_get_stats_empty_and_failure);
+   RUN_TEST(test_relation_list_for_entities_arguments);
    RUN_TEST(test_relation_list_class_aware_mention_count_surfaces);
 
    /* alias_link / alias_unlink */
@@ -3821,6 +4074,8 @@ int main(void) {
    RUN_TEST(test_entity_merge_into_own_alias);
    RUN_TEST(test_entity_merge_into_an_alias);
    RUN_TEST(test_alias_names_leave_out_user_placeholder);
+   RUN_TEST(test_link_candidates_keep_the_winner);
+   RUN_TEST(test_nominated_merge_honors_merging_off);
    RUN_TEST(test_fact_ids_for_subject);
    RUN_TEST(test_entity_class_members_scoped);
    RUN_TEST(test_class_lookups_by_alias);
@@ -3893,6 +4148,9 @@ int main(void) {
    /* Entity upsert timestamp overrides for reextract */
    RUN_TEST(test_entity_upsert_at_overrides_take_effect);
    RUN_TEST(test_entity_upsert_wrapper_uses_now);
+   RUN_TEST(test_sweep_removes_only_old_entities_nothing_names);
+   RUN_TEST(test_sweep_keeps_an_entity_a_pre_image_holds);
+   RUN_TEST(test_user_ids_include_one_with_only_entities);
 
    return UNITY_END();
 }

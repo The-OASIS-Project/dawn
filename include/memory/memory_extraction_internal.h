@@ -47,6 +47,15 @@ bool extraction_slot_claim_or_queue(int user_id,
                                     const char *session_id,
                                     const memory_extraction_fallback_t *fallback);
 
+/**
+ * @brief Claim the user's extraction slot, never queueing: for a run whose
+ *        request can't wait in the queue (a range run)
+ * @return true when the slot is the caller's; false when the user's
+ *         extraction is running, held or waited for, every slot is busy, or
+ *         the daemon is stopping
+ */
+bool extraction_slot_claim(int user_id);
+
 /** Release the user's slot, then start what the queue holds that can now run. */
 void extraction_slot_release(int user_id);
 
@@ -63,5 +72,38 @@ int extraction_run_queued(int user_id,
                           struct json_object *history,
                           int message_count,
                           const memory_extraction_fallback_t *fallback);
+
+/** A range run (memory_extraction_range.c): its bounds, and what its dry run
+ *  found. */
+typedef struct {
+   int64_t from; /* first row of the range */
+   int64_t to;   /* last row of the range */
+   bool dry;     /* find what it would read; claim nothing, write nothing */
+   int outside;  /* out: the outside kind the batch carries */
+} extraction_range_t;
+
+/**
+ * @brief Extract rows from..to of a conversation behind its cursor, through
+ *        the trigger every extraction takes (memory_extraction.c)
+ * @param history The conversation's stored rows through @p range->to
+ *                (borrowed)
+ * @return SUCCESS when started (or, dry, when it would start), MEMORY_EXTRACTION_BUSY,
+ *         MEMORY_EXTRACT_RANGE_NO_USER_ROW, or another refusal (non-zero)
+ */
+int extraction_run_range(int user_id,
+                         int64_t conversation_id,
+                         struct json_object *history,
+                         extraction_range_t *range);
+
+/**
+ * @brief Record that rows from..to of a conversation were extracted, unless a
+ *        recorded range overlaps them (one statement, so two runs can't both
+ *        pass)
+ * @return SUCCESS, MEMORY_EXTRACT_RANGE_OVERLAP, or FAILURE
+ */
+int extraction_range_record(int64_t conversation_id, int64_t from, int64_t to);
+
+/** Remove the record of a range run that stored nothing. */
+void extraction_range_unrecord(int64_t conversation_id, int64_t from, int64_t to);
 
 #endif /* MEMORY_EXTRACTION_INTERNAL_H */

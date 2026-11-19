@@ -57,6 +57,15 @@ extern "C" {
 int memory_note_bridge_upsert_gloss(int user_id, int64_t note_doc_id, const char *label);
 
 /**
+ * @brief memory_note_bridge_upsert_gloss for a note made from outside text
+ *        (a research report): the gloss carries @p outside (core/outside_kind.h)
+ */
+int memory_note_bridge_upsert_gloss_from(int user_id,
+                                         int64_t note_doc_id,
+                                         const char *label,
+                                         int outside);
+
+/**
  * @brief Delete the bridge gloss for a note.
  *
  * Call BEFORE the note row is deleted: the FK `ON DELETE SET NULL` nulls

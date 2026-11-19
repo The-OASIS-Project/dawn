@@ -809,6 +809,8 @@
          // at the right spot by timestamp.  Tags the entries this message just added.
          const tagEntries = (fromLen, ts, msgId) => {
             for (let k = fromLen; k < transcript.children.length; k++) {
+               // A held question (DawnTurnWait) rides at the end and is no saved row.
+               if (transcript.children[k].classList.contains('turn-wait-entry')) continue;
                transcript.children[k].setAttribute('data-ts', String(ts || 0));
                // Phase-0 (server-authoritative persistence §6a): stamp the DB message_id
                // on every reloaded bubble so a message_appended arriving after a reload
@@ -826,7 +828,12 @@
                if (renderToken !== historyState.loadRenderToken) return;
                if (msg.role === 'system') continue;
                if (typeof DawnTranscript === 'undefined') continue;
-               const entryStart = transcript.children.length;
+               // A held question (DawnTurnWait) stays last: this row's entries land just
+               // before it, at its index, so count from there.
+               const held = transcript.lastElementChild;
+               const entryStart =
+                  transcript.children.length -
+                  (held && held.classList.contains('turn-wait-entry') ? 1 : 0);
                if (msg.role === 'tool') {
                   // Normally skipped — rendered paired with its assistant call above. But if
                   // that call fell into an earlier, not-yet-loaded page (pagination split a
@@ -915,6 +922,13 @@
                   msg.email_ref
                );
                tagEntries(entryStart, msg.created_at, msg.id);
+               if (msg.stopped) {
+                  DawnTranscript.markStopped(
+                     transcript.querySelector(
+                        '.transcript-entry.assistant[data-message-id="' + String(msg.id) + '"]'
+                     )
+                  );
+               }
             }
 
             // Add continuation link at bottom for archived conversations (after all messages)
@@ -929,6 +943,9 @@
             if (typeof DawnAgentEvents !== 'undefined') {
                DawnAgentEvents.flush(payload.conversation_id);
             }
+            // What memory learned from it, as markers after the messages it read.
+            if (window.DawnMemoryMarker)
+               DawnMemoryMarker.conversationLoaded(payload.conversation_id);
 
             // Scroll to bottom after all messages loaded
             transcript.scrollTop = transcript.scrollHeight;
@@ -2021,6 +2038,8 @@
          transcript.innerHTML = '';
          if (typeof DawnToolPills !== 'undefined') DawnToolPills.reset();
       }
+      // Leaving any attached job: its markers and card don't follow into the new chat.
+      if (typeof DawnAgentEvents !== 'undefined') DawnAgentEvents.reset(0);
 
       // Reset per-conversation LLM settings
       if (typeof DawnSettings !== 'undefined') {

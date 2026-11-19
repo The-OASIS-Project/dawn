@@ -507,6 +507,18 @@ void llm_clear_interrupt(void);
 int llm_is_interrupt_requested(void);
 
 /**
+ * @brief Whether the transfer running on this thread has been cancelled: its
+ *        session's cancel flag, or (for a foreground call) the global interrupt.
+ *
+ * The same test llm_curl_progress_callback() makes.  A streaming write callback
+ * asks it too: curl only calls the progress callback between reads, so data it
+ * already holds would otherwise be delivered to the end after a Stop.
+ *
+ * @return 1 if cancelled, 0 otherwise
+ */
+int llm_transfer_cancelled(void);
+
+/**
  * @brief Set thread-local cancel flag for per-session cancellation
  *
  * Call this before starting an LLM request to enable per-session cancellation.

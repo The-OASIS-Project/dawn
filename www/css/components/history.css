@@ -825,19 +825,30 @@
       max-width: 100%;
    }
 
+   /* The title gets the whole width; the buttons sit on their own line below
+      it, and a clear divider separates one chat from the next. */
    .history-item {
       padding: 1rem;
+      flex-wrap: wrap;
+      border-bottom-color: var(--border-color);
    }
 
    .history-item-content {
-      margin-right: 0.5rem;
+      flex-basis: 100%;
    }
 
    .history-item-actions {
       opacity: 1; /* Always visible on mobile */
       position: static;
       transform: none;
-      flex-shrink: 0;
+      flex-basis: 100%;
+      justify-content: flex-end;
+      margin-top: 0.5rem;
+   }
+
+   /* Taller rows: an open chain shows all its children. */
+   .history-chain-group:not(.collapsed) .history-chain-children {
+      max-height: none;
    }
 
    .history-item-actions button {
@@ -944,4 +955,15 @@
    letter-spacing: 0.02em;
    white-space: nowrap;
    vertical-align: middle;
+}
+
+/* Phone rows hold the buttons under the title: the generating / unread dots sit
+   by the title, not in the middle of the taller row.  (After the dots' own rules,
+   with their selectors, so it wins.) */
+@media (max-width: 600px) {
+   .history-item.generating::before,
+   .history-item.done-unread:not(.generating)::before {
+      top: 1.6rem;
+      transform: none;
+   }
 }

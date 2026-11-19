@@ -355,6 +355,7 @@ void test_only_side_calls_leave_the_context_numbers_alone(void) {
    TEST_ASSERT_FALSE(llm_call_kind_sets_context(LLM_CALL_OBSERVE));
    TEST_ASSERT_FALSE(llm_call_kind_sets_context(LLM_CALL_SUMMARIZER));
    TEST_ASSERT_FALSE(llm_call_kind_sets_context(LLM_CALL_SYNTHESIS));
+   TEST_ASSERT_FALSE(llm_call_kind_sets_context(LLM_CALL_CONSOLIDATION));
 }
 
 static llm_call_kind_t kind_now(void) {
@@ -507,8 +508,9 @@ void test_a_failed_write_keeps_the_rows(void) {
 static void test_one_off_calls(void) {
    TEST_ASSERT_FALSE(llm_cache_monitor_one_off_call());
    static const llm_call_kind_t k_one_off[] = { LLM_CALL_COMPACTION, LLM_CALL_EXTRACTION };
-   static const llm_call_kind_t k_kept[] = { LLM_CALL_TURN, LLM_CALL_TOOL_ITER, LLM_CALL_JOB,
-                                             LLM_CALL_BRIEFING, LLM_CALL_SUMMARIZER };
+   static const llm_call_kind_t k_kept[] = { LLM_CALL_TURN,       LLM_CALL_TOOL_ITER,
+                                             LLM_CALL_JOB,        LLM_CALL_BRIEFING,
+                                             LLM_CALL_SUMMARIZER, LLM_CALL_CONSOLIDATION };
    for (size_t i = 0; i < sizeof(k_one_off) / sizeof(k_one_off[0]); i++) {
       const int prev = llm_cache_monitor_push_kind(k_one_off[i]);
       TEST_ASSERT_TRUE(llm_cache_monitor_one_off_call());
@@ -706,6 +708,27 @@ void test_dropped_reasoning_alerts_once(void) {
    json_object_put(r);
 }
 
+/* The clamp and the cache diagnostics measure a call by its own conversation:
+ * a side call, or a thread with no command context, has none. */
+static void test_conversation_session_is_the_turns_own(void) {
+   static session_t session;
+   s_context = NULL;
+   TEST_ASSERT_NULL(llm_cache_monitor_conversation_session());
+   s_context = &session;
+   TEST_ASSERT_EQUAL_PTR(&session, llm_cache_monitor_conversation_session());
+   int prev = llm_cache_monitor_push_kind(LLM_CALL_TURN);
+   TEST_ASSERT_EQUAL_PTR(&session, llm_cache_monitor_conversation_session());
+   llm_cache_monitor_pop_kind(prev);
+   const llm_call_kind_t side[] = { LLM_CALL_EXTRACTION, LLM_CALL_COMPACTION, LLM_CALL_BRIEFING,
+                                    LLM_CALL_SUMMARIZER };
+   for (size_t i = 0; i < sizeof(side) / sizeof(side[0]); i++) {
+      prev = llm_cache_monitor_push_kind(side[i]);
+      TEST_ASSERT_NULL(llm_cache_monitor_conversation_session());
+      llm_cache_monitor_pop_kind(prev);
+   }
+   s_context = NULL;
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_prefix_hash_covers_tools_and_stable_system_only);
@@ -733,5 +756,6 @@ int main(void) {
    RUN_TEST(test_state_names);
    RUN_TEST(test_warnings_are_rate_limited);
    RUN_TEST(test_dropped_reasoning_alerts_once);
+   RUN_TEST(test_conversation_session_is_the_turns_own);
    return UNITY_END();
 }

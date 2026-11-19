@@ -348,8 +348,12 @@ static struct json_object *build_responses_request(struct json_object *history,
       json_object_object_add(root, "input", input);
    }
 
-   /* max_output_tokens */
-   json_object_object_add(root, "max_output_tokens", json_object_new_int(g_config.llm.max_tokens));
+   /* max_output_tokens: reasoning counts toward it, so it follows the effort
+    * (every Responses request is streamed); held to the window once the tools
+    * are attached (below). */
+   const int max_output = llm_reply_max_tokens(LLM_CLOUD, CLOUD_PROVIDER_OPENAI, model_name,
+                                               &resolved, true);
+   json_object_object_add(root, "max_output_tokens", json_object_new_int(max_output));
 
    /* Tools.  The loop's last call (iteration at the cap), for a text answer:
     * the tools stay (the request reads as every other did), none may be
@@ -372,6 +376,15 @@ static struct json_object *build_responses_request(struct json_object *history,
          }
       }
    }
+
+   /* Held to the room the window leaves, the tools included; replaced in
+    * place.  input_text counts only when the input above appended it. */
+   struct json_object *request_tools = NULL;
+   json_object_object_get_ex(root, "tools", &request_tools);
+   json_object_object_add(root, "max_output_tokens",
+                          json_object_new_int(
+                              llm_context_fit_reply(max_output, history, input_text, request_tools,
+                                                    LLM_CLOUD, CLOUD_PROVIDER_OPENAI, model_name)));
 
    return root;
 }
@@ -889,6 +902,12 @@ static size_t responses_write_callback(void *contents, size_t size, size_t nmemb
    size_t total = size * nmemb;
    const char *data = (const char *)contents;
 
+   /* Stopped: take no more of what curl already holds (a short write ends the
+    * transfer).  Each event fed on would run its sentence through speech. */
+   if (llm_transfer_cancelled()) {
+      return 0;
+   }
+
    /* Capture raw response for error message extraction (cap at
     * RESPONSES_RAW_BUFFER_MAX).  Matches Claude's streaming context
     * pattern (see llm_claude.c). */
@@ -1043,13 +1062,20 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
          continue;
       }
 
-      if (res == CURLE_ABORTED_BY_CALLBACK) {
+      /* The write callback ends a stopped transfer with a short write. */
+      const bool stopped = res == CURLE_ABORTED_BY_CALLBACK ||
+                           (res == CURLE_WRITE_ERROR && llm_transfer_cancelled());
+      if (stopped) {
          OLOG_INFO("Responses: transfer interrupted by user");
+         /* What had streamed, with the output items that finished. */
+         llm_stream_fill_stopped(rctx.stream_ctx, result);
+         result->blocks = rctx.blocks;
+         rctx.blocks = NULL;
       } else {
          OLOG_ERROR("Responses: curl_easy_perform failed: %s", curl_easy_strerror(res));
       }
 #ifdef ENABLE_WEBUI
-      if (res != CURLE_ABORTED_BY_CALLBACK) {
+      if (!stopped) {
          session_t *s = session_get_command_context();
          if (s && s->type == SESSION_TYPE_WEBUI) {
             const char *err_code = (res == CURLE_OPERATION_TIMEDOUT) ? "LLM_TIMEOUT" : "LLM_ERROR";

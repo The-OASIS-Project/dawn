@@ -28,6 +28,8 @@
 #include "llm/llm_compaction.h"
 #include "llm/llm_compaction_range.h"
 #include "llm/llm_context.h"
+#include "llm/llm_history_kind.h"
+#include "prompts.h"
 #include "unity.h"
 
 void setUp(void) {
@@ -447,6 +449,32 @@ static void test_summarize_falls_through_to_l3(void) {
    json_object_put(h);
 }
 
+/* A reply the user stopped reads as cut off at every level: the note after its
+ * text for the summarizer, and on its role in the mechanical L3, whose snippet
+ * is cut before a long reply's end. */
+static char *seen_input(struct json_object *in, llm_compaction_level_t level, void *ctx) {
+   (void)level;
+   free(*(char **)ctx);
+   *(char **)ctx = strdup(json_object_to_json_string(in));
+   return NULL;
+}
+
+static void test_summary_input_marks_a_stopped_reply(void) {
+   struct json_object *h = two_messages();
+   json_object_object_add(json_object_array_get_idx(h, 1), LLM_HISTORY_STOPPED_KEY,
+                          json_object_new_boolean(1));
+   char *in = NULL;
+   llm_compaction_level_t level = LLM_COMPACT_NORMAL;
+   char *s = llm_compaction_summarize(h, 0, 10000, NULL, seen_input, &in, NULL, &level);
+   TEST_ASSERT_NOT_NULL(in);
+   TEST_ASSERT_NOT_NULL(strstr(in, STOPPED_REPLY_NOTE));
+   TEST_ASSERT_EQUAL_INT(LLM_COMPACT_DETERMINISTIC, level);
+   TEST_ASSERT_NOT_NULL(strstr(s, " (stopped by the user): "));
+   free(in);
+   free(s);
+   json_object_put(h);
+}
+
 static void test_summarize_stops_when_cancelled(void) {
    struct json_object *h = two_messages();
    fake_summarizer_t f = { .reply = { NULL, NULL } };
@@ -502,9 +530,95 @@ static void test_a_request_is_fixed_part_plus_density(void) {
    TEST_ASSERT_EQUAL_INT(40000, llm_compaction_calibrated_tokens(NULL, 40000));
 }
 
+/* The question beside the history counts once: not when the history already
+ * ends with it (every bare completion passes it both ways). */
+static void test_reply_input_counts_the_question_once(void) {
+   struct json_object *hist = json_object_new_array();
+   json_object_array_add(hist, make_msg("system", "You are DAWN."));
+   TEST_ASSERT_EQUAL_INT(2, llm_compaction_question_tokens(hist, "12345678"));
+   json_object_array_add(hist, make_msg("user", "12345678"));
+   TEST_ASSERT_EQUAL_INT(0, llm_compaction_question_tokens(hist, "12345678"));
+   TEST_ASSERT_EQUAL_INT(0, llm_compaction_question_tokens(hist, NULL));
+   TEST_ASSERT_EQUAL_INT(2, llm_compaction_question_tokens(NULL, "12345678"));
+   json_object_put(hist);
+}
+
+/* A large question, then a tool iteration: both requests count the question
+ * once, so the samples that calibrate the density agree with each other (a
+ * first request that counted it twice taught the density too low). */
+static void test_request_estimate_counts_a_large_question_once(void) {
+   static char question[40001];
+   memset(question, 'q', sizeof(question) - 1);
+   question[sizeof(question) - 1] = '\0';
+   struct json_object *hist = json_object_new_array();
+   json_object_array_add(hist, make_msg("system", "You are DAWN."));
+   json_object_array_add(hist, make_msg("user", question)); /* the turn appended it */
+   const int in_history = llm_compaction_estimate_range(hist, 0, 2);
+   /* The first request also passes the question as input_text. */
+   const int first = llm_compaction_request_estimate(hist, question);
+   TEST_ASSERT_EQUAL_INT(in_history, first);
+   /* The tool iteration: the call and its result appended, no input_text. */
+   json_object_array_add(hist, make_msg("assistant", "Looking that up."));
+   json_object_array_add(hist, make_msg("tool", "The result."));
+   const int second = llm_compaction_request_estimate(hist, "");
+   TEST_ASSERT_EQUAL_INT(llm_compaction_estimate_range(hist, 0, 4), second);
+   /* It grew by the tool exchange alone (the range estimate rounds once over
+    * its whole span, so allow a token), not by the 10,000-token question. */
+   TEST_ASSERT_INT_WITHIN(1, llm_compaction_estimate_range(hist, 2, 4), second - first);
+   /* A call whose history doesn't hold the question counts it beside it. */
+   struct json_object *bare = json_object_new_array();
+   json_object_array_add(bare, make_msg("system", "You are DAWN."));
+   TEST_ASSERT_EQUAL_INT(llm_compaction_estimate_range(bare, 0, 1) + 10000,
+                         llm_compaction_request_estimate(bare, question));
+   json_object_put(bare);
+   json_object_put(hist);
+}
+
+/* Tool definitions count until a measured request (which carried them) says
+ * what the conversation weighs. */
+static void test_reply_input_adds_the_tools_until_measured(void) {
+   /* No conversation of its own: the estimate and the tools. */
+   TEST_ASSERT_EQUAL_INT(155000, llm_compaction_reply_input(NULL, 130000, 25000));
+   /* A conversation not yet measured: the same, or its last prompt if larger. */
+   llm_compaction_calibration_t cal = { 0 };
+   TEST_ASSERT_EQUAL_INT(155000, llm_compaction_reply_input(&cal, 130000, 25000));
+   cal.last_prompt = 170000;
+   TEST_ASSERT_EQUAL_INT(170000, llm_compaction_reply_input(&cal, 130000, 25000));
+   /* Measured: the calibrated count, which has the tools already. */
+   cal.known = true;
+   cal.last_prompt = 150000;
+   cal.last_estimate = 120000;
+   cal.last_factor = 1.0f;
+   cal.factor = 1.0f;
+   TEST_ASSERT_EQUAL_INT(llm_compaction_calibrated_tokens(&cal, 130000),
+                         llm_compaction_reply_input(&cal, 130000, 25000));
+   TEST_ASSERT_EQUAL_INT(160000, llm_compaction_reply_input(&cal, 130000, 25000));
+}
+
+static void test_reply_room_holds_the_ceiling_to_the_window(void) {
+   /* Room enough: unchanged. */
+   TEST_ASSERT_EQUAL_INT(65536, llm_compaction_reply_room(65536, 1000000, 500000));
+   /* 200K window, 100K in: less a 10% margin on the input (10000) and 2% of
+    * the window (4000), 86000 left. */
+   TEST_ASSERT_EQUAL_INT(86000, llm_compaction_reply_room(128000, 200000, 100000));
+   /* 170K in: 200000 - 170000 - 17000 - 4000 = 9000. */
+   TEST_ASSERT_EQUAL_INT(9000, llm_compaction_reply_room(64000, 200000, 170000));
+   /* Without the 10% margin this would leave 4000; with it, under the floor. */
+   TEST_ASSERT_EQUAL_INT(LLM_REPLY_ROOM_MIN, llm_compaction_reply_room(16384, 200000, 192000));
+   /* Over the window already: the floor, not zero or negative. */
+   TEST_ASSERT_EQUAL_INT(LLM_REPLY_ROOM_MIN, llm_compaction_reply_room(64000, 200000, 250000));
+   /* A ceiling at or under the floor, or an unknown window: unchanged. */
+   TEST_ASSERT_EQUAL_INT(512, llm_compaction_reply_room(512, 200000, 250000));
+   TEST_ASSERT_EQUAL_INT(128000, llm_compaction_reply_room(128000, 0, 900000));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_compact_deterministic_basic);
+   RUN_TEST(test_reply_room_holds_the_ceiling_to_the_window);
+   RUN_TEST(test_reply_input_counts_the_question_once);
+   RUN_TEST(test_request_estimate_counts_a_large_question_once);
+   RUN_TEST(test_reply_input_adds_the_tools_until_measured);
    RUN_TEST(test_compact_deterministic_budget);
    RUN_TEST(test_compact_deterministic_empty);
    RUN_TEST(test_compact_deterministic_single);
@@ -524,6 +638,7 @@ int main(void) {
    RUN_TEST(test_drop_leading_results);
    RUN_TEST(test_summarize_uses_a_fitting_l1);
    RUN_TEST(test_summarize_falls_through_to_l3);
+   RUN_TEST(test_summary_input_marks_a_stopped_reply);
    RUN_TEST(test_summarize_stops_when_cancelled);
    return UNITY_END();
 }

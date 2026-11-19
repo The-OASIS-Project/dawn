@@ -139,6 +139,20 @@ char *memory_history_strip_visuals(const char *content) {
    return NULL;
 }
 
+char *memory_history_join_visual(const char *body, const char *visual) {
+   size_t blen = strlen(body);
+   size_t vlen = strlen(visual);
+   char *combined = malloc(blen + 1 + vlen + 2); /* body '\n' visual '\n' '\0' */
+   if (combined != NULL) {
+      memcpy(combined, body, blen);
+      combined[blen] = '\n';
+      memcpy(combined + blen + 1, visual, vlen);
+      combined[blen + 1 + vlen] = '\n';
+      combined[blen + 1 + vlen + 1] = '\0';
+   }
+   return combined;
+}
+
 static int append_message_to_history(const conversation_llm_row_t *msg, void *ctx_ptr) {
    history_build_ctx_t *ctx = (history_build_ctx_t *)ctx_ptr;
    if (!ctx || !ctx->array || !msg) {
@@ -227,6 +241,11 @@ static int on_llm_row(const conversation_llm_row_t *row, void *p) {
                                 json_object_new_int64(row->context_of));
       }
    }
+   /* A reply the user stopped (llm_history_stopped_noted). */
+   if (row->stopped && json_object_array_length(lc->rows) == before + 1) {
+      json_object_object_add(json_object_array_get_idx(lc->rows, before), LLM_HISTORY_STOPPED_KEY,
+                             json_object_new_boolean(1));
+   }
    /* Copied now (the row's text is gone after the callback) and parsed after
     * the read, outside the database lock. */
    if (lc->with_blocks && row->llm_blocks && json_object_array_length(lc->rows) == before + 1) {
@@ -246,7 +265,8 @@ static int on_message(const conversation_message_t *msg, void *p) {
                                   .tool_calls = msg->tool_calls,
                                   .tool_call_id = msg->tool_call_id,
                                   .created_at = msg->created_at,
-                                  .is_error = msg->is_error };
+                                  .is_error = msg->is_error,
+                                  .stopped = msg->stopped };
    memcpy(row.role, msg->role, sizeof(row.role));
    return on_llm_row(&row, p);
 }
@@ -285,14 +305,17 @@ static void attach_blocks(struct json_object *rows, int from) {
    }
 }
 
-int memory_history_load_rows(int64_t conv_id,
-                             int user_id,
-                             int64_t watermark,
-                             bool with_blocks,
-                             memory_history_row_cb cb,
-                             void *ctx,
-                             struct json_object *rows,
-                             size_t *chars_out) {
+/* memory_history_load_rows(); a tail (@p drop_leading false) keeps what
+ * leads it, for its caller to judge. */
+static int load_rows_impl(int64_t conv_id,
+                          int user_id,
+                          int64_t watermark,
+                          bool with_blocks,
+                          bool drop_leading,
+                          memory_history_row_cb cb,
+                          void *ctx,
+                          struct json_object *rows,
+                          size_t *chars_out) {
    if (chars_out) {
       *chars_out = 0;
    }
@@ -313,12 +336,23 @@ int memory_history_load_rows(int64_t conv_id,
    if (with_blocks) {
       attach_blocks(rows, from);
    }
-   if (rc == AUTH_DB_SUCCESS && watermark > 0) {
+   if (rc == AUTH_DB_SUCCESS && watermark > 0 && drop_leading) {
       /* A point recorded inside a tool exchange leaves results whose call is
        * in the summary: drop them, on every load. */
       (void)llm_history_drop_leading_results(rows, from, chars_out);
    }
    return rc;
+}
+
+int memory_history_load_rows(int64_t conv_id,
+                             int user_id,
+                             int64_t watermark,
+                             bool with_blocks,
+                             memory_history_row_cb cb,
+                             void *ctx,
+                             struct json_object *rows,
+                             size_t *chars_out) {
+   return load_rows_impl(conv_id, user_id, watermark, with_blocks, true, cb, ctx, rows, chars_out);
 }
 
 /* ------------------------------------------------------------------------
@@ -425,6 +459,9 @@ static int stage_row(const conversation_llm_row_t *row, void *ctx) {
    }
    if (row->tool_call_id && row->tool_call_id[0]) {
       json_object_object_add(obj, "tool_call_id", json_object_new_string(row->tool_call_id));
+   }
+   if (row->stopped) {
+      json_object_object_add(obj, LLM_HISTORY_STOPPED_KEY, json_object_new_boolean(1));
    }
    if (row->images && strcmp(row->role, "tool") == 0) {
       struct json_object *images = json_tokener_parse(row->images);
@@ -538,7 +575,8 @@ static struct json_object *request_message(int user_id, struct json_object *row)
    if (kind == MESSAGE_KIND_TOOL_CHANGE && !llm_tool_change_normalize(m)) {
       OLOG_WARNING("memory_history_loader: a tool change row holds no usable definition");
    }
-   static const char *const carried[] = { "id", LLM_HISTORY_CONTEXT_OF_KEY, LLM_TURN_BLOCKS_KEY };
+   static const char *const carried[] = { "id", LLM_HISTORY_CONTEXT_OF_KEY, LLM_TURN_BLOCKS_KEY,
+                                          LLM_HISTORY_STOPPED_KEY };
    for (size_t i = 0; i < sizeof(carried) / sizeof(carried[0]); i++) {
       struct json_object *v = NULL;
       if (json_object_object_get_ex(row, carried[i], &v)) {
@@ -633,6 +671,72 @@ struct json_object *memory_history_request_context(int64_t conv_id,
       *rows_out = n;
    }
    return hist;
+}
+
+/* Whether the staged rows after @p after_id render as a reload renders them
+ * there: they start a turn (no tool result whose call is earlier) and every
+ * row of request context goes with a question among them (the fold is then
+ * the same as over the whole conversation). */
+static bool tail_stands_alone(struct json_object *staged, int64_t after_id) {
+   const int n = (int)json_object_array_length(staged);
+   bool question = false;
+   for (int i = 0; i < n; i++) {
+      struct json_object *row = json_object_array_get_idx(staged, i);
+      if (i == 0 && json_object_object_get_ex(row, "tool_call_id", NULL)) {
+         return false;
+      }
+      const message_kind_t kind = llm_history_kind_of(row);
+      struct json_object *of = NULL;
+      const int64_t anchor = json_object_object_get_ex(row, LLM_HISTORY_CONTEXT_OF_KEY, &of)
+                                 ? json_object_get_int64(of)
+                                 : 0;
+      if (kind != MESSAGE_KIND_NONE && anchor > 0 && anchor <= after_id) {
+         return false; /* its question is before the tail */
+      }
+      if ((kind == MESSAGE_KIND_TURN_CONTEXT || kind == MESSAGE_KIND_MEMORY) && anchor <= 0 &&
+          !question) {
+         return false; /* unanchored: it would follow a question before the tail */
+      }
+      question = question || llm_history_is_question(row);
+   }
+   return true;
+}
+
+struct json_object *memory_history_request_tail(int64_t conv_id,
+                                                int user_id,
+                                                int64_t after_id,
+                                                bool *rebuild_out) {
+   *rebuild_out = false;
+   struct json_object *staged = json_object_new_array();
+   if (!staged) {
+      return NULL;
+   }
+   /* From 0: a history built from an empty conversation (every row is the tail). */
+   if (after_id < 0 || load_rows_impl(conv_id, user_id, after_id, true, false, stage_row, staged,
+                                      staged, NULL) != AUTH_DB_SUCCESS) {
+      json_object_put(staged);
+      return NULL;
+   }
+   if (!tail_stands_alone(staged, after_id)) {
+      json_object_put(staged);
+      *rebuild_out = true;
+      return NULL;
+   }
+   struct json_object *tail = json_object_new_array();
+   const int n = tail ? (int)json_object_array_length(staged) : 0;
+   for (int i = 0; i < n; i++) {
+      struct json_object *m = request_message(user_id, json_object_array_get_idx(staged, i));
+      if (m) {
+         json_object_array_add(tail, m);
+      }
+   }
+   json_object_put(staged);
+   if (tail && llm_history_fold_context(tail, 0) != 0) {
+      json_object_put(tail); /* out of memory: a full load does the rest */
+      *rebuild_out = true;
+      return NULL;
+   }
+   return tail;
 }
 
 static struct json_object *load_history(int64_t conv_id, int user_id, size_t *text_len_out) {

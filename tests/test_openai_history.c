@@ -27,6 +27,7 @@
 
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_turn_blocks.h"
+#include "prompts.h"
 #include "unity.h"
 
 /* A Claude request's carrier: its endpoint and key tag (llm_request_carrier). */
@@ -232,6 +233,25 @@ static void test_request_context_for_chat(void) {
    json_object_put(history);
 }
 
+/* The user's next message after a reply they stopped opens with the note, as
+ * a leading paragraph; the stopped reply goes as it was saved. */
+static void test_stopped_reply_noted_in_the_next_question(void) {
+   json_object *history = json_tokener_parse(
+       "[{\"role\":\"user\",\"content\":\"Q1\"},"
+       "{\"role\":\"assistant\",\"content\":\"Half\",\"_stopped\":true},"
+       "{\"role\":\"user\",\"content\":\"Go on\"}]");
+   json_object *prepared = llm_openai_prepare_chat_history(history, "api.example.com#00000000",
+                                                           "m");
+   TEST_ASSERT_EQUAL_STRING(
+       "[{\"role\":\"user\",\"content\":\"Q1\"},"
+       "{\"role\":\"assistant\",\"content\":\"Half\"},"
+       "{\"role\":\"user\",\"content\":\"[Operator note] " STOPPED_REPLY_USER_NOTE
+       "\\n\\nGo on\"}]",
+       json_object_to_json_string_ext(prepared, JSON_C_TO_STRING_PLAIN));
+   json_object_put(prepared);
+   json_object_put(history);
+}
+
 /* A direction after a Claude message of tool results is a note of its own
  * (text in a results message doesn't survive becoming tool messages). */
 static void test_note_after_claude_results(void) {
@@ -301,6 +321,7 @@ static void test_other_servers_get_a_tagged_note(void) {
 
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_stopped_reply_noted_in_the_next_question);
    RUN_TEST(test_openai_gets_directions_as_system_messages);
    RUN_TEST(test_other_servers_get_a_tagged_note);
    RUN_TEST(test_note_after_claude_results);

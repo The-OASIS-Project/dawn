@@ -990,6 +990,13 @@ int llm_is_interrupt_requested(void) {
    return llm_interrupt_requested;
 }
 
+int llm_transfer_cancelled(void) {
+   if (tls_cancel_flag && atomic_load(tls_cancel_flag)) {
+      return 1;
+   }
+   return tls_cancel_honor_global && llm_interrupt_requested;
+}
+
 void llm_set_cancel_flag_ex(void *flag, bool honor_global) {
    tls_cancel_flag = (_Atomic bool *)flag;
    tls_cancel_honor_global = honor_global;

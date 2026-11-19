@@ -1,5 +1,6 @@
 # CLI: python3 -m llm_testing.memory_audit
-#        sample|label|classify|compare|report|examples|reextract|candidates|coverage
+#        sample|label|classify|compare|report|examples|reextract|candidates|coverage|
+#        store|comebacks|world
 #
 # An audit of what memory extraction has stored for a user: which facts are worth
 # keeping and which kinds of unwanted fact extraction produces.
@@ -12,10 +13,21 @@
 #   examples   print facts of one kind (shows fact text: for the user, not for logs)
 #   reextract  run DAWN's extraction on chosen stored conversations into a scratch
 #              database, so a prompt variant can be measured on the same input
+#              (--dump-candidates: also what extraction proposed, before storing;
+#              --consolidator prompt|agent, --samples 1|2: how each batch is stored;
+#              --forgotten <file>: seed forgotten facts first; tokens per
+#              conversation by call kind go to reextract_<label>_usage.jsonl)
 #   candidates counts and conversation ids where memory may have gone wrong,
 #              for the owner to write memory eval cases from (prints no text)
 #   coverage   how many of run A's facts (by tier) run B also stored, judged by a
 #              model per conversation: covered / partial / missing (counts only)
+#   store      what re-extraction runs stored: live facts, near-duplicates,
+#              merged/replaced, closed relations, assistant-subject relations,
+#              facts without a relation, one-at-a-time conflicts; for a
+#              consolidator run its batches, ops and triage; tokens per batch by
+#              call kind (counts only)
+#   comebacks  how many seeded forgotten facts a run stored again (a judge)
+#   world      how many extraction candidates are world facts (a judge)
 #
 # Privacy: everything read or written lives under llm_testing/memory_audit/data/
 # (ignored by git).  Only `label` and `examples` print fact text; the others
@@ -35,7 +47,7 @@ import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
-from . import candidates, coverage, models, reextract, rubric
+from . import candidates, coverage, models, reextract, rubric, store
 from .storage import DATA, data_path, private_open, text_sha
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -460,6 +472,15 @@ def main(argv=None):
     s.add_argument("--label", default="", help="output name (default: prompt hash, model, effort)")
     s.add_argument("--config", default="",
                    help="dawn.toml for the bench (default: the run dir's); a variant's settings")
+    s.add_argument("--consolidator", choices=["prompt", "agent"], default="",
+                   help="how the bench stores each batch (default: the config's)")
+    s.add_argument("--samples", type=int, choices=[1, 2], default=0,
+                   help="the consolidator's extraction samples per batch (default 1)")
+    s.add_argument("--forgotten", default="",
+                   help="forgotten facts to seed first (JSON list or JSONL under data/)")
+    s.add_argument("--dump-candidates", action="store_true",
+                   help="also save each batch's raw extraction facts, before the store "
+                        "(reextract_<label>_candidates.jsonl, a B set for coverage)")
 
     s = sub.add_parser("candidates",
                        help="counts and conversation ids per memory failure signal (no text)")
@@ -482,7 +503,28 @@ def main(argv=None):
     s.add_argument("--workers", type=int, default=4)
     s.add_argument("--out", default="", help="verdict cache (default: from both set names)")
 
+    s = sub.add_parser("store", help="what re-extraction runs stored, by count")
+    s.add_argument("runs", nargs="+", help="run labels (reextract_<label>.db under data/)")
+    s.add_argument("--assistant", default="", help="assistant name (default: friday)")
+
+    s = sub.add_parser("comebacks", help="seeded forgotten facts stored again (counts)")
+    s.add_argument("runs", nargs="+", help="run labels")
+    s.add_argument("--forgotten", required=True, help="the seed file under data/")
+    s.add_argument("--model", default="claude:claude-haiku-5-5")
+    s.add_argument("--endpoint", default="")
+    s.add_argument("--secrets", default=DEFAULT_SECRETS)
+
+    s = sub.add_parser("world", help="extraction candidates that are world facts (counts)")
+    s.add_argument("candidates", help="reextract_<label>_candidates.jsonl under data/")
+    s.add_argument("--model", default="claude:claude-haiku-5-5")
+    s.add_argument("--endpoint", default="")
+    s.add_argument("--secrets", default=DEFAULT_SECRETS)
+
     a = p.parse_args(argv)
+    if a.cmd in ("store", "comebacks", "world"):
+        {"store": store.run_store, "comebacks": store.run_comebacks,
+         "world": store.run_world}[a.cmd](a)
+        return
     if a.cmd == "coverage":
         a.a_class = a.a_class or _class_name(a.class_model or a.model, a.a_set, "kind")
         if not os.path.exists(_data(a.a_class)):

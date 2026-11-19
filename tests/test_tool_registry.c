@@ -228,6 +228,16 @@ static const tool_metadata_t mock_tool_array_first = {
    .default_remote = true,
 };
 
+/* Stop hooks record their order. */
+static char s_stopped[8];
+static int s_stopped_n;
+static void stop_a(void) {
+   s_stopped[s_stopped_n++] = 'a';
+}
+static void stop_b(void) {
+   s_stopped[s_stopped_n++] = 'b';
+}
+
 /* ============================================================================
  * setUp / tearDown — fresh registry for each test
  * ============================================================================ */
@@ -243,6 +253,27 @@ void tearDown(void) {
 /* ============================================================================
  * Tests
  * ============================================================================ */
+
+/* Stop runs for tools that have one, last registered first. */
+static void test_stop_tools_in_reverse_order(void) {
+   tool_metadata_t a = mock_tool;
+   a.name = "stop_a";
+   a.stop = stop_a;
+   tool_metadata_t b = mock_tool;
+   b.name = "stop_b";
+   b.stop = stop_b;
+   tool_metadata_t none = mock_tool;
+   none.name = "no_stop";
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_register(&a));
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_register(&none));
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_register(&b));
+   TEST_ASSERT_EQUAL_INT(0, tool_registry_init_tools());
+   s_stopped_n = 0;
+   tool_registry_stop_tools();
+   TEST_ASSERT_EQUAL_INT(2, s_stopped_n);
+   TEST_ASSERT_EQUAL_CHAR('b', s_stopped[0]);
+   TEST_ASSERT_EQUAL_CHAR('a', s_stopped[1]);
+}
 
 static void test_init_returns_success(void) {
    /* setUp already called init, verify available flag */
@@ -746,9 +777,29 @@ static void test_kind_table_validation(void) {
    TEST_ASSERT_EQUAL_INT(SUCCESS, tool_registry_register(&meta));
 }
 
+/* Whose text a result is: the tool's say, unless the action's entry says
+ * otherwise; an undecided tool, or none, isn't DAWN's own. */
+static const tool_action_kind_entry_t own_kinds[] = {
+   { "play", TOOL_KIND_DEVICE, NULL },
+   { "pause", TOOL_KIND_DEVICE, NULL, NULL, TOOL_RESULTS_OUTSIDE },
+};
+static void test_results_own(void) {
+   tool_metadata_t meta = mock_tool;
+   meta.results = TOOL_RESULTS_OWN;
+   meta.action_kinds = own_kinds;
+   meta.action_kind_count = TOOL_KIND_COUNT(own_kinds);
+   TEST_ASSERT_TRUE(tool_results_own(&meta, "play"));
+   TEST_ASSERT_TRUE(tool_results_own(&meta, NULL));
+   TEST_ASSERT_FALSE(tool_results_own(&meta, "pause"));
+   meta.results = TOOL_RESULTS_UNDECIDED;
+   TEST_ASSERT_FALSE(tool_results_own(&meta, "play"));
+   TEST_ASSERT_FALSE(tool_results_own(NULL, "play"));
+}
+
 int main(void) {
    UNITY_BEGIN();
 
+   RUN_TEST(test_stop_tools_in_reverse_order);
    RUN_TEST(test_init_returns_success);
    RUN_TEST(test_kind_lookup_and_default);
    RUN_TEST(test_kind_classify_call);
@@ -790,5 +841,6 @@ int main(void) {
    RUN_TEST(test_escape_and_decode_truncate_safely);
    RUN_TEST(test_extract_zero_out_len_safe);
 
+   RUN_TEST(test_results_own);
    return UNITY_END();
 }

@@ -38,6 +38,7 @@ static void check(const char *model, int want_major, int want_minor) {
 
 /* OpenAI ids — the cases that drive the Responses routing gate. */
 void test_openai_minor_versions(void) {
+   check("gpt-6-astra", 6, 0);
    check("gpt-5.6-luna", 5, 6);
    check("gpt-5.4", 5, 4);
    check("gpt-5.4-mini", 5, 4);

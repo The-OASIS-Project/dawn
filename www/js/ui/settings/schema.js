@@ -9,7 +9,7 @@
 
    // Schema version — bump when adding/removing/reordering fields or sections.
    // When this changes, the settings DOM is rebuilt from scratch.
-   const SCHEMA_VERSION = 9;
+   const SCHEMA_VERSION = 10;
 
    // Track whether DOM has been rendered and which schema version it represents
    let renderedSchemaVersion = null;
@@ -79,13 +79,30 @@
          label: 'Default Persona',
          icon: '&#x1F464;',
          fields: {
+            // The placeholders quote the first words of each built-in half
+            // (AI_PERSONA_VALUES / AI_PERSONA_VOICE, include/prompts.h).
+            values: {
+               type: 'textarea',
+               label: 'Values',
+               rows: 8,
+               placeholder:
+                  'Leave empty for the built-in:\nYour name is {AI Name}. Iron-Man-style AI assistant running on DAWN, in the mold of JARVIS and FRIDAY...',
+               hint: 'Who the assistant is, for every user: role, judgment, limits. Leave empty for the built-in (My Settings → Show full shows it whole). Each user can add to or replace it in My Settings.',
+            },
+            voice: {
+               type: 'textarea',
+               label: 'Voice',
+               rows: 3,
+               placeholder:
+                  'Leave empty for the built-in:\nYour tone: Witty, playful, kind. Light banter welcome...',
+               hint: 'How the assistant talks, for every user: tone, humor, formality. Leave empty for the built-in (My Settings → Show full shows it whole). Each user can add to or replace it in My Settings.',
+            },
             description: {
                type: 'textarea',
-               label: 'AI Description',
+               label: 'Whole persona (older setting: replaces Values and Voice)',
                rows: 5,
-               placeholder:
-                  'Leave empty to use built-in default:\n"Your name is {AI Name}. Iron-Man-style AI assistant running on DAWN, in the mold of JARVIS and FRIDAY..."',
-               hint: 'System-wide base persona for all users. Individual users can append to or replace this via My Settings. Leave empty for the built-in default.',
+               hideWhenEmpty: true,
+               hint: 'While set, it replaces Values and Voice. Move what you want into them, then clear this.',
             },
          },
       },
@@ -397,7 +414,10 @@
                type: 'number',
                label: 'Max Tokens',
                min: 100,
-               hint: 'Maximum tokens in LLM response',
+               hint:
+                  'Maximum tokens in an LLM response. A streamed reply that reasons gets at ' +
+                  "least its effort's ceiling (low 16K, medium 32K, high 64K, xhigh/max 128K), " +
+                  "within the model's maximum.",
                advanced: true,
             },
             cloud: {
@@ -426,7 +446,7 @@
                      type: 'model_list',
                      label: 'OpenAI Models',
                      rows: 8, // LLM_CLOUD_MAX_MODELS
-                     placeholder: 'gpt-4o\ngpt-4-turbo\ngpt-4o-mini',
+                     placeholder: 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna',
                      hint: 'Available models for quick controls (one per line)',
                   },
                   openai_default_model_idx: {
@@ -459,7 +479,7 @@
                      type: 'model_list',
                      label: 'Gemini Models',
                      rows: 8, // LLM_CLOUD_MAX_MODELS
-                     placeholder: 'gemini-2.5-flash\ngemini-2.5-pro\ngemini-3-flash-preview',
+                     placeholder: 'gemini-3.8-flash\ngemini-3.5-flash-lite\ngemini-3.1-pro-preview',
                      hint: 'Available models for quick controls (one per line). 2.5+ and 3.x support reasoning.',
                   },
                   gemini_default_model_idx: {
@@ -473,7 +493,7 @@
                      label: 'OpenRouter Models',
                      rows: 8, // LLM_CLOUD_MAX_MODELS
                      placeholder:
-                        'anthropic/claude-sonnet-4\nopenai/gpt-5.4\ngoogle/gemini-2.5-flash',
+                        'anthropic/claude-sonnet-4\nopenai/gpt-5.4\ngoogle/gemini-3.5-flash-lite',
                      hint: 'Curated shortlist shown in the header model switcher. One OpenRouter model ID per line, "vendor/model" (e.g. anthropic/claude-sonnet-4).',
                   },
                   openrouter_default_model_idx: {
@@ -862,6 +882,20 @@
                   'accuracy from 72% to 77% (mean of two runs) at about 2.4x the output tokens. ' +
                   'Fact extraction only. On a local model that shares its server with chat, ' +
                   'leave off unless tested: reasoning keeps the server busy longer.',
+               advanced: true,
+            },
+            consolidator: {
+               type: 'select',
+               label: 'Memory Consolidator',
+               options: ['prompt', 'agent'],
+               default: 'prompt',
+               hint:
+                  'How extracted facts are stored. "prompt": fixed rules (paraphrase merge, ' +
+                  'automatic replace). "agent": the extraction model reads what memory already ' +
+                  'holds near each fact and decides, one reply per conversation: add, merge, ' +
+                  'replace, close a relation, or set aside. Each batch is recorded with what it ' +
+                  'changed. Costs about 2x the extraction tokens per conversation (two model ' +
+                  'calls).',
                advanced: true,
             },
             silent_observe_provider: {
@@ -2638,19 +2672,6 @@
       sectionsContainer.innerHTML = '';
       showWhenDependents = {};
 
-      const virtualConfig = { ...currentConfig };
-
-      // Populate persona description with built-in default if not set
-      const Config = window.DawnSettingsConfig;
-      if (
-         Config &&
-         Config.getDefaultPersona &&
-         (!virtualConfig.persona || !virtualConfig.persona.description)
-      ) {
-         if (!virtualConfig.persona) virtualConfig.persona = {};
-         virtualConfig.persona.description = Config.getDefaultPersona();
-      }
-
       // Render sections grouped by category
       for (const category of SECTION_CATEGORIES) {
          const headerEl = createCategoryHeader(category);
@@ -2662,7 +2683,7 @@
             const sectionDef = SETTINGS_SCHEMA[sectionKey];
             if (!sectionDef) continue;
 
-            const configSection = virtualConfig[sectionKey] || {};
+            const configSection = currentConfig[sectionKey] || {};
             const sectionEl = createSettingsSection(sectionKey, sectionDef, configSection);
             sectionEl.dataset.category = category.id;
             sectionEls.push(sectionEl);
@@ -2995,6 +3016,13 @@
          }
       }
 
+      // Shown only while it holds a value, decided when the stored value is
+      // shown (render, refresh), never on input: clearing it doesn't hide it.
+      if (def.hideWhenEmpty) {
+         item.classList.add('hide-when-empty');
+         item.style.display = value ? '' : 'none';
+      }
+
       // Add tooltip hint if defined
       if (def.hint) {
          item.title = def.hint;
@@ -3008,7 +3036,7 @@
 
       switch (def.type) {
          case 'text':
-            inputHtml = `<input type="text" id="${inputId}" value="${Utils.escapeAttr(value || '')}" placeholder="${def.placeholder || ''}" data-key="${fullKey}">`;
+            inputHtml = `<input type="text" id="${inputId}" value="${Utils.escapeAttr(value || '')}" placeholder="${Utils.escapeAttr(def.placeholder || '')}" data-key="${fullKey}">`;
             break;
          case 'number':
             {
@@ -3078,7 +3106,7 @@
             inputHtml = `<select id="${inputId}" data-key="${fullKey}" data-dynamic-key="${dynKey}">${dynOptionsHtml}</select>`;
             break;
          case 'textarea':
-            inputHtml = `<textarea id="${inputId}" rows="${def.rows || 3}" placeholder="${def.placeholder || ''}" data-key="${fullKey}">${escapeHtml(value || '')}</textarea>`;
+            inputHtml = `<textarea id="${inputId}" rows="${def.rows || 3}" placeholder="${Utils.escapeAttr(def.placeholder || '')}" data-key="${fullKey}">${escapeHtml(value || '')}</textarea>`;
             break;
          case 'model_list':
             // Convert array to newline-separated string for editing
@@ -3305,22 +3333,10 @@
    function updateSettingsValues(config) {
       if (!sectionsContainer || !config) return;
 
-      // Populate persona description with built-in default if not set
-      const Config = window.DawnSettingsConfig;
-      const virtualConfig = { ...config };
-      if (
-         Config &&
-         Config.getDefaultPersona &&
-         (!virtualConfig.persona || !virtualConfig.persona.description)
-      ) {
-         if (!virtualConfig.persona) virtualConfig.persona = {};
-         virtualConfig.persona.description = Config.getDefaultPersona();
-      }
-
       const inputs = sectionsContainer.querySelectorAll('[data-key]');
       inputs.forEach((input) => {
          const key = input.dataset.key;
-         const value = Utils.getNestedValue(virtualConfig, key);
+         const value = Utils.getNestedValue(config, key);
 
          if (input.type === 'checkbox') {
             input.checked = !!value;
@@ -3352,9 +3368,14 @@
          }
       });
 
+      sectionsContainer.querySelectorAll('.hide-when-empty').forEach((item) => {
+         const input = item.querySelector('[data-key]');
+         item.style.display = input && input.value ? '' : 'none';
+      });
+
       // Re-apply showWhen visibility based on updated values
       for (const key in showWhenDependents) {
-         const val = Utils.getNestedValue(virtualConfig, key);
+         const val = Utils.getNestedValue(config, key);
          if (val !== undefined) {
             updateShowWhenVisibility(key, val);
          }

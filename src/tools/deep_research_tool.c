@@ -351,7 +351,7 @@ int research_spawn_run(int user_id,
     * stamp must fail the start CLOSED: an unmarked research job is plain-resumable
     * and a plain resume would corrupt the run.  The run row doesn't exist yet, so
     * only the job row needs retiring. */
-   if (conv_db_job_set_kind(conv_id, "research") != AUTH_DB_SUCCESS) {
+   if (conv_db_job_set_kind(conv_id, JOB_KIND_RESEARCH) != AUTH_DB_SUCCESS) {
       job_manager_set_terminal(conv_id, user_id, "failed", "failed to mark research job",
                                time(NULL), 0);
       job_manager_mark_dirty();
@@ -645,9 +645,10 @@ static char *deep_research_callback(const char *action, char *value, int *should
    }
 
    /* Execution backstop for the runtime master switch: the native schema already
-    * hides the tool when disabled (llm_tools_refresh), but this refuses any
-    * non-schema entry (a legacy <command> tag, a hallucinated call replayed from
-    * history) so a disabled feature can never actually run. */
+    * hides the tool when disabled (llm_tools_refresh), but this refuses a call
+    * from outside the advertised schema (a model calling it because an earlier
+    * turn used it, or a caller that doesn't go through the schema) so a disabled
+    * feature can never actually run. */
    if (!g_config.research.enabled) {
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Deep research is turned off. Enable it in Settings → Deep Research "
@@ -695,7 +696,7 @@ static char *deep_research_callback(const char *action, char *value, int *should
    /* A background-job/research worker runs headless and must never start research
     * runs (unbounded fan-out).  The tool is already hidden from a research
     * session's schema (allowlist) and from a job session's; this backstops any
-    * non-schema path (e.g. a legacy <command> tag). */
+    * path that doesn't go through the schema. */
    if (caller_is_job && starts_work) {
       json_object_put(details);
       return strdup(TOOL_RESULT_ERROR_MARK
@@ -843,6 +844,7 @@ static int deep_research_describe_call(const char *action,
 
 static const tool_metadata_t deep_research_metadata = {
    .name = "deep_research",
+   .results = TOOL_RESULTS_OUTSIDE,
    .action_kinds = s_deep_research_action_kinds,
    .describe_call = deep_research_describe_call,
    .action_kind_count = TOOL_KIND_COUNT(s_deep_research_action_kinds),

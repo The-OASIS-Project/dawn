@@ -58,17 +58,19 @@ int llm_tools_add_results_openai(struct json_object *history, const tool_result_
     * OpenAI format: Add a "tool" role message for each result
     * {
     *   "role": "tool",
-    *   "tool_call_id": "call_xxx",
-    *   "content": "result text"
+    *   "content": "result text",
+    *   "tool_call_id": "call_xxx"
     * }
+    * In the order a reload builds it (memory_history_loader.c), so a request
+    * from the live history and from a reload are the same bytes.
     */
    for (int i = 0; i < results->count; i++) {
       const tool_result_t *r = &results->results[i];
 
       struct json_object *msg = json_object_new_object();
       json_object_object_add(msg, "role", json_object_new_string("tool"));
-      json_object_object_add(msg, "tool_call_id", json_object_new_string(r->tool_call_id));
       json_object_object_add(msg, "content", result_content(r));
+      json_object_object_add(msg, "tool_call_id", json_object_new_string(r->tool_call_id));
 
       session_history_append(history, msg);
    }

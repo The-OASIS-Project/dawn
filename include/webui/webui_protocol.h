@@ -38,8 +38,12 @@ extern "C" {
 
 #define WEBUI_PROTOCOL_VERSION 1
 
-/* Room for webui_protocol_json_members()' output: raise it with the flags. */
-#define WEBUI_PROTOCOL_JSON_MAX 256
+/* Room for webui_protocol_json_members()' output with every flag on
+ * (webui_protocol_json_max_len, checked by test_webui_protocol). */
+#define WEBUI_PROTOCOL_JSON_MAX 512
+
+/** The longest webui_protocol_json_members() can write: every flag on. */
+size_t webui_protocol_json_max_len(void);
 
 /**
  * @brief The advertised fields as JSON object members (no braces):
@@ -80,13 +84,29 @@ bool webui_protocol_payload_req(struct json_object *payload,
                                 size_t out_size);
 
 /**
- * @brief The error frame answering a message type this daemon doesn't handle:
- *        code UNKNOWN_TYPE, the type echoed as `request_type` and @p req as `req`
- *        (each only when safe to echo), so a client fails at once instead of
- *        waiting out its timeout.
- * @return A heap JSON string (caller frees), or NULL on allocation failure.
+ * @brief Note the request this thread is handling, until webui_protocol_request_end():
+ *        its type and its payload's `req`, each kept only when safe to echo.
+ * @param owner The connection it came in on (any stable pointer for it); frames
+ *              for another connection are never stamped.
+ * One request at a time per thread: a second begin replaces the first, and
+ * the end clears it.
  */
-char *webui_protocol_unknown_type_json(const char *type, const char *req);
+void webui_protocol_request_begin(const void *owner, const char *type, struct json_object *payload);
+
+/** @brief The request noted by webui_protocol_request_begin() is done. */
+void webui_protocol_request_end(void);
+
+/**
+ * @brief Name the request being handled on a frame going back to its sender.
+ * @param owner     The connection the frame goes to.
+ * @param payload   The frame's payload object; NULL or a non-object is left alone.
+ * @param with_type Also add `request_type` (an error frame: its own type doesn't
+ *                  say what was asked).
+ * @return true when `req` was added (a caller sending a shared object removes it
+ *         again).  Nothing is added outside a request, for another connection,
+ *         or over a `req` the payload already has.
+ */
+bool webui_protocol_request_stamp(const void *owner, struct json_object *payload, bool with_type);
 
 #ifdef __cplusplus
 }

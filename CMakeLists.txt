@@ -612,6 +612,8 @@ set(DAWN_SOURCES
     src/core/wake_word.c
     src/core/utterance_dedup.c
     src/core/pending_slots.c          # pure: what a tool staged for the user's confirm
+    src/core/conv_turn_lease.c        # one turn per conversation at a time
+    src/core/conv_post.c              # posts into a conversation from outside a turn
     src/core/tool_call_policy.c       # who may make a tool call
     src/core/tool_call_challenge.c    # actions from a text waiting for the user's reply code
     src/core/reply_code.c             # codes texted to a number and texted back
@@ -646,6 +648,7 @@ set(DAWN_SOURCES
     src/llm/llm_tool_images_render.c
     src/llm/llm_tools_dup.c
     src/llm/llm_tool_loop.c
+    src/llm/llm_tool_history.c
     src/llm/llm_tool_views_plan.c
     src/llm/llm_tool_views_apply.c
     src/llm/llm_context.c
@@ -692,6 +695,7 @@ set(DAWN_SOURCES
     src/audio/audio_backend.c
     src/audio/audio_alsa.c
     src/audio/audio_pulse.c
+    src/audio/pulse_stream.c
     src/audio/ringtone.c
     # phone_apm.cpp is compiled UNCONDITIONALLY (base sources, NOT AEC_SOURCES):
     # its WebRTC use is fenced behind #ifdef AEC_BACKEND_WEBRTC and it stubs to
@@ -774,10 +778,12 @@ if(ENABLE_WEBUI)
         src/webui/webui_broadcasts.c
         src/webui/webui_events.c
         src/webui/webui_jobs.c
+        src/webui/webui_turn_wait.c
         src/webui/webui_message_dispatch.c
         src/webui/webui_send.c
         src/webui/webui_turn_ref.c
         src/webui/webui_email_ref.c
+        src/webui/webui_message_frame.c
         src/webui/webui_attachments.c
         src/webui/webui_http.c
         src/webui/webui_admin.c
@@ -788,6 +794,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_restore.c
         src/webui/webui_memory.c
         src/webui/webui_memory_merged.c
+        src/webui/webui_memory_batches.c
         src/webui/webui_config.c
         src/webui/webui_reasoning.c
         src/webui/webui_session.c
@@ -842,12 +849,16 @@ list(APPEND DAWN_SOURCES
     src/core/session_voice_save.c
     src/core/session_image_hold.c
     src/core/session_history.c
+    src/core/session_catchup.c
+    src/core/session_turn_lease.c
     src/core/turn_queue.c
     src/core/session_manager_llm.c
+    src/core/session_stop.c
     src/core/job_manager.c
     src/core/job_worker.c
     src/core/job_reinvoke.c
     src/core/job_dispatch.c
+    src/core/job_report.c
     # Deep-research live orchestration (rides on the job session + dispatch).
     src/tools/research_run_loop.c
     src/core/research_worker.c
@@ -859,6 +870,7 @@ list(APPEND DAWN_SOURCES
     src/core/build_focus_block.c
     src/core/prompt_builder.c
     src/core/session_prefix.c
+    src/core/session_posts.c
     src/core/tool_result_store.c
     src/tools/result_read_tool.c
     src/tools/result_read_ops.c
@@ -882,6 +894,7 @@ if(ENABLE_WEBUI)
         src/messaging/messaging_engine_read.c
         src/messaging/messaging_engine_link.c
         src/messaging/messaging_engine_inbound.c
+        src/messaging/messaging_engine_parked.c
         src/messaging/messaging_engine_codes.c
         src/messaging/messaging_telegram.c
         src/messaging/messaging_telegram_parse.c
@@ -1013,6 +1026,12 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v109.c
     src/auth/auth_db_migrations_v110.c
     src/auth/auth_db_migrations_v111.c
+    src/auth/auth_db_migrations_v112.c
+    src/auth/auth_db_migrations_v113.c
+    src/auth/auth_db_migrations_v114.c
+    src/auth/auth_db_migrations_v115.c
+    src/auth/auth_db_migrations_v116.c
+    src/auth/auth_db_migrations_v117.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c
@@ -1055,8 +1074,11 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_db_alias_scorer.c
     src/memory/memory_db_alias_cascade.c
     src/memory/memory_db_alias_writes.c
+    src/memory/memory_db_alias_nominate.c
     src/memory/memory_db_provenance.c
     src/memory/memory_db_forget.c
+    src/memory/memory_db_consolidation.c
+    src/memory/memory_db_consolidation_undo.c
     src/core/focus/focus_source.c
     src/core/focus/focus_recency.c
     src/core/focus/focus_candidate_helpers.c
@@ -1078,8 +1100,14 @@ list(APPEND DAWN_SOURCES
     src/memory/memory_callback_restore.c
     src/memory/memory_callback_forget.c
     src/memory/memory_extraction.c
+    src/memory/memory_candidates.c
+    src/memory/memory_consolidate.c
+    src/memory/memory_consolidate_ops.c
+    src/memory/memory_consolidation_undo.c
+    src/memory/memory_consolidation_view.c
     src/memory/memory_extraction_queue.c
     src/memory/memory_extraction_slots.c
+    src/memory/memory_extraction_range.c
     src/memory/memory_extraction_input.c
     src/memory/memory_similarity.c
     src/memory/memory_import.c
@@ -1284,7 +1312,7 @@ target_link_libraries(dawn uuid)
 # Link audio libraries for runtime backend selection
 # Both backends are statically linked; runtime selection via vtable
 if(HAVE_LOCAL_AUDIO)
-    target_link_libraries(dawn asound pulse-simple pulse)
+    target_link_libraries(dawn asound pulse)
 elseif(NOT SERVER_ONLY)
     message(FATAL_ERROR
         "Audio libraries (ALSA, PulseAudio) not found.\n"

@@ -172,6 +172,37 @@
    }
 }
 
+/* Phone (where the panels become bottom sheets): the icons get their own row
+   under the logo and user badge, and the connection status is a dot.  The row
+   scrolls sideways only if it still overflows; its padding keeps the buttons'
+   dots and focus rings from being clipped. */
+@media (max-width: 480px) {
+   #header {
+      flex-wrap: wrap;
+      row-gap: 0.5rem;
+   }
+
+   #header-controls {
+      flex-basis: 100%;
+      justify-content: space-between;
+      overflow-x: auto;
+      scrollbar-width: none;
+      padding: 4px;
+      margin: -4px;
+   }
+
+   #connection-status {
+      font-size: 0;
+      padding: 0.4rem;
+      max-width: none;
+      background: transparent !important;
+   }
+
+   #connection-status::before {
+      display: block;
+   }
+}
+
 /* Very narrow: status dot only */
 @media (max-width: 420px) {
    #header-left {

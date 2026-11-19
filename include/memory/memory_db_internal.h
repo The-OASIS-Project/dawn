@@ -31,6 +31,7 @@
 #define DAWN_MEMORY_DB_INTERNAL_H
 
 #include <sqlite3.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -104,6 +105,40 @@ int memory_db_internal_reopen_rows_locked(int user_id,
                                           sqlite3_stmt *sel,
                                           int *reopened,
                                           int *kept_closed);
+
+/* memory_db_fact_restore inside the caller's transaction: fact @p fact_id
+ * current again, what merges moved off it moved back, the relations its
+ * keeper (into *keeper_out) closed reopened as reopen_rows_locked does.
+ * MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (not the user's, or not superseded:
+ * nothing written) or MEMORY_DB_FAILURE (roll back).  The caller invalidates
+ * the fact cache after unlocking.  Caller holds the lock. */
+int memory_db_internal_fact_restore_locked(int user_id,
+                                           int64_t fact_id,
+                                           int64_t *keeper_out,
+                                           memory_restore_result_t *out);
+
+/* Reopen closed relation @p relation_id as reopen_rows_locked does (not when
+ * that value, any value of a one-at-a-time relation, or its contradiction is
+ * open), *reopened saying whether it was.  Caller holds the lock. */
+int memory_db_internal_relation_reopen_locked(int user_id, int64_t relation_id, bool *reopened);
+
+/* memory_db_entity_alias_unlink inside the caller's transaction: the link's
+ * source entity (into *source_out) no longer an alias, the link stamped
+ * unlinked.  MEMORY_DB_SUCCESS, MEMORY_DB_NOT_FOUND (no such link of the
+ * user, or unlinked already) or MEMORY_DB_FAILURE (a hard merge, or the
+ * database).  The caller invalidates the entity cache after unlocking.
+ * Caller holds the lock. */
+int memory_db_internal_alias_unlink_locked(int user_id,
+                                           int64_t link_id,
+                                           const char *reason,
+                                           int64_t *source_out);
+
+/* memory_db_fact_source_remove with the lock held: the sqlite3_step result,
+ * *removed saying whether a row went. */
+int memory_db_internal_fact_source_remove_locked(int64_t fact_id,
+                                                 int user_id,
+                                                 int64_t conv_id,
+                                                 bool *removed);
 
 /* A user's forget, as one transaction (memory_db_fact_settle.c): the caller
  * clears temp table fact_going (memory_db_internal_going_reset_locked) and
@@ -245,22 +280,30 @@ void memory_db_internal_source_add_locked(memory_source_kind_t kind,
 /* A memory_entities row nothing else names any more (?1: the user): not the
  * user's own (is_user_self; a generic "user" entity is recreated on its next
  * mention), no relation or fact about it, no contact, alias or merge pointing at
- * it.  An entity an alias still targets stays (its target column can't be
- * nulled).  One index seek each ("+user_id" keeps the planner off the user_id
- * index, which scans every relation per entity). */
-#define MEMORY_ENTITY_UNREFERENCED                                                     \
-   "memory_entities.is_user_self = 0 AND "                                             \
-   "NOT EXISTS (SELECT 1 FROM memory_relations r WHERE "                               \
-   "            r.subject_entity_id = memory_entities.id AND +r.user_id = ?1) AND "    \
-   "NOT EXISTS (SELECT 1 FROM memory_relations r WHERE "                               \
-   "            r.object_entity_id = memory_entities.id AND +r.user_id = ?1) AND "     \
-   "NOT EXISTS (SELECT 1 FROM memory_facts f WHERE f.user_id = ?1 AND "                \
-   "            f.subject_entity_id = memory_entities.id) AND "                        \
-   "NOT EXISTS (SELECT 1 FROM contacts c WHERE c.entity_id = memory_entities.id) AND " \
-   "NOT EXISTS (SELECT 1 FROM memory_entities a WHERE "                                \
-   "            a.canonical_id = memory_entities.id) AND "                             \
-   "NOT EXISTS (SELECT 1 FROM memory_entity_aliases al WHERE al.user_id = ?1 AND "     \
-   "            al.target_entity_id = memory_entities.id)"
+ * it, not itself linked as another's alias (its canonical_id set: the link
+ * would lose its source), and not the subject an applied (or stale) op's
+ * pre-image holds for its undo (a malformed pre-image names nothing).  An
+ * entity an alias still targets stays (its target column can't be nulled).
+ * The one definition of "named": the nightly sweep (ENTITY_ORPHAN_SQL) adds
+ * what only it keeps.  One index seek each ("+user_id" keeps the planner off
+ * the user_id index, which scans every relation per entity); the pre-image
+ * list is read once per statement. */
+#define MEMORY_ENTITY_UNREFERENCED                                                          \
+   "memory_entities.is_user_self = 0 AND memory_entities.canonical_id IS NULL AND "         \
+   "NOT EXISTS (SELECT 1 FROM memory_relations r WHERE "                                    \
+   "            r.subject_entity_id = memory_entities.id AND +r.user_id = ?1) AND "         \
+   "NOT EXISTS (SELECT 1 FROM memory_relations r WHERE "                                    \
+   "            r.object_entity_id = memory_entities.id AND +r.user_id = ?1) AND "          \
+   "NOT EXISTS (SELECT 1 FROM memory_facts f WHERE f.user_id = ?1 AND "                     \
+   "            f.subject_entity_id = memory_entities.id) AND "                             \
+   "NOT EXISTS (SELECT 1 FROM contacts c WHERE c.entity_id = memory_entities.id) AND "      \
+   "NOT EXISTS (SELECT 1 FROM memory_entities a WHERE "                                     \
+   "            a.canonical_id = memory_entities.id) AND "                                  \
+   "NOT EXISTS (SELECT 1 FROM memory_entity_aliases al WHERE al.user_id = ?1 AND "          \
+   "            al.target_entity_id = memory_entities.id) AND "                             \
+   "memory_entities.id NOT IN (SELECT s FROM (SELECT CASE WHEN json_valid(pre_image) THEN " \
+   "json_extract(pre_image, '$.subject_entity_id') END AS s FROM memory_consolidation_ops " \
+   "WHERE user_id = ?1 AND status IN ('applied', 'stale')) WHERE s IS NOT NULL)"
 /* memory_preferences aliased "p" (sources: every conversation that gave its
  * current value). */
 #define MEMORY_FORGET_PREF_WHERE \
