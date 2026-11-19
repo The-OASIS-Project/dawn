@@ -78,7 +78,7 @@ bool coding_task_status_open(const char *status);
 #define CODING_CHECK_SHOWN 5
 /** The longest path and reason named there. */
 #define CODING_CHECK_PATH_MAX 120
-#define CODING_CHECK_WHY_MAX 120
+#define CODING_CHECK_WHY_MAX (80 * 4) /* the gateway's 80 characters, in UTF-8 bytes */
 
 /** Whether @p path (named by the agent) is plainly a path DAWN can name in its
  *  own words: short, and only letters, digits, '.', '_', '/', '-'. */

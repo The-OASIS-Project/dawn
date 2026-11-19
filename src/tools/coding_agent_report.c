@@ -53,7 +53,9 @@
 #define CR_KIND_MAX 16                     /* a gateway end: completed, failed, cancelled */
 #define CR_LINE_MAX (CONV_TITLE_MAX + 256) /* a fixed line: the title plus DAWN's words */
 #define CR_REPORT_MAX (16 * 1024)          /* the agent's words put to the take */
-#define CR_FACTS_MAX 2048    /* DAWN's facts: branch, files to check, checks, uncommitted, cost */
+/* DAWN's facts: branch, files to check (each named with its reason), checks, uncommitted, cost */
+#define CR_FACTS_MAX \
+   (1024 + CODING_CHECK_SHOWN * (CODING_CHECK_PATH_MAX + CODING_CHECK_WHY_MAX + 8))
 #define CR_STOP_WAIT_MS 5000 /* stop's wait for report-backs in flight */
 #define CR_STOP_POLL_MS 50
 
