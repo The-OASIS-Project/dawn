@@ -60,7 +60,7 @@
    let loadedHead = ''; /* the full head of the work listed */
    let acts = null; /* publish and close (coding-viewer-actions.js) */
    let downOnBackdrop = false;
-   let current = null; /* the file shown: {path, added, removed, protected} */
+   let current = null; /* the file shown: {path, added, removed, to_check, why} */
    let view = 'diff';
    let scope = 'all'; /* what the list shows: all, since_push or a commit's hash */
    let baseName = 'the base'; /* the task's base branch, for the notes */
@@ -98,6 +98,22 @@
       e.setAttribute('dir', 'ltr');
       appendShown(e, path);
       return e;
+   }
+
+   /* A file to check before publishing (an older gateway called it protected):
+    * flagged, never blocked. */
+   function isCheck(f) {
+      return Boolean(f && (f.to_check || f.protected));
+   }
+
+   function checkTip(f) {
+      return 'Look at this before you publish' + (f.why ? ': ' + f.why : '');
+   }
+
+   function checkBadge(f) {
+      const b = elem('span', 'dawn-badge warning', 'check');
+      b.title = checkTip(f);
+      return b;
    }
 
    function say(text) {
@@ -190,6 +206,8 @@
             elem: elem,
             appendShown: appendShown,
             shownPath: shownPath,
+            isCheck: isCheck,
+            checkBadge: checkBadge,
             say: say,
             shortHead: SHORT_HEAD,
             job: function () {
@@ -336,7 +354,7 @@
       const slash = shown.lastIndexOf('/');
       const top = elem('span', 'cv-fileline');
       top.append(shownPath('cv-name', slash >= 0 ? shown.slice(slash + 1) : shown), counts(f));
-      if (f.protected) top.appendChild(elem('span', 'dawn-badge warning', 'Protected'));
+      if (isCheck(f)) top.appendChild(checkBadge(f));
       b.appendChild(top);
       if (slash >= 0) b.appendChild(shownPath('cv-dir', shown.slice(0, slash)));
       if (f.path.indexOf(' -> ') >= 0) {
@@ -344,13 +362,14 @@
       }
       if (f.includes_main)
          b.appendChild(elem('span', 'cv-dir', 'includes ' + baseName + '’s changes'));
+      if (isCheck(f) && f.why) b.appendChild(elem('span', 'cv-dir', 'Check: ' + f.why));
       const added = f.added == null ? 'binary' : f.added + ' added, ' + f.removed + ' removed';
       b.setAttribute(
          'aria-label',
          f.path +
             ', ' +
             added +
-            (f.protected ? ', protected' : '') +
+            (isCheck(f) ? ', ' + checkTip(f) : '') +
             (f.includes_main ? ', includes ' + baseName + '’s changes' : '')
       );
       b.addEventListener('click', function () {
@@ -590,6 +609,7 @@
       group.setAttribute('aria-label', 'View');
       group.append(viewButton('diff', 'Diff'), viewButton('new', 'New'));
       ui.bar.replaceChildren(shownPath('cv-barpath', f.path), counts(f), group);
+      if (isCheck(f)) group.before(checkBadge(f));
       ui.pane.setAttribute(
          'aria-label',
          (view === 'diff' ? 'Diff of ' : 'New version of ') + f.path

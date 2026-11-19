@@ -12,6 +12,26 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-11-19 — Agent gateway: `protected` is now `check`
+
+**What changed.** A repo's `protected` list in the agent gateway's config is now called
+`check`: files to check before publishing. Nothing was ever blocked; a task that changes one
+has it named to you before publishing. Each entry can now carry a reason, which Friday says
+with the path: `{ path = "src/auth/**", why = "who can log in and do what" }`. A plain string
+still works, with no reason.
+
+**What you need to do.** First re-run the gateway's installer, so the gateway runs the new
+code: `cd services/agent-gateway && sudo UV=$(command -v uv) ./install.sh`. A restart alone
+keeps the old code, which refuses a `check` key and fails at load.
+
+Then, optionally, in `/usr/local/etc/agent-gateway/agent-gateway.toml` (the installer keeps
+your copy) rename `protected = [...]` to `check = [...]` under each `[[repos]]` and
+`sudo systemctl restart agent-gateway`. That only silences a warning the gateway logs at every
+start: the old key still works. Reasons are optional; the shipped
+`services/agent-gateway/agent-gateway.toml` has them for the dawn repo.
+
+---
+
 ## 2026-11-18 — models.toml: `[cache_pricing]` is now `[pricing]`
 
 **What changed.** `models.toml` keeps every price DAWN uses in one table per provider,

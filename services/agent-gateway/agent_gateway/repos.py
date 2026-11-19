@@ -61,12 +61,13 @@ SANDBOX_PLACEHOLDERS = [".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".pro
                         ".claude/.cc-writes"]
 
 SUBJECT_CAP = 200
-PROTECTED_CAP = 20        # protected paths named in a completed event
+CHECK_CAP = 20            # files to check named in a completed event
+HELD_CAP = 20             # conflicts the sandbox can't write, named in a refusal
 FILE_CAP = 512 * 1024     # one file's content or diff in a viewer reply
 # What one reply may take once encoded: the text is JSON in the tool result,
 # which is JSON again in the MCP reply, and DAWN reads at most 1 MiB of it.
 REPLY_CAP = 900 * 1024
-FILES_CAP = 2000          # changed files in one changes listing (protected first)
+FILES_CAP = 2000          # changed files in one changes listing (files to check first)
 TREE_CAP = 2000           # entries in one folder listing
 COMMITS_CAP = 100
 HASH_RE = re.compile(r"[0-9a-f]{4,40}")  # a commit as the viewer names it
@@ -114,12 +115,23 @@ def glob_re(pattern: str) -> re.Pattern:
    return re.compile(out, re.DOTALL)
 
 
-def is_protected(path: str, patterns: list[str]) -> bool:
-   """Whether `path` matches a pattern, or carries a control character (no real
-   file needs one, and one could hide a path from the patterns)."""
+def check_why(path: str, checks: list[dict]) -> str | None:
+   """Why `path` is a file to check before publishing: the reason of the first
+   matching pattern that has one ("" when only patterns without one match), or
+   None when it isn't one.  A control character in a path counts: no real file
+   needs one, and one could hide a path from the patterns."""
    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in path):
-      return True
-   return any(glob_re(p).fullmatch(path) for p in patterns)
+      return "a control character in its name"
+   whys = [c["why"] for c in checks if glob_re(c["path"]).fullmatch(path)]
+   return next((w for w in whys if w), "") if whys else None
+
+
+def check_mark(paths: list[str], checks: list[dict]) -> dict:
+   """A changed file's `to_check` flag (any of its names matching), with a
+   reason (`why`) when one of its matches has one."""
+   whys = [w for w in (check_why(p, checks) for p in paths) if w is not None]
+   why = next((w for w in whys if w), "")
+   return {"to_check": bool(whys), **({"why": why} if why else {})}
 
 
 def sandbox_protected(path: str) -> bool:
@@ -275,7 +287,7 @@ class Repos:
                await self.jailed_git(task_id, *quiet, "merge", "--abort", writable=True)
             if not conflicts:
                raise
-            raise ValueError(f"merging {base} conflicts in {', '.join(held[:PROTECTED_CAP])}, "
+            raise ValueError(f"merging {base} conflicts in {', '.join(held[:HELD_CAP])}, "
                              "which the agent's sandbox can't write: those need your hand.  "
                              "The merge was aborted; the branch is as it was and nothing was sent") from e
          return {"conflicts": conflicts, "base_head": head}
@@ -374,19 +386,20 @@ class Repos:
       stat = await self.gw("-C", m, "diff", "--shortstat", f"refs/heads/{base}...{ref}")
       names = await run(["git", "-C", m, "diff", "--no-renames", "--name-only", "-z",
                          f"refs/heads/{base}...{ref}"])
-      patterns = self.protected(name)
-      touched = [p for p in names.decode(errors="replace").split("\0")
-                 if p and is_protected(p, patterns)]
+      checks = self.checks(name)
+      touched = [{"path": p, **({"why": w} if w else {})}
+                 for p in names.decode(errors="replace").split("\0") if p
+                 for w in [check_why(p, checks)] if w is not None]
       return {"commits": [c[:SUBJECT_CAP] for c in commits.splitlines()[:20]],
               "diffstat": stat, "uncommitted": len(dirty.splitlines()),
-              "protected": touched[:PROTECTED_CAP], "protected_count": len(touched)}
+              "to_check": touched[:CHECK_CAP], "to_check_count": len(touched)}
 
    # --- reading the agent's work (in the mirror only) -----------------------
 
-   def protected(self, name: str) -> list[str]:
-      """The repo's protected patterns, and always CI workflows: a pushed one runs
-      with the repo's secrets."""
-      return [".github/workflows/**", *self.repos[name].get("protected", [])]
+   def checks(self, name: str) -> list[dict]:
+      """The repo's files to check before publishing, and always CI workflows."""
+      return [{"path": ".github/workflows/**", "why": "CI, which runs with the repo's secrets"},
+              *self.repos[name].get("check", [])]
 
    async def uncommitted(self, task_id: str) -> int:
       """Files changed in the task's clone but not committed (lost with the clone)."""
@@ -515,7 +528,7 @@ class Repos:
          ["git", "--literal-pathspecs", "-C", m, "diff", "--no-ext-diff", "--no-textconv", "-M",
           "--numstat", "-z", sc["from"], sc["to"], *(["--", *only] if only else [])])
       files, fields = [], numstat.split(b"\0")
-      patterns = self.protected(name)
+      checks = self.checks(name)
       i = 0
       while i < len(fields) and fields[i]:
          added, removed, path = fields[i].decode(errors="replace").split("\t", 2)
@@ -525,20 +538,18 @@ class Repos:
             i += 2
          files.append({"path": path, "added": None if added == "-" else int(added),
                        "removed": None if removed == "-" else int(removed),
-                       "protected": any(is_protected(p, patterns)
-                                        for p in path.split(" -> "))})
+                       **check_mark(path.split(" -> "), checks)})
          i += 1
       # A conflict resolved by keeping the branch's side has no diff against the
       # first parent: still listed, as how it was resolved.
       listed = {n for f in files for n in f["path"].split(" -> ")}
       for p in only or []:
          if p not in listed:
-            files.append({"path": p, "added": 0, "removed": 0,
-                          "protected": is_protected(p, patterns)})
+            files.append({"path": p, "added": 0, "removed": 0, **check_mark([p], checks)})
       if sc["scope"] == "since_push" and await self.gw(
             "-C", m, "rev-list", "--first-parent", "--min-parents=2", "-n1", sc["range"]):
          files = await self.drop_main(m, head, sc["from"], mb, files)
-      files.sort(key=lambda f: not f["protected"])  # protected first: never cut off a listing
+      files.sort(key=lambda f: not f["to_check"])  # files to check first: never cut off a listing
       # Paths a commit changed that the net diff doesn't show (added then removed, or
       # changed back): a push publishes the commits, so these are public too.
       # --no-renames lists both names of a rename; either name of a net rename counts
@@ -547,9 +558,8 @@ class Repos:
       names = await run(["git", "-C", m, "log", "--no-renames", "--format=", "--name-only",
                          "-z", f"{mb}..{head}"])
       seen = dict.fromkeys(n for n in names.decode(errors="replace").split("\0") if n)
-      history = [{"path": p, "protected": is_protected(p, patterns)}
-                 for p in seen if p not in net]
-      history.sort(key=lambda f: not f["protected"])
+      history = [{"path": p, **check_mark([p], checks)} for p in seen if p not in net]
+      history.sort(key=lambda f: not f["to_check"])
       workflows = any(p.startswith(".github/workflows/") for p in (*net, *seen))
       total = len(files)
       files = files[:FILES_CAP]

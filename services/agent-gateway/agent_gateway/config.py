@@ -20,11 +20,13 @@
 # two secrets (DAWN's bearer token and the GitHub token).  The secrets are
 # taken out of the environment once read, so no child process inherits them.
 
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, field
 
 LIB = "/usr/local/lib/agent-gateway"
+log = logging.getLogger("agent-gateway")
 
 
 @dataclass
@@ -69,8 +71,41 @@ SECTIONS = {
 }
 
 
-# Paths flagged when a task changes them, for a repo that names none.
-DEFAULT_PROTECTED = [".github/**", "CLAUDE.md", "AGENTS.md", ".claude/**"]
+# Files to check before publishing, for a repo that names none: a task that changes
+# one has it named to the user before publishing (never blocked).
+DEFAULT_CHECK = [
+   {"path": ".github/**", "why": "CI, which runs with the repo's secrets"},
+   {"path": "CLAUDE.md", "why": "the agent's own instructions"},
+   {"path": "AGENTS.md", "why": "the agent's own instructions"},
+   {"path": ".claude/**", "why": "the agent's own instructions"},
+]
+WHY_CAP = 80  # characters of a pattern's reason
+
+
+def check_list(repo: str, entries) -> list[dict]:
+   """A repo's `check` list: each entry a glob string, or {path, why}."""
+   bad = ValueError(f"[[repos]] {repo}: check is a list of repo-relative path patterns "
+                    "(no leading or trailing /), each a string or { path, why }")
+   if not isinstance(entries, list):
+      raise bad
+   out = []
+   for e in entries:
+      if isinstance(e, str):
+         e = {"path": e}
+      if not isinstance(e, dict) or set(e) - {"path", "why"}:
+         raise bad
+      path, why = e.get("path"), e.get("why", "")
+      if not isinstance(path, str) or not path or path[0] == "/" or path[-1] == "/" \
+            or not isinstance(why, str):
+         raise bad
+      why = "".join(" " if ord(ch) < 0x20 or ord(ch) == 0x7f else ch for ch in why)
+      if len(why) > WHY_CAP:
+         log.warning("[[repos]] %s: the reason for %s is cut to %d characters",
+                     repo, path, WHY_CAP)
+         why = why[:WHY_CAP]
+      out.append({"path": path, "why": why})
+   return out
+
 
 def load(path: str, **overrides) -> Config:
    with open(path, "rb") as f:
@@ -88,15 +123,17 @@ def load(path: str, **overrides) -> Config:
          setattr(c, k, v)
    c.cbm_url = t.get("cbm", {}).get("url")
    for r in t.get("repos", []):
-      if set(r) - {"name", "url", "base", "protected"} or "name" not in r or "url" not in r:
-         raise ValueError("each [[repos]] needs name and url (optional: base, protected)")
-      protected = r.get("protected", DEFAULT_PROTECTED)
-      if not isinstance(protected, list) or not all(isinstance(p, str) and p and p[0] != "/"
-                                                     and p[-1] != "/" for p in protected):
-         raise ValueError(f"[[repos]] {r['name']}: protected is a list of repo-relative path "
-                          "patterns (no leading or trailing /)")
-      c.repos[r["name"]] = {"url": r["url"], "base": r.get("base", "main"),
-                            "protected": protected}
+      if set(r) - {"name", "url", "base", "check", "protected"} or "name" not in r \
+            or "url" not in r:
+         raise ValueError("each [[repos]] needs name and url (optional: base, check)")
+      if "protected" in r:  # the key's old name, read as check
+         if "check" in r:
+            log.warning("[[repos]] %s: check and protected are both set; using check "
+                        "(remove protected)", r["name"])
+         else:
+            log.warning("[[repos]] %s: protected is now called check; rename it", r["name"])
+      check = check_list(r["name"], r.get("check", r.get("protected", DEFAULT_CHECK)))
+      c.repos[r["name"]] = {"url": r["url"], "base": r.get("base", "main"), "check": check}
    if not isinstance(c.deny_read, list) or not all(isinstance(p, str) and p.startswith("/")
                                                     for p in c.deny_read):
       raise ValueError("[paths] deny_read is a list of absolute paths")
