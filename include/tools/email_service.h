@@ -170,6 +170,7 @@ static inline int email_confirm_rc(turn_origin_rc_t rc) {
       case TURN_ORIGIN_SAME_TURN:
          return EMAIL_CONFIRM_RC_SAME_TURN;
       case TURN_ORIGIN_NOT_NEXT:
+      case TURN_ORIGIN_STOPPED: /* prepare it again, as for a moved-on conversation */
          return EMAIL_CONFIRM_RC_NOT_NEXT;
       case TURN_ORIGIN_FROM_VISUAL:
          return EMAIL_CONFIRM_RC_FROM_VISUAL;

@@ -57,6 +57,7 @@
 #include "core/session_prefix.h"
 #include "core/session_stop.h"
 #include "core/text_input_dispatch.h"
+#include "core/turn_origin.h"
 #include "core/turn_queue.h"
 #include "dawn_error.h"
 #include "image_store.h"
@@ -104,11 +105,13 @@ typedef struct {
    bool user_stop;        /* the user's Stop lands mid-stream (session_stop_turn_by_user) */
    const char *partial;   /* what had streamed when the stop cut the call (the tool loop's
                              final_answer.stopped_text) */
+   bool capture;          /* the turn's confirm origin is read (s_origin), as a tool would */
    const char *post;      /* DAWN posts this into the conversation mid-turn */
    bool boundary;         /* the turn declares a boundary: reasoning so far left behind */
 } script_t;
 
 static script_t s_script;
+static turn_origin_t s_origin;
 static session_t *s; /* the session running the turn (one of s_sessions) */
 static int s_user;
 static int64_t s_conv;
@@ -233,6 +236,9 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
       free(s->pending_visual);
       s->pending_visual = strdup(s_script.visual);
       pthread_mutex_unlock(&s->tools_mutex);
+   }
+   if (s_script.capture) {
+      TEST_ASSERT_TRUE(turn_origin_capture(&s_origin));
    }
    if (s_script.partial) {
       /* What the tool loop keeps of a call a stop cut. */
@@ -1249,11 +1255,16 @@ static bool last_reply_stopped(int64_t conv) {
  * kept, marked, and the next question carries the note, live and reloaded. */
 static void test_a_partial_reply_the_user_stopped(void) {
    run_turn(s_conv, "Q1", (script_t){ .reply = "A1" });
-   run_turn(s_conv, "Q2", (script_t){ .user_stop = true, .partial = "Half an ans" });
+   run_turn(s_conv, "Q2",
+            (script_t){ .user_stop = true, .partial = "Half an ans", .capture = true });
+   const turn_origin_t stopped = s_origin;
    TEST_ASSERT_TRUE(saved_reply_has(s_conv, "Half an ans"));
    TEST_ASSERT_TRUE(last_reply_stopped(s_conv));
    assert_live_is_reload(s_conv, STOPPED_REPLY_USER_NOTE);
-   run_turn(s_conv, "Q3", (script_t){ .reply = "A3" });
+   /* What the stopped turn prepared isn't confirmed by the next one. */
+   run_turn(s_conv, "Q3", (script_t){ .reply = "A3", .capture = true });
+   TEST_ASSERT_EQUAL_UINT64(stopped.turn_token, s_origin.stopped_token);
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_STOPPED, turn_origin_check(&stopped, &s_origin));
    TEST_ASSERT_FALSE(last_reply_stopped(s_conv));
    assert_live_is_reload(s_conv, STOPPED_REPLY_USER_NOTE);
 }
