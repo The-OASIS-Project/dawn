@@ -507,6 +507,9 @@
                if (e.el && msgId != null) {
                   e.el.setAttribute('data-message-id', String(msgId));
                }
+               if (payload.stopped && typeof DawnTranscript !== 'undefined') {
+                  DawnTranscript.markStopped(e.el, payload.text);
+               }
                return;
             }
          }
@@ -572,6 +575,11 @@
          msgId,
          payload.email_ref
       );
+      if (payload.stopped && transcript) {
+         DawnTranscript.markStopped(
+            transcript.querySelector('.transcript-entry[data-message-id="' + String(msgId) + '"]')
+         );
+      }
    }
 
    /**

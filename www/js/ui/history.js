@@ -922,6 +922,13 @@
                   msg.email_ref
                );
                tagEntries(entryStart, msg.created_at, msg.id);
+               if (msg.stopped) {
+                  DawnTranscript.markStopped(
+                     transcript.querySelector(
+                        '.transcript-entry.assistant[data-message-id="' + String(msg.id) + '"]'
+                     )
+                  );
+               }
             }
 
             // Add continuation link at bottom for archived conversations (after all messages)

@@ -671,6 +671,16 @@ body.debug-mode .transcript-entry.debug {
    letter-spacing: 0.08em;
 }
 
+/* A reply the user stopped before it finished (DawnTranscript.markStopped). */
+.transcript-entry .transcript-stopped {
+   font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+   font-size: 0.65rem;
+   color: var(--text-secondary);
+   margin-top: 0.25rem;
+   text-transform: uppercase;
+   letter-spacing: 0.08em;
+}
+
 .transcript-entry .text {
    /* Human font: conversation */
    font-family:

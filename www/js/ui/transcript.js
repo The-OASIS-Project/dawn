@@ -844,6 +844,35 @@
       transcript.scrollTop = transcript.scrollHeight;
    }
 
+   /**
+    * Mark a transcript entry as a reply the user stopped before it finished:
+    * its text becomes what was saved (when given; a reply holding a visual or
+    * an image keeps what was drawn) and a "Stopped" label follows it.
+    * @param {HTMLElement} entry - The assistant's .transcript-entry
+    * @param {string} [savedText] - The saved row's text
+    */
+   function markStopped(entry, savedText) {
+      if (!entry) return;
+      const textEl = entry.querySelector('.text');
+      if (
+         textEl &&
+         typeof savedText === 'string' &&
+         savedText !== textEl.getAttribute('data-raw-text') &&
+         savedText.indexOf('<dawn-visual') === -1 &&
+         savedText.indexOf('[IMAGE:') === -1
+      ) {
+         textEl.innerHTML = DawnFormat.markdown(savedText);
+         DawnFormat.addCopyButtons(textEl);
+         textEl.setAttribute('data-raw-text', savedText);
+         DawnFormat.addMessageCopyButton(textEl);
+      }
+      if (entry.querySelector('.transcript-stopped')) return;
+      const label = document.createElement('div');
+      label.className = 'transcript-stopped';
+      label.textContent = 'Stopped';
+      entry.appendChild(label);
+   }
+
    // =============================================================================
    // Export Module
    // =============================================================================
@@ -958,5 +987,6 @@
       createImageElement: createImageElement,
       createDocumentChips: createDocumentChips,
       createEmailChip: createEmailChip,
+      markStopped: markStopped,
    };
 })(window);
