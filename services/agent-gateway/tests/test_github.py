@@ -282,7 +282,9 @@ def test_pr_threads_say_which_copilot_resolved(monkeypatch):
    monkeypatch.setattr(github, "_request", gh)
    res = github.pr_threads("o", "dawn", 115, "tok", everything=True)
    assert "resolvedBy { login }" in gh.calls[0]["data"]["query"]
-   assert [t["resolved_by_copilot"] for t in res["threads"]] == [True, False, False]
+   # Open first, then Copilot's, then a person's.
+   assert [(t["comment_id"], t["resolved_by_copilot"]) for t in res["threads"]] == [
+      (300, False), (100, True), (200, False)]
 
 
 def test_pr_threads_put_replyable_threads_before_answered_ones(monkeypatch):
@@ -290,9 +292,9 @@ def test_pr_threads_put_replyable_threads_before_answered_ones(monkeypatch):
    # ahead of a new round's thread a reply needs.
    monkeypatch.setattr(github, "_token_logins", {"tok": "me"})
    old = [thread(i, 1000 * i, resolved=True) for i in range(1, 50)]
-   for t in old:
+   for i, t in enumerate(old):
       t["head"]["nodes"][0]["body"] = "x" * 5000
-      t["resolvedBy"] = {"login": "KerseyFabrications"}
+      t["resolvedBy"] = {"login": "Copilot" if i % 2 else "KerseyFabrications"}
    gh = GitHub(threads=[threads_page(old + [thread(99, 99000)])])
    monkeypatch.setattr(github, "_request", gh)
    res = github.pr_threads("o", "dawn", 115, "tok", everything=True)

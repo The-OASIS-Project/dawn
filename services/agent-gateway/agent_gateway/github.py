@@ -692,9 +692,10 @@ def pr_threads(owner: str, repo: str, number: int, token: str, everything: bool 
    reviews_raw = (first.get("reviews") or {}).get("nodes") or []
    shown = [{k: v for k, v in t.items() if k != "review_id"} for t in found
             if everything or not t["resolved"]]
-   # Threads a reply can still go on first, so the cap cuts old answered ones,
-   # never a new round's (stable: each group keeps GitHub's order).
-   shown.sort(key=lambda t: t["resolved"] and not t["resolved_by_copilot"])
+   # Open threads first, then ones Copilot resolved, then a person's: the cap
+   # cuts old answered history, never a new round's thread (stable: each group
+   # keeps GitHub's order).
+   shown.sort(key=lambda t: 0 if not t["resolved"] else 1 if t["resolved_by_copilot"] else 2)
    reviews = [{"author": login(r.get("author")), "state": lower(r.get("state")),
                "body": clean(r.get("body"), BODY_CAP), "submitted": clean(r.get("submittedAt"),
                                                                           NAME_CAP),

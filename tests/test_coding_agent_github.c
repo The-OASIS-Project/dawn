@@ -644,7 +644,7 @@ static void test_reply_then_confirm(void) {
           "{\"results\":[{\"comment_id\":2501,\"error\":\"GitHub refused the reply\"},"
           "{\"comment_id\":2601,\"url\":\"https://github.com/o/dawn/pull/115#d2\"}]}");
    char *done = call("confirm", args);
-   TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
+   TEST_ASSERT_TRUE_MESSAGE(is_error(done), done); /* a reply not posted: unfinished */
    TEST_ASSERT_EQUAL_STRING("pr_reply", g_tool);
    struct json_object *sent = json_tokener_parse(g_args);
    TEST_ASSERT_EQUAL_STRING("o/dawn#115",
@@ -1111,6 +1111,24 @@ static void test_failure_leaves_the_rest_staged(void) {
    free(out);
 }
 
+/* A reply GitHub refused leaves the batch unfinished: the Copilot request
+ * after it doesn't run and still waits. */
+static void test_unposted_reply_stops_the_rest(void) {
+   unsigned ids[3];
+   stage_three(ids);
+   g_turn++;
+   answer(3, "pr_reply", "{\"results\":[{\"comment_id\":2501,\"error\":\"GitHub refused it\"}]}");
+   char args[96];
+   snprintf(args, sizeof(args), "{\"ids\": [%u, %u, %u]}", ids[0], ids[1], ids[2]);
+   char *out = call("confirm", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(out), out); /* the publish ran */
+   TEST_ASSERT_EQUAL_STRING("publish;pr_reply;", g_ran);
+   char rev[16];
+   snprintf(rev, sizeof(rev), "%u", ids[0]);
+   ASSERT_FACTS_IN_ORDER(out, "replies", "failed", "not posted", "Still waiting", rev);
+   free(out);
+}
+
 /* The publish refused: nothing else runs, the result is an error, and every
  * item still waits, the refused publish too. */
 static void test_refused_publish_stops_the_rest(void) {
@@ -1127,8 +1145,8 @@ static void test_refused_publish_stops_the_rest(void) {
    snprintf(pub, sizeof(pub), "%u", PUBLISH_ID);
    snprintf(rep, sizeof(rep), "%u", ids[1]);
    snprintf(rev, sizeof(rev), "%u", ids[0]);
-   ASSERT_FACTS_IN_ORDER(out, "publish", pub, "failed", "nothing was carried out", "Still waiting",
-                         pub, rep, rev);
+   ASSERT_FACTS_IN_ORDER(out, "publish", pub, "failed", "Stopped there", "Still waiting", pub, rep,
+                         rev);
    free(out);
 }
 
@@ -1172,6 +1190,7 @@ int main(void) {
    RUN_TEST(test_confirm_a_subset);
    RUN_TEST(test_failure_leaves_the_rest_staged);
    RUN_TEST(test_refused_publish_stops_the_rest);
+   RUN_TEST(test_unposted_reply_stops_the_rest);
    RUN_TEST(test_unknown_id_runs_nothing);
    RUN_TEST(test_reads_are_web_and_mark_the_turn);
    RUN_TEST(test_job_is_sent_as_its_client_ref);

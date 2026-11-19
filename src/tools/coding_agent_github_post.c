@@ -478,7 +478,8 @@ static char *replies_result(const cg_replies_pending_t *p, struct json_object *a
    }
    strbuf_appendf(&sb, ":\n%s", strbuf_str(&lines));
    strbuf_free(&lines);
-   return taken(&sb);
+   /* A reply not posted leaves the batch unfinished: a confirm stops there. */
+   return posted < p->count ? coding_agent_error_free(taken(&sb)) : taken(&sb);
 }
 
 char *coding_github_confirm_reply(uint32_t id, int user_id, const turn_origin_t *origin) {

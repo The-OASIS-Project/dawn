@@ -886,6 +886,9 @@ static int resolve_items(struct json_object *details,
                          char **bad) {
    uint32_t ids[CA_CONFIRM_IDS_MAX];
    const int n = parse_ids(details, ids, bad);
+   if (n == 0) {
+      return 0;
+   }
    strbuf_t gone;
    strbuf_init(&gone, 64);
    for (int i = 0; i < n; i++) {
@@ -941,7 +944,7 @@ static char *confirm_one(const ca_confirm_item_t *it,
 
 /* confirm: each named item in turn, stopping at the first that fails.  One
  * item's result is its own; several say what ran, what failed and why, and
- * what still waits (an error result only when nothing ran). */
+ * what still waits (an error result when the first failed: it may have partly run). */
 static char *handle_confirm(struct json_object *details, int user_id, const turn_origin_t *origin) {
    ca_confirm_item_t items[CA_CONFIRM_IDS_MAX];
    char *bad = NULL;
@@ -979,7 +982,7 @@ static char *handle_confirm(struct json_object *details, int user_id, const turn
          strbuf_appendf(&left, "%s%u", strbuf_len(&left) ? ", " : "", (unsigned)items[i].id);
       }
    }
-   strbuf_appendf(&sb, "Stopped there%s.", done == 0 ? "; nothing was carried out" : "");
+   strbuf_append(&sb, "Stopped there.");
    if (strbuf_len(&left) > 0) {
       strbuf_appendf(&sb,
                      " Still waiting: ids %s (say what failed, and confirm them when the user "
@@ -987,7 +990,7 @@ static char *handle_confirm(struct json_object *details, int user_id, const turn
                      strbuf_str(&left));
    }
    strbuf_free(&left);
-   /* An error only when nothing ran: what did run stands. */
+   /* An error when the first item failed; what ran before a later failure stands. */
    return done == 0 ? coding_agent_error_free(strbuf_steal(&sb)) : strbuf_steal(&sb);
 }
 
