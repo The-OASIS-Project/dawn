@@ -52,8 +52,8 @@ dawn-admin user unlock username
 # List active sessions
 dawn-admin session list
 
-# Revoke a specific session by token prefix
-dawn-admin session revoke a1b2c3d4
+# Revoke a specific session by the 16-character token prefix the list shows
+dawn-admin session revoke a1b2c3d4e5f60718
 
 # Revoke all sessions for a user
 dawn-admin session revoke --user guest

@@ -108,6 +108,14 @@ extern "C" {
 #define ADMIN_PROTOCOL_VERSION 0x01
 
 /**
+ * @brief Token-prefix length carried by LIST_SESSIONS and REVOKE_SESSION.
+ *
+ * Equals AUTH_TOKEN_PREFIX_LEN, the length the session store matches on, so
+ * a prefix copied from `dawn-admin session list` revokes that login.
+ */
+#define ADMIN_SESSION_PREFIX_LEN 16
+
+/**
  * @brief Message types for admin socket protocol.
  *
  * Phase 0 implements PING and VALIDATE_SETUP_TOKEN.
@@ -312,6 +320,7 @@ typedef enum {
    ADMIN_RESP_UNAUTHORIZED = 0x05,     /**< Peer credentials rejected */
    ADMIN_RESP_LAST_ADMIN = 0x06,       /**< Cannot delete/demote last admin */
    ADMIN_RESP_NOT_FOUND = 0x07,        /**< User/session not found */
+   ADMIN_RESP_AMBIGUOUS = 0x08,        /**< Session prefix matches several logins */
 } admin_resp_code_t;
 
 /**
