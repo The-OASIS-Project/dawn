@@ -187,6 +187,37 @@ static void name_from_repo(const char *repo, size_t n, char *out, size_t out_len
    out[o] = '\0';
 }
 
+static int hex_value(char c) {
+   if (c >= '0' && c <= '9') {
+      return c - '0';
+   }
+   c = (char)tolower((unsigned char)c);
+   return (c >= 'a' && c <= 'f') ? c - 'a' + 10 : -1;
+}
+
+/* Decode the @p n bytes at @p src's %XX escapes into @p out (room for @p n + 1
+ * bytes; decoding never lengthens), length to @p out_n.  False for a '%'
+ * without two hex digits after it, or one that decodes to NUL. */
+static bool percent_decode(const char *src, size_t n, char *out, size_t *out_n) {
+   size_t o = 0;
+   for (size_t i = 0; i < n; i++) {
+      if (src[i] != '%') {
+         out[o++] = src[i];
+         continue;
+      }
+      const int hi = i + 2 < n ? hex_value(src[i + 1]) : -1;
+      const int lo = hi >= 0 ? hex_value(src[i + 2]) : -1;
+      if (lo < 0 || (hi == 0 && lo == 0)) {
+         return false;
+      }
+      out[o++] = (char)(hi * 16 + lo);
+      i += 2;
+   }
+   out[o] = '\0';
+   *out_n = o;
+   return true;
+}
+
 /* The clone URL and a default project name for the repository the user named.
  * A GitHub repo in any form a person copies (owner/repo, github.com/owner/repo,
  * a web URL of any page under the repo, its HTTPS or SSH clone address) becomes
@@ -261,9 +292,15 @@ static bool cp_resolve_repo(const char *in,
       name_from_repo(repo, rn, name, name_len);
       static const char tree_seg[] = "/tree/";
       if (!shorthand && strncmp(repo + rn, tree_seg, sizeof(tree_seg) - 1) == 0) {
+         /* Branch names are matched as git spells them, so decode the URL's
+          * spelling first ("feature%2Fx" is feature/x). */
          const char *t = repo + rn + sizeof(tree_seg) - 1;
-         size_t tn = strcspn(t, "?#");
-         while (tn > 0 && t[tn - 1] == '/') {
+         char decoded[CODE_PROJECT_URL_MAX]; /* never longer than @p in */
+         size_t tn = 0;
+         if (!percent_decode(t, strcspn(t, "?#"), decoded, &tn)) {
+            return false;
+         }
+         while (tn > 0 && decoded[tn - 1] == '/') {
             tn--;
          }
          /* Only a branch's length of it matters: with @p tree one past the
@@ -271,7 +308,7 @@ static bool cp_resolve_repo(const char *in,
          if (tn >= tree_len) {
             tn = tree_len - 1;
          }
-         memcpy(tree, t, tn);
+         memcpy(tree, decoded, tn);
          tree[tn] = '\0';
       }
       return true;

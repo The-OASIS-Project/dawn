@@ -438,6 +438,58 @@ static void test_tree_url_names_the_branch(void) {
    }
 }
 
+/* A /tree/ path is matched as git spells branch names: its %XX escapes are
+ * decoded once first, an encoded '/' included. */
+static void test_tree_url_branch_is_percent_decoded(void) {
+   static const struct {
+      const char *given;
+      const char *path; /* what the remote's branches are matched against */
+      const char *branch;
+   } cases[] = {
+      { "https://github.com/o/r/tree/feature%2Fx/src", "feature/x/src", "feature/x" },
+      { "https://github.com/o/r/tree/feature%2fx", "feature/x", "feature/x" },
+      { "https://github.com/o/r/tree/release%2F1.0%2F", "release/1.0", "release/1.0" },
+      { "https://github.com/o/r/tree/main/src%20dir", "main/src dir", "main" },
+      /* Decoded once: "%252F" is a literal "%2F", not a '/'. */
+      { "https://github.com/o/r/tree/main/a%252Fb", "main/a%2Fb", "main" },
+   };
+   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      setUp();
+      char packed[160];
+      snprintf(packed, sizeof(packed), "::url::%s", cases[i].given);
+      const unsigned id = add_ok(packed);
+      TEST_ASSERT_EQUAL_STRING_MESSAGE(cases[i].path, g_tree, cases[i].given);
+      g_turn++;
+      free(confirm(id));
+      TEST_ASSERT_EQUAL_STRING_MESSAGE(cases[i].branch, g_imp_branch, cases[i].given);
+   }
+}
+
+/* A malformed escape, or one that decodes to NUL, names no branch: refused
+ * before the remote is asked, with nothing staged. */
+static void test_tree_url_bad_percent_encoding_is_refused(void) {
+   static const char *const bad[] = {
+      "::url::https://github.com/o/r/tree/feature%2",    /* cut short */
+      "::url::https://github.com/o/r/tree/feature%",     /* bare '%' */
+      "::url::https://github.com/o/r/tree/feature%zz/x", /* not hex */
+      "::url::https://github.com/o/r/tree/feature%g1",   /* first digit not hex */
+      "::url::https://github.com/o/r/tree/main%00/src",  /* encoded NUL */
+      NULL,
+   };
+   for (int i = 0; bad[i]; i++) {
+      char *r = call("add", bad[i]);
+      TEST_ASSERT_TRUE_MESSAGE(is_error(r), bad[i]);
+      free(r);
+   }
+   TEST_ASSERT_EQUAL_INT(0, g_nbranch_ls);
+   TEST_ASSERT_EQUAL_INT(0, g_nprobes);
+   g_turn++;
+   for (unsigned id = 1; id < 64; id++) {
+      free(confirm(id));
+   }
+   TEST_ASSERT_EQUAL_INT(0, g_nimports);
+}
+
 /* An explicit branch wins over the URL's, and the remote isn't asked about it. */
 static void test_explicit_branch_beats_the_url(void) {
    char *preview = call("add", "::url::https://github.com/o/r/tree/feature/x::branch::dev");
@@ -542,6 +594,8 @@ int main(void) {
    RUN_TEST(test_a_missing_repo_is_never_staged);
    RUN_TEST(test_confirm_rechecks_the_import);
    RUN_TEST(test_tree_url_names_the_branch);
+   RUN_TEST(test_tree_url_branch_is_percent_decoded);
+   RUN_TEST(test_tree_url_bad_percent_encoding_is_refused);
    RUN_TEST(test_explicit_branch_beats_the_url);
    RUN_TEST(test_tree_url_without_a_matching_branch);
    RUN_TEST(test_other_pages_take_the_default_branch);
