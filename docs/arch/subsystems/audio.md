@@ -14,7 +14,12 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Runs in separate thread to avoid blocking main loop
    - Continuous capture from ALSA/PulseAudio device
    - Writes to ring buffer for main loop consumption
-   - Handles capture errors gracefully
+   - When the device goes away (or isn't there at start), writes silence to the ring and reopens
+     the same device by name when it returns, never another one; `"default"` follows the default.
+     TTS playback does the same between utterances (`src/tts/text_to_speech.cpp`)
+- **`src/audio/pulse_stream.c`**: The PulseAudio backend's blocking stream (one mainloop per
+  stream, adapted from libpulse's `simple.c`): a stream on a named device is opened with
+  `PA_STREAM_DONT_MOVE`, so losing the device fails it instead of moving it to the default
 
 - **`common/src/audio/ring_buffer.c`, `common/include/audio/ring_buffer.h`**: Thread-safe circular buffer (shared with satellite)
    - Lock-free or mutex-protected (implementation dependent)
@@ -22,13 +27,20 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Overwrite policy when buffer full
    - Used for smooth audio streaming between threads
 
-- **flac_playback.c/h**: Local speaker music playback
-   - Multi-format decoding (FLAC, MP3, Ogg Vorbis) via unified audio_decoder API
-   - ALSA/PulseAudio output with automatic sample rate conversion
-   - Plays music library tracks only (local or Plex), opened through music_open.c; a stop
-     cancels a Plex download in progress
-   - A track that won't open is skipped (playback stops at the 5th in a row, or at once when
-     Plex is unreachable)
+- **music_speaker.c/h**: The local speaker
+   - A music player (below) on its owner's queue: the local device's user (`[memory]
+     default_voice_user_id`, or whoever the local mic is assigned to). The owner's WebUI tabs
+     show and edit the same queue; a change of owner stops the old owner's music and plays the
+     new owner's queue on the next request
+   - Its output plays through the audio backend (ALSA or PulseAudio), converting to the
+     device's rate; the device opens when a track starts and closes on a pause, seek or stop,
+     and switching the playback device moves playing music to it
+   - Holds the speaker's volume (`setMusicVolume`/`getMusicVolume`) and ducking, applied to the
+     samples as they're written (ducking never changes the set volume)
+   - Who may play on it is the music tool's rule (`music_tool_speaker_allowed`): the owner,
+     from the local mic, a messaging channel or no session (the scheduler, MQTT). Pausing
+     it isn't gated: a phone call pauses it, and so does a cancel phrase on the local mic
+     ("Okay Friday, stop") when no reply of hers is going
 
 - **music_open.c/h**: Opening a library track, shared by every player
    - `music_path_is_valid()`: a local path must resolve inside `[paths] music_dir`; a `plex:`
@@ -41,6 +53,19 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - A play history (back and forward under shuffle), in memory, cleared when the queue is replaced or cleared
    - `music_nav_pick()`: end of queue, repeat-all/one, failure caps (`MUSIC_NAV_MAX_FAILED`),
      shuffle; pure, the caller holds its queue's lock
+
+- **music_player.c, music_player_track.c, music_player.h**: The music player
+   - Plays a user's queue (shared with the user's other players; each keeps its own place,
+     which follows their edits) to one output given as `music_output_ops_t`: `track_begin`,
+     `write` (paces the player), `halt` (pause, flush, idle) and `notify` (state, position,
+     error), each on the player's thread with no player lock held
+   - Its thread opens the pending track (`music_open_track()`), applies seeks, reads the
+     decoder, writes to the output, and at a track's end picks the next with `music_nav_pick()`,
+     skipping tracks that won't open; a helper prefetches the next remote track
+   - Controls under its control lock (play, step, stop, remove, clear, await a track's
+     outcome) and without it (pause, seek, snapshot); internals in `music_player_internal.h`
+   - Used by the WebUI stream (`webui_music.c` is its output) and the local speaker
+     (`music_speaker.c`)
 
 - **music_db.c/h**: Unified music metadata database
    - SQLite-based cache for artist/title/album/genre tags with source tracking

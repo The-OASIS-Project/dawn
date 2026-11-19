@@ -64,6 +64,9 @@ static const char *DDL =
    "  num_chunks INTEGER NOT NULL,"
    "  is_global INTEGER DEFAULT 0,"
    "  created_at INTEGER NOT NULL,"
+   "  original_blob_id TEXT DEFAULT NULL,"
+   "  outside INTEGER NOT NULL DEFAULT 0,"
+   "  own INTEGER NOT NULL DEFAULT 0,"
    "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
    ");"
    "CREATE TABLE IF NOT EXISTS document_chunks ("
@@ -85,15 +88,17 @@ static int prepare_statements(void) {
    rc = sqlite3_prepare_v2(
        s_db.db,
        "INSERT INTO documents (user_id, filename, filepath, filetype, file_hash, "
-       "num_chunks, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+       "num_chunks, is_global, created_at, original_blob_id, outside) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ?4 = 'note' THEN 0 ELSE 5 END)",
        -1, &s_db.stmt_doc_create, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-                           "num_chunks, is_global, created_at FROM documents WHERE id = ?",
-                           -1, &s_db.stmt_doc_get, NULL);
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT id, user_id, filename, filepath, filetype, file_hash, "
+       "num_chunks, is_global, created_at, outside, own FROM documents WHERE id = ?",
+       -1, &s_db.stmt_doc_get, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
@@ -106,20 +111,21 @@ static int prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-                           "num_chunks, is_global, created_at FROM documents "
+                           "num_chunks, is_global, created_at, outside, own FROM documents "
                            "WHERE user_id = ? OR is_global = 1 ORDER BY created_at DESC "
                            "LIMIT ? OFFSET ?",
                            -1, &s_db.stmt_doc_list, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT d.id, d.user_id, d.filename, d.filepath, d.filetype, "
-                           "d.file_hash, d.num_chunks, d.is_global, d.created_at, "
-                           "COALESCE(u.username, '') FROM documents d "
-                           "LEFT JOIN users u ON d.user_id = u.id "
-                           "ORDER BY d.created_at DESC LIMIT ? OFFSET ?",
-                           -1, &s_db.stmt_doc_list_all, NULL);
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT d.id, d.user_id, d.filename, d.filepath, d.filetype, "
+       "d.file_hash, d.num_chunks, d.is_global, d.created_at, d.outside, d.own, "
+       "COALESCE(u.username, '') FROM documents d "
+       "LEFT JOIN users u ON d.user_id = u.id "
+       "ORDER BY d.created_at DESC LIMIT ? OFFSET ?",
+       -1, &s_db.stmt_doc_list_all, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
@@ -151,7 +157,7 @@ static int prepare_statements(void) {
 
    rc = sqlite3_prepare_v2(s_db.db,
                            "SELECT id, user_id, filename, filepath, filetype, file_hash, "
-                           "num_chunks, is_global, created_at "
+                           "num_chunks, is_global, created_at, outside, own "
                            "FROM documents "
                            "WHERE (user_id = ? OR is_global = 1) "
                            "AND filename LIKE ? ESCAPE '\\' COLLATE NOCASE "
@@ -178,23 +184,29 @@ static int prepare_statements(void) {
    if (rc != SQLITE_OK)
       return -1;
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks "
-                           "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
-                           "WHERE (d.user_id = ? OR d.is_global = 1) "
-                           "AND c.text LIKE ? ESCAPE '\\' "
-                           "ORDER BY c.document_id, c.chunk_index LIMIT ? OFFSET ?",
-                           -1, &s_db.stmt_doc_chunk_grep_ci, NULL);
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks, "
+       "d.user_id = ?1 AND " OUTSIDE_OWN_SQL(
+           "d.own", "d.outside") " "
+                                 "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
+                                 "WHERE (d.user_id = ?1 OR d.is_global = 1) "
+                                 "AND c.text LIKE ?2 ESCAPE '\\' "
+                                 "ORDER BY c.document_id, c.chunk_index LIMIT ?3 OFFSET ?4",
+       -1, &s_db.stmt_doc_chunk_grep_ci, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
-   rc = sqlite3_prepare_v2(s_db.db,
-                           "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks "
-                           "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
-                           "WHERE (d.user_id = ? OR d.is_global = 1) "
-                           "AND instr(c.text, ?) > 0 "
-                           "ORDER BY c.document_id, c.chunk_index LIMIT ? OFFSET ?",
-                           -1, &s_db.stmt_doc_chunk_grep_cs, NULL);
+   rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT c.chunk_index, c.document_id, d.filename, d.num_chunks, "
+       "d.user_id = ?1 AND " OUTSIDE_OWN_SQL(
+           "d.own", "d.outside") " "
+                                 "FROM document_chunks c JOIN documents d ON c.document_id = d.id "
+                                 "WHERE (d.user_id = ?1 OR d.is_global = 1) "
+                                 "AND instr(c.text, ?2) > 0 "
+                                 "ORDER BY c.document_id, c.chunk_index LIMIT ?3 OFFSET ?4",
+       -1, &s_db.stmt_doc_chunk_grep_cs, NULL);
    if (rc != SQLITE_OK)
       return -1;
 
@@ -585,6 +597,225 @@ static void test_chunk_create_and_read(void) {
    TEST_ASSERT_TRUE_MESSAGE(chunks[1].chunk_index == 2, "second paginated chunk is index 2");
 }
 
+/* A note's chunk is the user's own words unless its text carries outside text
+ * (a research report, a note written in a turn that read a page); one stored
+ * before the kind was recorded counts as own.  A document's isn't until the
+ * user marks it as their own. */
+static void test_chunks_by_ids_own(void) {
+   float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+   int64_t note = 0, report = 0, web = 0, old = 0, doc = 0, ids[5] = { 0 };
+   document_db_create(1, "Groceries", "", "note", "h-note", 1, false, &note);
+   document_db_create(1, "Research #1: Tea", "", "note", "h-report", 1, false, &report);
+   document_db_create(1, "Tea notes", "", "note", "h-web", 1, false, &web);
+   document_db_create(1, "Old note", "", "note", "h-old", 1, false, &old);
+   document_db_create(1, "a.pdf", "a.pdf", "pdf", "h-doc", 1, false, &doc);
+   document_db_chunk_create(note, 0, "Eggs", emb, 4, 1.0f, 0, &ids[0]);
+   document_db_chunk_create(report, 0, "Tea grows", emb, 4, 1.0f, 0, &ids[1]);
+   document_db_chunk_create(web, 0, "Tea is", emb, 4, 1.0f, 0, &ids[2]);
+   document_db_chunk_create(old, 0, "Milk", emb, 4, 1.0f, 0, &ids[3]);
+   document_db_chunk_create(doc, 0, "A page", emb, 4, 1.0f, 0, &ids[4]);
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, report, OUTSIDE_RESEARCH, false, OUTSIDE_NONE));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, web, OUTSIDE_WEB, false, OUTSIDE_NONE));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, old, OUTSIDE_UNKNOWN, false, OUTSIDE_NONE));
+
+   document_chunk_t out[5];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(1, ids, 5, out, &n));
+   TEST_ASSERT_EQUAL_INT(5, n);
+   for (int i = 0; i < n; i++) {
+      TEST_ASSERT_EQUAL(out[i].id == ids[0] || out[i].id == ids[3], out[i].own);
+   }
+}
+
+/* A note another user published globally reads as outside text, never as the
+ * reader's own words; its owner still reads it as own. */
+static void test_chunks_by_ids_global_note_not_own(void) {
+   float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+   int64_t note = 0, id = 0;
+   document_db_create(1, "Shared", "", "note", "h-shared", 1, true, &note);
+   document_db_chunk_create(note, 0, "Shared words", emb, 4, 1.0f, 0, &id);
+
+   document_chunk_t out[1];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(2, &id, 1, out, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_FALSE(out[0].own);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(1, &id, 1, out, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_TRUE(out[0].own);
+}
+
+static int doc_outside(int64_t id) {
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db, "SELECT outside FROM documents WHERE id = ?", -1, &st, NULL);
+   sqlite3_bind_int64(st, 1, id);
+   const int v = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int(st, 0) : -1;
+   sqlite3_finalize(st);
+   return v;
+}
+
+/* A save replaces a note's kind; an edit keeps a tainted one (part of the old
+ * text stays) and takes the turn's when that one is; another user's note is
+ * never touched. */
+static void test_set_outside_combine(void) {
+   int64_t note = 0;
+   document_db_create(1, "Tea", "", "note", "h-tea", 1, false, &note);
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, note, OUTSIDE_NONE, true, OUTSIDE_NONE));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, doc_outside(note));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, note, OUTSIDE_WEB, true, OUTSIDE_NONE));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, doc_outside(note));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, note, OUTSIDE_NONE, true, OUTSIDE_NONE));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, doc_outside(note));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, note, OUTSIDE_EMAIL, true, OUTSIDE_NONE));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, doc_outside(note));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, note, OUTSIDE_NONE, false, OUTSIDE_NONE));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, doc_outside(note));
+   TEST_ASSERT_EQUAL_INT(FAILURE,
+                         document_db_set_outside(2, note, OUTSIDE_WEB, false, OUTSIDE_NONE));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, doc_outside(note));
+}
+
+static int doc_own_flag(int64_t id) {
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db, "SELECT own FROM documents WHERE id = ?", -1, &st, NULL);
+   sqlite3_bind_int64(st, 1, id);
+   const int v = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int(st, 0) : -1;
+   sqlite3_finalize(st);
+   return v;
+}
+
+/* Whether chunk @p chunk reads as user @p user's own words. */
+static bool chunk_own(int user, int64_t chunk) {
+   document_chunk_t out[1];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_chunks_get_by_ids(user, &chunk, 1, out, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   return out[0].own;
+}
+
+/* The user's vouch is kept apart from where the text came from: on makes a
+ * document's chunk the user's words and keeps its kind; off clears the vouch
+ * and turns only an unrecorded kind (a note's NONE) into DOCUMENT; only the
+ * owner can do either (a global one included). */
+static void test_set_own(void) {
+   float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+   int64_t pdf = 0, note = 0, report = 0, chunk = 0, rchunk = 0, nchunk = 0;
+   document_db_create(1, "own.pdf", "own.pdf", "pdf", "h-own", 1, true, &pdf);
+   document_db_create(1, "Own note", "", "note", "h-own-note", 1, false, &note);
+   document_db_create(1, "Research #1", "", "note", "h-own-report", 1, false, &report);
+   document_db_chunk_create(pdf, 0, "My words", emb, 4, 1.0f, 0, &chunk);
+   document_db_chunk_create(report, 0, "Tea grows", emb, 4, 1.0f, 0, &rchunk);
+   document_db_chunk_create(note, 0, "Eggs", emb, 4, 1.0f, 0, &nchunk);
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, report, OUTSIDE_RESEARCH, false, OUTSIDE_NONE));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, doc_outside(pdf));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, doc_outside(note));
+   TEST_ASSERT_FALSE(chunk_own(1, chunk));
+
+   /* On: the vouch, its provenance kept. */
+   int outside = -1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_own(1, pdf, true, &outside));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside);
+   document_t d;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(pdf, &d));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, d.outside);
+   TEST_ASSERT_TRUE(d.own);
+   TEST_ASSERT_TRUE(document_is_own(&d, 1));
+   TEST_ASSERT_TRUE(chunk_own(1, chunk));
+   /* Another user can't change it, and never reads it as their own. */
+   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_set_own(2, pdf, false, NULL));
+   TEST_ASSERT_EQUAL_INT(1, doc_own_flag(pdf));
+   TEST_ASSERT_FALSE(chunk_own(2, chunk));
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_own(1, pdf, false, &outside));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside);
+   TEST_ASSERT_EQUAL_INT(0, doc_own_flag(pdf));
+   TEST_ASSERT_FALSE(chunk_own(1, chunk));
+
+   /* A research report on, then off: still a research report, not own. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_own(1, report, true, &outside));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, outside);
+   TEST_ASSERT_TRUE(chunk_own(1, rchunk));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_own(1, report, false, &outside));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, outside);
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_RESEARCH, doc_outside(report));
+   TEST_ASSERT_FALSE(chunk_own(1, rchunk));
+
+   /* A note off: no recorded kind, so it becomes a document. */
+   TEST_ASSERT_TRUE(chunk_own(1, nchunk));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_own(1, note, false, &outside));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, outside);
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, doc_outside(note));
+   TEST_ASSERT_FALSE(chunk_own(1, nchunk));
+   TEST_ASSERT_EQUAL_INT(FAILURE, document_db_set_own(1, 999999, true, NULL));
+}
+
+/* A write in a turn that read outside text drops the user's vouch (it was for
+ * the old text); a clean turn's, or one no turn made (a panel restore),
+ * leaves it. */
+static void test_tainted_write_clears_own(void) {
+   int64_t pdf = 0;
+   document_db_create(1, "plan.pdf", "plan.pdf", "pdf", "h-vouch", 1, false, &pdf);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_own(1, pdf, true, NULL));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, pdf, OUTSIDE_NONE, true, OUTSIDE_NONE));
+   TEST_ASSERT_EQUAL_INT(1, doc_own_flag(pdf));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_set_outside(1, pdf, OUTSIDE_EMAIL, true, OUTSIDE_NONE));
+   TEST_ASSERT_EQUAL_INT(1, doc_own_flag(pdf)); /* a restore of a tainted version */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_outside(1, pdf, OUTSIDE_WEB, true, OUTSIDE_WEB));
+   TEST_ASSERT_EQUAL_INT(0, doc_own_flag(pdf));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_DOCUMENT, doc_outside(pdf)); /* the first kind kept */
+}
+
+/* What the document tools frame: a grep hit and a document read as the
+ * reader's own only for their own document of their own words; a document
+ * not marked own, or another user's shared one, isn't. */
+static void test_document_tools_own(void) {
+   float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+   int64_t note = 0, pdf = 0, cid = 0;
+   document_db_create(1, "Own note", "", "note", "h-tool-note", 1, true, &note);
+   document_db_create(1, "upload.pdf", "upload.pdf", "pdf", "h-tool-pdf", 1, false, &pdf);
+   document_db_chunk_create(note, 0, "Owl_Marker_7 in my words", emb, 4, 1.0f, 0, &cid);
+   document_db_chunk_create(pdf, 0, "Owl_Marker_7 in a page", emb, 4, 1.0f, 0, &cid);
+
+   doc_grep_hit_t hits[4];
+   int n = 0;
+   bool more = false;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_chunk_grep(1, "Owl_Marker_7", false, 0, hits, 4, &n, &more));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   for (int i = 0; i < n; i++) {
+      TEST_ASSERT_EQUAL(hits[i].document_id == note, hits[i].own);
+   }
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_chunk_grep(2, "Owl_Marker_7", true, 0, hits, 4, &n, &more));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_FALSE(hits[0].own); /* the shared note isn't user 2's */
+
+   document_t d;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(note, &d));
+   TEST_ASSERT_TRUE(document_is_own(&d, 1));
+   TEST_ASSERT_FALSE(document_is_own(&d, 2));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(pdf, &d));
+   TEST_ASSERT_FALSE(document_is_own(&d, 1));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_set_own(1, pdf, true, NULL));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_db_get(pdf, &d));
+   TEST_ASSERT_TRUE(document_is_own(&d, 1));
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         document_db_chunk_grep(1, "Owl_Marker_7", true, 0, hits, 4, &n, &more));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_TRUE(hits[0].own && hits[1].own);
+}
+
 /* ============================================================================
  * Test: chunk_read_range — window by chunk_index VALUE, gap-safe
  * ============================================================================ */
@@ -791,6 +1022,12 @@ int main(void) {
    RUN_TEST(test_global_visibility);
    RUN_TEST(test_find_by_name);
    RUN_TEST(test_chunk_create_and_read);
+   RUN_TEST(test_chunks_by_ids_own);
+   RUN_TEST(test_chunks_by_ids_global_note_not_own);
+   RUN_TEST(test_set_outside_combine);
+   RUN_TEST(test_set_own);
+   RUN_TEST(test_tainted_write_clears_own);
+   RUN_TEST(test_document_tools_own);
    RUN_TEST(test_chunk_read_range);
    RUN_TEST(test_chunk_grep);
    RUN_TEST(test_invalid_params);

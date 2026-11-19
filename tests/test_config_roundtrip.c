@@ -33,6 +33,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "config/config_env.h"
 #include "config/config_parser.h"
@@ -40,6 +41,7 @@
 #include "test_config_roundtrip_stub.h"
 #include "test_tmp.h"
 #include "unity.h"
+#include "utils/string_utils.h"
 
 static char RT_PATH[TEST_TMP_PATH_MAX];
 
@@ -73,6 +75,75 @@ static void round_trip(void) {
    TEST_ASSERT_EQUAL_INT_MESSAGE(0, test_stub_warning_count(),
                                  "re-parsing the written config logged a warning — the writer "
                                  "emitted a key or section the parser does not accept");
+}
+
+/* --- [persona] ------------------------------------------------------------- */
+
+/* Both halves round-trip byte for byte (a blank line, apostrophes); an empty
+ * half is never written; description with either half set warns once that it
+ * replaces them.  Multi-line text without a final newline gains one (the
+ * WebUI trims it off again on save); with one it stays as it is. */
+static void test_persona_halves_round_trip(void) {
+   static const char values[] = "You're Friday.\n\nYou say what you think, '' and why.\n";
+   static const char voice[] = "Dry.\nBrief.\n";
+   snprintf(g_written.persona.values, sizeof(g_written.persona.values), "%s", values);
+   snprintf(g_written.persona.voice, sizeof(g_written.persona.voice), "%s", voice);
+   round_trip();
+   TEST_ASSERT_EQUAL_STRING(values, g_read.persona.values);
+   TEST_ASSERT_EQUAL_STRING(voice, g_read.persona.voice);
+   TEST_ASSERT_EQUAL_STRING("", g_read.persona.description);
+
+   g_written.persona.voice[0] = '\0';
+   TEST_ASSERT_EQUAL_INT(0, config_write_toml(&g_written, RT_PATH));
+   FILE *fp = fopen(RT_PATH, "rb");
+   TEST_ASSERT_NOT_NULL(fp);
+   static char buf[512 * 1024];
+   size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+   fclose(fp);
+   buf[n] = '\0';
+   TEST_ASSERT_NOT_NULL(strstr(buf, "\nvalues = "));
+   TEST_ASSERT_NULL(strstr(buf, "\nvoice = "));
+   TEST_ASSERT_NULL(strstr(buf, "\ndescription = "));
+
+   /* A control character a ''' literal can't hold goes as an escaped string. */
+   static const char controlled[] = "Line one.\x01\nLine two.\x7f";
+   snprintf(g_written.persona.voice, sizeof(g_written.persona.voice), "%s", controlled);
+   round_trip();
+   TEST_ASSERT_EQUAL_STRING(controlled, g_read.persona.voice);
+   g_written.persona.voice[0] = '\0';
+
+   snprintf(g_written.persona.description, sizeof(g_written.persona.description), "%s", "Old.");
+   TEST_ASSERT_EQUAL_INT(0, config_write_toml(&g_written, RT_PATH));
+   test_stub_reset_warnings();
+   TEST_ASSERT_EQUAL_INT(0, config_parse_file(RT_PATH, &g_read));
+   TEST_ASSERT_EQUAL_INT(1, test_stub_warning_count());
+}
+
+/* Three or more apostrophes in a row survive, on one line and across lines
+ * (neither a ''' literal nor a raw basic string can hold them). */
+static void test_persona_apostrophe_runs_round_trip(void) {
+   static const char values[] = "Use ''' for Python docstrings.";
+   static const char voice[] = "'''Quoted''' and '''' four.\nJon's second line.";
+   snprintf(g_written.persona.values, sizeof(g_written.persona.values), "%s", values);
+   snprintf(g_written.persona.voice, sizeof(g_written.persona.voice), "%s", voice);
+   round_trip();
+   TEST_ASSERT_EQUAL_STRING(values, g_read.persona.values);
+   TEST_ASSERT_EQUAL_STRING(voice, g_read.persona.voice);
+}
+
+/* Text longer than the field is cut at a whole character: 683 three-byte
+ * characters (2049 bytes) keep 682 of them, not 682 and a third. */
+static void test_persona_cut_keeps_whole_characters(void) {
+   FILE *fp = fopen(RT_PATH, "w");
+   TEST_ASSERT_NOT_NULL(fp);
+   fputs("[persona]\nvalues = \"", fp);
+   for (int i = 0; i < 683; i++) {
+      fputs("\xe8\xaa\x9e", fp); /* U+8A9E */
+   }
+   fputs("\"\n", fp);
+   fclose(fp);
+   TEST_ASSERT_EQUAL_INT(0, config_parse_file(RT_PATH, &g_read));
+   TEST_ASSERT_EQUAL_size_t(682 * 3, strlen(g_read.persona.values));
 }
 
 /* --- [jobs] ---------------------------------------------------------------- */
@@ -111,6 +182,43 @@ static void test_jobs_roundtrip(void) {
    TEST_ASSERT_EQUAL_INT(999, g_read.jobs.max_runtime_sec);
    TEST_ASSERT_EQUAL_INT(4242, g_read.jobs.event_chunk_cap);
    TEST_ASSERT_EQUAL_INT(17, g_read.jobs.event_retention_days);
+}
+
+/* --- [[mcp.server]] -------------------------------------------------------- */
+
+static void test_mcp_server_roundtrip(void) {
+   g_written.mcp.server_count = 2;
+   mcp_server_config_t *gw = &g_written.mcp.servers[0];
+   memset(gw, 0, sizeof(*gw));
+   safe_strscpy(gw->alias, "agents");
+   safe_strscpy(gw->url, "http://127.0.0.1:9760/mcp");
+   safe_strscpy(gw->transport, "http");
+   safe_strscpy(gw->capabilities, "read_only");
+   safe_strscpy(gw->auth_bearer_token_secret, "agents");
+   safe_strscpy(gw->role, "agent_gateway");
+   gw->enabled = true;
+   gw->tls_verify = true;
+   gw->request_timeout_seconds = 60;
+   mcp_server_config_t *cbm = &g_written.mcp.servers[1];
+   memset(cbm, 0, sizeof(*cbm));
+   safe_strscpy(cbm->alias, "cbm");
+   safe_strscpy(cbm->url, "http://127.0.0.1:9750/sse");
+   safe_strscpy(cbm->transport, "http+sse");
+   safe_strscpy(cbm->capabilities, "read_only");
+   cbm->enabled = true;
+   cbm->tls_verify = true;
+
+   round_trip();
+
+   TEST_ASSERT_EQUAL_INT(2, g_read.mcp.server_count);
+   TEST_ASSERT_EQUAL_STRING("agents", g_read.mcp.servers[0].alias);
+   TEST_ASSERT_EQUAL_STRING("http", g_read.mcp.servers[0].transport);
+   TEST_ASSERT_EQUAL_STRING("agents", g_read.mcp.servers[0].auth_bearer_token_secret);
+   TEST_ASSERT_EQUAL_STRING("agent_gateway", g_read.mcp.servers[0].role);
+   TEST_ASSERT_EQUAL_INT(60, g_read.mcp.servers[0].request_timeout_seconds);
+   TEST_ASSERT_EQUAL_STRING("cbm", g_read.mcp.servers[1].alias);
+   TEST_ASSERT_EQUAL_STRING("", g_read.mcp.servers[1].role);
+   g_written.mcp.server_count = 0;
 }
 
 /* --- [asr] ----------------------------------------------------------------- */
@@ -290,6 +398,25 @@ static void test_memory_extraction_effort_clamps(void) {
    snprintf(g_written.memory.extraction_effort, sizeof(g_written.memory.extraction_effort), "max");
    config_clamp_memory(&g_written.memory);
    TEST_ASSERT_EQUAL_STRING("off", g_written.memory.extraction_effort);
+}
+
+/* --- [memory] consolidator ------------------------------------------------ */
+
+static void test_memory_consolidator_roundtrip(void) {
+   /* Default is "prompt"; a dropped key would silently switch the store back
+    * to the prompt path on the next WebUI settings save. */
+   snprintf(g_written.memory.consolidator, sizeof(g_written.memory.consolidator), "agent");
+
+   round_trip();
+
+   TEST_ASSERT_EQUAL_STRING("agent", g_read.memory.consolidator);
+}
+
+/* An unknown value falls back to "prompt" (the file and the WebUI share the clamp). */
+static void test_memory_consolidator_clamps(void) {
+   snprintf(g_written.memory.consolidator, sizeof(g_written.memory.consolidator), "llm");
+   config_clamp_memory(&g_written.memory);
+   TEST_ASSERT_EQUAL_STRING("prompt", g_written.memory.consolidator);
 }
 
 static void test_focus_document_min_relevance_roundtrip(void) {
@@ -527,7 +654,7 @@ static void test_all_writer_owned_sections_present(void) {
    };
 
    /* Two sections are legitimately CONDITIONAL — [persona] is emitted only when
-    * a description exists, [url_fetcher] only when it holds non-default content.
+    * a description, values or voice exists, [url_fetcher] only when it holds non-default content.
     * That is safe (the emit condition is derived from the parsed content, so
     * anything a user actually set round-trips); it just means the section is
     * absent at defaults.  Give both a triggering value so this test exercises
@@ -620,12 +747,70 @@ static void test_control_characters_survive_the_round_trip(void) {
    TEST_ASSERT_EQUAL_STRING(g_written.general.room, g_read.general.room);
 }
 
+/* secrets.toml is rewritten from the struct by a WebUI settings save too: an
+ * entry the writer leaves out is deleted from the user's file.  [secrets.mcp]
+ * holds the tokens the MCP bridge sends, so it must survive the round trip,
+ * and the file stays private even if it was looser before. */
+static void test_mcp_secrets_survive_and_file_stays_private(void) {
+   static secrets_config_t w, r;
+   memset(&w, 0, sizeof(w));
+   memset(&r, 0, sizeof(r));
+   safe_strscpy(w.claude_api_key, "sk-ant-x");
+   w.mcp_count = 2;
+   safe_strscpy(w.mcp[0].name, "agents");
+   safe_strscpy(w.mcp[0].token, "tok-\"quoted\"-1");
+   safe_strscpy(w.mcp[1].name, "agents-lab");
+   safe_strscpy(w.mcp[1].token, "tok2");
+
+   char path[TEST_TMP_PATH_MAX];
+   test_tmp_path(path, sizeof(path), "secrets_rt.toml");
+   FILE *f = fopen(path, "w");
+   fclose(f);
+   chmod(path, 0644);
+   TEST_ASSERT_EQUAL_INT(0, secrets_write_toml(&w, path));
+   struct stat st;
+   TEST_ASSERT_EQUAL_INT(0, stat(path, &st));
+   TEST_ASSERT_EQUAL_INT(0600, st.st_mode & 0777);
+
+   TEST_ASSERT_EQUAL_INT(0, config_parse_secrets(path, &r));
+   TEST_ASSERT_EQUAL_STRING("sk-ant-x", r.claude_api_key);
+   TEST_ASSERT_EQUAL_INT(2, r.mcp_count);
+   TEST_ASSERT_EQUAL_STRING("agents", r.mcp[0].name);
+   TEST_ASSERT_EQUAL_STRING("tok-\"quoted\"-1", r.mcp[0].token);
+   TEST_ASSERT_EQUAL_STRING("agents-lab", r.mcp[1].name);
+   TEST_ASSERT_EQUAL_STRING("tok2", r.mcp[1].token);
+   remove(path);
+}
+
+/* A name that isn't a bare key would be written back as a broken line, and
+ * secrets.toml (every key in it) would then fail to load: such names are
+ * dropped when read. */
+static void test_mcp_secret_names_that_cannot_be_written_are_dropped(void) {
+   static secrets_config_t r;
+   memset(&r, 0, sizeof(r));
+   char path[TEST_TMP_PATH_MAX];
+   test_tmp_path(path, sizeof(path), "secrets_names.toml");
+   FILE *f = fopen(path, "w");
+   fprintf(f, "[secrets.mcp]\n\"\" = \"a\"\n\"x y\" = \"b\"\nok = \"c\"\nn = 3\n");
+   fclose(f);
+   TEST_ASSERT_EQUAL_INT(0, config_parse_secrets(path, &r));
+   TEST_ASSERT_EQUAL_INT(1, r.mcp_count);
+   TEST_ASSERT_EQUAL_STRING("ok", r.mcp[0].name);
+   remove(path);
+}
+
 int main(void) {
    test_tmp_path(RT_PATH, sizeof(RT_PATH), "test_config_roundtrip.toml");
    UNITY_BEGIN();
+   RUN_TEST(test_persona_halves_round_trip);
+   RUN_TEST(test_persona_apostrophe_runs_round_trip);
+   RUN_TEST(test_persona_cut_keeps_whole_characters);
    RUN_TEST(test_jobs_roundtrip);
+   RUN_TEST(test_mcp_server_roundtrip);
    RUN_TEST(test_memory_extraction_effort_roundtrip);
    RUN_TEST(test_memory_extraction_effort_clamps);
+   RUN_TEST(test_memory_consolidator_roundtrip);
+   RUN_TEST(test_memory_consolidator_clamps);
    RUN_TEST(test_asr_roundtrip);
    RUN_TEST(test_vad_roundtrip);
    RUN_TEST(test_research_roundtrip);
@@ -647,5 +832,7 @@ int main(void) {
    RUN_TEST(test_written_file_reparses);
    RUN_TEST(test_string_values_cannot_forge_toml);
    RUN_TEST(test_control_characters_survive_the_round_trip);
+   RUN_TEST(test_mcp_secrets_survive_and_file_stays_private);
+   RUN_TEST(test_mcp_secret_names_that_cannot_be_written_are_dropped);
    return UNITY_END();
 }

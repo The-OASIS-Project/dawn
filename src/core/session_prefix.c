@@ -491,6 +491,16 @@ static struct json_object *question_locked(session_t *session, struct json_objec
    return NULL;
 }
 
+struct json_object *session_prefix_turn_history_locked(session_t *session,
+                                                       int64_t *conv_out,
+                                                       struct json_object **question_out) {
+   bool pinned_live = false;
+   struct json_object *hist = *target_locked(session, &pinned_live);
+   *conv_out = hist_conv_locked(session, hist);
+   *question_out = question_locked(session, hist);
+   return hist;
+}
+
 /* Put @p parts in front of @p question's own content (replacing any context
  * a failed earlier attempt of this turn put there), after a compaction's
  * summary when it opens with one. */
@@ -1106,6 +1116,65 @@ void session_prefix_save_taken(session_t *session, struct session_prefix_turn *t
    if (session && turn) {
       save_turn(session, turn);
    }
+}
+
+int session_prefix_take_back_changes(session_t *session) {
+   if (!session) {
+      return 0;
+   }
+   const int user = session_effective_user_id(session);
+   pthread_mutex_lock(&session->history_mutex);
+   struct json_object *hist = session->turn_history ? session->turn_history
+                                                    : session->conversation_history;
+   struct json_object *question = session->turn_user_msg;
+   if (!session->turn_active || session_turn_reads_elsewhere_locked(session) || !question) {
+      pthread_mutex_unlock(&session->history_mutex);
+      return 0;
+   }
+   /* From the end back to its question, until a model's answer: what came
+    * before that was answered.  One a record still waits to save is left. */
+   int removed = 0;
+   bool found = false;
+   for (size_t i = hist ? json_object_array_length(hist) : 0; i-- > 0 && !found;) {
+      struct json_object *m = json_object_array_get_idx(hist, i);
+      found = m == question || llm_history_role_is(m, "assistant");
+      /* A whole surface's record saves no rows, so what it holds needn't stay. */
+      if (!found && llm_history_kind_of(m) == MESSAGE_KIND_TOOL_CHANGE &&
+          (session_saved_whole(session) || !session_prefix_owns_locked(session, m))) {
+         prefix_tools_refund(hist, m);
+         json_object_array_del_idx(hist, i, 1);
+         removed++;
+      }
+   }
+   char *in_force = removed > 0 ? prefix_in_force_json(hist) : NULL;
+   for (struct session_prefix_turn *t = session->prefix_turn; in_force && t; t = t->next) {
+      if (t->hist == hist) {
+         free(t->in_force);
+         t->in_force = strdup(in_force);
+      }
+   }
+   const int64_t question_id = id_of(question);
+   const int64_t conv = hist_conv_locked(session, hist);
+   pthread_mutex_unlock(&session->history_mutex);
+   if (removed == 0) {
+      return 0;
+   }
+   llm_cache_monitor_history_rewritten(session->session_id); /* its calls cached them */
+   OLOG_INFO("Session %u: the turn failed; %d tool change(s) no model answered taken back, "
+             "appended again after the next question",
+             session->session_id, removed);
+   /* A voice surface saves its whole history; the rest saved their rows. */
+   if (!session_saved_whole(session) && conv > 0 && user > 0 && question_id > 0) {
+      const conv_turn_save_t save = { .in_force = in_force, .retract_changes_of = question_id };
+      const int rc = conv_db_save_turn(conv, user, &save, NULL);
+      if (rc != AUTH_DB_SUCCESS) {
+         OLOG_WARNING("Session %u: the failed turn's tool changes weren't taken back from conv "
+                      "%lld (%d)",
+                      session->session_id, (long long)conv, rc);
+      }
+   }
+   free(in_force);
+   return removed;
 }
 
 void session_prefix_release_locked(session_t *session) {

@@ -799,3 +799,134 @@ int llm_history_attach_summary(struct json_object *history,
    json_object_object_add(msg, "content", parts);
    return at;
 }
+
+bool llm_history_is_stopped(struct json_object *msg) {
+   struct json_object *v = NULL;
+   return json_object_is_type(msg, json_type_object) &&
+          json_object_object_get_ex(msg, LLM_HISTORY_STOPPED_KEY, &v) && json_object_get_boolean(v);
+}
+
+static bool has_stopped(struct json_object *history) {
+   const size_t n = json_object_is_type(history, json_type_array)
+                        ? json_object_array_length(history)
+                        : 0;
+   for (size_t i = 0; i < n; i++) {
+      if (llm_history_is_stopped(json_object_array_get_idx(history, i))) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* @p msg (a question after a stopped reply) with @p note in front, added to
+ * @p out: an envelope's goes in a message of its own before it (DAWN's text
+ * never shares a message with untrusted text). */
+static bool add_noted(struct json_object *out, struct json_object *msg, const char *note) {
+   struct json_object *parts = json_object_new_array();
+   struct json_object *part = parts ? llm_history_context_part(note, MESSAGE_KIND_TURN_CONTEXT)
+                                    : NULL;
+   if (!part) {
+      json_object_put(parts);
+      return false;
+   }
+   json_object_array_add(parts, part);
+   if (llm_history_kind_of(msg) == MESSAGE_KIND_ENVELOPE) {
+      struct json_object *own = llm_history_context_message(parts);
+      return own && json_object_array_add(out, own) == 0 &&
+             json_object_array_add(out, json_object_get(msg)) == 0;
+   }
+   struct json_object *noted = with_parts_in_front(msg, parts);
+   json_object_put(parts);
+   return noted && json_object_array_add(out, noted) == 0;
+}
+
+struct json_object *llm_history_stopped_noted(struct json_object *history) {
+   if (!has_stopped(history)) {
+      return json_object_get(history);
+   }
+   char label[LLM_CONTEXT_TAG_MAX + 24];
+   llm_operator_note_label(llm_history_tag(history), label, sizeof(label));
+   char note[sizeof(label) + sizeof(STOPPED_REPLY_USER_NOTE)];
+   snprintf(note, sizeof(note), "%s%s", label, STOPPED_REPLY_USER_NOTE);
+
+   const size_t n = json_object_array_length(history);
+   struct json_object *out = json_object_new_array();
+   bool pending = false;
+   for (size_t i = 0; out && i < n; i++) {
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      if (pending && llm_history_is_question(msg)) {
+         pending = false;
+         if (!add_noted(out, msg, note)) {
+            json_object_put(out);
+            return NULL;
+         }
+         continue;
+      }
+      if (is_role(msg, "assistant")) {
+         pending = llm_history_is_stopped(msg);
+      }
+      json_object_array_add(out, json_object_get(msg));
+   }
+   return out;
+}
+
+/* A copy of @p msg (its values shared) with STOPPED_REPLY_NOTE after its text. */
+static struct json_object *marked_copy(struct json_object *msg) {
+   struct json_object *content = NULL;
+   json_object_object_get_ex(msg, "content", &content);
+   if (json_object_is_type(content, json_type_array)) {
+      struct json_object *parts = json_object_new_array();
+      struct json_object *part = parts ? llm_history_context_part(STOPPED_REPLY_NOTE,
+                                                                  MESSAGE_KIND_NONE)
+                                       : NULL;
+      if (!part) {
+         json_object_put(parts);
+         return NULL;
+      }
+      const size_t n = json_object_array_length(content);
+      for (size_t i = 0; i < n; i++) {
+         json_object_array_add(parts, json_object_get(json_object_array_get_idx(content, i)));
+      }
+      json_object_array_add(parts, part);
+      return with_parts(msg, parts);
+   }
+   const char *text = json_object_is_type(content, json_type_string)
+                          ? json_object_get_string(content)
+                          : "";
+   const size_t len = strlen(text) + sizeof(STOPPED_REPLY_NOTE) + 2;
+   char *joined = malloc(len);
+   if (!joined) {
+      return NULL;
+   }
+   snprintf(joined, len, "%s%s%s", text, *text ? "\n\n" : "", STOPPED_REPLY_NOTE);
+   struct json_object *copy = json_object_new_object();
+   if (copy) {
+      json_object_object_foreach(msg, key, val) {
+         if (strcmp(key, "content") != 0) {
+            json_object_object_add(copy, key, json_object_get(val));
+         }
+      }
+      json_object_object_add(copy, "content", json_object_new_string(joined));
+   }
+   free(joined);
+   return copy;
+}
+
+struct json_object *llm_history_stopped_marked(struct json_object *history) {
+   if (!has_stopped(history)) {
+      return json_object_get(history);
+   }
+   const size_t n = json_object_array_length(history);
+   struct json_object *out = json_object_new_array();
+   for (size_t i = 0; out && i < n; i++) {
+      struct json_object *msg = json_object_array_get_idx(history, i);
+      struct json_object *copy = llm_history_is_stopped(msg) ? marked_copy(msg)
+                                                             : json_object_get(msg);
+      if (!copy) {
+         json_object_put(out);
+         return NULL;
+      }
+      json_object_array_add(out, copy);
+   }
+   return out;
+}

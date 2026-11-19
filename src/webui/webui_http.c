@@ -461,20 +461,24 @@ static bool extract_session_cookie(struct lws *wsi, char *token_out) {
 }
 
 /**
- * @brief Check if request is authenticated via session cookie
+ * @brief Check a request's login cookie
  * @param wsi WebSocket/HTTP connection
- * @param session_out If not NULL, filled with session info on success
- * @return true if authenticated, false otherwise
+ * @param session_out If not NULL, filled with session info when valid
+ * @return WEBUI_LOGIN_VALID, WEBUI_LOGIN_NONE (no cookie, or the login ended),
+ *         or WEBUI_LOGIN_UNAVAILABLE (the database couldn't answer)
  */
-bool is_request_authenticated(struct lws *wsi, auth_session_t *session_out) {
+webui_login_t request_login(struct lws *wsi, auth_session_t *session_out) {
    char token[AUTH_TOKEN_LEN];
    if (!extract_session_cookie(wsi, token)) {
-      return false;
+      return WEBUI_LOGIN_NONE;
    }
 
    auth_session_t session;
-   if (auth_db_get_session(token, &session) != AUTH_DB_SUCCESS) {
-      return false;
+   int rc = auth_db_get_session(token, &session);
+   if (rc != AUTH_DB_SUCCESS) {
+      /* A database that is down or busy (shutdown) is not a signed-out user */
+      return rc == AUTH_DB_NOT_FOUND || rc == AUTH_DB_INVALID ? WEBUI_LOGIN_NONE
+                                                              : WEBUI_LOGIN_UNAVAILABLE;
    }
 
    /* Update session activity */
@@ -483,8 +487,18 @@ bool is_request_authenticated(struct lws *wsi, auth_session_t *session_out) {
    if (session_out) {
       *session_out = session;
    }
-   return true;
+   return WEBUI_LOGIN_VALID;
 }
+
+/**
+ * @brief Check if request is authenticated via session cookie
+ * @return true if authenticated, false otherwise (also when it couldn't be
+ *         checked)
+ */
+bool is_request_authenticated(struct lws *wsi, auth_session_t *session_out) {
+   return request_login(wsi, session_out) == WEBUI_LOGIN_VALID;
+}
+
 
 /**
  * @brief Check if request has a valid service Bearer token.
@@ -597,6 +611,12 @@ static int send_auth_response(struct lws *wsi,
       return LWS_CLOSE_CONNECTION;
 
    return 0;
+}
+/* 503 for a request whose login couldn't be checked: the client tries again
+ * rather than taking it as signed out */
+static int send_login_unavailable(struct lws *wsi) {
+   send_auth_response(wsi, HTTP_STATUS_SERVICE_UNAVAILABLE, "{\"error\":\"unavailable\"}", NULL, 0);
+   return LWS_CLOSE_CONNECTION;
 }
 
 /**
@@ -1141,7 +1161,11 @@ static int handle_auth_logout(struct lws *wsi) {
 /* GET /api/memory/entities/:id/aliases */
 static int handle_memory_entity_aliases_get(struct lws *wsi, int64_t entity_id) {
    auth_session_t session;
-   if (!is_request_authenticated(wsi, &session)) {
+   webui_login_t login = request_login(wsi, &session);
+   if (login == WEBUI_LOGIN_UNAVAILABLE) {
+      return send_login_unavailable(wsi);
+   }
+   if (login != WEBUI_LOGIN_VALID) {
       send_auth_response(wsi, HTTP_STATUS_UNAUTHORIZED,
                          "{\"success\":false,\"error\":\"unauthenticated\"}", NULL, 0);
       return LWS_CLOSE_CONNECTION;
@@ -1193,7 +1217,11 @@ static int handle_memory_entity_aliases_get(struct lws *wsi, int64_t entity_id) 
  * 0.70-0.90 candidates as proposals; the WebUI renders them for review. */
 static int handle_memory_merge_proposals_get(struct lws *wsi) {
    auth_session_t session;
-   if (!is_request_authenticated(wsi, &session)) {
+   webui_login_t login = request_login(wsi, &session);
+   if (login == WEBUI_LOGIN_UNAVAILABLE) {
+      return send_login_unavailable(wsi);
+   }
+   if (login != WEBUI_LOGIN_VALID) {
       send_auth_response(wsi, HTTP_STATUS_UNAUTHORIZED,
                          "{\"success\":false,\"error\":\"unauthenticated\"}", NULL, 0);
       return LWS_CLOSE_CONNECTION;
@@ -1252,7 +1280,11 @@ static int handle_memory_entity_link_post(struct lws *wsi, int64_t source_id, in
       return LWS_CLOSE_CONNECTION;
    }
    auth_session_t session;
-   if (!is_request_authenticated(wsi, &session)) {
+   webui_login_t login = request_login(wsi, &session);
+   if (login == WEBUI_LOGIN_UNAVAILABLE) {
+      return send_login_unavailable(wsi);
+   }
+   if (login != WEBUI_LOGIN_VALID) {
       send_auth_response(wsi, HTTP_STATUS_UNAUTHORIZED,
                          "{\"success\":false,\"error\":\"unauthenticated\"}", NULL, 0);
       return LWS_CLOSE_CONNECTION;
@@ -1332,7 +1364,11 @@ static int handle_auth_status(struct lws *wsi) {
    char protocol[WEBUI_PROTOCOL_JSON_MAX];
    const char *sep = webui_protocol_json_members(protocol, sizeof(protocol)) > 0 ? "," : "";
 
-   if (is_request_authenticated(wsi, &session)) {
+   webui_login_t login = request_login(wsi, &session);
+   if (login == WEBUI_LOGIN_UNAVAILABLE) {
+      return send_login_unavailable(wsi); /* not "signed out": a restart, or a busy DB */
+   }
+   if (login == WEBUI_LOGIN_VALID) {
       snprintf(response, sizeof(response),
                "{\"authenticated\":true,\"username\":\"%s\",\"is_admin\":%s%s%s}", session.username,
                session.is_admin ? "true" : "false", sep, protocol);
@@ -1413,6 +1449,10 @@ int callback_http(struct lws *wsi,
          const char *mime_type;
          int n;
 
+         if (webui_server_quiescing()) {
+            lws_return_http_status(wsi, HTTP_STATUS_SERVICE_UNAVAILABLE, NULL);
+            return LWS_CLOSE_CONNECTION; /* shutting down */
+         }
          if (len < 1) {
             lws_return_http_status(wsi, HTTP_STATUS_BAD_REQUEST, NULL);
             return LWS_CLOSE_CONNECTION;
@@ -1595,7 +1635,11 @@ int callback_http(struct lws *wsi,
          if (strncmp(path, "/api/documents/original/", 24) == 0 && pss && !pss->is_post) {
             const char *blob_id = path + 24;
             auth_session_t session;
-            if (is_request_authenticated(wsi, &session)) {
+            webui_login_t login = request_login(wsi, &session);
+            if (login == WEBUI_LOGIN_UNAVAILABLE) {
+               return send_login_unavailable(wsi);
+            }
+            if (login == WEBUI_LOGIN_VALID) {
                return webui_documents_handle_original_download(wsi, blob_id, session.user_id);
             }
             /* Fall through to auth redirect */
@@ -1604,7 +1648,11 @@ int callback_http(struct lws *wsi,
          /* POST /api/images - upload image (defer to body completion) */
          if (strcmp(path, "/api/images") == 0 && pss && pss->is_post) {
             auth_session_t session;
-            if (is_request_authenticated(wsi, &session)) {
+            webui_login_t login = request_login(wsi, &session);
+            if (login == WEBUI_LOGIN_UNAVAILABLE) {
+               return send_login_unavailable(wsi);
+            }
+            if (login == WEBUI_LOGIN_VALID) {
                pss->image_session = NULL;
                int result = webui_images_handle_upload_start(wsi, &pss->image_session,
                                                              session.user_id);
@@ -1619,7 +1667,11 @@ int callback_http(struct lws *wsi,
 
          /* POST /api/documents/summarize - TF-IDF summarize document text */
          if (strcmp(path, "/api/documents/summarize") == 0 && pss && pss->is_post) {
-            if (is_request_authenticated(wsi, NULL)) {
+            webui_login_t login = request_login(wsi, NULL);
+            if (login == WEBUI_LOGIN_UNAVAILABLE) {
+               return send_login_unavailable(wsi);
+            }
+            if (login == WEBUI_LOGIN_VALID) {
                /* Allocate dynamic body buffer for large document content */
                const size_t max_body = (size_t)g_config.documents.max_extracted_size_kb * 1024 +
                                        1024;
@@ -1638,7 +1690,11 @@ int callback_http(struct lws *wsi,
          /* POST /api/documents - upload document (defer to body completion) */
          if (strcmp(path, "/api/documents") == 0 && pss && pss->is_post) {
             auth_session_t session;
-            if (is_request_authenticated(wsi, &session)) {
+            webui_login_t login = request_login(wsi, &session);
+            if (login == WEBUI_LOGIN_UNAVAILABLE) {
+               return send_login_unavailable(wsi);
+            }
+            if (login == WEBUI_LOGIN_VALID) {
                pss->document_session = NULL;
                int result = webui_documents_handle_upload_start(wsi, &pss->document_session,
                                                                 session.user_id);
@@ -1664,7 +1720,13 @@ int callback_http(struct lws *wsi,
               strcmp(path, "/js/oauth-callback.js") == 0);
 
          /* Check authentication for protected paths */
-         if (!is_public_path && !is_request_authenticated(wsi, NULL)) {
+         webui_login_t page_login = is_public_path ? WEBUI_LOGIN_VALID : request_login(wsi, NULL);
+         if (page_login == WEBUI_LOGIN_UNAVAILABLE) {
+            /* A page a browser shows: the server's own 503 page */
+            lws_return_http_status(wsi, HTTP_STATUS_SERVICE_UNAVAILABLE, NULL);
+            return LWS_CLOSE_CONNECTION;
+         }
+         if (page_login != WEBUI_LOGIN_VALID) {
             /* Redirect to login page */
             unsigned char buffer[LWS_PRE + 768];
             unsigned char *start = &buffer[LWS_PRE];
@@ -1882,6 +1944,12 @@ int callback_http(struct lws *wsi,
          /* Accumulate POST body */
          if (!pss)
             return LWS_CLOSE_CONNECTION;
+         if (webui_server_quiescing()) {
+            /* Shutdown began mid-upload: nothing more is handled (what was
+             * held is freed in LWS_CALLBACK_CLOSED_HTTP) */
+            lws_return_http_status(wsi, HTTP_STATUS_SERVICE_UNAVAILABLE, NULL);
+            return LWS_CLOSE_CONNECTION;
+         }
 
          /* Image upload - route to image handler */
          if (pss->image_session) {
@@ -1938,6 +2006,10 @@ int callback_http(struct lws *wsi,
          /* POST body complete - process it */
          if (!pss)
             return LWS_CLOSE_CONNECTION;
+         if (webui_server_quiescing()) {
+            lws_return_http_status(wsi, HTTP_STATUS_SERVICE_UNAVAILABLE, NULL);
+            return LWS_CLOSE_CONNECTION; /* upload sessions freed in CLOSED_HTTP */
+         }
 
          /* Image upload complete */
          if (pss->image_session) {

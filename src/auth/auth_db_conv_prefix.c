@@ -85,12 +85,8 @@ int conv_prompt_blob_put_locked(const char *bytes, char hash_out[DAWN_SHA256_HEX
  * are missing or don't match. Caller holds the lock. */
 int conv_prompt_blob_get_locked(const char *hash, char **out) {
    *out = NULL;
-   sqlite3_stmt *st = NULL;
-   if (sqlite3_prepare_v2(s_db.db, "SELECT bytes FROM prompt_blobs WHERE hash = ?", -1, &st,
-                          NULL) != SQLITE_OK) {
-      OLOG_ERROR("conv_prefix: prepare blob read failed: %s", sqlite3_errmsg(s_db.db));
-      return AUTH_DB_FAILURE;
-   }
+   sqlite3_stmt *st = s_db.stmt_prompt_blob_get;
+   sqlite3_reset(st);
    sqlite3_bind_text(st, 1, hash, -1, SQLITE_STATIC);
    int result = AUTH_DB_FAILURE;
    if (sqlite3_step(st) == SQLITE_ROW) {
@@ -111,7 +107,21 @@ int conv_prompt_blob_get_locked(const char *hash, char **out) {
       OLOG_ERROR("conv_prefix: stored prompt %.12s... is missing", hash);
       result = AUTH_DB_INVALID;
    }
-   sqlite3_finalize(st);
+   sqlite3_reset(st);
+   return result;
+}
+
+int conv_db_prompt_blob_get(const char *hash, char **out) {
+   if (!out) {
+      return AUTH_DB_FAILURE;
+   }
+   *out = NULL;
+   if (!hash || !hash[0]) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   const int result = conv_prompt_blob_get_locked(hash, out);
+   AUTH_DB_UNLOCK();
    return result;
 }
 
@@ -381,6 +391,28 @@ static int compaction_locked(int64_t conv_id, int user_id, const conv_turn_save_
    return AUTH_DB_SUCCESS;
 }
 
+/* A failed turn's tool changes no model answered: those saved with
+ * @p question_id that no assistant row follows.  Caller holds the lock and the
+ * transaction. */
+static int retract_changes_locked(int64_t conv_id, int64_t question_id) {
+   sqlite3_stmt *st = NULL;
+   /* kind-rows: tool_change rows of the question, unanswered. */
+   if (sqlite3_prepare_v2(s_db.db,
+                          "DELETE FROM messages WHERE conversation_id = ?1 AND context_of = ?2 "
+                          "AND kind = 'tool_change' AND NOT EXISTS (SELECT 1 FROM messages a "
+                          "WHERE a.conversation_id = ?1 AND a.id > messages.id AND "
+                          "a.role = 'assistant')",
+                          -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("conv_prefix: prepare change retract failed: %s", sqlite3_errmsg(s_db.db));
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   sqlite3_bind_int64(st, 2, question_id);
+   const int rc = sqlite3_step(st);
+   sqlite3_finalize(st);
+   return rc == SQLITE_DONE ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+}
+
 int conv_db_save_turn(int64_t conv_id,
                       int user_id,
                       const conv_turn_save_t *save,
@@ -426,6 +458,9 @@ int conv_db_save_turn(int64_t conv_id,
    if (result == AUTH_DB_SUCCESS && first_id > 0) {
       result = conv_db_withdraw_saved_locked(conv_id, user_id, first_id, save->built_at,
                                              save->built_seq, &withdrawn);
+   }
+   if (result == AUTH_DB_SUCCESS && save->retract_changes_of > 0) {
+      result = retract_changes_locked(conv_id, save->retract_changes_of);
    }
    if (result == AUTH_DB_SUCCESS) {
       result = turn_prefix_locked(conv_id, user_id, save);
@@ -473,7 +508,8 @@ int conv_db_retract_envelope(int64_t conv_id, int user_id, int64_t envelope_id) 
                                   "conversation_id = ?1 AND kind = 'envelope'), "
                                   "(SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 "
                                   "AND id > ?2 AND context_of IS NOT ?2 AND "
-                                  "(kind IS NULL OR kind NOT IN " CONV_SCOPED_KINDS_SQL "))",
+                                  "(kind IS NULL OR kind NOT IN " CONV_SCOPED_KINDS_SQL ") "
+                                  "AND id NOT IN (SELECT message_id FROM message_unprompted))",
                                   -1, &st, NULL) == SQLITE_OK
                    ? AUTH_DB_SUCCESS
                    : AUTH_DB_FAILURE;

@@ -58,6 +58,7 @@ static const treg_param_t recall_params[] = {
 
 static const tool_metadata_t recall_metadata = {
    .name = "recall",
+   .results = TOOL_RESULTS_OUTSIDE,
    .default_kind = TOOL_KIND_READ,
    .device_string = "recall",
    .description =

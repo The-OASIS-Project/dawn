@@ -37,6 +37,7 @@
 #include <strings.h>
 
 #include "dawn_error.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/document_db.h"
 #include "tools/document_grep.h"
@@ -111,6 +112,9 @@ static const treg_param_t doc_grep_params[] = {
 
 static const tool_metadata_t doc_grep_metadata = {
    .name = "document_grep",
+   /* Matches in the user's own documents read as theirs; a result showing
+    * any other's is framed as a document's (TOOL_FRAME_DOCUMENT). */
+   .results = TOOL_RESULTS_OWN,
    .default_kind = TOOL_KIND_READ,
    .device_string = "document grep",
    .description = "Find an EXACT string in the user's saved documents and notes and return each "
@@ -296,6 +300,7 @@ static char *doc_grep_callback(const char *action, char *value, int *should_resp
     * headlines but skip context. This is the fix for a large leading-context
     * chunk truncating the real hit out of its own result. */
    int64_t prev_doc = -1;
+   bool outside = false;
    int prev_hi = -1; /* highest chunk_index already rendered for prev_doc (context dedup) */
    int ctx_omitted = 0;
 
@@ -303,6 +308,7 @@ static char *doc_grep_callback(const char *action, char *value, int *should_resp
       int64_t doc = hits[i].document_id;
       int idx = hits[i].chunk_index;
       int nc = hits[i].num_chunks;
+      outside = outside || !hits[i].own;
       if (doc != prev_doc) {
          prev_doc = doc;
          prev_hi = -1;
@@ -377,5 +383,8 @@ static char *doc_grep_callback(const char *action, char *value, int *should_resp
    }
 
    free(rbuf);
+   if (outside) {
+      llm_tools_result_third_party(TOOL_FRAME_DOCUMENT);
+   }
    return result; /* caller takes ownership */
 }

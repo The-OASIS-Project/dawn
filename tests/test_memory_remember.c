@@ -35,12 +35,15 @@
 #include "auth/auth_db_messages.h"
 #include "bench_prompt_pieces.h"
 #include "config/dawn_config.h"
+#include "core/outside_kind.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
+#include "llm/llm_third_party.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_entities.h"
 #include "memory/memory_extraction.h"
 #include "prompts.h"
+#include "tools/tool_registry.h"
 #include "unity.h"
 
 char *memoryCallback(const char *actionName, char *value, int *should_respond);
@@ -49,6 +52,8 @@ char *memoryCallback(const char *actionName, char *value, int *should_respond);
 extern session_t *g_stub_command_context;
 extern int g_stub_defer_result;
 extern int64_t g_stub_defer_conv;
+extern const char *g_stub_turn_history;
+extern int64_t g_stub_turn_conv;
 
 static session_t s_session;
 static int s_user;
@@ -94,6 +99,8 @@ void setUp(void) {
    g_stub_command_context = &s_session;
    g_stub_defer_result = FAILURE;
    g_stub_defer_conv = 0;
+   g_stub_turn_history = NULL;
+   g_stub_turn_conv = 0;
 }
 
 void tearDown(void) {
@@ -112,6 +119,15 @@ void test_remember_in_a_known_conversation_is_learned_there(void) {
    TEST_ASSERT_TRUE(fact_row("My locker number is 314", &source, &unsourced));
    TEST_ASSERT_EQUAL_INT64(conv, source);
    TEST_ASSERT_EQUAL_INT(0, unsourced); /* forgetting that conversation removes it */
+   /* Stored because the user asked: its word says so, with no outside kind. */
+   TEST_ASSERT_EQUAL_INT64(
+       1, auth_db_query_int64(s_db.db, "SELECT COUNT(*) FROM memory_facts WHERE fact_text = "
+                                       "'My locker number is 314' AND origin = 1 AND outside = 0"));
+   memory_fact_t facts[4];
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_list(s_user, facts, 4, 0, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_STRING("remembered on request", memory_fact_kind_word(&facts[0]));
 }
 
 void test_remember_outside_a_turn_is_stated_outside_any_conversation(void) {
@@ -313,6 +329,94 @@ static char *search(const char *value) {
    return memoryCallback("search", buf, &respond);
 }
 
+static int64_t fact_outside(const char *text) {
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "SELECT outside FROM memory_facts WHERE user_id = ? AND "
+                      "fact_text = ?",
+                      -1, &st, NULL);
+   sqlite3_bind_int(st, 1, s_user);
+   sqlite3_bind_text(st, 2, text, -1, SQLITE_STATIC);
+   const int64_t v = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int64(st, 0) : -1;
+   sqlite3_finalize(st);
+   return v;
+}
+
+/* A remembered fact carries what outside text its turn read, and what its
+ * conversation read before. */
+void test_remember_takes_the_turn_outside_kind(void) {
+   free(remember("Jon's locker code is 41"));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_NONE, fact_outside("Jon's locker code is 41"));
+
+   g_stub_turn_history = "[{\"role\":\"user\",\"content\":\"read my mail\"},"
+                         "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"--- EMAIL "
+                         "CONTENT ---\\nHi\\n--- END EMAIL CONTENT ---\"}]";
+   free(remember("Jon's gate code is 52"));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_EMAIL, fact_outside("Jon's gate code is 52"));
+
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Chat", &conv));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_set_last_extracted(conv, 2, 5, OUTSIDE_WEB));
+   g_stub_turn_history = NULL;
+   g_stub_turn_conv = conv;
+   free(remember("Jon's bike lock is 63"));
+   TEST_ASSERT_EQUAL_INT64(OUTSIDE_WEB, fact_outside("Jon's bike lock is 63"));
+}
+
+/* A source excerpt from a conversation that read outside text says so, even
+ * under a fact that didn't come from it. */
+void test_source_excerpt_marks_an_outside_conversation(void) {
+   int64_t conv = 0, row = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Chat", &conv));
+   const conv_message_row_t said = { .role = "user", .content = "my kayak is green" };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &said, &row));
+   const memory_provenance_t prov = { .conv_id = conv, .msg_id_start = row, .msg_id_end = row };
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_create(s_user, "Jon's kayak is green",
+                                                                  0.9f, "explicit", &prov, &id));
+   char *r = search("kayak::with_source::true");
+   TEST_ASSERT_NOT_NULL(strstr(r, "[source: conv="));
+   TEST_ASSERT_NULL(strstr(r, "]" MEMORY_OUTSIDE_MARK "\n"));
+   free(r);
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_set_last_extracted(conv, 1, row, OUTSIDE_WEB));
+   r = search("kayak::with_source::true");
+   TEST_ASSERT_NOT_NULL(strstr(r, "]" MEMORY_OUTSIDE_MARK "\n"));
+   free(r);
+}
+
+/* list_merged says which of the two outside text taught. */
+void test_list_merged_marks_outside_facts(void) {
+   const memory_provenance_t web = { .outside = OUTSIDE_WEB };
+   int64_t dup = 0, keep = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_create(s_user, "Jon flies Acme Air",
+                                                                  0.9f, "explicit", NULL, &dup));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_create(s_user, "Jon flies with Acme",
+                                                                  0.9f, "inferred", &web, &keep));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_merge(dup, keep, s_user));
+   char buf[32] = "";
+   int respond = 0;
+   char *r = memoryCallback("list_merged", buf, &respond);
+   TEST_ASSERT_NOT_NULL(strstr(r, "Jon flies Acme Air\n"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "Jon flies with Acme" MEMORY_OUTSIDE_MARK "\n"));
+   free(r);
+}
+
+/* A preference outside text taught says so in a search, as facts do. */
+void test_search_marks_an_outside_preference(void) {
+   const memory_provenance_t web = { .outside = OUTSIDE_WEB };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_pref_upsert(s_user, "airline", "Acme Air",
+                                                                  0.8f, "inferred", &web));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_pref_upsert(s_user, "tea", "green", 0.8f, "explicit", NULL));
+   char *r = search("airline");
+   TEST_ASSERT_NOT_NULL(strstr(r, "- airline: Acme Air" MEMORY_OUTSIDE_MARK "\n"));
+   free(r);
+   r = search("tea");
+   TEST_ASSERT_NOT_NULL(strstr(r, "- tea: green\n"));
+   free(r);
+}
+
 /* Search shows relations only when asked about a time or for closed ones, and
  * then filters them as asked. */
 void test_search_shows_relations_only_when_asked(void) {
@@ -414,6 +518,79 @@ static void test_unprompted_skip_leaves_a_later_reply_unread(void) {
    TEST_ASSERT_TRUE(reply > cursor);
 }
 
+/* A web result another session's turn wrote between the cursor and the
+ * history's end: the batch is recorded as having read the web, and the
+ * conversation's floor with it, though the history never held the row. */
+static void test_another_sessions_web_result_raises_the_floor(void) {
+   int64_t conv = 0, q1 = 0, tool = 0, a1 = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Shared", &conv));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_message_ex(conv, s_user, "user", "hi", &q1));
+   char *page = llm_third_party_frame(TOOL_FRAME_WEB, NULL, "A page\n");
+   TEST_ASSERT_NOT_NULL(page);
+   const conv_message_row_t row = { .role = "tool", .tool_call_id = "w1", .content = page };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &tool));
+   free(page);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_add_message_ex(conv, s_user, "assistant", "Hello.", &a1));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_set_last_extracted(conv, 1, q1, OUTSIDE_NONE));
+
+   char json[128];
+   snprintf(json, sizeof(json), "[{\"role\":\"assistant\",\"content\":\"Hello.\",\"id\":%lld}]",
+            (long long)a1);
+   struct json_object *history = json_tokener_parse(json);
+   TEST_ASSERT_NOT_NULL(history);
+   TEST_ASSERT_EQUAL_INT(0, memory_trigger_extraction(s_user, conv, "s", history, 3, 0, NULL));
+   json_object_put(history);
+
+   int64_t cursor = 0;
+   int floor = -1;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_get_last_extracted_msg_id(conv, &cursor));
+   TEST_ASSERT_EQUAL_INT64(a1, cursor);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get_outside(conv, s_user, &floor));
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, floor);
+}
+
+/* A session's history counting fewer rows than its conversation (another
+ * session's tool row missing): the stored conversation is read, and
+ * the count cursor reaches the conversation's message_count, so memory
+ * recovery doesn't pick the conversation again. */
+static void test_stored_conversation_read_counts_every_row(void) {
+   int64_t conv = 0, q1 = 0, tool = 0, a1 = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Counted", &conv));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_message_ex(conv, s_user, "user", "hi", &q1));
+   const conv_message_row_t row = { .role = "tool", .tool_call_id = "t1", .content = "42" };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &tool));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_add_message_ex(conv, s_user, "assistant", "It's 42.", &a1));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_set_last_extracted(conv, 1, q1, OUTSIDE_NONE));
+
+   char json[128];
+   snprintf(json, sizeof(json), "[{\"role\":\"assistant\",\"content\":\"It's 42.\",\"id\":%lld}]",
+            (long long)a1);
+   struct json_object *history = json_tokener_parse(json);
+   TEST_ASSERT_NOT_NULL(history);
+   TEST_ASSERT_EQUAL_INT(0, memory_trigger_extraction(s_user, conv, "s", history, 2, 0, NULL));
+   json_object_put(history);
+
+   int64_t cursor = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_get_last_extracted_msg_id(conv, &cursor));
+   TEST_ASSERT_EQUAL_INT64(a1, cursor);
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(s_db.db,
+                      "SELECT message_count, last_extracted_msg_count < message_count "
+                      "FROM conversations WHERE id = ?",
+                      -1, &st, NULL);
+   sqlite3_bind_int64(st, 1, conv);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   const int total = sqlite3_column_int(st, 0);
+   const int backlog = sqlite3_column_int(st, 1); /* memory recovery's rule */
+   sqlite3_finalize(st);
+   TEST_ASSERT_EQUAL_INT(3, total);
+   TEST_ASSERT_EQUAL_INT(0, backlog);
+}
+
 /* A benchmark's prompt file is split into literal pieces the way printf reads
  * the compiled template, so the same text gives the same prompt either way. */
 static void test_prompt_file_pieces_give_the_compiled_prompt(void) {
@@ -466,7 +643,13 @@ int main(void) {
    RUN_TEST(test_list_merged_and_restore);
    RUN_TEST(test_forget_reports_already_merged);
    RUN_TEST(test_search_shows_relations_only_when_asked);
+   RUN_TEST(test_search_marks_an_outside_preference);
+   RUN_TEST(test_remember_takes_the_turn_outside_kind);
+   RUN_TEST(test_source_excerpt_marks_an_outside_conversation);
+   RUN_TEST(test_list_merged_marks_outside_facts);
    RUN_TEST(test_unprompted_skip_leaves_a_later_reply_unread);
+   RUN_TEST(test_another_sessions_web_result_raises_the_floor);
+   RUN_TEST(test_stored_conversation_read_counts_every_row);
    RUN_TEST(test_prompt_file_pieces_give_the_compiled_prompt);
    RUN_TEST(test_prompt_file_split);
    return UNITY_END();

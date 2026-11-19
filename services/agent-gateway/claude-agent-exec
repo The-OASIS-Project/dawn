@@ -1,0 +1,69 @@
+#!/bin/sh
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# By contributing to this project, you agree to license your contributions
+# under the GPLv3 (or any later version) or any future licenses chosen by
+# the project author(s).
+#
+# Runs as the agent user: pick the credential, then exec Claude Code.  The
+# binary is one the gateway's Python SDK ships, root-owned, so the agent can't
+# replace the program that sets up its own sandbox.  DAWN_AGENT_CLAUDE picks an
+# installed version (the updater's check runs the new one before switching);
+# only binaries under the gateway's venvs are accepted.  An ANTHROPIC_API_KEY
+# overrides a `claude login`, so exactly one credential is used.
+LIB=/usr/local/lib/agent-gateway
+BIN="$(readlink -f "${DAWN_AGENT_CLAUDE:-$LIB/claude}")"
+case "$BIN" in
+   "$LIB"/venvs/*/claude_agent_sdk/_bundled/claude) ;;
+   *) echo "refusing to run $BIN" >&2; exit 1 ;;
+esac
+unset ANTHROPIC_API_KEY
+if [ "$DAWN_AGENT_AUTH" = "api_key" ]; then
+   [ -r "$HOME/.config/anthropic.env" ] || { echo "no $HOME/.config/anthropic.env" >&2; exit 1; }
+   . "$HOME/.config/anthropic.env"
+   export ANTHROPIC_API_KEY
+fi
+export DISABLE_AUTOUPDATER=1
+# A run is one turn, so nothing may outlive it: no background commands; a
+# foreground one may take up to an hour (a full build or test suite).
+export CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
+export BASH_DEFAULT_TIMEOUT_MS=600000 BASH_MAX_TIMEOUT_MS=3600000
+# A tool cache per repo, the one place outside its clone and /tmp a task may
+# write that outlives it: downloads and build caches kept for the repo's next
+# task (one repo's tasks never see another's).  Each tool is pointed at it by
+# its own variable, never XDG_CACHE_HOME: Claude Code itself, outside the
+# sandbox, keeps its cache there and must not write where a task can plant links.
+case "$DAWN_AGENT_REPO" in
+   *[!A-Za-z0-9._-]*|""|.|..) ;;
+   *)
+      C="$HOME/.cache/repo/$DAWN_AGENT_REPO"
+      mkdir -p "$C/arduino15" "$C/Arduino"
+      export PIP_CACHE_DIR="$C/pip" UV_CACHE_DIR="$C/uv" npm_config_cache="$C/npm"
+      export ARDUINO_DIRECTORIES_DATA="$C/arduino15" ARDUINO_DIRECTORIES_USER="$C/Arduino"
+      export ARDUINO_DIRECTORIES_DOWNLOADS="$C/arduino15/staging"
+      export ARDUINO_BUILD_CACHE_PATH="$C/arduino-build"
+      # No ccache config file is read from the cache (an agent could write one
+      # that runs a command in later builds); paths are taken relative to the
+      # clone, which differs per task.
+      if command -v ccache >/dev/null 2>&1; then
+         export CCACHE_DIR="$C/ccache"
+         mkdir -p "$CCACHE_DIR"
+         export CCACHE_CONFIGPATH=/dev/null CCACHE_BASEDIR="$PWD" CCACHE_NOHASHDIR=1
+         export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
+         export CMAKE_CUDA_COMPILER_LAUNCHER=ccache
+      fi
+      ;;
+esac
+exec "$BIN" "$@"

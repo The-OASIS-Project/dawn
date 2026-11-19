@@ -189,6 +189,125 @@ static void test_display_reads_skip_kind_rows(void) {
 
 /* ---- rows DAWN wrote on its own, left out of memory extraction ---- */
 
+static int64_t add_post(int64_t conv, const char *text) {
+   const conv_message_row_t row = { .role = "assistant", .content = text, .unprompted = true };
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, alice_id, &row, &id));
+   return id;
+}
+
+
+/* v115: posts stored before it keep replaying (and are never told in a turn's
+ * context); new ones don't replay.  Run on its own, it marks only what is
+ * there, once. */
+static void test_v115_earlier_posts_keep_replaying(void) {
+   sqlite3 *mem = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_open(":memory:", &mem));
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_exec(mem,
+                                      "CREATE TABLE message_unprompted (message_id INTEGER PRIMARY "
+                                      "KEY); INSERT INTO message_unprompted VALUES (1), (2);",
+                                      NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v115(mem));
+   TEST_ASSERT_EQUAL_INT64(2, raw_int(mem, "SELECT SUM(replayed) FROM message_unprompted"));
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(mem,
+                                                 "INSERT INTO message_unprompted (message_id) "
+                                                 "VALUES (3)",
+                                                 NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v115(mem)); /* a rerun: no change */
+   TEST_ASSERT_EQUAL_INT64(
+       0, raw_int(mem, "SELECT replayed FROM message_unprompted WHERE message_id = 3"));
+   sqlite3_close(mem);
+
+   /* Through the daemon's reads: an earlier post replays and isn't told. */
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   const int64_t question = add_row(conv, "user", "Research it", NULL);
+   const int64_t old_post = add_post(conv, "Research finished.");
+   char sql[96];
+   snprintf(sql, sizeof(sql), "UPDATE message_unprompted SET replayed = 1 WHERE message_id = %lld",
+            (long long)old_post);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+   conv_posted_row_t rows[1];
+   int n = 0;
+   bool more = false;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_posted_after(conv, alice_id, question, 2000, rows, 1, &n, &more));
+   TEST_ASSERT_EQUAL_INT(0, n);
+   replay_t replay = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages_for_llm(conv, alice_id, 0, collect_replay, &replay));
+   TEST_ASSERT_EQUAL_INT(2, replay.count);
+}
+
+/* A post longer than the caller's cap comes back one character over, so the
+ * caller can say it was cut. */
+static void test_post_cut_shows(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   add_post(conv, "abcdefghij");
+   add_post(conv, "abcde");
+   conv_posted_row_t rows[2];
+   int n = 0;
+   bool more = false;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_posted_after(conv, alice_id, 0, 5, rows, 2, &n, &more));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_EQUAL_STRING("abcdef", rows[0].content); /* cut: one over */
+   TEST_ASSERT_EQUAL_STRING("abcde", rows[1].content);  /* whole */
+   conv_db_posted_free(rows, n);
+}
+
+/* DAWN's posts: read after a row, for their owner, a few at a time; left out
+ * of the replay (a turn tells them in its context), still shown. */
+static void test_posts_after_and_not_replayed(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   const int64_t question = add_row(conv, "user", "Fix it", NULL);
+   add_row(conv, "assistant", "Started job #5.", NULL);
+   const int64_t p1 = add_post(conv, "Job #5 is waiting.");
+   const int64_t p2 = add_post(conv, "Job #5 finished.");
+   add_row(conv, "user", "allow it", NULL);
+
+   conv_posted_row_t rows[1];
+   int n = 0;
+   bool more = false;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_posted_after(conv, alice_id, question, 2000, rows, 1, &n, &more));
+   /* The newest one; the earlier one left (more). */
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_TRUE(more);
+   TEST_ASSERT_EQUAL_INT64(p2, rows[0].id);
+   TEST_ASSERT_EQUAL_STRING("Job #5 finished.", rows[0].content);
+   conv_db_posted_free(rows, n);
+   /* Both, oldest first; each cut to its characters. */
+   conv_posted_row_t two[2];
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_posted_after(conv, alice_id, question, 6, two, 2, &n, &more));
+   TEST_ASSERT_EQUAL_INT(2, n);
+   TEST_ASSERT_FALSE(more);
+   TEST_ASSERT_EQUAL_INT64(p1, two[0].id);
+   TEST_ASSERT_EQUAL_INT64(p2, two[1].id);
+   TEST_ASSERT_EQUAL_STRING("Job #5 ", two[0].content); /* one over the cap: cut */
+   conv_db_posted_free(two, n);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_posted_after(conv, alice_id, p2, 2000, rows, 1, &n, &more));
+   TEST_ASSERT_EQUAL_INT(0, n);
+   /* Another user's read sees nothing. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_posted_after(conv, bob_id, 0, 2000, rows, 1, &n, &more));
+   TEST_ASSERT_EQUAL_INT(0, n);
+
+   replay_t replay = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages_for_llm(conv, alice_id, 0, collect_replay, &replay));
+   TEST_ASSERT_EQUAL_INT(3, replay.count);
+   display_t shown = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_get_messages(conv, alice_id, collect_display, &shown));
+   TEST_ASSERT_EQUAL_INT(5, shown.count);
+}
+
 static void test_unprompted_rows(void) {
    int64_t conv = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
@@ -287,7 +406,8 @@ static void test_messages_fk_children(void) {
                                             "'table' AND f.\"table\" = 'messages' ORDER BY m.name)",
                                             -1, &st, NULL));
    TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
-   TEST_ASSERT_EQUAL_STRING("message_unprompted", (const char *)sqlite3_column_text(st, 0));
+   TEST_ASSERT_EQUAL_STRING("message_stopped,message_unprompted",
+                            (const char *)sqlite3_column_text(st, 0));
    sqlite3_finalize(st);
 }
 
@@ -1202,6 +1322,118 @@ static void test_v96_leaves_compacted_reasoning_behind(void) {
    sqlite3_close(db);
 }
 
+/* ---- v116: reasoning left behind where its replay dropped it ---- */
+
+static int64_t floor_of(int64_t conv) {
+   char sql[112];
+   snprintf(sql, sizeof(sql), "SELECT reasoning_floor_msg_id FROM conversations WHERE id = %lld",
+            (long long)conv);
+   return auth_db_query_int64(s_db.db, sql);
+}
+
+/* A usage-log row for @p conv recording @p drops prefix drops. */
+static void log_drops(int64_t conv, int drops) {
+   char sql[224];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO llm_usage_log (created_at, conversation_id, provider, kind, "
+            "binding_prefix_drops) VALUES (1, %lld, 'claude', 'chat', %d)",
+            (long long)conv, drops);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+}
+
+/* Only a conversation the log records drops for rises, to its newest row;
+ * one already above that keeps its floor; one with only clean calls, and a
+ * session-less call (conversation 0), change nothing.  A rerun changes
+ * nothing. */
+static void test_v116_raises_floor_where_replay_dropped(void) {
+   int64_t dropped = 0, high = 0, clean = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "d", &dropped));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "h", &high));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &clean));
+   add_row(dropped, "user", "Q", NULL);
+   const int64_t last = add_row(dropped, "assistant", "A", NULL);
+   add_row(high, "user", "Q", NULL);
+   add_row(clean, "user", "Q", NULL);
+   add_row(clean, "assistant", "A", NULL);
+   char sql[112];
+   snprintf(sql, sizeof(sql),
+            "UPDATE conversations SET reasoning_floor_msg_id = %lld WHERE id = %lld",
+            (long long)(last + 1000), (long long)high);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+   log_drops(dropped, 2);
+   log_drops(high, 1);
+   log_drops(clean, 0);
+   log_drops(0, 3);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v116(s_db.db));
+   TEST_ASSERT_EQUAL_INT64(last, floor_of(dropped));
+   TEST_ASSERT_EQUAL_INT64(last + 1000, floor_of(high)); /* never lowered */
+   TEST_ASSERT_EQUAL_INT64(0, floor_of(clean));
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v116(s_db.db));
+   TEST_ASSERT_EQUAL_INT64(last, floor_of(dropped));
+   TEST_ASSERT_EQUAL_INT64(last + 1000, floor_of(high));
+   TEST_ASSERT_EQUAL_INT64(0, floor_of(clean));
+}
+
+/* A database whose usage log has no drop count (before v91): nothing to act
+ * on, and the record table is still made. */
+static void test_v116_without_drop_column(void) {
+   sqlite3 *mem = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_open(":memory:", &mem));
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_exec(mem,
+                                      "CREATE TABLE conversations (id INTEGER PRIMARY KEY, "
+                                      "reasoning_floor_msg_id INTEGER NOT NULL DEFAULT 0);"
+                                      "CREATE TABLE llm_usage_log (id INTEGER PRIMARY KEY, "
+                                      "conversation_id INTEGER);"
+                                      "INSERT INTO conversations (id) VALUES (1);"
+                                      "INSERT INTO llm_usage_log (conversation_id) VALUES (1);",
+                                      NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_migrations_v116(mem));
+   TEST_ASSERT_EQUAL_INT64(0, raw_int(mem, "SELECT reasoning_floor_msg_id FROM conversations"));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(mem, "SELECT COUNT(*) FROM sqlite_master WHERE name = "
+                                           "'memory_extract_ranges'"));
+   sqlite3_close(mem);
+}
+
+/* The record table on a new database and on one upgraded from v115 (where
+ * the floor rises through the migration runner), and a conversation's
+ * ranges going with it. */
+static void test_v116_table_on_new_and_upgraded(void) {
+   static const char k_has_table[] = "SELECT COUNT(*) FROM sqlite_master WHERE name = "
+                                     "'memory_extract_ranges'";
+   TEST_ASSERT_EQUAL_INT64(1, auth_db_query_int64(s_db.db, k_has_table));
+   TEST_ASSERT_EQUAL_INT64(AUTH_DB_SCHEMA_VERSION,
+                           auth_db_query_int64(s_db.db, "SELECT version FROM schema_version"));
+
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "d", &conv));
+   add_row(conv, "user", "Q", NULL);
+   const int64_t last = add_row(conv, "assistant", "A", NULL);
+   log_drops(conv, 1);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db,
+                                                 "DROP TABLE memory_extract_ranges;"
+                                                 "UPDATE schema_version SET version = 115;",
+                                                 NULL, NULL, NULL));
+   auth_db_shutdown();
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_init(TEST_DB));
+   TEST_ASSERT_EQUAL_INT64(1, auth_db_query_int64(s_db.db, k_has_table));
+   TEST_ASSERT_EQUAL_INT64(AUTH_DB_SCHEMA_VERSION,
+                           auth_db_query_int64(s_db.db, "SELECT version FROM schema_version"));
+   TEST_ASSERT_EQUAL_INT64(last, floor_of(conv));
+
+   char sql[160];
+   snprintf(sql, sizeof(sql),
+            "INSERT INTO memory_extract_ranges (conversation_id, msg_id_start, msg_id_end, "
+            "created_at) VALUES (%lld, 1, 2, 1)",
+            (long long)conv);
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(s_db.db, sql, NULL, NULL, NULL));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_delete(conv, alice_id));
+   TEST_ASSERT_EQUAL_INT64(0, auth_db_query_int64(s_db.db,
+                                                  "SELECT COUNT(*) FROM memory_extract_ranges"));
+}
+
 /* ---- v98: messages rebuilt (images, kind triggers) ---- */
 
 /* The text a database stores for a messages object (NULL-safe copy). */
@@ -1622,6 +1854,12 @@ static void test_an_unanswered_envelope_is_retracted(void) {
    TEST_ASSERT_EQUAL_INT64(1, raw_int(db, sql)); /* only the question */
    sqlite3_close(db);
 
+   /* A post DAWN made while the attempt ran (a job's notice) doesn't hold it
+    * back either: it isn't replayed, so it can't stand between two envelopes. */
+   const int64_t env5 = add_row(conv, "user", "job results", "envelope");
+   add_post(conv, "Coding job #5 is waiting.");
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_retract_envelope(conv, alice_id, env5));
+
    /* An announced change saved after it (carried, naming no question)
     * doesn't hold it back, and stays. */
    const int64_t env3 = add_row(conv, "user", "job results", "envelope");
@@ -1656,6 +1894,50 @@ static void test_an_unanswered_envelope_is_retracted(void) {
    const int64_t env2 = add_row(conv, "user", "job results", "envelope");
    add_row(conv, "assistant", "working on it", NULL);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_DUPLICATE, conv_db_retract_envelope(conv, alice_id, env2));
+}
+
+/* A tool change saved with @p question. */
+static int64_t add_change_of(int64_t conv, int64_t question) {
+   const conv_message_row_t row = { .role = "system",
+                                    .content = "{\"rendered\":\"inline\",\"tools\":[]}",
+                                    .kind = "tool_change",
+                                    .context_of = question };
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, alice_id, &row, &id));
+   return id;
+}
+
+/* A failed turn's tool change no model answered goes; its question stays, and
+ * so does a change a model answered.  Only the conversation's owner's. */
+static void test_a_failed_turn_retracts_its_unanswered_tool_change(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(alice_id, "c", &conv));
+   const int64_t q1 = add_row(conv, "user", "Q1", NULL);
+   const int64_t answered = add_change_of(conv, q1);
+   add_row(conv, "assistant", "A1", NULL);
+   const int64_t q2 = add_row(conv, "user", "Q2", NULL);
+   add_change_of(conv, q2);
+   const int64_t count = message_count(conv);
+   conv_turn_save_t save = { .retract_changes_of = q1 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_save_turn(conv, alice_id, &save, NULL));
+   save.retract_changes_of = q2;
+   TEST_ASSERT_NOT_EQUAL(AUTH_DB_SUCCESS, conv_db_save_turn(conv, bob_id, &save, NULL));
+   sqlite3 *db = raw_open(TEST_DB);
+   char sql[160];
+   snprintf(sql, sizeof(sql),
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = %lld AND kind = 'tool_change'",
+            (long long)conv);
+   TEST_ASSERT_EQUAL_INT64(2, raw_int(db, sql));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_save_turn(conv, alice_id, &save, NULL));
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, sql));
+   snprintf(sql, sizeof(sql),
+            "SELECT id FROM messages WHERE conversation_id = %lld AND kind = 'tool_change'",
+            (long long)conv);
+   TEST_ASSERT_EQUAL_INT64(answered, raw_int(db, sql));
+   snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM messages WHERE id = %lld", (long long)q2);
+   TEST_ASSERT_EQUAL_INT64(1, raw_int(db, sql));
+   sqlite3_close(db);
+   TEST_ASSERT_EQUAL_INT64(count, message_count(conv));
 }
 
 /* ---- citation handles ---- */
@@ -1787,11 +2069,18 @@ int main(void) {
    RUN_TEST(test_kind_triggers_agree_with_message_kind_h);
    RUN_TEST(test_images_only_on_tool_rows_as_a_json_array);
    RUN_TEST(test_an_unanswered_envelope_is_retracted);
+   RUN_TEST(test_a_failed_turn_retracts_its_unanswered_tool_change);
    RUN_TEST(test_handles_are_stable_per_conversation);
    RUN_TEST(test_handles_check_the_owner_and_input);
    RUN_TEST(test_deleting_a_conversation_drops_its_handles);
    RUN_TEST(test_briefing_marked_extracted);
    RUN_TEST(test_unprompted_rows);
+   RUN_TEST(test_posts_after_and_not_replayed);
+   RUN_TEST(test_v115_earlier_posts_keep_replaying);
+   RUN_TEST(test_v116_raises_floor_where_replay_dropped);
+   RUN_TEST(test_v116_without_drop_column);
+   RUN_TEST(test_v116_table_on_new_and_upgraded);
+   RUN_TEST(test_post_cut_shows);
    RUN_TEST(test_v109_marks_earlier_posts);
    RUN_TEST(test_messages_fk_children);
    return UNITY_END();

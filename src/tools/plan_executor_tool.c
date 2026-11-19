@@ -241,6 +241,7 @@ static tool_action_kind_t plan_classify_call(const char *device,
 
 static const tool_metadata_t plan_executor_metadata = {
    .name = "execute_plan",
+   .results = TOOL_RESULTS_OUTSIDE,
    /* Kind of action: by its steps (plan_classify_call), each step also decided
     * on its own as it runs. */
    .classify_call = plan_classify_call,

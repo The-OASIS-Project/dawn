@@ -34,9 +34,11 @@ extern "C" {
 /**
  * @brief Run nightly memory decay and pruning
  *
- * Checks config flags, current hour, and last-run timestamp before
+ * Checks the current hour (decay_hour) and last-run timestamp before
  * executing. Safe to call every maintenance cycle — will no-op if
- * conditions are not met.
+ * conditions are not met.  Each night it prunes the consolidation record
+ * (batches older than MEMORY_CONSOLIDATE_RECORD_DAYS) whatever memory and
+ * decay are set to; the rest runs only with both enabled.
  *
  * For each user with memory data:
  * 1. Applies confidence decay to facts and preferences

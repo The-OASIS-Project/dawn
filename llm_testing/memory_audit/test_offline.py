@@ -12,7 +12,7 @@ import sqlite3
 import tempfile
 import unittest
 
-from . import candidates, coverage, models, rubric, storage
+from . import candidates, coverage, models, reextract, rubric, storage, store
 from .__main__ import kappa, main, stratified
 
 
@@ -284,6 +284,137 @@ class Coverage(unittest.TestCase):
                '{"id": 7, "v": "missing"}]'
         self.assertEqual(coverage.parse_verdicts(text, {1, 2}), {1: "covered"})
         self.assertEqual(coverage.parse_verdicts("[{bad", {1}), {})
+
+
+class Reextract(unittest.TestCase):
+    def test_bench_command_dumps_candidates_when_asked(self):
+        plain = reextract.bench_command("b", "claude", "m", "medium")
+        self.assertNotIn("--dump-candidates", plain)
+        cmd = reextract.bench_command("b", "claude", "m", "medium", candidates="c.jsonl")
+        i = cmd.index("--dump-candidates")
+        self.assertEqual(cmd[i + 1], os.path.abspath("c.jsonl"))
+
+    def test_candidates_file_is_a_coverage_set(self):
+        """The bench's candidate lines carry what coverage reads of a B set."""
+        path = storage.data_path("_test_candidates.jsonl")
+        try:
+            with storage.private_open(path) as f:
+                for i, conv in [(1, 10), (2, 10), (3, 12)]:
+                    f.write(json.dumps({"id": i, "text": f"t{i}", "conversation": conv,
+                                        "kind": "fact", "source": "explicit"}) + "\n")
+            self.assertEqual(reextract.count_candidates(path), (3, 2))
+            rows = coverage._read(path)
+            self.assertTrue(all({"text", "conversation"} <= set(r) for r in rows))
+        finally:
+            os.unlink(path)
+
+    def test_bench_command_sets_the_consolidator(self):
+        self.assertNotIn("--consolidator", reextract.bench_command("b", "claude", "m", ""))
+        cmd = reextract.bench_command("b", "claude", "m", "", consolidator="agent")
+        self.assertEqual(cmd[cmd.index("--consolidator") + 1], "agent")
+
+    def test_bench_command_sets_the_samples(self):
+        self.assertNotIn("--samples", reextract.bench_command("b", "claude", "m", ""))
+        cmd = reextract.bench_command("b", "claude", "m", "", consolidator="agent", samples=2)
+        self.assertEqual(cmd[cmd.index("--samples") + 1], "2")
+
+    def test_usage_lines_carry_the_call_kind_and_step(self):
+        line = (b"LLM cache: provider=claude model=m kind=consolidation conv=0 iter=2 prompt=1200 "
+                b"read=1000 write=0 uncached=200 coverage=83% expected=- state=warm output=300")
+        m = reextract.USAGE_RE.search(line)
+        self.assertEqual((m.group(1), m.group(2), m.group(3), m.group(4)),
+                         (b"consolidation", b"2", b"1200", b"300"))
+        self.assertEqual(reextract.usage_step("consolidation", 2), "consolidation/round")
+        self.assertEqual(reextract.usage_step("consolidation", 0), "consolidation/sample")
+        self.assertEqual(reextract.usage_step("extraction", -1), "extraction")
+
+
+def _vec(*xs):
+    import struct as _s
+    return _s.pack(f"{len(xs)}f", *xs)
+
+
+class Store(unittest.TestCase):
+    def test_duplicates_and_percentile(self):
+        vecs = [store._vec(_vec(1, 0)), store._vec(_vec(0.99, 0.1)), store._vec(_vec(0, 1))]
+        self.assertEqual(store.duplicates(vecs), (1, 1, 2))
+        self.assertEqual(store.percentile([1, 2, 3, 4], 0.5), 2.5)
+        self.assertEqual(store.percentile([], 0.9), 0)
+
+    def test_counts_from_a_scratch_database(self):
+        path = storage.data_path("_test_store.db")
+        if os.path.exists(path):
+            os.unlink(path)
+        con = sqlite3.connect(path)
+        con.executescript("""
+            CREATE TABLE memory_facts (id INTEGER PRIMARY KEY, fact_text TEXT, embedding BLOB,
+              superseded_by INTEGER, superseded_kind INTEGER, outside INTEGER DEFAULT 0);
+            CREATE TABLE memory_entities (id INTEGER PRIMARY KEY, canonical_name TEXT);
+            CREATE TABLE memory_relations (id INTEGER PRIMARY KEY, subject_entity_id INTEGER,
+              relation TEXT, fact_id INTEGER, valid_to INTEGER, closed_by_fact_id INTEGER);
+            CREATE TABLE memory_preferences (id INTEGER PRIMARY KEY);
+            CREATE TABLE conversations (id INTEGER PRIMARY KEY, origin TEXT);
+            CREATE TABLE memory_consolidation_batches (id INTEGER PRIMARY KEY,
+              conversation_id INTEGER, path TEXT, stop TEXT, outside INTEGER, rounds INTEGER);
+            CREATE TABLE memory_consolidation_ops (id INTEGER PRIMARY KEY, batch_id INTEGER,
+              op TEXT, status TEXT, reason TEXT);
+        """)
+        con.execute("INSERT INTO memory_facts VALUES (1, 'a', ?, NULL, NULL, 0)", (_vec(1, 0),))
+        con.execute("INSERT INTO memory_facts VALUES (2, 'b', ?, NULL, NULL, 0)", (_vec(1, 0),))
+        con.execute("INSERT INTO memory_facts VALUES (3, 'c', NULL, 1, 1, 0)")
+        con.execute("INSERT INTO memory_entities VALUES (1, 'friday'), (2, 'jonathan smith')")
+        con.execute("INSERT INTO memory_relations VALUES (1, 1, 'owns', 1, NULL, NULL), "
+                    "(2, 2, 'married_to', 2, NULL, NULL), (3, 2, 'married_to', 2, NULL, NULL)")
+        con.execute("INSERT INTO conversations VALUES (5, 'messaging:sms'), (6, 'webui')")
+        con.execute("INSERT INTO memory_consolidation_batches VALUES (1, 5, 'agent', 'finished', "
+                    "2, 1), (2, 6, 'agent_partial', 'tokens', 0, 0)")
+        con.execute("INSERT INTO memory_consolidation_ops VALUES (1, 1, 'added', 'applied', "
+                    "'nothing similar stored'), (2, 1, 'replaced', 'refused', 'x'), "
+                    "(3, 2, 'reinforced', 'applied', 'the same text is stored')")
+        con.commit()
+        con.close()
+        try:
+            counts, record = store.store_counts(path, "Friday")
+            self.assertEqual(counts["facts"], 2)
+            self.assertEqual(counts["dup_pairs"], 1)
+            self.assertEqual(counts["replaced"], 1)
+            self.assertEqual(counts["replaced_not_outside"], 1)
+            self.assertEqual(counts["assistant_subject"], 1)
+            self.assertEqual(counts["one_at_a_time_conflicts"], 1)
+            self.assertEqual(record["refused_replaces"], 1)
+            self.assertEqual(record["triage"], {"new": 1, "reinforced": 1})
+            self.assertEqual(record["outside_by_origin"]["messaging"]["tainted"], 1)
+            self.assertEqual(record["ops_per_batch"], 1.5)
+        finally:
+            os.unlink(path)
+
+    def test_usage_by_kind(self):
+        path = storage.data_path("_test_usage.jsonl")
+        with storage.private_open(path) as f:
+            for conv, kind, i, o in [(1, "consolidation", 100, 10), (1, "consolidation", 50, 5),
+                                     (2, "consolidation", 300, 30)]:
+                f.write(json.dumps({"conversation": conv, "kind": kind, "calls": 1, "in": i,
+                                    "out": o}) + "\n")
+        try:
+            u = store.usage_counts(path)["consolidation"]
+            self.assertEqual(u["batches"], 2)
+            self.assertEqual(u["in_p50"], 225)
+            self.assertEqual(u["calls_per_batch"], 1.5)
+        finally:
+            os.unlink(path)
+
+    def test_forgotten_seed_formats(self):
+        path = storage.data_path("_test_forgotten.json")
+        try:
+            with storage.private_open(path) as f:
+                json.dump(["one", {"text": "two"}], f)
+            self.assertEqual(store.load_forgotten(path), ["one", "two"])
+            with storage.private_open(path) as f:
+                f.write(json.dumps({"text": "three"}) + "\n")
+            self.assertEqual(store.load_forgotten(path), ["three"])
+            self.assertEqual(store.fold("  Three  apples. "), "three apples")
+        finally:
+            os.unlink(path)
 
 
 if __name__ == "__main__":

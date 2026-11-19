@@ -514,10 +514,13 @@ static void *reinvoke_turn_entry(void *arg) {
       return NULL;
    }
 
-   session_turn_begin(live, parent, m->user_id); /* also tags the stream */
+   /* Flags first: a Stop pressed while the turn waits for the parent
+    * conversation must count.  In flight from before that wait, so the idle
+    * sweep never reaps the session under it. */
    session_begin_turn_flags(live);
    live->input_was_voice = false; /* a job's result, not the user's speech */
    atomic_fetch_add(&live->turn_in_flight, 1);
+   session_turn_begin_background(live, parent, m->user_id); /* also tags the stream */
 
    /* Clear a stale pending_visual left by a PRIOR turn on this viewer's session (e.g. a
     * render_visual whose turn was interrupted before its final answer persisted).  The
@@ -533,7 +536,11 @@ static void *reinvoke_turn_entry(void *arg) {
 
    int64_t fired_ids[JOB_MONITOR_MAX_PER_TICK];
    int n_fired = 0;
-   char *envelope = build_envelope(parent, user_id, fired_ids, &n_fired);
+   /* Stopped while another turn had the parent: nothing ran, no attempt is
+    * counted, and the monitor tries again. */
+   char *envelope = session_turn_unsent(live)
+                        ? NULL
+                        : build_envelope(parent, user_id, fired_ids, &n_fired);
 
    /* build_envelope returns non-NULL only when it included ≥1 job, so n_fired > 0
     * is implied here — the explicit clause is belt-and-suspenders. */
@@ -568,6 +575,10 @@ static void *reinvoke_turn_entry(void *arg) {
          /* Codec captured at begin (pre-dispatch) so this close never derefs a
           * client_data the lws thread may have freed during a long tool loop. */
          webui_reinvoke_tts_finish(live, tts_use_opus);
+      } else {
+         /* No speech to close: still settle the viewer, whose last state was
+          * this turn's. */
+         webui_reinvoke_settle(live);
       }
       session_set_tool_iteration_hook(live, NULL, NULL);
       session_set_tool_persist_hook(live, NULL, NULL);
@@ -651,9 +662,12 @@ static void reinvoke_run_detached(reinvoke_work_t *w,
                                   int n_fired) {
    /* Hydrate the parent conversation's history so the model reacts in context. */
    size_t restored = 0;
+   /* Read before the load: the turn's catch-up pulls what lands after. */
+   conv_sync_point_t at;
+   const bool at_ok = conv_db_sync_point_get(w->parent_conv, w->user_id, &at) == AUTH_DB_SUCCESS;
    struct json_object *hist = memory_history_load_for_llm(w->parent_conv, w->user_id, &restored);
    if (hist != NULL) {
-      session_replace_history(s, hist, w->parent_conv);
+      session_replace_history_at(s, hist, w->parent_conv, w->user_id, at_ok ? &at : NULL);
    }
 
    job_persist_ctx_t pctx = { w->parent_conv, w->user_id };
@@ -970,4 +984,9 @@ __attribute__((weak)) bool webui_reinvoke_tts_begin(session_t *live,
 __attribute__((weak)) void webui_reinvoke_tts_finish(session_t *live, bool use_opus) {
    (void)live;
    (void)use_opus;
+}
+
+/* Weak default: no viewer to settle without WebUI. */
+__attribute__((weak)) void webui_reinvoke_settle(session_t *live) {
+   (void)live;
 }

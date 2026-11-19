@@ -42,11 +42,13 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_messages.h"
+#include "core/conv_turn_lease.h"
 #include "core/job_dispatch.h"
 #include "core/memory_filter.h"
 #include "core/rate_limiter.h"
 #include "core/reply_code.h"
 #include "core/session_manager.h"
+#include "core/session_prefix.h"
 #include "core/text_input_dispatch.h"
 #include "core/tool_call_challenge.h"
 #include "core/wake_word.h"
@@ -449,7 +451,7 @@ static void *typing_keepalive_thread(void *arg) {
    return NULL;
 }
 
-static void process_inbound(inbound_item_t *item) {
+static inbound_outcome_t process_inbound(inbound_item_t *item) {
    /* Forever-binding: every messaging-backed exchange persists into one
     * conversations row per channel row (several DAWN users may each link
     * one chat).  First inbound
@@ -474,13 +476,13 @@ static void process_inbound(inbound_item_t *item) {
    int64_t conv_id = resolve_channel_conversation_id(&item->ref, item->provider,
                                                      item->provider_address, &gone);
    if (gone) {
-      return;
+      return INBOUND_RAN;
    }
 
    /* STOP drops the channel's waiting action (messaging_engine_codes.c). */
    if (item->kind == INBOUND_STOP) {
       engine_cancel_reply_code(item);
-      return;
+      return INBOUND_RAN;
    }
 
    session_t *session = get_or_create_messaging_session(&item->ref, item->provider,
@@ -492,31 +494,108 @@ static void process_inbound(inbound_item_t *item) {
          /* The code stays good: it wasn't taken. */
          engine_reply_busy(item);
       }
-      return;
+      return INBOUND_RAN;
+   }
+   /* One turn per conversation.  While another session's turn holds this one
+    * the message waits on the worker's list (messaging_engine_parked.c) rather
+    * than the worker waiting, so every other channel is still answered.  Taken
+    * before the reply code is: a message that waits has used nothing up. */
+   uint64_t lease_token = 0;
+   if (conv_id > 0) {
+      const uint64_t token = conv_turn_lease_new_token();
+      const int lrc = conv_turn_lease_try_acquire(conv_id, session->session_id, token);
+      if (lrc == CONV_TURN_LEASE_BUSY) {
+         session_release(session);
+         /* Once, when it first waits: the sender sees it was received. */
+         const messaging_driver_t *drv = item->busy_conv == 0 ? find_driver(item->provider) : NULL;
+         if (drv && drv->send_typing) {
+            char address_json[MESSAGING_ADDRESS_JSON_BUF_SIZE];
+            build_address_json_for(item->provider, item->provider_address, address_json,
+                                   sizeof(address_json));
+            drv->send_typing(item->ref.user_id, item->provider_address, address_json);
+         }
+         item->busy_conv = conv_id;
+         return INBOUND_PARKED;
+      }
+      if (lrc == CONV_TURN_LEASE_GRANTED) {
+         lease_token = token;
+      } /* else shut down or no table entry: session_turn_begin decides, as for any turn */
    }
    /* A reply code is taken once there's a session to run it in, before any
     * turn: a wrong one opens none. */
    tool_redeemed_t taken = { 0 };
    if (item->kind == INBOUND_CODE && !engine_take_reply_code(item, &taken)) {
+      if (lease_token != 0) {
+         (void)conv_turn_lease_release(conv_id, lease_token);
+      }
       session_release(session);
-      return;
+      return INBOUND_RAN;
    }
 
-   /* Cross-channel staleness check.  An external writer (WebUI
-    * conversation panel, voice session, MCP) may have appended to
-    * this conv between our turns — the cached session_t holds frozen
-    * in-memory history while the DB has fresher state.  Without this
-    * reload, the LLM would respond without context of the
-    * external-channel turns, producing a visibly-divergent
-    * conversation from what the user sees in the WebUI.
-    *
-    * Universal across SMS / Telegram / future Discord/Slack — every
-    * channel funnels through here.  Skipped when conv_id <= 0 (DB
-    * persistence failed for this turn; degraded mode). */
-   reload_session_history_if_stale(session, item->provider, item->provider_address, conv_id,
-                                   item->ref.user_id);
+   /* Typing-indicator keepalive.  If the driver supports `send_typing`,
+    * spawn a background thread that fires the typing call once and
+    * re-fires every ~4s while the LLM is processing — so the user sees
+    * "Bot is typing..." instead of dead air during multi-second turns.
+    * Joined after dispatch returns; ctx freed here (not in the thread)
+    * for clear ownership. */
+   typing_keepalive_ctx_t *ka_ctx = NULL;
+   pthread_t ka_thread = 0;
+   bool ka_started = false;
+   const messaging_driver_t *typing_drv = find_driver(item->provider);
+   if (typing_drv && typing_drv->send_typing) {
+      ka_ctx = (typing_keepalive_ctx_t *)calloc(1, sizeof(*ka_ctx));
+      if (ka_ctx) {
+         ka_ctx->drv = typing_drv;
+         ka_ctx->user_id = item->ref.user_id;
+         snprintf(ka_ctx->provider_address, sizeof(ka_ctx->provider_address), "%s",
+                  item->provider_address);
+         build_address_json_for(item->provider, item->provider_address, ka_ctx->address_json,
+                                sizeof(ka_ctx->address_json));
+         atomic_init(&ka_ctx->stop, false);
+         if (pthread_create(&ka_thread, NULL, typing_keepalive_thread, ka_ctx) == 0) {
+            ka_started = true;
+         } else {
+            free(ka_ctx);
+            ka_ctx = NULL;
+         }
+      }
+   }
 
-   /* Build the per-turn channel hint, including a truncation-feedback
+   /* Persist the tool-turn's assistant tool_calls + role:tool rows to the channel
+    * conversation for the whole (synchronous) dispatch — the SAME mechanism jobs use
+    * (job_dispatch_tool_persist_cb, snapshot conv_id).  A messaging turn is otherwise on
+    * the tool loop's fan_ephemeral path with no persist hook, so without this a WebUI
+    * viewer reloading the channel conversation loses the tool interaction (the chat
+    * platform only ever receives the final answer, which persists inline below).  pctx is
+    * stack-scoped and the hook fires on THIS thread during dispatch; cleared right after. */
+   job_persist_ctx_t pctx = { conv_id, item->ref.user_id };
+   if (conv_id > 0) {
+      session_set_tool_persist_hook(session, job_dispatch_tool_persist_cb, &pctx);
+   }
+   /* Fresh flags: a Stop aimed at this session's last turn (stop_other_reply
+    * from the WebUI) must not stop this one. */
+   session_begin_turn_flags(session);
+   /* The turn belongs to the channel's conversation, and owns its lease from
+    * here (released by session_turn_end). */
+   session_turn_begin_leased(session, conv_id, item->ref.user_id, lease_token);
+   if (session_turn_unsent(session)) {
+      /* Stopped waiting (shutdown): nothing ran, and nothing was taken. */
+      OLOG_WARNING("messaging: inbound message for conversation %lld not answered: the wait "
+                   "for its conversation was stopped",
+                   (long long)conv_id);
+      session_set_tool_persist_hook(session, NULL, NULL);
+      if (ka_started) {
+         atomic_store(&ka_ctx->stop, true);
+         pthread_join(ka_thread, NULL);
+         free(ka_ctx);
+      }
+      session_turn_end(session);
+      session_release(session);
+      return INBOUND_RAN;
+   }
+   /* Built once the turn has begun: its start brought the history up to date
+    * with what other sessions wrote, so "the previous reply" is the latest.
+    * Build the per-turn channel hint, including a truncation-feedback
     * note when the prior assistant reply was cut.  The truncation
     * marker lives in the assistant history (we replaced it
     * post-truncation in the previous turn), so detecting prior
@@ -564,48 +643,6 @@ static void process_inbound(inbound_item_t *item) {
       .channel_hint = channel_hint,
    };
 
-   /* Typing-indicator keepalive.  If the driver supports `send_typing`,
-    * spawn a background thread that fires the typing call once and
-    * re-fires every ~4s while the LLM is processing — so the user sees
-    * "Bot is typing..." instead of dead air during multi-second turns.
-    * Joined after dispatch returns; ctx freed here (not in the thread)
-    * for clear ownership. */
-   typing_keepalive_ctx_t *ka_ctx = NULL;
-   pthread_t ka_thread = 0;
-   bool ka_started = false;
-   const messaging_driver_t *typing_drv = find_driver(item->provider);
-   if (typing_drv && typing_drv->send_typing) {
-      ka_ctx = (typing_keepalive_ctx_t *)calloc(1, sizeof(*ka_ctx));
-      if (ka_ctx) {
-         ka_ctx->drv = typing_drv;
-         ka_ctx->user_id = item->ref.user_id;
-         snprintf(ka_ctx->provider_address, sizeof(ka_ctx->provider_address), "%s",
-                  item->provider_address);
-         build_address_json_for(item->provider, item->provider_address, ka_ctx->address_json,
-                                sizeof(ka_ctx->address_json));
-         atomic_init(&ka_ctx->stop, false);
-         if (pthread_create(&ka_thread, NULL, typing_keepalive_thread, ka_ctx) == 0) {
-            ka_started = true;
-         } else {
-            free(ka_ctx);
-            ka_ctx = NULL;
-         }
-      }
-   }
-
-   /* Persist the tool-turn's assistant tool_calls + role:tool rows to the channel
-    * conversation for the whole (synchronous) dispatch — the SAME mechanism jobs use
-    * (job_dispatch_tool_persist_cb, snapshot conv_id).  A messaging turn is otherwise on
-    * the tool loop's fan_ephemeral path with no persist hook, so without this a WebUI
-    * viewer reloading the channel conversation loses the tool interaction (the chat
-    * platform only ever receives the final answer, which persists inline below).  pctx is
-    * stack-scoped and the hook fires on THIS thread during dispatch; cleared right after. */
-   job_persist_ctx_t pctx = { conv_id, item->ref.user_id };
-   if (conv_id > 0) {
-      session_set_tool_persist_hook(session, job_dispatch_tool_persist_cb, &pctx);
-   }
-   /* The turn belongs to the channel's conversation (see session_turn_begin). */
-   session_turn_begin(session, conv_id, item->ref.user_id);
    /* A reply code runs the action it approves in this turn; the model is
     * handed the outcome (DAWN's words, saved as request context), not the
     * code, and only reports it: no tools in that turn. */
@@ -624,7 +661,7 @@ static void process_inbound(inbound_item_t *item) {
          }
          session_turn_end(session);
          session_release(session);
-         return;
+         return INBOUND_RAN;
       }
       opts.question_kind = MESSAGE_KIND_ENVELOPE;
    }
@@ -661,6 +698,9 @@ static void process_inbound(inbound_item_t *item) {
 
    if (!response || response[0] == '\0') {
       json_object_put(reply_blocks);
+      /* No reply (failed, empty or stopped): the tool changes no model
+       * answered go back, to be appended again after the next message. */
+      (void)session_prefix_take_back_changes(session);
       session_turn_end(session);
       session_release(session);
       free(response);
@@ -672,7 +712,7 @@ static void process_inbound(inbound_item_t *item) {
          messaging_deliver(rdrv, item->ref.user_id, item->provider_address, address_json, refusal);
       }
       engine_send_reply_code(item);
-      return;
+      return INBOUND_RAN;
    }
 
    /* Provider-side truncation safety net for any provider that opts
@@ -730,12 +770,6 @@ static void process_inbound(inbound_item_t *item) {
       free(stored);
       if (rc == AUTH_DB_SUCCESS && assistant_msg_id > 0) {
          session_stamp_last_message_id(session, "assistant", assistant_msg_id);
-         /* Bump slot's last_known_msg_id to the assistant message.
-          * msg_ids are monotonic per conv, so this id is strictly
-          * greater than the just-persisted user message's id — one
-          * bump covers both writes for the cross-channel staleness
-          * check on the next inbound. */
-         slot_bump_last_known_msg_id(session, assistant_msg_id);
          /* Notify any open WebUI session viewing this conversation
           * that new messages landed.  Weak-symbol no-op when the
           * WebUI layer isn't linked; the strong override in
@@ -839,6 +873,7 @@ static void process_inbound(inbound_item_t *item) {
 
    /* The code for an action this turn held, after the reply that explains it. */
    engine_send_reply_code(item);
+   return INBOUND_RAN;
 }
 
 void *messaging_worker_thread(void *arg) {
@@ -847,28 +882,39 @@ void *messaging_worker_thread(void *arg) {
 
    while (!atomic_load(&s_shutdown_requested)) {
       pthread_mutex_lock(&s_inbound_mutex);
-      while (s_inbound_count == 0 && !atomic_load(&s_shutdown_requested)) {
-         pthread_cond_wait(&s_inbound_cond, &s_inbound_mutex);
+      bool recheck = false;
+      while (s_inbound_count == 0 && !atomic_load(&s_shutdown_requested) && !recheck) {
+         if (inbound_parked_count() == 0) {
+            pthread_cond_wait(&s_inbound_cond, &s_inbound_mutex);
+            continue;
+         }
+         /* Messages wait for a held conversation: look again in a moment. */
+         struct timespec until;
+         clock_gettime(CLOCK_REALTIME, &until);
+         until.tv_nsec += (long)MESSAGING_PARKED_RECHECK_MS * 1000000L;
+         until.tv_sec += until.tv_nsec / 1000000000L;
+         until.tv_nsec %= 1000000000L;
+         recheck = pthread_cond_timedwait(&s_inbound_cond, &s_inbound_mutex, &until) != 0;
       }
       if (atomic_load(&s_shutdown_requested)) {
          pthread_mutex_unlock(&s_inbound_mutex);
          break;
       }
-      inbound_item_t *item = s_inbound_queue[s_inbound_head];
-      s_inbound_queue[s_inbound_head] = NULL;
-      s_inbound_head = (s_inbound_head + 1) % MESSAGING_INBOUND_QUEUE_DEPTH;
-      s_inbound_count--;
+      inbound_item_t *item = NULL;
+      if (s_inbound_count > 0) {
+         item = s_inbound_queue[s_inbound_head];
+         s_inbound_queue[s_inbound_head] = NULL;
+         s_inbound_head = (s_inbound_head + 1) % MESSAGING_INBOUND_QUEUE_DEPTH;
+         s_inbound_count--;
+      }
       pthread_mutex_unlock(&s_inbound_mutex);
 
       if (item) {
-         process_inbound(item);
-         if (item->kind == INBOUND_CODE && item->body) {
-            sodium_memzero(item->body, strlen(item->body)); /* a reply code */
-         }
-         free(item->body);
-         free(item);
+         inbound_parked_submit(item, process_inbound);
       }
+      inbound_parked_retry(process_inbound);
    }
+   inbound_parked_drop_all();
 
    OLOG_INFO("messaging: worker thread exiting");
    return NULL;

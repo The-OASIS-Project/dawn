@@ -37,6 +37,7 @@
 #include "config/dawn_config.h"
 #include "core/buf_printf.h"
 #include "core/build_focus_block.h"
+#include "core/component_status.h"
 #include "core/session_manager.h"
 #include "core/strbuf.h"
 #include "core/text_filter.h"
@@ -96,6 +97,24 @@ static void user_context_text(const auth_user_settings_t *settings,
       BUF_PRINTF(buf, off, rem, "Preferred units: %s\n", settings->units);
 }
 
+/* The persona for @p settings' user (NULL: a guest, the server's): each half
+ * the server's, with the user's own text for it added or in its place, then
+ * the halves joined.  Heap text (caller frees), NULL on allocation failure. */
+static char *user_persona(const auth_user_settings_t *settings) {
+   char values_base[CONFIG_DESCRIPTION_MAX];
+   char voice_base[CONFIG_DESCRIPTION_MAX];
+   llm_persona_half(PERSONA_VALUES, values_base, sizeof(values_base));
+   llm_persona_half(PERSONA_VOICE, voice_base, sizeof(voice_base));
+   char *values = prompt_persona_half(values_base, settings ? settings->persona_values : NULL,
+                                      settings ? settings->persona_values_mode : NULL);
+   char *voice = prompt_persona_half(voice_base, settings ? settings->persona_voice : NULL,
+                                     settings ? settings->persona_voice_mode : NULL);
+   char *persona = values && voice ? prompt_persona_half(values, voice, "append") : NULL;
+   free(values);
+   free(voice);
+   return persona;
+}
+
 /**
  * @brief The system prompt a conversation starting now would freeze, in
  *        named sections, and joined (out->stable_prefix)
@@ -103,7 +122,8 @@ static void user_context_text(const auth_user_settings_t *settings,
  * The same base for every surface (get_command_prompt_parts): what differs by
  * surface is a standing direction (build_directives), so a conversation
  * continued from another surface keeps its prompt.  In order:
- *   - identity_override or persona: a replace-mode persona, else the base one
+ *   - identity_override or persona: an older replace-mode persona text, else
+ *     the server's persona with the user's own values and voice
  *   - rules: the base prompt's rules
  *   - tool_defaults: the configured location / units / timezone, for a guest
  *     only (a user's own settings are their user_context)
@@ -137,7 +157,9 @@ static int build_stable_sections(int user_id, composed_prompt_t *out) {
       snprintf(override, sizeof(override), "## Your Identity\n%s", settings.persona_description);
       err |= prompt_sections_add(out, "identity_override", "who you are", override);
    } else {
-      err |= prompt_sections_add(out, "persona", "your persona", base.persona);
+      char *persona = user_persona(have_settings ? &settings : NULL);
+      err |= persona ? prompt_sections_add(out, "persona", "your persona", persona) : FAILURE;
+      free(persona);
    }
    err |= prompt_sections_add(out, "rules", "your operating rules", base.rules);
    if (user_id <= 0)
@@ -390,6 +412,10 @@ static char *build_directives(session_t *dispatch) {
        dispatch->type == SESSION_TYPE_DAP) {
       set = add_directive(set, voice_directive_effective());
       set = add_directive(set, asr_disambiguation_hint_effective());
+   }
+   /* Appended or withdrawn mid-conversation as the body comes and goes. */
+   if (dispatch->type == SESSION_TYPE_LOCAL && component_status_is_reachy_online()) {
+      set = add_directive(set, EXPRESSION_DIRECTIVE);
    }
    if (dispatch->type == SESSION_TYPE_JOB) {
       set = add_directive(set, JOB_HEADLESS_DIRECTIVE);

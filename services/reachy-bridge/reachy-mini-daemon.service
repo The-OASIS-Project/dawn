@@ -1,0 +1,26 @@
+# Reachy Mini daemon (Pollen), motion only, for DAWN's reachy-bridge.
+# A systemd USER unit: run as the same user as DAWN.
+#
+#   --no-media     The Jetson's GStreamer (1.20) is too old for the daemon's
+#                  media path, and DAWN owns the audio device anyway.  The
+#                  bridge reads direction of arrival from the mic itself.
+#   Binds 127.0.0.1:8000 (the Lite default).  The API has no authentication:
+#   never add --fastapi-host 0.0.0.0.
+#   It still advertises itself over mDNS (name, LAN address, port, a hardware
+#   id) with no switch to stop it; nothing off the box can connect.
+
+[Unit]
+Description=Reachy Mini daemon (motion only) for DAWN
+After=default.target
+
+[Service]
+Type=simple
+# Pollen's telemetry is on by default (anonymous, to PostHog); the SDK
+# honours these to switch it and Hugging Face Hub's off.
+Environment=DO_NOT_TRACK=1 HF_HUB_DISABLE_TELEMETRY=1
+ExecStart=%h/.local/share/reachy-bridge/venv/bin/reachy-mini-daemon --no-media --no-wake-up-on-start --goto-sleep-on-stop
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

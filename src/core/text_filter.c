@@ -18,148 +18,15 @@
  * enhancements, or additions to the project. These contributions become
  * part of the project and are adopted by the project author(s).
  *
- * Text filtering utilities for command tag stripping.
+ * Filters for the tags a model writes into its reply text.
  */
 
 #include "core/text_filter.h"
 
+#include <ctype.h>
+#include <stdio.h>
 #include <string.h>
-
-/* Use constants from header (CMD_TAG_OPEN, CMD_TAG_CLOSE, etc.) */
-
-void text_filter_reset(cmd_tag_filter_state_t *state) {
-   if (state) {
-      memset(state, 0, sizeof(*state));
-   }
-}
-
-void text_filter_command_tags(cmd_tag_filter_state_t *state,
-                              const char *text,
-                              text_filter_output_fn output_fn,
-                              void *ctx) {
-   if (!state || !text || !output_fn) {
-      return;
-   }
-
-   const char *p = text;
-   const char *output_start = NULL;
-
-   while (*p) {
-      if (state->nesting_depth > 0) {
-         /* Inside command tag - look for <command> (nested) or </command> */
-         if (*p == '<') {
-            state->buffer[0] = '<';
-            state->len = 1;
-            p++;
-            continue;
-         }
-
-         if (state->len > 0) {
-            /* Bounds check for safety */
-            if (state->len >= CMD_TAG_BUF_SIZE - 1) {
-               state->len = 0;
-               p++;
-               continue;
-            }
-
-            /* Check for nested <command> opening tag */
-            if (*p == CMD_TAG_OPEN[state->len]) {
-               state->buffer[state->len++] = *p;
-
-               if (state->len == CMD_TAG_OPEN_LEN) {
-                  /* Found nested <command> - increase depth with overflow protection */
-                  if (state->nesting_depth < CMD_TAG_MAX_NESTING) {
-                     state->nesting_depth++;
-                  }
-                  /* Beyond max depth, stay at max (still filters content) */
-                  state->len = 0;
-               }
-               p++;
-               continue;
-            }
-
-            /* Check for </command> closing tag */
-            if (*p == CMD_TAG_CLOSE[state->len]) {
-               state->buffer[state->len++] = *p;
-
-               if (state->len == CMD_TAG_CLOSE_LEN) {
-                  /* Found </command> - decrease nesting depth */
-                  state->nesting_depth--;
-                  state->len = 0;
-               }
-               p++;
-               continue;
-            }
-
-            /* Not matching either tag - reset buffer */
-            state->len = 0;
-            p++;
-            continue;
-         }
-
-         /* Inside command, not matching any tag - discard */
-         p++;
-         continue;
-      }
-
-      /* Normal mode - look for <command> */
-      if (*p == '<') {
-         /* Flush pending output before buffering potential tag */
-         if (output_start) {
-            output_fn(output_start, (size_t)(p - output_start), ctx);
-            output_start = NULL;
-         }
-         /* Emit any held partial-tag bytes before restarting on this '<': no tag
-          * has an interior '<', so a held partial can never continue past one —
-          * those bytes are confirmed non-tag text (fixes a dropped '<' on "<<command>"). */
-         if (state->len > 0) {
-            output_fn(state->buffer, state->len, ctx);
-         }
-         state->buffer[0] = '<';
-         state->len = 1;
-         p++;
-         continue;
-      }
-
-      if (state->len > 0) {
-         /* Bounds check for safety */
-         if (state->len >= CMD_TAG_BUF_SIZE - 1) {
-            output_fn(state->buffer, state->len, ctx);
-            state->len = 0;
-            continue;
-         }
-
-         /* Single-char comparison instead of strncmp */
-         if (*p != CMD_TAG_OPEN[state->len]) {
-            /* Not open tag - emit buffer and re-process current char */
-            output_fn(state->buffer, state->len, ctx);
-            state->len = 0;
-            continue;
-         }
-
-         state->buffer[state->len++] = *p;
-
-         if (state->len == CMD_TAG_OPEN_LEN) {
-            /* Found <command> - enter command mode */
-            state->nesting_depth = 1;
-            state->len = 0;
-         }
-         p++;
-         continue;
-      }
-
-      /* Normal character - add to output span */
-      if (!output_start) {
-         output_start = p;
-      }
-      p++;
-   }
-
-   /* Flush any remaining output */
-   if (output_start) {
-      output_fn(output_start, (size_t)(p - output_start), ctx);
-   }
-}
+#include <strings.h>
 
 /* Context for buffer output callback */
 typedef struct {
@@ -185,28 +52,11 @@ static void buffer_output_fn(const char *text, size_t len, void *ctx) {
    }
 }
 
-int text_filter_command_tags_to_buffer(cmd_tag_filter_state_t *state,
-                                       const char *text,
-                                       char *out_buf,
-                                       size_t out_size) {
-   if (!state || !text || !out_buf || out_size == 0) {
-      return 0;
-   }
-
-   buffer_ctx_t ctx = { .buf = out_buf, .size = out_size, .len = 0 };
-   out_buf[0] = '\0';
-
-   text_filter_command_tags(state, text, buffer_output_fn, &ctx);
-
-   return (int)ctx.len;
-}
-
 /* =============================================================================
  * Memory-citation tag filter — strips <cited>…</cited> from streamed text.
  *
- * Same chunk-spanning discipline as the command filter, minus nesting: once the
- * opener is matched, ALL bytes are suppressed until the closer.  Mirrors the
- * command state machine so the restart-on-mismatch behavior is identical.
+ * Tolerates a tag split across chunks.  No nesting: once the opener is matched,
+ * ALL bytes are suppressed until the closer.
  * ============================================================================= */
 
 void text_filter_cited_reset(cited_tag_filter_state_t *state) {
@@ -273,21 +123,9 @@ void text_filter_cited_normalize(char *text) {
    }
 }
 
-void text_filter_command_strip(char *text, bool truncate_orphan) {
+void text_filter_end_of_turn_strip(char *text) {
    if (!text)
       return;
-
-   char *s;
-   while ((s = strstr(text, COMMAND_TAG_OPEN)) != NULL) {
-      char *e = strstr(s, COMMAND_TAG_CLOSE);
-      if (e == NULL) {
-         if (truncate_orphan)
-            *s = '\0'; /* mid-stream split — drop the partial so it isn't spoken */
-         break;        /* else: unclosed in a complete response — leave as literal */
-      }
-      e += COMMAND_TAG_CLOSE_LEN;
-      memmove(s, e, strlen(e) + 1);
-   }
 
    char *eot = strstr(text, END_OF_TURN_TAG);
    if (eot != NULL) {
@@ -368,7 +206,7 @@ void text_filter_cited_tags(cited_tag_filter_state_t *state,
          }
          if (*p != CITED_TAG_OPEN[state->len]) {
             /* Partial match broke — emit held bytes and re-process current char
-             * (a '<' among them restarts a fresh match, as in the command filter). */
+             * (a '<' among them restarts a fresh match). */
             output_fn(state->buffer, state->len, ctx);
             state->len = 0;
             continue;
@@ -426,4 +264,133 @@ int text_filter_cited_flush_to_buffer(cited_tag_filter_state_t *state,
    }
    text_filter_cited_reset(state);
    return (int)ctx.len;
+}
+
+/* =============================================================================
+ * Expression tags — `[emote:<name>]`, stripped from complete text.
+ * ============================================================================= */
+
+#define EMOTE_NAME_AS_STRING(name) #name,
+static const char *const s_emote_names[] = { EMOTE_NAMES(EMOTE_NAME_AS_STRING) };
+
+static bool emote_name_known(const char *name) {
+   for (size_t i = 0; i < sizeof(s_emote_names) / sizeof(s_emote_names[0]); i++) {
+      if (strcmp(name, s_emote_names[i]) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+/* The next opener at or after @p s, in any case ("[Emote:" is a slip worth
+ * catching), or NULL. */
+static char *emote_find_opener(char *s) {
+   for (char *p = strchr(s, '['); p != NULL; p = strchr(p + 1, '[')) {
+      if (strncasecmp(p, EMOTE_TAG_OPEN, EMOTE_TAG_OPEN_LEN) == 0) {
+         return p;
+      }
+   }
+   return NULL;
+}
+
+/* The tag at @p s (which starts with the opener): its end, past one trailing
+ * space, with its name lower-cased into @p name ("" when what's inside isn't
+ * one name, e.g. "happy, curious": still a tag, never spoken).  NULL when no
+ * "]" closes it on the same line within EMOTE_TAG_SPAN: then it's text. */
+static char *emote_tag_end(char *s, char name[EMOTE_NAME_MAX]) {
+   char *p = s + EMOTE_TAG_OPEN_LEN;
+   while (*p == ' ') {
+      p++;
+   }
+   size_t n = 0;
+   while ((isalpha((unsigned char)*p) || *p == '_' || *p == '-') && n + 1 < EMOTE_NAME_MAX) {
+      name[n++] = (char)tolower((unsigned char)*p++);
+   }
+   name[n] = '\0';
+   while (*p == ' ') {
+      p++;
+   }
+   if (*p != ']') {
+      name[0] = '\0';
+      const size_t limit = EMOTE_TAG_OPEN_LEN +
+                           EMOTE_TAG_SPAN; /* offsets: no pointer past the end */
+      while ((size_t)(p - s) < limit && *p != '\0' && *p != ']' && *p != '\n' && *p != '[') {
+         p++;
+      }
+      if ((size_t)(p - s) >= limit || *p != ']') {
+         return NULL;
+      }
+   }
+   p++;
+   return *p == ' ' ? p + 1 : p;
+}
+
+bool text_filter_emote_strip(char *text, char *name_out, size_t name_size) {
+   if (name_out && name_size > 0) {
+      name_out[0] = '\0';
+   }
+   if (!text) {
+      return false;
+   }
+   bool found = false;
+   char *s = text;
+   while ((s = emote_find_opener(s)) != NULL) {
+      char name[EMOTE_NAME_MAX];
+      char *end = emote_tag_end(s, name);
+      if (end == NULL) {
+         s += EMOTE_TAG_OPEN_LEN; /* not a tag: leave it as text */
+         continue;
+      }
+      if (!found && emote_name_known(name)) {
+         found = true;
+         if (name_out && name_size > 0) {
+            snprintf(name_out, name_size, "%s", name);
+         }
+      }
+      /* Its trailing space goes too, unless the tag sat against a word:
+       * "Sure,[emote:happy] glad" keeps the words apart. */
+      if (end[-1] == ' ' && s > text && !isspace((unsigned char)s[-1])) {
+         end--;
+      }
+      memmove(s, end, strlen(end) + 1);
+   }
+   return found;
+}
+
+void text_split_pieces(const char *text, size_t max_bytes, text_piece_fn fn, void *ctx) {
+   if (!text || !text[0] || !fn) {
+      return;
+   }
+   if (max_bytes == 0 || max_bytes > TEXT_PIECE_MAX) {
+      max_bytes = TEXT_PIECE_MAX;
+   } else if (max_bytes < TEXT_PIECE_MIN) {
+      max_bytes = TEXT_PIECE_MIN; /* a shorter limit could cut inside a character */
+   }
+
+   size_t len = strlen(text);
+   if (len <= max_bytes) {
+      fn(text, ctx);
+      return;
+   }
+
+   char piece[TEXT_PIECE_MAX + 1];
+   while (len > 0) {
+      size_t n = len;
+      if (n > max_bytes) {
+         /* Back up off continuation bytes (10xxxxxx) to the start of the
+          * character the cut would split. */
+         n = max_bytes;
+         while (n > 0 && ((unsigned char)text[n] & 0xC0) == 0x80) {
+            n--;
+         }
+         if (n == 0) {
+            n = max_bytes; /* malformed: no character start in reach */
+         }
+      }
+      memcpy(piece, text, n);
+      piece[n] = '\0';
+      fn(piece, ctx);
+      text += n;
+      len -= n;
+   }
 }

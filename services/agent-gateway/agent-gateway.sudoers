@@ -1,0 +1,3 @@
+# The gateway (user dawn) runs the agent's Claude Code and git as dawn-agent,
+# a less privileged user.  Nothing runs the other way.
+dawn ALL=(dawn-agent) NOPASSWD: ALL

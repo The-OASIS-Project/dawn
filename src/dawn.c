@@ -58,16 +58,19 @@
 #include "audio/audio_backend.h"
 #include "audio/audio_capture_thread.h"
 #include "audio/audio_decoder.h"
-#include "audio/flac_playback.h"
 #include "audio/music_db.h"
 #include "audio/music_queue.h"
 #include "audio/music_scanner.h"
+#include "audio/music_speaker.h"
 #include "audio/plex_db.h"
 #include "core/attention/attention.h"
 #include "core/command_executor.h"
 #include "core/command_router.h"
 #include "core/component_status.h"
+#include "core/conv_post.h"
 #include "core/conv_stream.h"
+#include "core/conv_turn_lease.h"
+#include "core/dawn_events.h"
 #include "core/embedding_engine.h"
 #include "core/endpointer.h"
 #include "core/prompt_builder.h"
@@ -190,7 +193,6 @@ static void vad_metrics_callback(float probability, void *user_data) {
 // See config/dawn_config.h for the config struct definitions
 
 // Music ducking configuration (reduces music volume during speech detection)
-#define MUSIC_DUCK_FACTOR 0.3f         // Reduce volume to 30% when speech detected
 #define MUSIC_DUCK_RESTORE_DELAY 2.0f  // Seconds of silence before restoring volume
 
 // Default number of frames per audio period (used for buffer size calculations)
@@ -420,12 +422,49 @@ static bool s_command_unattended = false;
  * as for an interrupt that brings a new request. */
 static bool s_reply_stopped_by_user = false;
 
+/* What a cancel phrase in the next command means, decided when the command
+ * arrives (main-thread state): by PROCESS_COMMAND her speech has been
+ * discarded and an interrupted turn may be gone or still finishing.
+ * "Okay Friday, stop" in one breath over her speaking, thinking or a held
+ * request means her; the command after a bare wake word (which stopped her by
+ * itself) means the music; a typed one while she speaks or works means her. */
+typedef enum {
+   CANCEL_TARGET_AUTO,  /**< Decided when the cancel is handled */
+   CANCEL_TARGET_REPLY, /**< Her reply */
+   CANCEL_TARGET_MUSIC, /**< The speaker's music */
+} cancel_target_t;
+static cancel_target_t s_cancel_target = CANCEL_TARGET_AUTO;
+
 
 /* A cancel phrase: stop the reply (its speech, and its generation if still
  * running) and confirm out loud, since silence can't be told apart from not
- * having been heard.  A fixed line on the local speaker: no LLM turn, nothing
- * added to the conversation. */
+ * having been heard.  With no reply of hers going, it means the music: the
+ * speaker pauses, keeping its place.  A fixed line on the local speaker: no
+ * LLM turn, nothing added to the conversation. */
 static void acknowledge_cancel(void) {
+   pthread_mutex_lock(&tts_mutex);
+   const bool speaking = tts_playback_state == TTS_PLAYBACK_PAUSE;
+   pthread_mutex_unlock(&tts_mutex);
+   const cancel_target_t target = s_cancel_target;
+   s_cancel_target = CANCEL_TARGET_AUTO;
+   const bool replying = target == CANCEL_TARGET_REPLY ||
+                         (target == CANCEL_TARGET_AUTO &&
+                          (local_llm_busy() || s_pending_voice_command || speaking));
+   if (!replying && music_speaker_is_playing()) {
+      if (s_pending_voice_command) { /* stop means stop: a held request too */
+         free(s_pending_voice_command);
+         s_pending_voice_command = NULL;
+      }
+      if (music_speaker_pause()) {
+         const size_t n = sizeof(cancelResponses) / sizeof(cancelResponses[0]);
+         OLOG_INFO("Cancel phrase: music paused, confirming");
+         text_to_speech(cancelResponses[randombytes_uniform((uint32_t)n)]);
+      } else {
+         OLOG_WARNING("Cancel phrase: couldn't pause the music");
+         text_to_speech("I couldn't pause the music, Sir.");
+      }
+      return;
+   }
    if (llm_processing) {
       s_reply_stopped_by_user = true; /* keep its question (see the completion) */
       llm_request_interrupt();
@@ -567,6 +606,10 @@ static bool run_direct_command(const char *treg_command, bool secret, bool began
  * This callback is called for each complete sentence from the streaming LLM.
  * It cleans the sentence and sends it directly to TTS for immediate playback.
  */
+/* An expression tag whose sentence had nothing to speak (a tag on its own
+ * line): it opens the next sentence that does.  Only the LLM worker touches it. */
+static char s_pending_expression[EMOTE_NAME_MAX];
+
 static void dawn_tts_sentence_callback(const char *sentence, void *userdata) {
    if (!sentence || strlen(sentence) == 0) {
       return;
@@ -583,11 +626,17 @@ static void dawn_tts_sentence_callback(const char *sentence, void *userdata) {
       return;
    }
 
-   // Remove command tags + <end_of_turn> (processed from the full response later),
-   // then the <cited> memory-citation tag — shared whole-string strips, the same
-   // ones the response finalizer and WebUI-audio TTS use.  Both truncate on an
-   // orphan opener so a sentence that breaks mid-tag can't leak a partial into TTS.
-   text_filter_command_strip(cleaned, true); /* per-sentence TTS: drop a mid-split tag */
+   // The expression tag first (its name opens this sentence on the robot;
+   // removing it can join the text around it, which the later strips must see).
+   // Then <end_of_turn> and the <cited> memory-citation tag — shared whole-string
+   // strips, the same ones the response finalizer and WebUI-audio TTS use.  The
+   // cited strip truncates on an orphan opener so a sentence that breaks mid-tag
+   // can't leak a partial into TTS.
+   char expression[EMOTE_NAME_MAX];
+   if (text_filter_emote_strip(cleaned, expression, sizeof(expression))) {
+      snprintf(s_pending_expression, sizeof(s_pending_expression), "%s", expression);
+   }
+   text_filter_end_of_turn_strip(cleaned);
    text_filter_cited_strip(cleaned);
 
    // Remove special characters that cause problems
@@ -603,7 +652,8 @@ static void dawn_tts_sentence_callback(const char *sentence, void *userdata) {
 
    // Only send to TTS if there's actual content
    if (len > 0) {
-      text_to_speech(cleaned);
+      text_to_speech_expr(cleaned, s_pending_expression[0] ? s_pending_expression : NULL);
+      s_pending_expression[0] = '\0';
 
       // Add natural pause between sentences (300ms)
       usleep(300000);
@@ -780,6 +830,7 @@ char *setPcmPlaybackDevice(const char *actionName, char *value, int *should_resp
       if (match) {
          OLOG_INFO("Setting audio playback device to \"%s\"", d->device);
          safe_strscpy(pcm_playback_device, d->device);
+         music_speaker_set_device(pcm_playback_device);
 
          if (command_processing_mode == CMD_MODE_DIRECT_ONLY) {
             snprintf(speech, MAX_COMMAND_LENGTH, "Switching playback device to %s.", d->name);
@@ -1147,6 +1198,10 @@ static int check_and_process_input_queue(char **command_text_out,
 
    *command_text_out = strdup(input.text);
    s_next_command_unattended = *command_text_out && input.source == INPUT_SOURCE_MQTT;
+   /* A typed command came with no wake word (and only once the pipeline is
+    * free): one while she's still speaking is about her (her speech plays on,
+    * not paused) */
+   s_cancel_target = tts_is_speaking() ? CANCEL_TARGET_REPLY : CANCEL_TARGET_AUTO;
    if (*command_text_out == NULL) {
       OLOG_ERROR("Failed to allocate memory for text input from %s",
                  input_source_name(input.source));
@@ -1206,6 +1261,12 @@ int publish_ai_state(dawn_state_t newState) {
    }
 
    json_object_put(json);
+
+   struct json_object *fields = json_object_new_object();
+   if (fields) {
+      json_object_object_add(fields, "state", json_object_new_string(state_name));
+   }
+   dawn_events_publish("state_change", fields);
 
    // Update metrics with state transition
    metrics_update_state(newState);
@@ -1342,6 +1403,7 @@ void *llm_worker_thread(void *arg) {
                                                                         NULL, &resolved_config)
                         : NULL;
    session_put_history(local_session, history);
+   s_pending_expression[0] = '\0'; /* a tag the reply never got to speak */
    llm_cache_monitor_set_local_mic(false);
    session_set_turn_token(0);
    // Command context auto-cleared by scope guard
@@ -1946,6 +2008,9 @@ int main(int argc, char *argv[]) {
       return 1;
    }
 
+   // Step 6a: A stored copy of a built-in persona would hide the current one
+   llm_persona_drop_builtin_copy();
+
    // Step 7: Initialize wake words from config (must be after config is finalized)
    init_wake_words();
    wake_word_init(g_config.general.ai_name);            /* Shared module for WebUI always-on */
@@ -2115,6 +2180,10 @@ int main(int argc, char *argv[]) {
       OLOG_ERROR("Failed to initialize session manager");
       return 1;
    }
+   /* One turn per conversation: posts from outside a turn are written through
+    * the lease, and a turn waiting past a job's runtime limit is reported. */
+   conv_post_init();
+   conv_turn_lease_set_stale_after(g_config.jobs.max_runtime_sec);
 
    // Register the prompt builder before any turn can run.
    /* The focus-source adapters, before the prompt builder that uses them.
@@ -2236,6 +2305,7 @@ int main(int argc, char *argv[]) {
       }
    }
    OLOG_INFO("Audio backend initialized: %s", audio_backend_type_name(audio_backend_get_type()));
+   music_speaker_set_device(getPcmPlaybackDevice());
 
    if (!server_mode) {
       // Initialize audio decoder subsystem (FLAC, MP3, Ogg Vorbis)
@@ -2275,9 +2345,6 @@ int main(int argc, char *argv[]) {
       audio_capture_ctx = audio_capture_start(pcm_capture_device, 262144, 1);
       if (!audio_capture_ctx) {
          OLOG_ERROR("Failed to start audio capture thread");
-         OLOG_ERROR("  Hint: Check that capture device '%s' exists and isn't in use by another "
-                    "application",
-                    pcm_capture_device);
          return 1;
       }
    } else {
@@ -2842,9 +2909,8 @@ mqtt_disabled:
             static dawn_state_t prev_vad_state = DAWN_STATE_INVALID;  // Track state transitions
 
             // Music ducking state (reduces volume during speech detection)
-            static int music_ducked = 0;                // Currently ducked?
-            static float music_pre_duck_volume = 0.5f;  // Volume before ducking
-            static struct timespec music_last_speech;   // Last speech detection time
+            static int music_ducked = 0;               // Currently ducked?
+            static struct timespec music_last_speech;  // Last speech detection time
             static int music_duck_initialized = 0;
 
             // Initialize timer on first run (ideally would be in main(), but keeping locality)
@@ -3005,34 +3071,25 @@ mqtt_disabled:
                speech_detected = 0;  // Assume silence if VAD unavailable
             }
 
-            // Music ducking: reduce volume when speech detected, restore after cooldown
-            if (speech_detected && getMusicPlay()) {
+            // Music ducking: lower the speaker's music while someone speaks, restore it
+            // after a cooldown or as soon as the music stops (the volume itself is untouched)
+            if (speech_detected && music_speaker_is_playing()) {
                clock_gettime(CLOCK_MONOTONIC, &music_last_speech);
                if (!music_ducked) {
-                  // Duck the music - save current volume and reduce
-                  music_pre_duck_volume = getMusicVolume();
-                  float ducked_volume = music_pre_duck_volume * MUSIC_DUCK_FACTOR;
-                  setMusicVolume(ducked_volume);
+                  music_speaker_set_ducked(true);
                   music_ducked = 1;
-                  OLOG_INFO("Music ducked: %.2f -> %.2f (speech detected)", music_pre_duck_volume,
-                            ducked_volume);
+                  OLOG_INFO("Music ducked (speech detected)");
                }
-            } else if (music_ducked && getMusicPlay()) {
-               // Check if cooldown has elapsed since last speech
+            } else if (music_ducked) {
                struct timespec now;
                clock_gettime(CLOCK_MONOTONIC, &now);
                double elapsed = (now.tv_sec - music_last_speech.tv_sec) +
                                 (now.tv_nsec - music_last_speech.tv_nsec) / 1e9;
-               if (elapsed >= MUSIC_DUCK_RESTORE_DELAY) {
-                  // Restore original volume
-                  setMusicVolume(music_pre_duck_volume);
-                  OLOG_INFO("Music restored: %.2f (%.1fs since speech)", music_pre_duck_volume,
-                            elapsed);
+               if (elapsed >= MUSIC_DUCK_RESTORE_DELAY || !music_speaker_is_playing()) {
+                  music_speaker_set_ducked(false);
+                  OLOG_INFO("Music restored (%.1fs since speech)", elapsed);
                   music_ducked = 0;
                }
-            } else if (music_ducked && !getMusicPlay()) {
-               // Music stopped - reset ducking state
-               music_ducked = 0;
             }
 
             if (speech_detected) {
@@ -3391,6 +3448,7 @@ mqtt_disabled:
                   pthread_mutex_unlock(&tts_mutex);
                   if (speaking && wake_word_is_cancel(input_text)) {
                      OLOG_WARNING("Cancel word detected.\n");
+                     s_cancel_target = CANCEL_TARGET_REPLY; /* said over her speech */
                      acknowledge_cancel();
                      silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
                      recState = DAWN_STATE_SILENCE;
@@ -3449,6 +3507,12 @@ mqtt_disabled:
 
                   if (i < numWakeWords) {
                      pthread_mutex_lock(&tts_mutex);
+                     /* Whether this wake word cut a reply off, for a cancel phrase */
+                     s_cancel_target = tts_playback_state == TTS_PLAYBACK_PAUSE ||
+                                               tts_is_speaking() || local_llm_busy() ||
+                                               s_pending_voice_command
+                                           ? CANCEL_TARGET_REPLY
+                                           : CANCEL_TARGET_AUTO;
                      if (tts_playback_state == TTS_PLAYBACK_PAUSE) {
                         tts_playback_state = TTS_PLAYBACK_DISCARD;
                         pthread_cond_signal(&tts_cond);
@@ -3469,10 +3533,23 @@ mqtt_disabled:
                      OLOG_INFO("After skip, check_ptr='%s' (len=%zu)", check_ptr,
                                strlen(check_ptr));
 
+                     /* The only "it heard me" signal: a bare wake word goes on to
+                      * SILENCE, and one with a command straight to PROCESS_COMMAND. */
+                     struct json_object *wake = json_object_new_object();
+                     if (wake) {
+                        json_object_object_add(wake, "with_command",
+                                               json_object_new_boolean(*check_ptr != '\0'));
+                     }
+                     dawn_events_publish("wake_word", wake);
+
                      if (*check_ptr == '\0') {
                         // No command after wake word - transition to DAWN_STATE_COMMAND_RECORDING
                         OLOG_WARNING("Wake word detected with no command, transitioning to "
                                      "COMMAND_RECORDING.\n");
+                        /* The wake word alone stopped any reply of hers: what comes
+                         * next is a new request ("pause" then means the music, even
+                         * while an interrupted tool call is still finishing) */
+                        s_cancel_target = CANCEL_TARGET_MUSIC;
                         text_to_speech("Hello.");
 
                         commandTimeout = 0;
@@ -4090,6 +4167,17 @@ mqtt_disabled:
 server_shutdown:
    OLOG_INFO("Quit.\n");
 
+#ifdef ENABLE_WEBUI
+   /* First, while the logins it checks are still readable: close the
+    * connections as a restart, not a revoke */
+   OLOG_INFO("Shutdown: webui_server_quiesce");
+   webui_server_quiesce();
+#endif
+   /* No turn waits for a conversation from here on (each ends unsent), and
+    * posts queued behind running turns are written while the database is up. */
+   OLOG_INFO("Shutdown: conv_turn_lease_shutdown");
+   conv_turn_lease_shutdown();
+
    // Stop heartbeat immediately — no dependencies on other subsystems
    OLOG_INFO("Shutdown: stopping heartbeat");
    component_status_publish_offline(mosq);
@@ -4139,6 +4227,13 @@ server_shutdown:
    OLOG_INFO("Shutdown: webui_email_exec_stop");
    webui_email_exec_stop();
 #endif
+   /* Tools' own threads (stop hooks) call into jobs and the database: stop them
+    * before either goes. */
+   if (tools_available) {
+      OLOG_INFO("Shutdown: tool_registry_stop_tools");
+      tool_registry_stop_tools();
+   }
+
    /* Background jobs: cancel running jobs before auth/DB teardown (their workers
     * use sessions + conv_db).  Unregisters the resolver + requests cancellation;
     * detached workers observe it and tear down their own sessions. */
@@ -4240,6 +4335,10 @@ server_shutdown:
    OLOG_INFO("Shutdown: tool_registry");
    tool_registry_shutdown();
 
+   /* Before the music library and decoders it plays from go */
+   OLOG_INFO("Shutdown: music speaker");
+   music_speaker_cleanup();
+
    // Cleanup chunking manager (if initialized)
    if (chunk_mgr) {
       OLOG_INFO("Shutdown: chunking_manager");
@@ -4297,7 +4396,8 @@ server_shutdown:
       worker_pool_shutdown();
    }
 #endif
-   /* After every player that holds a queue is gone */
+   /* After the WebUI's players and the speaker are gone (a tool call still
+    * holding one at exit keeps its queue, see music_queue_shutdown) */
    music_queue_shutdown();
 
    /* Cleanup session manager AFTER WebUI shutdown so WebSocket sessions are released */

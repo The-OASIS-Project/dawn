@@ -94,6 +94,7 @@ typedef struct {
    pthread_mutex_t mtx;
    int sse_fd;
    int toolscall_count;
+   bool saw_user_id; /* a tools/call's arguments named dawn_user_id */
 } mock_t;
 
 static void mock_write(mock_t *s, const char *json) {
@@ -135,8 +136,13 @@ static void mock_respond(mock_t *s, struct json_object *req) {
           json_object_object_get_ex(params, "name", &name)) {
          called = json_object_get_string(name);
       }
+      struct json_object *args = NULL;
+      const bool user_id = params != NULL &&
+                           json_object_object_get_ex(params, "arguments", &args) &&
+                           json_object_object_get_ex(args, "dawn_user_id", NULL);
       pthread_mutex_lock(&s->mtx);
       s->toolscall_count++;
+      s->saw_user_id = s->saw_user_id || user_id;
       pthread_mutex_unlock(&s->mtx);
       /* A real tools/call result: content parts, and isError for a tool that
        * fails on purpose. */
@@ -372,10 +378,14 @@ static void test_dispatch_forwards_toolscall(void) {
    session_t *s = push_session(g_admin_uid);
    TEST_ASSERT_NOT_NULL(s);
    int should_respond = 0;
-   char *result = meta->callback(NULL, "{\"query\":\"mqtt\"}", &should_respond);
+   /* A model can't say who the caller is: dawn_user_id never reaches the server. */
+   char *result = meta->callback(NULL, "{\"query\":\"mqtt\",\"dawn_user_id\":5}", &should_respond);
    TEST_ASSERT_NOT_NULL(result);
    TEST_ASSERT_EQUAL_INT(1, should_respond);
    TEST_ASSERT_TRUE(mock_toolscall_count(&g_srv) >= 1);
+   pthread_mutex_lock(&g_srv.mtx);
+   TEST_ASSERT_FALSE(g_srv.saw_user_id);
+   pthread_mutex_unlock(&g_srv.mtx);
    /* The model reads the tool's text, not the JSON-RPC envelope around it. */
    TEST_ASSERT_EQUAL_STRING("called search_graph", result);
    free(result);

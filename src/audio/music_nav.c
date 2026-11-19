@@ -148,14 +148,14 @@ static bool record(music_history_t *h, const music_nav_queue_t *q, int index) {
 }
 
 /* Under shuffle: the history's next entry, else a new random pick other than
- * pos, recorded (length > 1) */
+ * exclude (-1 for none), recorded (length > 1) */
 static int shuffle_next(music_history_t *h,
                         const music_nav_queue_t *q,
-                        int pos,
+                        int exclude,
                         unsigned int *seed) {
    int next = music_history_step(h, true, true, q->find, q->ctx);
    if (next < 0) {
-      next = random_index(pos, q->length, seed);
+      next = random_index(exclude, q->length, seed);
       music_history_push(h, q->path_at(q->ctx, next), next);
    }
    return next;
@@ -168,7 +168,8 @@ static void pick_auto(music_history_t *h,
                       music_nav_pick_t *out) {
    int len = q->length;
    int next = rq->pos;
-   bool repeat_one = q->repeat_one && rq->pos >= 0;
+   int after = !rq->lost ? rq->pos + 1 : rq->pos;
+   bool repeat_one = q->repeat_one && !rq->lost;
    bool recorded = false;
 
    if (len == 0) {
@@ -188,13 +189,13 @@ static void pick_auto(music_history_t *h,
    } else if (q->shuffle && rq->failures > 0) {
       /* Step past a failure in order: random picks can repeat, so a few
        * playable tracks could go untried before the cap is reached */
-      next = (next + 1 + len) % len;
+      next = after % len;
    } else if (q->shuffle) {
       if (len > 1) {
-         next = shuffle_next(h, q, next, seed);
+         next = shuffle_next(h, q, !rq->lost ? rq->pos : -1, seed);
          recorded = true;
       }
-   } else if (++next >= len) {
+   } else if ((next = after) >= len) {
       if (!q->repeat_all) {
          out->result = MUSIC_NAV_STOP_END;
          return;
@@ -203,8 +204,8 @@ static void pick_auto(music_history_t *h,
    }
 
    if (next < 0 || next >= len) {
-      /* The queue shrank under a repeat-one or stale position, or nothing
-       * above picked from it (shuffle with one track, not held) */
+      /* A stale position under repeat-one, or nothing above picked from the
+       * queue (shuffle with one track, lost) */
       next = 0;
    }
    out->result = MUSIC_NAV_PLAY;
@@ -235,16 +236,19 @@ static void pick_user(music_history_t *h,
    }
    if (q->shuffle && len > 1) {
       out->result = MUSIC_NAV_PLAY;
-      out->index = rq->commit ? shuffle_next(h, q, pos, seed) : -1;
+      out->index = rq->commit ? shuffle_next(h, q, !rq->lost ? pos : -1, seed) : -1;
       return;
    }
-   /* -1 (the queue doesn't hold the track): next is its top, nothing is before it */
-   if (pos > len - 1) {
-      pos = len - 1; /* removes left the position past the end */
+   if (!rq->lost && pos > len - 1) {
+      pos = len - 1; /* nothing picked, and removes left the position past the end */
+   } else if (rq->lost && pos > len) {
+      pos = len;
    }
+   /* Not held: next is the track at pos, previous the one before it */
+   int after = !rq->lost ? pos + 1 : pos;
    int next = -1;
-   if (rq->dir == MUSIC_NAV_NEXT && pos < len - 1) {
-      next = pos + 1;
+   if (rq->dir == MUSIC_NAV_NEXT && after < len) {
+      next = after;
    } else if (rq->dir == MUSIC_NAV_PREVIOUS && pos > 0) {
       next = pos - 1;
    } else if (q->repeat_all) {
@@ -267,7 +271,8 @@ static void pick_plan(music_history_t *h,
                       music_nav_pick_t *out) {
    int len = q->length;
    int next = -1;
-   if (len == 0 || q->repeat_one) {
+   int after = !rq->lost ? rq->pos + 1 : rq->pos;
+   if (len == 0 || (q->repeat_one && !rq->lost)) {
       return; /* repeat-one replays the current track: nothing to plan */
    }
    if (q->shuffle && len > 1) {
@@ -275,13 +280,13 @@ static void pick_plan(music_history_t *h,
        * next and auto-advance play the track planned here */
       next = music_history_step(h, true, false, q->find, q->ctx);
       if (next < 0) {
-         next = random_index(rq->pos, len, seed);
+         next = random_index(!rq->lost ? rq->pos : -1, len, seed);
          music_history_plan(h, q->path_at(q->ctx, next), next);
       }
    } else if (q->shuffle) {
       return; /* a single track under shuffle: nothing follows */
-   } else if (rq->pos + 1 < len) {
-      next = rq->pos + 1;
+   } else if (after < len) {
+      next = after;
    } else if (q->repeat_all) {
       next = 0;
    } else {

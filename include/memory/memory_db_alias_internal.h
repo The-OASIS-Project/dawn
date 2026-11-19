@@ -188,6 +188,13 @@ int memory_alias_internal_insert_merge_proposal(int user_id,
                                                 const char *evidence_json,
                                                 int64_t *out_proposal_id);
 
+/* Whether linking @p inbound and @p winner_id should keep @p inbound's longer
+ * name as the canonical (person, pet, place; the winner a leaf).  The
+ * auto-merge gate's direction swap, shared with the nominated merge. */
+bool memory_alias_internal_should_swap(int user_id,
+                                       const memory_entity_t *inbound,
+                                       int64_t winner_id);
+
 #ifdef __cplusplus
 }
 #endif

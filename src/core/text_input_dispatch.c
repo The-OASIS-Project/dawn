@@ -55,6 +55,11 @@ char *core_text_input_dispatch(session_t *session,
    if (!session || !text || (text[0] == '\0' && !(opts && opts->question_message))) {
       return NULL;
    }
+   /* A turn that stopped waiting for its conversation never runs: nothing of it
+    * is saved (every caller then ends it). */
+   if (session_turn_unsent(session)) {
+      return NULL;
+   }
 
    /* The turn's conversation may only be resolved here (fallback to the active
     * one) rather than at dequeue; record it before the append attributes it.
@@ -67,6 +72,9 @@ char *core_text_input_dispatch(session_t *session,
    }
    if (opts && opts->conversation_id > 0) {
       session_turn_set_conversation(session, opts->conversation_id, true);
+      if (session_turn_unsent(session)) {
+         return NULL; /* stopped waiting for it, before anything was added */
+      }
    }
 
    /* An LLM that can't run refuses the turn before its question is added or

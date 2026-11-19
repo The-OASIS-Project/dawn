@@ -126,6 +126,26 @@ static void test_email_codes(void) {
    TEST_ASSERT_EQUAL_INT(EMAIL_CONFIRM_RC_THIRD_PARTY, email_confirm_rc(TURN_ORIGIN_THIRD_PARTY));
 }
 
+/* What a turn the user stopped prepared is never confirmed, not even by reply
+ * code; an item another turn made (one DAWN staged on its own, under a token
+ * no turn owns) is untouched by the stop, and a stored origin forgets it. */
+static void test_stopped_turn_refused(void) {
+   const turn_origin_t made = { .session_id = 7, .turn_token = 100, .turn_number = 4 };
+   turn_origin_t reply = { .session_id = 7,
+                           .turn_token = 160,
+                           .turn_number = 5,
+                           .stopped_tokens = { 130, 100 } };
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_STOPPED, turn_origin_check(&made, &reply));
+   reply.code_redeemed = true;
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_STOPPED, turn_origin_check(&made, &reply));
+   const turn_origin_t unasked = { .session_id = 7, .turn_token = 999, .turn_number = 4 };
+   reply.code_redeemed = false;
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_OK, turn_origin_check(&unasked, &reply));
+   TEST_ASSERT_EQUAL_UINT64(0, turn_origin_stored(&reply).stopped_tokens[1]);
+   TEST_ASSERT_EQUAL_INT(EMAIL_CONFIRM_RC_STOPPED, email_confirm_rc(TURN_ORIGIN_STOPPED));
+   TEST_ASSERT_NOT_NULL(strstr(turn_origin_retry_hint(TURN_ORIGIN_STOPPED), "stopped"));
+}
+
 /* A turn carrying an attached email confirms nothing (the email could say
  * yes); staging in one is fine, and the user's own next reply confirms. */
 static void test_third_party_refused(void) {
@@ -154,6 +174,7 @@ int main(void) {
    RUN_TEST(test_code_redeemed);
    RUN_TEST(test_from_visual_refused);
    RUN_TEST(test_third_party_refused);
+   RUN_TEST(test_stopped_turn_refused);
    RUN_TEST(test_email_codes);
    return UNITY_END();
 }

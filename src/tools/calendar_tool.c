@@ -37,6 +37,7 @@
 #include "core/strbuf.h"
 #include "core/tz.h"
 #include "core/user_tz.h"
+#include "llm/llm_tools.h"
 #include "logging.h"
 #include "tools/calendar_pick.h"
 #include "tools/calendar_rrule.h"
@@ -608,6 +609,7 @@ static char *handle_add(struct json_object *details, int user_id, const tz_t *zo
                "No single writable calendar is named '%s'. Writable calendars: %s. Ask the user "
                "which one, then pass its name.",
                calendar_name ? calendar_name : "", writable[0] ? writable : "(none)");
+      llm_tools_result_third_party(TOOL_FRAME_CALENDAR); /* names a sharer wrote */
       return msg;
    }
    if (rc != CALENDAR_RC_OK)
@@ -639,6 +641,7 @@ static char *handle_add(struct json_object *details, int user_id, const tz_t *zo
                       n.rrule && n.rrule[0] ? n.rrule : "");
    if (uid[0] && pos >= 0 && pos < 640)
       snprintf(buf + pos, 640 - (size_t)pos, "\nUID: %s", uid);
+   llm_tools_result_third_party(TOOL_FRAME_CALENDAR); /* the calendar's name: a sharer's */
    return buf;
 }
 
@@ -884,14 +887,21 @@ static const treg_param_t calendar_params[] = {
  * Tool Metadata
  * ============================================================================= */
 
+/* What an event says (its title, place, who invited) and a calendar's name
+ * anyone who shares a calendar or sends an invitation may have written: the
+ * reads frame it (TOOL_FRAME_CALENDAR), as does an add's reply (it names the
+ * calendar, or the calendars to pick from); the rest is the tool's own. */
 static const tool_action_kind_entry_t s_calendar_action_kinds[] = {
-   { "calendars", TOOL_KIND_READ, NULL }, { "today", TOOL_KIND_READ, NULL },
-   { "range", TOOL_KIND_READ, NULL },     { "next", TOOL_KIND_READ, NULL },
-   { "search", TOOL_KIND_READ, NULL },
+   { "calendars", TOOL_KIND_READ, NULL, TOOL_FRAME_CALENDAR },
+   { "today", TOOL_KIND_READ, NULL, TOOL_FRAME_CALENDAR },
+   { "range", TOOL_KIND_READ, NULL, TOOL_FRAME_CALENDAR },
+   { "next", TOOL_KIND_READ, NULL, TOOL_FRAME_CALENDAR },
+   { "search", TOOL_KIND_READ, NULL, TOOL_FRAME_CALENDAR },
 };
 
 static const tool_metadata_t calendar_metadata = {
    .name = "calendar",
+   .results = TOOL_RESULTS_OWN,
    .action_kinds = s_calendar_action_kinds,
    .action_kind_count = TOOL_KIND_COUNT(s_calendar_action_kinds),
    .device_string = "calendar",

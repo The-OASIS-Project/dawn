@@ -20,8 +20,8 @@
  *
  * Unified Command Executor Implementation
  *
- * Provides a single entry point for command execution across all three
- * command paths (direct, <command> tags, native tools).
+ * Provides a single entry point for command execution across both command
+ * paths (direct pattern matches and native tool calls).
  */
 
 #include "core/command_executor.h"
@@ -52,8 +52,8 @@
  * read-only allowlist.  The native tool path (llm_tools_execute) already enforces
  * this at execute time; command_execute() and its two separately-exported publish
  * primitives (command_execute_mqtt_direct / command_execute_sync) are the OTHER
- * actuation entries — legacy <command> tags, direct-regex matches, and the
- * no-callback fallback route through them WITHOUT the native gate.  Putting the
+ * actuation entries — direct-regex matches and the no-callback fallback route
+ * through them WITHOUT the native gate.  Putting the
  * refusal at EVERY such entry (not one caller up) is the point of HIGH-1: the
  * boundary must not depend on a particular caller having gated upstream.
  *

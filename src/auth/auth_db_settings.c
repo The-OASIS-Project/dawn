@@ -47,6 +47,8 @@ int auth_db_get_user_settings(int user_id, auth_user_settings_t *settings_out) {
    /* Initialize with defaults */
    memset(settings_out, 0, sizeof(*settings_out));
    safe_strscpy(settings_out->persona_mode, "append");
+   safe_strscpy(settings_out->persona_values_mode, "append");
+   safe_strscpy(settings_out->persona_voice_mode, "append");
    safe_strscpy(settings_out->units, "metric");
    safe_strscpy(settings_out->theme, "cyan");
 
@@ -85,6 +87,24 @@ int auth_db_get_user_settings(int user_id, auth_user_settings_t *settings_out) {
       if (theme) {
          safe_strscpy(settings_out->theme, theme);
       }
+
+      /* The persona's halves (v112); a NULL mode keeps the default. */
+      const char *values = (const char *)sqlite3_column_text(s_db.stmt_get_user_settings, 6);
+      const char *values_mode = (const char *)sqlite3_column_text(s_db.stmt_get_user_settings, 7);
+      const char *voice = (const char *)sqlite3_column_text(s_db.stmt_get_user_settings, 8);
+      const char *voice_mode = (const char *)sqlite3_column_text(s_db.stmt_get_user_settings, 9);
+      if (values) {
+         safe_strscpy(settings_out->persona_values, values);
+      }
+      if (values_mode) {
+         safe_strscpy(settings_out->persona_values_mode, values_mode);
+      }
+      if (voice) {
+         safe_strscpy(settings_out->persona_voice, voice);
+      }
+      if (voice_mode) {
+         safe_strscpy(settings_out->persona_voice_mode, voice_mode);
+      }
    } else if (rc != SQLITE_DONE) {
       /* Unexpected error */
       OLOG_ERROR("auth_db: get_user_settings failed: %s", sqlite3_errmsg(s_db.db));
@@ -115,7 +135,13 @@ int auth_db_set_user_settings(int user_id, const auth_user_settings_t *settings)
    sqlite3_bind_text(s_db.stmt_set_user_settings, 5, settings->timezone, -1, SQLITE_STATIC);
    sqlite3_bind_text(s_db.stmt_set_user_settings, 6, settings->units, -1, SQLITE_STATIC);
    sqlite3_bind_text(s_db.stmt_set_user_settings, 7, settings->theme, -1, SQLITE_STATIC);
-   sqlite3_bind_int64(s_db.stmt_set_user_settings, 8, (int64_t)time(NULL));
+   sqlite3_bind_text(s_db.stmt_set_user_settings, 8, settings->persona_values, -1, SQLITE_STATIC);
+   sqlite3_bind_text(s_db.stmt_set_user_settings, 9, settings->persona_values_mode, -1,
+                     SQLITE_STATIC);
+   sqlite3_bind_text(s_db.stmt_set_user_settings, 10, settings->persona_voice, -1, SQLITE_STATIC);
+   sqlite3_bind_text(s_db.stmt_set_user_settings, 11, settings->persona_voice_mode, -1,
+                     SQLITE_STATIC);
+   sqlite3_bind_int64(s_db.stmt_set_user_settings, 12, (int64_t)time(NULL));
 
    int rc = sqlite3_step(s_db.stmt_set_user_settings);
    sqlite3_reset(s_db.stmt_set_user_settings);

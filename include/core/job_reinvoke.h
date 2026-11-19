@@ -114,6 +114,13 @@ bool webui_reinvoke_tts_begin(session_t *live,
 void webui_reinvoke_tts_finish(session_t *live, bool use_opus);
 
 /**
+ * @brief End a live re-engagement that spoke nothing: the viewer gets
+ *        `state` `idle`, as webui_reinvoke_tts_finish() sends after speech.
+ *        Weak default is a no-op.
+ */
+void webui_reinvoke_settle(session_t *live);
+
+/**
  * @brief Register the reinvoke processor with the completion monitor.
  *
  * Idempotent.  Call once after job_manager_init().  Wires
@@ -139,8 +146,11 @@ void job_reinvoke_process_pending(const job_record_t *rows, int n);
 
 /* NOTE: the former job_reinvoke_notify_conv_appended weak seam (a
  * conversation_messages_appended refetch nudge) was retired in Phase 1 of
- * SERVER_AUTHORITATIVE_PERSISTENCE — the reinvoke reply now fans out inline via
- * conv_event_notify_message_appended (§6b), the sole active-view channel. */
+ * SERVER_AUTHORITATIVE_PERSISTENCE.  The reinvoke reply is persisted by
+ * webui_persist_final_answer, which fans out one message_appended to every
+ * browser of the user (webui_broadcast_message_appended_origin): from the live
+ * path it names the viewer's session; from the detached path (a job session)
+ * it names none. */
 
 #ifdef __cplusplus
 }

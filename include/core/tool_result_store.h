@@ -117,7 +117,7 @@ int tool_result_store_put(struct session *session,
 
 /**
  * @brief tool_result_store_put for text that is someone else's: @p frame
- *        (TOOL_FRAME_EMAIL, TOOL_FRAME_WEB, or NULL) is kept with it, and a
+ *        (a TOOL_FRAME_*, or NULL) is kept with it, and a
  *        read of it is framed the same way (tool_result_store_frame)
  */
 int tool_result_store_put_framed(struct session *session,

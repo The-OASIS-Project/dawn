@@ -59,16 +59,20 @@
 #include "core/missed_notifications_db.h"
 #include "core/scheduler.h"
 #include "core/session_compaction.h"
+#include "core/session_stop.h"
 #include "dawn_error.h"
 #include "image_store.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
+#include "memory/memory_consolidate.h"
 #include "memory/memory_db_aliases.h"
+#include "memory/memory_history_loader.h"
 #include "tools/calendar_service.h"
 #include "utils/string_utils.h"
-#include "webui/webui_email_ref.h"
 #include "webui/webui_internal.h"
+#include "webui/webui_memory_batches.h"
+#include "webui/webui_message_frame.h"
 #include "webui/webui_send.h" /* webui_sentence_audio_callback, webui_send_audio_end/_state */
 #include "webui/webui_server.h"
 
@@ -676,7 +680,8 @@ void webui_broadcast_conversation_renamed(int user_id, int64_t conv_id, const ch
 
    int sent = broadcast_json_to_user_ex(user_id, root, false);
    if (sent > 0) {
-      OLOG_INFO("WebUI: Broadcast conversation rename to %d client(s): %s", sent, title);
+      OLOG_INFO("WebUI: Broadcast conversation rename (conv=%lld) to %d client(s)",
+                (long long)conv_id, sent);
    }
 }
 
@@ -750,7 +755,7 @@ void webui_broadcast_message_appended(int user_id,
                                       const char *reasoning,
                                       unsigned stream_id) {
    webui_broadcast_message_appended_origin(user_id, conv_id, msg_id, role, text, reasoning,
-                                           stream_id, NULL, NULL, NULL);
+                                           stream_id, NULL, NULL, NULL, false);
 }
 
 void webui_broadcast_message_appended_origin(int user_id,
@@ -762,7 +767,8 @@ void webui_broadcast_message_appended_origin(int user_id,
                                              unsigned stream_id,
                                              const session_t *origin,
                                              const char *client_ref,
-                                             const char *email_ref) {
+                                             const char *email_ref,
+                                             bool stopped) {
    if (user_id <= 0 || conv_id <= 0 || text == NULL) {
       return;
    }
@@ -772,38 +778,16 @@ void webui_broadcast_message_appended_origin(int user_id,
       return;
    }
 
-   json_object *root = json_object_new_object();
-   json_object_object_add(root, "type", json_object_new_string("message_appended"));
-
-   json_object *p = json_object_new_object();
-   json_object_object_add(p, "conversation_id", json_object_new_int64(conv_id));
-   json_object_object_add(p, "message_id", json_object_new_int64(msg_id));
-   json_object_object_add(p, "role", json_object_new_string(role ? role : "assistant"));
-   json_object_object_add(p, "text", json_object_new_string(text));
-   /* Phase-0 cross-viewer fan-out fields (SERVER_AUTHORITATIVE_PERSISTENCE_DESIGN §6a):
-    * reasoning lets a non-origin viewer render the E3 panel; stream_id lets the
-    * origin correlate + adopt instead of re-rendering. */
-   if (reasoning && reasoning[0]) {
-      json_object_object_add(p, "reasoning", json_object_new_string(reasoning));
-   }
-   json_object_object_add(p, "stream_id", json_object_new_int64((int64_t)stream_id));
-   webui_row_add_email_ref(p, role, email_ref);
-   json_object_object_add(root, "payload", p);
+   json_object *root = webui_message_appended_frame(conv_id, msg_id, role, text, reasoning,
+                                                    stream_id, origin, email_ref, stopped);
 
    /* browsers_only (SERVER_AUTHORITATIVE §8): message_appended is a transcript frame
     * a satellite renders nothing for — keep it strictly WEBUI, matching the
-    * frame-delivery capability matrix.  broadcast_json_to_user TAKES OWNERSHIP. */
-   if (!origin || !client_ref || !client_ref[0]) {
-      broadcast_json_to_user_ex(user_id, root, /*browsers_only=*/true);
-      return;
-   }
-   /* The sender's own connection gets a copy naming its turn (client_ref): if
+    * frame-delivery capability matrix.  broadcast_json_to_user TAKES OWNERSHIP.
+    * The sender's own connection gets a copy naming its turn (client_ref): if
     * its transcript echo is dropped, this copy still tells it which turn was
     * saved.  Other connections, whose refs are their own, get the plain frame. */
-   json_object_object_add(p, "client_ref", json_object_new_string(client_ref));
-   const char *with_ref = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN);
-   char *origin_json = with_ref ? strdup(with_ref) : NULL;
-   json_object_object_del(p, "client_ref");
+   char *origin_json = webui_message_appended_origin_json(root, origin, client_ref);
    broadcast_json_to_user_origin(user_id, root, /*browsers_only=*/true, origin, origin_json);
    free(origin_json);
 }
@@ -837,6 +821,8 @@ int webui_persist_final_answer(session_t *session,
    struct json_object *reply_blocks = session_take_reply_blocks(session);
    char *stored_blocks = llm_turn_blocks_answer_stored(reply_blocks);
    json_object_put(reply_blocks);
+   /* A reply the user stopped is saved, and sent, as one. */
+   const bool stopped = session_turn_reply_stopped(session);
 
    /* Take the accumulated visual under tools_mutex, then RELEASE before the body build /
     * DB write / fan-out — never hold a leaf lock across the persist (lock-ordering). */
@@ -851,15 +837,8 @@ int webui_persist_final_answer(session_t *session,
    const char *persist_body = body;
    char *combined = NULL;
    if (visual != NULL && visual[0] != '\0') {
-      size_t blen = strlen(body);
-      size_t vlen = strlen(visual);
-      combined = malloc(blen + 1 + vlen + 2); /* body '\n' visual '\n' '\0' */
+      combined = memory_history_join_visual(body, visual);
       if (combined != NULL) {
-         memcpy(combined, body, blen);
-         combined[blen] = '\n';
-         memcpy(combined + blen + 1, visual, vlen);
-         combined[blen + 1 + vlen] = '\n';
-         combined[blen + 1 + vlen + 1] = '\0';
          persist_body = combined;
       }
       /* malloc failure: persist the bare body rather than lose the row. */
@@ -875,7 +854,8 @@ int webui_persist_final_answer(session_t *session,
       const conv_message_row_t row = { .role = "assistant",
                                        .content = persist_body,
                                        .reasoning = reasoning,
-                                       .llm_blocks = stored_blocks };
+                                       .llm_blocks = stored_blocks,
+                                       .stopped = stopped };
       rc = conv_db_add_row(conv_id, (int)user_id, &row, &msg_id);
       if (rc == AUTH_DB_SUCCESS) {
          break;
@@ -903,9 +883,13 @@ int webui_persist_final_answer(session_t *session,
          }
       }
 
-      /* One fan-out, stamped with this turn's stream_id so the origin adopts (browsers_only). */
-      conv_event_notify_message_appended(conv_id, (int)user_id, msg_id, "assistant", persist_body,
-                                         reasoning, atomic_load(&session->current_stream_id));
+      /* One fan-out, stamped with this turn's stream_id and session so the browser that
+       * streamed it adopts (browsers_only).  A job session belongs to no browser: its stream
+       * is fanned to every viewer of the job, so its row names no session. */
+      webui_broadcast_message_appended_origin((int)user_id, conv_id, msg_id, "assistant",
+                                              persist_body, reasoning,
+                                              atomic_load(&session->current_stream_id),
+                                              webui_message_origin(session), NULL, NULL, stopped);
    }
 
    free(combined);
@@ -1734,6 +1718,13 @@ void webui_reinvoke_tts_finish(session_t *live, bool use_opus) {
    webui_send_state(live, "idle");
 }
 
+/* Strong override: a re-engagement that spoke nothing still ends in idle. */
+void webui_reinvoke_settle(session_t *live) {
+   if (live) {
+      webui_send_state(live, "idle");
+   }
+}
+
 void webui_broadcast_memory_proposals_changed(int user_id) {
    if (user_id <= 0)
       return;
@@ -1755,6 +1746,27 @@ void webui_broadcast_memory_proposals_changed(int user_id) {
       OLOG_INFO("WebUI: Broadcast memory_proposals_changed (count=%d) to %d client(s)", pending,
                 sent);
    }
+}
+
+/* Strong override of the weak no-op in memory_db_consolidation.c: a batch recorded,
+ * undone, changed by a Keep or a forget, or removed by one goes to every tab of
+ * its user (memory_batch: the batch object, or its id marked removed).  From
+ * the extraction thread, the undo worker or a forget. */
+void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id) {
+   (void)conversation_id; /* the batch object carries it */
+   if (user_id <= 0) {
+      return; /* never every user's tabs */
+   }
+   json_object *batch = webui_memory_batch_notice(user_id, batch_id);
+   if (!batch) {
+      return;
+   }
+   json_object *root = json_object_new_object();
+   json_object_object_add(root, "type", json_object_new_string("memory_batch"));
+   json_object_object_add(root, "payload", batch);
+   int sent = broadcast_json_to_user_ex(user_id, root, true);
+   OLOG_INFO("WebUI: Broadcast memory_batch (user=%d batch=%lld) to %d client(s)", user_id,
+             (long long)batch_id, sent);
 }
 
 /*

@@ -97,6 +97,8 @@ pending_slot_t *pending_slots_stage(const pending_slots_t *slots,
       *rc = PENDING_TWICE_IN_TURN;
       return NULL;
    }
+   /* A newer preview of the same thing: the one it replaces is answered by it. */
+   const uint32_t replaced = slot ? slot->origin.turn_number : 0;
    for (int i = 0; !slot && i < slots->count; i++) {
       pending_slot_t *s = slot_at(slots, i);
       if (!s->active) {
@@ -112,6 +114,7 @@ pending_slot_t *pending_slots_stage(const pending_slots_t *slots,
    slot->kind = kind;
    slot->item_id = next_item_id();
    slot->origin = turn_origin_stored(current);
+   slot->replaced_turn = replaced;
    slot->made_at = now;
    *rc = PENDING_STAGED;
    return slot;
@@ -161,7 +164,12 @@ pending_find_rc_t pending_slots_take(const pending_slots_t *slots,
    if (rc != PENDING_FOUND) {
       return rc;
    }
-   const turn_origin_rc_t check = turn_origin_check(&s->origin, current);
+   turn_origin_rc_t check = turn_origin_check(&s->origin, current);
+   if (check == TURN_ORIGIN_NOT_NEXT && slots->later_turns > 0 &&
+       current->turn_number > s->origin.turn_number &&
+       current->turn_number - s->origin.turn_number <= (uint32_t)slots->later_turns) {
+      check = TURN_ORIGIN_OK; /* one of the next few turns of its session */
+   }
    if (orc) {
       *orc = check;
    }
@@ -196,4 +204,18 @@ int pending_slots_valid_for(const pending_slots_t *slots, const pending_slot_t *
       return 0;
    }
    return (int)(slots->ttl_sec - (now - slot->made_at));
+}
+
+pending_slot_t *pending_slots_live(const pending_slots_t *slots,
+                                   uint32_t session_id,
+                                   int kind,
+                                   time_t now) {
+   for (int i = 0; i < slots->count; i++) {
+      pending_slot_t *s = slot_at(slots, i);
+      if (s->active && s->origin.session_id == session_id && (kind < 0 || s->kind == kind) &&
+          !expired(slots, s, now)) {
+         return s;
+      }
+   }
+   return NULL;
 }

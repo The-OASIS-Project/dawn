@@ -47,7 +47,8 @@
    do {                                                      \
       const char *val = getenv(env_name);                    \
       if (val) {                                             \
-         safe_strscpy(dest, val);                            \
+         if (safe_strscpy(dest, val) >= sizeof(dest))        \
+            utf8_trim_incomplete(dest);                      \
          OLOG_INFO("Config override: %s=%s", env_name, val); \
       }                                                      \
    } while (0)
@@ -180,6 +181,8 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
 
    /* [persona] */
    ENV_STRING("DAWN_PERSONA_DESCRIPTION", config->persona.description);
+   ENV_STRING("DAWN_PERSONA_VALUES", config->persona.values);
+   ENV_STRING("DAWN_PERSONA_VOICE", config->persona.voice);
 
    /* [localization] */
    ENV_STRING("DAWN_LOCALIZATION_LOCATION", config->localization.location);
@@ -305,7 +308,7 @@ void config_apply_env(dawn_config_t *config, secrets_config_t *secrets) {
    ENV_STRING("DAWN_MQTT_TLS_CERT_PATH", config->mqtt.tls_cert_path);
    ENV_STRING("DAWN_MQTT_TLS_KEY_PATH", config->mqtt.tls_key_path);
    ENV_STRING("MQTT_USERNAME", secrets->mqtt_username);
-   ENV_STRING("MQTT_PASSWORD", secrets->mqtt_password);
+   ENV_SECRET("MQTT_PASSWORD", secrets->mqtt_password);
 
    /* Home Assistant */
    ENV_SECRET("HOME_ASSISTANT_TOKEN", secrets->home_assistant_token);
@@ -362,6 +365,10 @@ void config_dump(const dawn_config_t *config) {
    printf("\n[persona]\n");
    printf("  description = \"%.*s%s\"\n", config->persona.description[0] ? 50 : 0,
           config->persona.description, strlen(config->persona.description) > 50 ? "..." : "");
+   printf("  values = \"%.*s%s\"\n", config->persona.values[0] ? 50 : 0, config->persona.values,
+          strlen(config->persona.values) > 50 ? "..." : "");
+   printf("  voice = \"%.*s%s\"\n", config->persona.voice[0] ? 50 : 0, config->persona.voice,
+          strlen(config->persona.voice) > 50 ? "..." : "");
 
    printf("\n[localization]\n");
    printf("  location = \"%s\"\n", config->localization.location);
@@ -627,6 +634,16 @@ void config_dump_settings(const dawn_config_t *config,
    printf("    %-38s   (%s)\n\n", "DAWN_PERSONA_DESCRIPTION",
           source_name(detect_source_str(config->persona.description, defaults.persona.description,
                                         "DAWN_PERSONA_DESCRIPTION")));
+   printf("  %-40s = \"%.*s%s\"\n", "values", config->persona.values[0] ? 50 : 0,
+          config->persona.values, strlen(config->persona.values) > 50 ? "..." : "");
+   printf("    %-38s   (%s)\n\n", "DAWN_PERSONA_VALUES",
+          source_name(detect_source_str(config->persona.values, defaults.persona.values,
+                                        "DAWN_PERSONA_VALUES")));
+   printf("  %-40s = \"%.*s%s\"\n", "voice", config->persona.voice[0] ? 50 : 0,
+          config->persona.voice, strlen(config->persona.voice) > 50 ? "..." : "");
+   printf("    %-38s   (%s)\n\n", "DAWN_PERSONA_VOICE",
+          source_name(detect_source_str(config->persona.voice, defaults.persona.voice,
+                                        "DAWN_PERSONA_VOICE")));
 
    /* [localization] */
    printf("[localization]\n");
@@ -1122,6 +1139,8 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object *persona = json_object_new_object();
    json_object_object_add(persona, "description",
                           json_object_new_string(config->persona.description));
+   json_object_object_add(persona, "values", json_object_new_string(config->persona.values));
+   json_object_object_add(persona, "voice", json_object_new_string(config->persona.voice));
    json_object_object_add(root, "persona", persona);
 
    /* [localization] */
@@ -1374,6 +1393,9 @@ json_object *config_to_json(const dawn_config_t *config) {
       json_object_object_add(s, "idle_close_seconds", json_object_new_int(srv->idle_close_seconds));
       json_object_object_add(s, "tls_verify", json_object_new_boolean(srv->tls_verify));
       json_object_object_add(s, "auth_bearer_env", json_object_new_string(srv->auth_bearer_env));
+      json_object_object_add(s, "auth_bearer_token_secret",
+                             json_object_new_string(srv->auth_bearer_token_secret));
+      json_object_object_add(s, "role", json_object_new_string(srv->role));
       json_object_array_add(mcp_servers, s);
    }
    json_object_object_add(mcp, "servers", mcp_servers);
@@ -1524,6 +1546,8 @@ json_object *config_to_json(const dawn_config_t *config) {
                           json_object_new_int(config->memory.extraction_timeout_ms));
    json_object_object_add(memory, "extraction_effort",
                           json_object_new_string(config->memory.extraction_effort));
+   json_object_object_add(memory, "consolidator",
+                          json_object_new_string(config->memory.consolidator));
    json_object_object_add(memory, "paraphrase_dedup_enabled",
                           json_object_new_boolean(config->memory.paraphrase_dedup_enabled));
    json_object_object_add(memory, "paraphrase_dedup_threshold",
@@ -1982,6 +2006,16 @@ json_object *secrets_to_json_status(const secrets_config_t *secrets) {
    json_object_object_add(obj, "slack_bot_token",
                           json_object_new_boolean(secrets && secrets->slack_bot_token[0]));
 
+   /* [secrets.mcp]: the names that have a token, never the tokens. */
+   json_object *mcp = json_object_new_array();
+   if (mcp) {
+      for (int i = 0; secrets && i < secrets->mcp_count && i < MCP_SECRETS_MAX; i++) {
+         if (secrets->mcp[i].token[0]) {
+            json_object_array_add(mcp, json_object_new_string(secrets->mcp[i].name));
+         }
+      }
+      json_object_object_add(obj, "mcp", mcp);
+   }
    return obj;
 }
 
@@ -1992,7 +2026,8 @@ json_object *secrets_to_json_status(const secrets_config_t *secrets) {
 /**
  * @brief Escape a string for TOML basic string format.
  *
- * Escapes backslashes, quotes, and control characters.
+ * Escapes backslashes, quotes, and control characters, and an apostrophe that
+ * would make three in a row (tomlc99 rejects ''' inside a basic string).
  * The caller must free the returned string.
  *
  * @param str Input string to escape
@@ -2033,6 +2068,13 @@ static char *toml_escape_string(const char *str) {
          case '\t':
             *dst++ = '\\';
             *dst++ = 't';
+            break;
+         case '\'':
+            if (src[1] == '\'' && src[2] == '\'') {
+               dst += sprintf(dst, "\\u0027");
+            } else {
+               *dst++ = '\'';
+            }
             break;
          default:
             /* Remaining C0 controls (and DEL) are ILLEGAL raw in a TOML basic
@@ -2078,44 +2120,29 @@ void config_write_toml_string(void *fp, const char *key, const char *value) {
  *
  * Multi-line prose (e.g. the voice-session prompt directives) is emitted as a
  * TOML literal triple-quoted string ('''...''') so embedded newlines survive
- * the round-trip; single-line values fall back to the escaped basic string.
+ * the round-trip; other values go as an escaped basic string.
  * No-op when @p value is empty (empty config field = built-in default, so we
  * keep dawn.toml clean rather than persisting the fallback text).
  */
 static void write_toml_string_multiline(FILE *fp, const char *key, const char *value) {
    if (!value || value[0] == '\0')
       return;
-   /* Sanitize: cap any run of apostrophes at 2 so the value can never contain
-    * '''.  Reasons: (a) ''' terminates / breaks out of a TOML multi-line literal
-    * ('''...'''), which would let a crafted value forge new TOML keys/sections on
-    * the next load (CWE-91); (b) our TOML reader mis-parses ''' even inside a
-    * double-quoted BASIC string, so there is NO safe TOML representation of a
-    * value containing '''.  ''' is not meaningful in a prose directive, so
-    * collapsing it is lossless in practice and guarantees the config always
-    * round-trips.  Callers pass CONFIG_DESCRIPTION_MAX-sized fields; the sanitizer
-    * only ever shrinks, so `safe` cannot overflow. */
-   char safe[CONFIG_DESCRIPTION_MAX];
-   size_t si = 0;
-   int apos_run = 0;
-   for (const char *p = value; *p != '\0' && si < sizeof(safe) - 1; p++) {
-      if (*p == '\'') {
-         if (apos_run >= 2)
-            continue; /* drop the 3rd+ consecutive apostrophe */
-         apos_run++;
-      } else {
-         apos_run = 0;
-      }
-      safe[si++] = *p;
+   /* A literal can't hold ''' (it would end the literal, and the rest could
+    * forge keys: CWE-91) or a control character other than newline and tab.
+    * Text with either goes as a basic string, which write_toml_string keeps
+    * parseable for both. */
+   bool literal = strchr(value, '\n') && !strstr(value, "'''");
+   for (const char *p = value; literal && *p != '\0'; p++) {
+      const unsigned char c = (unsigned char)*p;
+      literal = !((c < 0x20 && c != '\n' && c != '\t') || c == 0x7f);
    }
-   safe[si] = '\0';
-
-   /* Readable triple-quoted literal for multi-line prose; escaped basic string
-    * otherwise (write_toml_string escapes quotes/backslash/newline).  Neither can
-    * contain ''' after sanitization, so both re-parse cleanly. */
-   if (strchr(safe, '\n')) {
-      fprintf(fp, "%s = '''\n%s\n'''\n", key, safe);
+   if (literal) {
+      /* The newline before the closing ''' is part of the value: add one only
+       * when the text lacks it, so a value read back and written again stays
+       * the same. */
+      fprintf(fp, "%s = '''\n%s%s'''\n", key, value, value[strlen(value) - 1] == '\n' ? "" : "\n");
    } else {
-      write_toml_string(fp, key, safe);
+      write_toml_string(fp, key, value);
    }
 }
 
@@ -2159,7 +2186,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    if (config->general.room[0])
       write_toml_string(fp, "room", config->general.room);
 
-   if (config->persona.description[0]) {
+   if (config->persona.description[0] || config->persona.values[0] || config->persona.voice[0]) {
       fprintf(fp, "\n[persona]\n");
       /* Route through the multiline-aware writer, which uses the readable
        * triple-quote literal only when safe and falls back to the escaped
@@ -2167,6 +2194,8 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
        * literal-string breakout as the voice-directive fields (security
        * review 2026-07; admin-only, but fixed on merit). */
       write_toml_string_multiline(fp, "description", config->persona.description);
+      write_toml_string_multiline(fp, "values", config->persona.values);
+      write_toml_string_multiline(fp, "voice", config->persona.voice);
    }
 
    fprintf(fp, "\n[localization]\n");
@@ -2484,6 +2513,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    write_toml_string(fp, "extraction_model", config->memory.extraction_model);
    fprintf(fp, "extraction_timeout_ms = %d\n", config->memory.extraction_timeout_ms);
    write_toml_string(fp, "extraction_effort", config->memory.extraction_effort);
+   write_toml_string(fp, "consolidator", config->memory.consolidator);
    fprintf(fp, "paraphrase_dedup_enabled = %s\n",
            config->memory.paraphrase_dedup_enabled ? "true" : "false");
    fprintf(fp, "paraphrase_dedup_threshold = %.2f\n", config->memory.paraphrase_dedup_threshold);
@@ -2795,6 +2825,9 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
       if (srv->auth_bearer_token_secret[0] != '\0') {
          write_toml_string(fp, "auth_bearer_token_secret", srv->auth_bearer_token_secret);
       }
+      if (srv->role[0] != '\0') {
+         write_toml_string(fp, "role", srv->role);
+      }
    }
 
    /* [code_projects] (coding harness) — round-trips. allowed_host_pattern is a
@@ -2846,6 +2879,11 @@ int secrets_write_toml(const secrets_config_t *secrets, const char *path) {
       OLOG_ERROR("Failed to open secrets file for writing: %s (%s)", path, strerror(errno));
       return 1;
    }
+   /* open() applies 0600 only to a new file: tighten an existing one too. */
+   if (fchmod(fd, 0600) != 0) {
+      OLOG_WARNING("Could not set %s to mode 600: %s", path, strerror(errno));
+   }
+
    FILE *fp = fdopen(fd, "w");
    if (!fp) {
       OLOG_ERROR("Failed to fdopen secrets file: %s (%s)", path, strerror(errno));
@@ -2917,6 +2955,14 @@ int secrets_write_toml(const secrets_config_t *secrets, const char *path) {
       WRITE_SECRET("client_id", secrets->schwab_client_id);
       WRITE_SECRET("client_secret", secrets->schwab_client_secret);
       WRITE_SECRET("redirect_url", secrets->schwab_redirect_url);
+   }
+
+   /* Names were checked as bare TOML keys when parsed. */
+   if (secrets->mcp_count > 0) {
+      fprintf(fp, "\n[secrets.mcp]\n");
+      for (int i = 0; i < secrets->mcp_count && i < MCP_SECRETS_MAX; i++) {
+         WRITE_SECRET(secrets->mcp[i].name, secrets->mcp[i].token);
+      }
    }
 
 #undef WRITE_SECRET

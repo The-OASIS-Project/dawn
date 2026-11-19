@@ -123,6 +123,7 @@
 
       ws.onopen = function () {
          console.log('WebSocket connected');
+         thisWs.attemptsBeforeOpen = reconnectAttempts;
          reconnectAttempts = 0;
          maxClientsReached = false;
          superseded = false;
@@ -231,6 +232,11 @@
 
          if (callbacks.onStatus) {
             callbacks.onStatus('disconnected', event.reason || null);
+         }
+         // 1013: the server couldn't check the login (its database is down).
+         // The open that preceded it doesn't count as success: keep backing off.
+         if (event.code === 1013) {
+            reconnectAttempts = thisWs.attemptsBeforeOpen || 0;
          }
          scheduleReconnect();
       };

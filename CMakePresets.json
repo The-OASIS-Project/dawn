@@ -64,7 +64,8 @@
         "CMAKE_BUILD_TYPE": "Release",
         "ENABLE_WEBUI": "ON",
         "SERVER_ONLY": "ON",
-        "ENABLE_AEC": "OFF"
+        "ENABLE_AEC": "OFF",
+        "DAWN_ENABLE_MCP_BRIDGE_TOOL": "ON"
       }
     },
     {
@@ -76,7 +77,8 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "ENABLE_WEBUI": "ON",
         "SERVER_ONLY": "ON",
-        "ENABLE_AEC": "OFF"
+        "ENABLE_AEC": "OFF",
+        "DAWN_ENABLE_MCP_BRIDGE_TOOL": "ON"
       }
     },
     {

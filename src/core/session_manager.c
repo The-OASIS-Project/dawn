@@ -33,10 +33,12 @@
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
+#include "core/conv_turn_lease.h"
 #include "core/focus/focus_handles.h"
 #include "core/focus/focus_incremental.h"
 #include "core/session_compaction.h"
 #include "core/session_focus.h"
+#include "core/session_posts.h"
 #include "core/session_prefix.h"
 #include "core/session_reaper.h"
 #include "core/tool_result_store.h"
@@ -267,6 +269,14 @@ static session_t *session_alloc(void) {
 static void session_free(session_t *session) {
    if (!session) {
       return;
+   }
+
+   /* No thread runs its turn by now, so a conversation it still holds would
+    * never be released: a turn exit that skipped its end. */
+   const int stray_leases = conv_turn_lease_release_session(session->session_id);
+   if (stray_leases > 0) {
+      OLOG_ERROR("Session %u: freed while holding %d conversation lease(s); released",
+                 session->session_id, stray_leases);
    }
 
    /* Its compaction first: a worker still summarizing (shutdown frees without
@@ -605,6 +615,9 @@ session_t *session_create_dap2(int client_fd,
          existing->client_fd = client_fd;
          existing->disconnected = false;
          existing->last_activity = time(NULL);
+         if (capabilities) {
+            existing->capabilities = *capabilities; /* an update may have changed them */
+         }
          pthread_mutex_unlock(&existing->fd_mutex);
 
          /* Increment ref count */
@@ -628,6 +641,9 @@ session_t *session_create_dap2(int client_fd,
          pthread_mutex_lock(&existing->fd_mutex);
          existing->client_fd = client_fd;
          existing->last_activity = time(NULL);
+         if (capabilities) {
+            existing->capabilities = *capabilities; /* an update may have changed them */
+         }
          pthread_mutex_unlock(&existing->fd_mutex);
 
          /* Increment ref count */
@@ -981,6 +997,13 @@ int session_manager_list_owned(session_owned_t *out, int max) {
    return n;
 }
 
+dap2_capabilities_t session_capabilities(session_t *session) {
+   pthread_mutex_lock(&session->fd_mutex);
+   dap2_capabilities_t caps = session->capabilities;
+   pthread_mutex_unlock(&session->fd_mutex);
+   return caps;
+}
+
 session_t *session_get_local(void) {
    if (!initialized) {
       return NULL;
@@ -1132,8 +1155,8 @@ void session_manager_finalize(session_t *session) {
          char session_id_str[32];
          snprintf(session_id_str, sizeof(session_id_str), "ws_%u", session->session_id);
 
-         /* The snapshot has provider state stripped (see
-          * llm_history_strip_internal); extraction copies it again. */
+         /* The snapshot keeps the request context (session_snapshot_history);
+          * extraction reads it, then strips it. */
          memory_extraction_fallback_t fb;
          memory_extraction_build_fallback(session, &fb);
          memory_trigger_extraction(session->metrics.user_id, conv_id, session_id_str, clean,
@@ -1604,6 +1627,10 @@ static char *turn_note_with_email(session_t *session, const char *note) {
 }
 
 static int dispatch_with_note(session_t *session, const char *user_turn_text, const char *note);
+static int dispatch_prompt(session_t *session,
+                           const char *user_turn_text,
+                           const char *turn_note,
+                           int user_id);
 
 int session_dispatch_user_turn_ex(session_t *session,
                                   const char *user_turn_text,
@@ -1633,6 +1660,45 @@ static int dispatch_with_note(session_t *session,
     * triggered on first content) and could wipe a mid-turn held-back partial. */
    text_filter_cited_reset(&session->cited_tag_filter);
 
+   /* Re-read user_id under metrics_mutex so satellite rebinds that
+    * occurred since last turn are picked up.  A guest (0: an unmapped
+    * satellite, a local mic with no voice user) gets the base prompt, its
+    * surface's standing directions and the time; the builder adds nothing of
+    * any user's (settings, memory, retrieval are gated on a user). */
+   const int user_id = session_effective_user_id(session);
+
+   /* What DAWN posted into the conversation since (a job's report): told with
+    * this turn's note, so the turn's sizing below counts it. */
+   char *posts = session_posts_take(session, user_id);
+   char *joined = NULL;
+   if (posts != NULL && turn_note == NULL) {
+      joined = posts; /* the note is the posts */
+      turn_note = joined;
+   } else if (posts != NULL) {
+      const size_t len = strlen(turn_note) + 2 + strlen(posts) + 1;
+      joined = malloc(len);
+      if (joined != NULL) {
+         snprintf(joined, len, "%s\n\n%s", turn_note, posts);
+         turn_note = joined;
+      } else {
+         /* Not told after all: the next turn tells them. */
+         pthread_mutex_lock(&session->history_mutex);
+         session_posts_untell_locked(session);
+         pthread_mutex_unlock(&session->history_mutex);
+      }
+      free(posts);
+   }
+   const int rc = dispatch_prompt(session, user_turn_text, turn_note, user_id);
+   free(joined);
+   return rc;
+}
+
+/* dispatch_with_note()'s build: the turn's prompt and context, @p turn_note
+ * with what it was told. */
+static int dispatch_prompt(session_t *session,
+                           const char *user_turn_text,
+                           const char *turn_note,
+                           int user_id) {
    session_prompt_builder_t builder = atomic_load_explicit(&s_prompt_builder, memory_order_acquire);
    if (builder == NULL) {
       /* No builder (a build without one): the base prompt is what a new
@@ -1643,13 +1709,6 @@ static int dispatch_with_note(session_t *session,
       composed_prompt_free(&base);
       return SUCCESS;
    }
-
-   /* Re-read user_id under metrics_mutex so satellite rebinds that
-    * occurred since last turn are picked up.  A guest (0: an unmapped
-    * satellite, a local mic with no voice user) gets the base prompt, its
-    * surface's standing directions and the time; the builder adds nothing of
-    * any user's (settings, memory, retrieval are gated on a user). */
-   const int user_id = session_effective_user_id(session);
 
    composed_prompt_t cp = { 0 };
    if (builder(session, user_id, user_turn_text, &cp) != SUCCESS) {

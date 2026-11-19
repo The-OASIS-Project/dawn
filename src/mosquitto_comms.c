@@ -46,6 +46,7 @@
 #include "llm/llm_interface.h"
 #include "logging.h"
 #include "mosquitto_comms.h"
+#include "prompts.h"
 #include "tools/hud_discovery.h"
 #ifdef DAWN_ENABLE_PHONE_TOOL
 #include "tools/phone_service.h"
@@ -238,7 +239,7 @@ static void executeJsonCommand(struct json_object *parsedJson, struct mosquitto 
    char *safe = session_prefix_mask_secret(session_get_local(),
                                            llm_context_neutralize(pending_command_result));
    snprintf(gpt_response, sizeof(gpt_response),
-            "[DEVICE DATA] Speak this information naturally to the user: %s",
+            MQTT_DEVICE_DATA_PREFIX " Speak this information naturally to the user: %s",
             safe ? safe : "(the device's data couldn't be read)");
    free(safe);
    input_queue_push(INPUT_SOURCE_MQTT, gpt_response);
@@ -295,7 +296,7 @@ void on_connect(struct mosquitto *mosq, void *obj, int reason_code) {
       OLOG_INFO("Subscribed to \"%s\" MQTT.", APPLICATION_NAME);
    }
 
-   /* Initialize component status (subscribes to hud/status, publishes dawn/status) */
+   /* Component status, every connect (subscribes to the peers' status, publishes dawn/status) */
    if (component_status_init(mosq) != 0) {
       OLOG_WARNING("Component status initialization failed");
    }
@@ -330,9 +331,13 @@ void on_connect(struct mosquitto *mosq, void *obj, int reason_code) {
    }
 #endif
 
-   /* Initialize HUD discovery (subscribes to hud/discovery/# and requests state) */
+   /* Initialize HUD discovery (subscribes to hud/discovery/#) */
    if (hud_discovery_init(mosq) != 0) {
       OLOG_WARNING("HUD discovery initialization failed - using defaults");
+   } else if (component_status_is_hud_online()) {
+      /* A reconnect while the HUD was up: it may have restarted while we were
+       * away, and its status alone (still "online") wouldn't ask again. */
+      hud_discovery_request_update(mosq);
    }
 }
 
@@ -585,18 +590,19 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
    }
 #endif
 
+   /* Peer status (hud/status, reachy/status): a heartbeat every 30 s, so before
+    * the per-message INFO log; component_status logs when a peer comes or goes. */
+   if (strcmp(msg->topic, STATUS_TOPIC_HUD) == 0 || strcmp(msg->topic, STATUS_TOPIC_REACHY) == 0) {
+      component_status_handle_message(msg->topic, (const char *)msg->payload, msg->payloadlen);
+      return;
+   }
+
    /* The phone's topics carry texts (a reply code received or sent, a /link
     * code, anyone's message): the phone service logs what may be kept. */
    if (strncmp(msg->topic, "echo/", 5) == 0) {
       OLOG_INFO("%s %d (%d bytes)", msg->topic, msg->qos, msg->payloadlen);
    } else {
       OLOG_INFO("%s %d %s", msg->topic, msg->qos, (char *)msg->payload);
-   }
-
-   /* Check for component status messages (hud/status) */
-   if (strcmp(msg->topic, STATUS_TOPIC_HUD) == 0) {
-      component_status_handle_message(msg->topic, (const char *)msg->payload, msg->payloadlen);
-      return;
    }
 
    /* Route ECHO modem daemon messages to phone service */

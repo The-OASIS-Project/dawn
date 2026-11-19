@@ -49,11 +49,14 @@
  * Helper: Populate fact from statement row
  * ============================================================================= */
 
-/* Reads from SELECTs ordered: id, user_id, fact_text, confidence, source,
- * created_at, last_accessed, access_count, superseded_by, note_doc_id.
- * A statement's own extra column (expires_at, a BM25 score) follows them. */
+/* Reads from SELECTs of the shared projection (MEMORY_FACT_COLS): id,
+ * user_id, fact_text, confidence, source, created_at, last_accessed,
+ * access_count, superseded_by, note_doc_id, origin, outside.  A statement's
+ * own extra column (expires_at, a BM25 score) follows them. */
 #define FACT_COL_NOTE_DOC_ID 9
-#define FACT_COL_EXTRA 10
+#define FACT_COL_ORIGIN 10
+#define FACT_COL_OUTSIDE 11
+#define FACT_COL_EXTRA 12
 static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
    fact->id = sqlite3_column_int64(stmt, 0);
    fact->user_id = sqlite3_column_int(stmt, 1);
@@ -75,6 +78,8 @@ static void populate_fact_from_row(sqlite3_stmt *stmt, memory_fact_t *fact) {
    fact->access_count = sqlite3_column_int(stmt, 7);
    fact->superseded_by = sqlite3_column_int64(stmt, 8);
    fact->note_doc_id = sqlite3_column_int64(stmt, FACT_COL_NOTE_DOC_ID);
+   fact->origin = sqlite3_column_int(stmt, FACT_COL_ORIGIN);
+   fact->outside = sqlite3_column_int(stmt, FACT_COL_OUTSIDE);
 
    /* expires_at (v58) is NOT in the shared projection: only the by-id read
     * carries it, at FACT_COL_EXTRA.  The keyword/list retrieval statements
@@ -162,6 +167,8 @@ int memory_db_fact_create_at(int user_id,
    sqlite3_bind_int64(stmt, 5, created_at);
    sqlite3_bind_int64(stmt, 6, (int64_t)normalized_hash);
    memory_db_internal_bind_provenance(stmt, 7, prov);
+   sqlite3_bind_int(stmt, 10, prov ? prov->origin : MEMORY_ORIGIN_CONVERSATION);
+   sqlite3_bind_int(stmt, 11, prov ? prov->outside : OUTSIDE_NONE);
 
    int rc = sqlite3_step(stmt);
    sqlite3_reset(stmt);
@@ -293,7 +300,8 @@ int memory_db_fact_list_sorted(int user_id,
    sqlite3_bind_int64(stmt, 4, fact_expiry_guard_now()); /* expiry guard (v58) */
 
    int count = 0;
-   while (count < max_facts && sqlite3_step(stmt) == SQLITE_ROW) {
+   int rc = SQLITE_DONE;
+   while (count < max_facts && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {
       populate_fact_from_row(stmt, &out_facts[count]);
       count++;
    }
@@ -302,7 +310,8 @@ int memory_db_fact_list_sorted(int user_id,
    AUTH_DB_UNLOCK();
    if (count_out)
       *count_out = count;
-   return MEMORY_DB_SUCCESS;
+   /* A step error ends the read early: report it, not a short list. */
+   return (rc == SQLITE_ROW || rc == SQLITE_DONE) ? MEMORY_DB_SUCCESS : MEMORY_DB_FAILURE;
 }
 
 /* v48: FTS5 maintenance helpers.  Called from fact_create / fact_delete
@@ -829,7 +838,13 @@ static const char *const MERGE_SOURCES_SQL =
     "EXISTS (SELECT 1 FROM memory_facts m WHERE m.id = ?2 AND m.user_id = ?3 AND "
     "(m.origin_unsourced = 1 OR (NOT EXISTS (SELECT 1 FROM memory_fact_sources x "
     "WHERE x.fact_id = m.id) AND (m.source_conversation_id IS NULL OR "
-    "m.source_conversation_id NOT IN (SELECT id FROM conversations)))));";
+    "m.source_conversation_id NOT IN (SELECT id FROM conversations)))));"
+    /* The keeper of a merge takes the duplicate's outside kind when only the
+     * duplicate's batch read outside text. */
+    "UPDATE memory_facts SET outside = (SELECT m.outside FROM memory_facts m WHERE m.id = ?2 "
+    "AND m.user_id = ?3) WHERE id = ?1 AND user_id = ?3 AND outside IN (" OUTSIDE_UNTAINTED_SQL
+    ") AND EXISTS (SELECT 1 FROM memory_facts m WHERE m.id = ?2 AND m.user_id = ?3 AND "
+    "m.outside NOT IN (" OUTSIDE_UNTAINTED_SQL "));";
 
 /* Caller holds the auth_db lock.  Runs MERGE_SOURCES_SQL's statements. */
 static bool merge_sources_locked(int64_t old_fact_id, int64_t keeper_id, int user_id) {
@@ -1129,6 +1144,7 @@ int memory_db_fact_find_similar(int user_id,
          safe_strscpy(out_facts[count].fact_text, text);
       }
       out_facts[count].confidence = (float)sqlite3_column_double(stmt, 2);
+      out_facts[count].outside = sqlite3_column_int(stmt, 3);
       count++;
    }
 
@@ -1211,6 +1227,7 @@ int memory_db_fact_find_by_hash(int user_id,
          safe_strscpy(out_facts[count].fact_text, text);
       }
       out_facts[count].confidence = (float)sqlite3_column_double(stmt, 2);
+      out_facts[count].outside = sqlite3_column_int(stmt, 3);
       count++;
    }
 

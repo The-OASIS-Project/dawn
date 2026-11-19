@@ -67,6 +67,9 @@
    let focusTrapCleanup = null;
    let triggerElement = null;
    let memoryEscToken = null; // DawnEscStack registration while the panel is open
+   /* After a delete, where focus goes once the tab's list comes back: the row
+    * that took the deleted one's place (its delete button), else the tab. */
+   let focusAfter = null; // { tab, index }
 
    /* Phase 2 entity-merge: one-shot flag so auto-route-to-Graph fires
     * on the FIRST open per page-load when proposals are pending, then
@@ -238,6 +241,7 @@
          memoryState.allEntities = newEntities;
          if (memoryState.activeTab === 'entities' && !memoryState.searchQuery) {
             renderEntitiesList();
+            focusAfterDelete();
          }
       }
    }
@@ -247,6 +251,7 @@
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show(payload.error || 'Failed to delete entity', 'error');
          }
+         focusAfter = null;
          return;
       }
 
@@ -313,6 +318,7 @@
          memoryState.facts = newFacts;
          if (memoryState.activeTab === 'facts' && !memoryState.searchQuery) {
             renderFactsList();
+            focusAfterDelete();
          }
       }
    }
@@ -392,6 +398,7 @@
          memoryState.allPreferences = newPrefs;
          if (memoryState.activeTab === 'preferences' && !memoryState.searchQuery) {
             renderPreferencesList();
+            focusAfterDelete();
          }
       }
    }
@@ -417,12 +424,18 @@
          memoryState.summaries = newSummaries;
          if (memoryState.activeTab === 'summaries' && !memoryState.searchQuery) {
             renderSummariesList();
+            focusAfterDelete();
          }
       }
    }
 
    function handleSearchResponse(payload) {
       memoryState.loading = false;
+      /* A delete's focus target is for the full list; a search result list
+       * isn't it, so drop the target rather than move focus later. */
+      focusAfter = null;
+      /* Landed after a switch to Learned: that list isn't a search result. */
+      if (memoryState.activeTab === 'learned') return;
 
       if (!payload.success) {
          console.error('Failed to search memory:', payload.error);
@@ -463,6 +476,7 @@
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show(payload.error || 'Failed to delete fact', 'error');
          }
+         focusAfter = null;
          return;
       }
 
@@ -498,6 +512,7 @@
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show(payload.error || 'Failed to delete preference', 'error');
          }
+         focusAfter = null;
          return;
       }
 
@@ -516,6 +531,7 @@
          if (typeof DawnToast !== 'undefined') {
             DawnToast.show(payload.error || 'Failed to delete summary', 'error');
          }
+         focusAfter = null;
          return;
       }
 
@@ -692,7 +708,10 @@
 
    function renderKind(word) {
       const shown = word || 'unknown';
-      const title = KIND_TITLES[shown] ? ` title="${KIND_TITLES[shown]}"` : '';
+      /* ", outside": learned while reading text someone else wrote. */
+      const base = shown.replace(/, outside$/, '');
+      const outside = base !== shown ? ' (while reading outside text)' : '';
+      const title = KIND_TITLES[base] ? ` title="${KIND_TITLES[base]}${outside}"` : '';
       return `<span class="memory-item-source"${title}>${escapeHtml(shown)}</span>`;
    }
 
@@ -718,7 +737,7 @@
             <div class="memory-item-value">${escapeHtml(pref.value)}</div>
             <div class="memory-item-meta">
                <span class="memory-item-confidence ${confidenceClass}">${confidencePercent}%</span>
-               ${renderKind(KIND_WORDS[pref.source] || pref.source)}
+               ${renderKind((KIND_WORDS[pref.source] || pref.source) + (pref.outside ? ', outside' : ''))}
                <span class="memory-item-date">${dateStr}</span>
                ${pref.reinforcement_count > 1 ? `<span>${pref.reinforcement_count}x</span>` : ''}
             </div>
@@ -830,6 +849,14 @@
            `+${relations.length - maxVisible} more</div>`
          : '';
 
+      /* The server sends a card's strongest relations per direction;
+         relations_total counts them all, so say what wasn't sent. */
+      const notSent = Math.max(0, (entity.relations_total || 0) - (entity.relations || []).length);
+      const notSentHtml = notSent
+         ? `<div class="entity-relation entity-relations-unsent">${notSent} more ` +
+           `relation${notSent === 1 ? '' : 's'} not loaded</div>`
+         : '';
+
       const hiddenHtml = hasMore
          ? `<div class="entity-relations-hidden" data-entity-hidden="${entity.id}" style="display:none">` +
            relations
@@ -897,7 +924,7 @@
               `connecting this entity to another entity or a literal value. Aggregated across ` +
               `all soft aliases.">` +
               `Relations</div>` +
-              `${relationsHtml}${hiddenHtml}${moreHtml}` +
+              `${relationsHtml}${hiddenHtml}${moreHtml}${notSentHtml}` +
               `</div>`
             : '') +
          `</div>`
@@ -1101,6 +1128,11 @@
       if (!btn) return;
 
       e.stopPropagation();
+      const index = Array.prototype.indexOf.call(
+         memoryElements.list.querySelectorAll('.memory-item-delete'),
+         btn
+      );
+      const deleting = { tab: memoryState.activeTab, index: index };
       const factId = btn.dataset.factId;
       const prefCategory = btn.dataset.prefCategory;
       const summaryId = btn.dataset.summaryId;
@@ -1111,6 +1143,7 @@
          const detail = fact ? fact.fact_text : null;
 
          if (await DawnDialog.confirm('Delete this fact?', { detail: detail, danger: true })) {
+            focusAfter = deleting;
             requestDeleteFact(parseInt(factId, 10));
          }
       } else if (prefCategory) {
@@ -1120,6 +1153,7 @@
          if (
             await DawnDialog.confirm('Delete this preference?', { detail: detail, danger: true })
          ) {
+            focusAfter = deleting;
             requestDeletePreference(prefCategory);
          }
       } else if (summaryId) {
@@ -1127,6 +1161,7 @@
          const detail = summary ? summary.summary : null;
 
          if (await DawnDialog.confirm('Delete this summary?', { detail: detail, danger: true })) {
+            focusAfter = deleting;
             requestDeleteSummary(parseInt(summaryId, 10));
          }
       } else if (entityId) {
@@ -1139,9 +1174,19 @@
                danger: true,
             })
          ) {
+            focusAfter = deleting;
             requestDeleteEntity(parseInt(entityId, 10));
          }
       }
+   }
+
+   function focusAfterDelete() {
+      if (!focusAfter || focusAfter.tab !== memoryState.activeTab || !memoryElements.list) return;
+      const buttons = memoryElements.list.querySelectorAll('.memory-item-delete');
+      const next = buttons[Math.min(focusAfter.index, buttons.length - 1)];
+      const target = next || document.getElementById('memory-tab-' + focusAfter.tab);
+      focusAfter = null;
+      if (target) target.focus();
    }
 
    function scrollToEntity(entityId) {
@@ -1273,11 +1318,11 @@
 
    function handleClickOutside(e) {
       // A dialog opened over the panel (contact, source, merged, import,
-      // export) is a sibling overlay, not a child: a click on it, its × or its
-      // backdrop must not close the panel underneath.  A closed overlay is
-      // display:none, so its nodes take no clicks.  No stopPropagation, so the
-      // image lightbox still receives them.
-      if (e.target.closest && e.target.closest('.modal-overlay')) return;
+      // export, or a confirm such as a delete's) is a sibling overlay, not a
+      // child: a click on it, its × or its backdrop must not close the panel
+      // underneath.  A closed overlay is display:none, so its nodes take no
+      // clicks.  No stopPropagation, so the image lightbox still receives them.
+      if (e.target.closest && e.target.closest('.modal-overlay, .modal')) return;
 
       if (
          memoryElements.popover &&
@@ -1306,7 +1351,9 @@
       if (memoryState.activeTab === tabName) return;
 
       if (window.DawnMemoryAliases) DawnMemoryAliases.cancelMergeMode();
+      if (window.DawnMemoryBatches) DawnMemoryBatches.hideTab();
       memoryState.activeTab = tabName;
+      focusAfter = null;
 
       if (tablist) tablist.sync();
       syncSortControl();
@@ -1316,9 +1363,13 @@
          memoryElements.list.setAttribute('aria-labelledby', 'memory-tab-' + tabName);
       }
 
-      // Clear search and load data
+      // Clear search (a pending one too) and load data (the Learned tab has no search strip)
+      clearTimeout(memoryState.searchTimeout);
+      memoryState.searchTimeout = null;
       if (memoryElements.searchInput) {
          memoryElements.searchInput.value = '';
+         const strip = memoryElements.searchInput.closest('.memory-search');
+         if (strip) strip.classList.toggle('hidden', tabName === 'learned');
       }
       memoryState.searchQuery = '';
 
@@ -1355,6 +1406,12 @@
             break;
          case 'contacts':
             if (typeof DawnContacts !== 'undefined') DawnContacts.loadContacts();
+            break;
+         case 'learned':
+            /* What memory learned per batch (memory_batches.js). */
+            if (window.DawnMemoryBatches) {
+               DawnMemoryBatches.showTab(memoryElements.list, memoryElements.loadMoreBtn);
+            }
             break;
       }
    }
@@ -1506,6 +1563,10 @@
 
       if (tab === 'contacts') {
          if (typeof DawnContacts !== 'undefined') DawnContacts.loadMore();
+         return;
+      }
+      if (tab === 'learned') {
+         if (window.DawnMemoryBatches) DawnMemoryBatches.loadMore();
          return;
       }
 
@@ -1725,6 +1786,7 @@
       close,
       toggle,
       updateVisibility,
+      switchTab,
       // Response handlers
       handleStatsResponse,
       handleFactsResponse,

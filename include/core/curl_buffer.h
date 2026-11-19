@@ -222,7 +222,7 @@ static inline void curl_buffer_free(curl_buffer_t *buf) {
 /**
  * Apply DAWN's standard defense-in-depth setopts to a CURL handle.
  *
- * Sets: TCP_KEEPALIVE, HTTP_VERSION_2, SSL_VERIFYPEER=1, SSL_VERIFYHOST=2,
+ * Sets: TCP_KEEPALIVE, HTTP_VERSION_2TLS, SSL_VERIFYPEER=1, SSL_VERIFYHOST=2,
  *       USERAGENT (caller-supplied, only if non-NULL/non-empty),
  *       TIMEOUT (caller-supplied, only if > 0),
  *       WRITEFUNCTION (curl_buffer_write_callback),
@@ -263,7 +263,9 @@ static inline void curl_apply_dawn_defaults(CURL *curl,
     * thread-safe setting. Requires a threadsafe resolver (libcurl's default). */
    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-   curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2);
+   /* HTTP/2 over TLS; plain HTTP stays HTTP/1.1 (no h2c upgrade offer, which a
+    * local server would decline on every request). */
+   curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2TLS);
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
    if (user_agent && user_agent[0]) {

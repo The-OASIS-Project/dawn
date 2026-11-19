@@ -24,6 +24,7 @@
  *   - reset_derived FK isolation: user A's drop doesn't touch user B's rows
  *   - estimate_reextract_cost uses the real prompt template size
  *   - estimate_reextract_cost rates_known=false for local provider
+ *   - estimate_reextract_cost prices from the shipped models.toml [pricing]
  *   - reextract worker concurrency guard (CAS busy flag)
  *   - wire payload encode/decode roundtrip
  */
@@ -40,8 +41,10 @@
 #include "auth/auth_db_internal.h"
 #include "config/dawn_config.h"
 #include "dawn_error.h"
+#include "llm/llm_pricing.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_admin.h"
+#include "toml.h"
 #include "unity.h"
 
 /* clang-format off */
@@ -452,6 +455,55 @@ void test_estimate_haiku_5_5_has_its_own_rate(void) {
                              est.cost_high_usd);
 }
 
+static double estimate_high_on(const char *provider, const char *model) {
+   snprintf(g_config.memory.extraction_provider, sizeof(g_config.memory.extraction_provider), "%s",
+            provider);
+   snprintf(g_config.memory.extraction_model, sizeof(g_config.memory.extraction_model), "%s",
+            model);
+   memory_db_admin_cost_estimate_t est = { 0 };
+   TEST_ASSERT_EQUAL(SUCCESS, memory_db_admin_estimate_reextract_cost(1, &est));
+   TEST_ASSERT_TRUE(est.rates_known);
+   return est.cost_high_usd;
+}
+
+void test_estimate_cloud_model_rates(void) {
+   /* Haiku 4.5 is $1 / $5; each of these keeps the same 1:5 ratio, so its
+    * estimate is a fixed multiple of Haiku 4.5's. */
+   const double haiku = estimate_high_on("claude", "claude-haiku-4-5");
+   TEST_ASSERT_TRUE(haiku > 0.0);
+   const struct {
+      const char *model;
+      double multiple;
+   } cases[] = {
+      { "claude-fable-5-2", 8.0 },  { "claude-fable-5-1", 10.0 },  { "claude-fable-5", 10.0 },
+      { "claude-opus-5-5", 4.0 },   { "claude-opus-5", 5.0 },      { "claude-opus-4-8", 5.0 },
+      { "claude-sonnet-5-5", 2.0 }, { "claude-sonnet-5", 2.0 },    { "claude-sonnet-4-6", 3.0 },
+      { "claude-mythos-5-2", 8.0 }, { "claude-mythos-5-1", 10.0 }, { "claude-mythos-5", 10.0 },
+   };
+   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      TEST_ASSERT_DOUBLE_WITHIN_MESSAGE(haiku * 0.001, haiku * cases[i].multiple,
+                                        estimate_high_on("claude", cases[i].model), cases[i].model);
+   }
+   /* GPT-6: each at the same 1:5. */
+   const struct {
+      const char *model;
+      double multiple;
+   } gpt6[] = {
+      { "gpt-6-astra", 10.0 }, { "gpt-6-cyber", 20.0 },  { "gpt-6-sol", 2.0 },
+      { "gpt-6.1-sol", 2.0 },  { "gpt-6.1-terra", 1.0 }, { "gpt-6-luna", 0.1 },
+   };
+   for (size_t i = 0; i < sizeof(gpt6) / sizeof(gpt6[0]); i++) {
+      TEST_ASSERT_DOUBLE_WITHIN_MESSAGE(haiku * 0.001, haiku * gpt6[i].multiple,
+                                        estimate_high_on("openai", gpt6[i].model), gpt6[i].model);
+   }
+   /* OpenRouter is priced through its vendor's table. */
+   TEST_ASSERT_DOUBLE_WITHIN(haiku * 0.001, haiku,
+                             estimate_high_on("openrouter", "anthropic/claude-haiku-4.5"));
+   /* GPT-5.6 Cyber ($12.50 / $75) has its own row, above the gpt-5 family's. */
+   TEST_ASSERT_TRUE(estimate_high_on("openai", "gpt-5.6-cyber") >
+                    estimate_high_on("openai", "gpt-5.6-luna") * 4.0);
+}
+
 void test_estimate_unknown_local_provider_marks_uncosted(void) {
    strncpy(g_config.memory.extraction_provider, "local",
            sizeof(g_config.memory.extraction_provider) - 1);
@@ -463,6 +515,31 @@ void test_estimate_unknown_local_provider_marks_uncosted(void) {
    TEST_ASSERT_FALSE(est.rates_known);
    TEST_ASSERT_EQUAL_DOUBLE(0.0, est.cost_high_usd);
    TEST_ASSERT_EQUAL_DOUBLE(0.0, est.cost_low_usd);
+}
+
+void test_estimate_unpriced_providers_mark_uncosted(void) {
+   /* Providers memory extraction runs locally (Gemini, the "anthropic" alias,
+    * Ollama), a model no row covers or no model at all. */
+   const struct {
+      const char *provider;
+      const char *model;
+   } cases[] = {
+      { "gemini", "gemini-3.7-flash" },
+      { "anthropic", "claude-haiku-4-5" },
+      { "ollama", "qwen3" },
+      { "openai", "gpt-image-2.6-flare" },
+      { "claude", "" },
+   };
+   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      snprintf(g_config.memory.extraction_provider, sizeof(g_config.memory.extraction_provider),
+               "%s", cases[i].provider);
+      snprintf(g_config.memory.extraction_model, sizeof(g_config.memory.extraction_model), "%s",
+               cases[i].model);
+      memory_db_admin_cost_estimate_t est = { 0 };
+      TEST_ASSERT_EQUAL(SUCCESS, memory_db_admin_estimate_reextract_cost(1, &est));
+      TEST_ASSERT_FALSE_MESSAGE(est.rates_known, cases[i].model);
+      TEST_ASSERT_EQUAL_DOUBLE(0.0, est.cost_high_usd);
+   }
 }
 
 void test_estimate_after_reset_includes_all_conversations(void) {
@@ -642,6 +719,20 @@ static void test_undo_extraction_attempt_is_idempotent(void) {
  * ============================================================================ */
 
 int main(void) {
+   /* The estimate's prices come from the shipped models.toml. */
+   FILE *fp = fopen(MODELS_TOML_PATH, "r");
+   if (!fp) {
+      return 1;
+   }
+   char err[200];
+   toml_table_t *models = toml_parse_file(fp, err, sizeof(err));
+   fclose(fp);
+   if (!models) {
+      fprintf(stderr, "models.toml: %s\n", err);
+      return 1;
+   }
+   llm_pricing_load_registry(models);
+
    UNITY_BEGIN();
    RUN_TEST(test_reset_derived_drops_all_five_tables_for_user_a);
    RUN_TEST(test_reset_derived_does_not_touch_other_users);
@@ -652,7 +743,9 @@ int main(void) {
    RUN_TEST(test_reset_derived_invalid_user_fails);
    RUN_TEST(test_estimate_uses_real_template_size);
    RUN_TEST(test_estimate_haiku_5_5_has_its_own_rate);
+   RUN_TEST(test_estimate_cloud_model_rates);
    RUN_TEST(test_estimate_unknown_local_provider_marks_uncosted);
+   RUN_TEST(test_estimate_unpriced_providers_mark_uncosted);
    RUN_TEST(test_estimate_after_reset_includes_all_conversations);
    RUN_TEST(test_worker_is_running_starts_false);
    RUN_TEST(test_payload_fits_under_admin_max);
@@ -660,5 +753,8 @@ int main(void) {
    RUN_TEST(test_undo_extraction_attempt_decrements_counter);
    RUN_TEST(test_undo_extraction_attempt_clamps_at_zero);
    RUN_TEST(test_undo_extraction_attempt_is_idempotent);
-   return UNITY_END();
+   const int rc = UNITY_END();
+   llm_pricing_free_registry();
+   toml_free(models);
+   return rc;
 }

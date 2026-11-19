@@ -54,8 +54,8 @@ static const char *s_ignore_words[] = { "", "the", "cancel", "never mind", "neve
 #define NUM_IGNORE (sizeof(s_ignore_words) / sizeof(s_ignore_words[0]))
 
 /* Cancel phrases, as wake_word_normalize() leaves them ("that's" → "thats").
- * The one list for every voice surface: the local mic, always-on WebUI and
- * satellites all stop on the same words. */
+ * Read by the local mic (dawn.c): they stop her reply, or with none going,
+ * pause the speaker's music.  Other surfaces send the phrase to the model. */
 static const char *s_cancel_words[] = {
    "stop",     "stop it", "cancel",   "hold on",      "wait",           "never mind",
    "abort",    "pause",   "enough",   "disregard",    "no thanks",      "forget it",

@@ -38,6 +38,25 @@
 /* HTTP auth helpers (extract_session_cookie, is_request_authenticated)
  * moved to webui_http.c */
 
+/* Look up the connection's login.  An ended one (not found, expired) is no
+ * longer this connection's: UNAUTHORIZED with @p ended_message.  One that
+ * couldn't be checked keeps the connection logged in. */
+static bool conn_login_lookup(ws_connection_t *conn,
+                              auth_session_t *session,
+                              const char *ended_message) {
+   int rc = auth_db_get_session(conn->auth_session_token, session);
+   if (rc == AUTH_DB_SUCCESS) {
+      return true;
+   }
+   if (rc == AUTH_DB_NOT_FOUND || rc == AUTH_DB_INVALID) {
+      conn->authenticated = false;
+      send_error_impl(conn->wsi, "UNAUTHORIZED", ended_message);
+   } else {
+      send_error_impl(conn->wsi, "SERVICE_UNAVAILABLE", "Couldn't check the login; try again");
+   }
+   return false;
+}
+
 /**
  * @brief Check if WebSocket connection is authenticated
  *
@@ -45,7 +64,9 @@
  * where session may have been revoked (password change, admin action, etc.)
  * but cached conn->authenticated flag remains true.
  *
- * Sends UNAUTHORIZED error if not authenticated or session invalid.
+ * Sends UNAUTHORIZED error if not authenticated or the login has ended, and
+ * SERVICE_UNAVAILABLE (keeping the login) when it couldn't be checked: a
+ * database that is down or busy, as during shutdown, is not a revoke.
  *
  * @param conn WebSocket connection
  * @return true if authenticated with valid session, false otherwise (error sent)
@@ -58,9 +79,7 @@ bool conn_require_auth_ex(ws_connection_t *conn, auth_session_t *session_out) {
 
    /* Re-validate session from DB (prevents stale session exploitation) */
    auth_session_t session;
-   if (auth_db_get_session(conn->auth_session_token, &session) != AUTH_DB_SUCCESS) {
-      conn->authenticated = false;
-      send_error_impl(conn->wsi, "UNAUTHORIZED", "Session expired or revoked");
+   if (!conn_login_lookup(conn, &session, "Session expired or revoked")) {
       return false;
    }
 
@@ -95,9 +114,7 @@ bool conn_require_admin(ws_connection_t *conn) {
 
    /* Re-validate session from DB (prevents stale is_admin cache) */
    auth_session_t session;
-   if (auth_db_get_session(conn->auth_session_token, &session) != AUTH_DB_SUCCESS) {
-      conn->authenticated = false;
-      send_error_impl(conn->wsi, "UNAUTHORIZED", "Session expired");
+   if (!conn_login_lookup(conn, &session, "Session expired")) {
       return false;
    }
 

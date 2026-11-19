@@ -26,6 +26,10 @@
 
 #include <stdbool.h>
 
+#include "core/session_manager.h"
+
+typedef struct music_player music_player_t;
+
 /**
  * @brief Register the music tool with the tool registry
  *
@@ -37,20 +41,38 @@
 int music_tool_register(void);
 
 /**
- * @brief Pause the local speaker's music, keeping its place for a resume
+ * @brief The player a session has of its own (a WebUI tab, a Tier-1
+ *        satellite), referenced: release it with music_player_release()
  *
- * For an interruption such as a phone call: nothing resumes it but the user.
- * Without the music tool there's no local music, so nothing to pause.
+ * Weak default (no WebUI) returns NULL; the WebUI overrides it, keeping the
+ * session's connection alive while it takes the reference.
  *
- * @return true if music was playing and is now paused
+ * @return The player, or NULL when the session has none
  */
-#ifdef DAWN_ENABLE_MUSIC_TOOL
-bool music_tool_pause(void);
-#else
-static inline bool music_tool_pause(void) {
-   return false;
+music_player_t *music_player_for_session(struct session *session);
+
+/**
+ * @brief Whether a caller without a player of its own may play on the local
+ *        speaker
+ *
+ * Only its owner (the local device's user), and only from the local mic, a
+ * messaging channel, or no session (the scheduler, a briefing, MQTT).  A
+ * WebUI tab, a satellite (which has a speaker of its own) and a background
+ * job never play at home.
+ *
+ * @param session The caller's session, or NULL
+ * @param caller_user_id The user the call acts for (tool_get_current_user_id())
+ * @param owner_user_id The speaker's owner, 0 when unknown
+ */
+static inline bool music_tool_speaker_allowed(const session_t *session,
+                                              int caller_user_id,
+                                              int owner_user_id) {
+   if (owner_user_id <= 0 || caller_user_id != owner_user_id) {
+      return false;
+   }
+   return !session || session->type == SESSION_TYPE_LOCAL ||
+          session->type == SESSION_TYPE_MESSAGING;
 }
-#endif
 
 /**
  * @brief Set custom music directory path

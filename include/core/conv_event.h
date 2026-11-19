@@ -65,6 +65,11 @@ extern "C" {
 /* The completeness critic's verdict at a natural-end stop: stop (confirmed) or
  * continue (re-armed with N new gap sub-questions). */
 #define CONV_EVENT_RESEARCH_CRITIC "research_critic"
+/* A coding agent's work, as its gateway reported it (event_payload_agent): a
+ * step (a tool run, its words), a request and its answer, and its end. */
+#define CONV_EVENT_AGENT_STEP "agent_step"
+#define CONV_EVENT_AGENT_REQUEST "agent_request"
+#define CONV_EVENT_AGENT_END "agent_end"
 
 /**
  * @brief Persist one event and fan it out to the owner's attached clients.
@@ -198,6 +203,9 @@ struct session; /* forward decl — avoids pulling session_manager.h into this l
  * stamped.  The three foreground persist paths (text, voice, and the backgrounded/client-gone
  * case) route through it today; the reinvoke path (job_reinvoke.c) still persists inline and
  * folds in as its own follow-up commit (it already reaches this seam with no include change).
+ *
+ * The fan-out names @p session (`session_id`) unless it is a job's, whose stream reaches
+ * every viewer of the job: then the row names no session.
  *
  * Callers own everything OUTSIDE this middle: arming `will_persist_turn`, bounded retry +
  * error frame, and post-persist side effects (a job's mark-fired).  Gate those on the return.

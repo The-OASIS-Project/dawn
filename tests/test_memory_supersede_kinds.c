@@ -34,6 +34,7 @@
 #include "memory/memory_db.h"
 #include "memory/memory_db_entities.h"
 #include "memory/memory_db_provenance.h"
+#include "memory/memory_similarity.h"
 #include "unity.h"
 
 static int s_user;
@@ -254,6 +255,48 @@ void test_forget_reopens_one_at_a_time_after_the_delete(void) {
    TEST_ASSERT_EQUAL_INT64(0, sup(f1));
    TEST_ASSERT_TRUE(open_rel(r1));
    TEST_ASSERT_EQUAL_INT64(0, q("SELECT COUNT(*) FROM memory_relations WHERE fact_id = ?", f2));
+}
+
+/* A batch that read outside text never replaces a fact such a batch didn't
+ * teach, even through a relation it attached to that fact. */
+void test_outside_close_keeps_a_clean_fact(void) {
+   const int64_t f1 = fact("Pat is married to Vic", 0);
+   const memory_provenance_t web = { .outside = OUTSIDE_WEB };
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_relation_supersede_ex(s_user, s_ent, "married_to", 0, "Vic", f1,
+                                                         0.9f, 0, 0, NULL, &web, NULL));
+   int64_t f2 = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_create(s_user, "Pat is married to Wes",
+                                                                  0.9f, "inferred", &web, &f2));
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_relation_supersede_ex(s_user, s_ent, "married_to", 0, "Wes", f2,
+                                                         0.9f, 0, 0, NULL, &web, NULL));
+   TEST_ASSERT_EQUAL_INT64(0, sup(f1));
+}
+
+/* The similar-fact and exact-repeat lookups report the kind of the fact they
+ * found. */
+void test_find_similar_reports_outside(void) {
+   const memory_provenance_t web = { .outside = OUTSIDE_WEB };
+   int64_t id = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS, memory_db_fact_create(s_user, "Pat drives a red car",
+                                                                  0.9f, "inferred", &web, &id));
+   memory_fact_t found[3];
+   memset(found, 0, sizeof(found));
+   found[0].outside = OUTSIDE_NONE;
+   int n = 0;
+   TEST_ASSERT_EQUAL_INT(MEMORY_DB_SUCCESS,
+                         memory_db_fact_find_similar(s_user, "Pat drives a red car", found, 3, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, found[0].outside);
+   memset(found, 0, sizeof(found));
+   n = 0;
+   TEST_ASSERT_EQUAL_INT(
+       MEMORY_DB_SUCCESS,
+       memory_db_fact_find_by_hash(s_user, memory_normalize_and_hash("Pat drives a red car"), found,
+                                   3, &n));
+   TEST_ASSERT_EQUAL_INT(1, n);
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_WEB, found[0].outside);
 }
 
 /* Forgetting a conversation brings back the value its fact replaced, and the
@@ -561,6 +604,8 @@ int main(void) {
    RUN_TEST(test_forget_middle_value_hands_up);
    RUN_TEST(test_forget_reopens_a_relation_level_replace);
    RUN_TEST(test_forget_reopens_one_at_a_time_after_the_delete);
+   RUN_TEST(test_outside_close_keeps_a_clean_fact);
+   RUN_TEST(test_find_similar_reports_outside);
    RUN_TEST(test_conversation_forget_restores_and_preview_agrees);
    RUN_TEST(test_prune_low_confidence_takes_history);
    RUN_TEST(test_prune_stale_takes_history);

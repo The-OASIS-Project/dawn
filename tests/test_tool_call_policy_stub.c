@@ -126,3 +126,9 @@ int llm_tools_hold_for_reply_code(const tool_call_t *call,
    (void)result;
    return 1;
 }
+
+/* A preview staged in a session is noted there (the session unit; not under test). */
+struct session;
+void turn_origin_note_prepare(struct session *session) {
+   (void)session;
+}

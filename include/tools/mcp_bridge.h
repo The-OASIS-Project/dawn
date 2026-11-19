@@ -166,4 +166,34 @@ int mcp_bridge_server_connected(const char *server_alias);
  */
 int mcp_bridge_ensure_connected(const char *server_alias);
 
+/**
+ * @brief Abort every call in flight to one server and refuse new ones.
+ *
+ * For a caller that is shutting down and must not wait out a long call (a
+ * long-poll): a blocked mcp_bridge_call_tool() returns with an error within
+ * about a second. Latched until mcp_bridge_shutdown(): later calls to that
+ * server fail at once instead of reconnecting.
+ *
+ * @param server_alias Configured server alias.
+ * @return SUCCESS, or FAILURE if no such server.
+ */
+int mcp_bridge_interrupt(const char *server_alias);
+
+/**
+ * @brief Whether a server is an agent gateway DAWN may hand coding tasks to.
+ *
+ * True only for a server the operator declared (`role = "agent_gateway"`)
+ * whose tools/list names `task_start` and `task_events`. A server listing them
+ * undeclared never qualifies; one that lists them at startup has none of its
+ * tools registered for the model either. Doesn't connect: a server that has
+ * never connected reads false (call mcp_bridge_ensure_connected() first). Once
+ * true, it stays true until shutdown; while false for a declared, connected
+ * server, each call parses its tools/list again, so a polling caller should
+ * keep its answer until the server reconnects.
+ *
+ * @param server_alias Configured server alias.
+ * @return true if it is one; false if not, never connected, or no such server.
+ */
+bool mcp_bridge_is_agent_gateway(const char *server_alias);
+
 #endif /* MCP_BRIDGE_H */

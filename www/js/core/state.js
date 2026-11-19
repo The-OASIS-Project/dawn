@@ -95,6 +95,7 @@
       authenticated: false,
       isAdmin: false,
       username: '',
+      sessionId: undefined, // this connection's session (session frame's session_id)
    };
 
    /**

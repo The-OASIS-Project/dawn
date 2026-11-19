@@ -89,6 +89,7 @@ typedef struct {
    bool local_tts; /* Has local text-to-speech */
    bool wake_word; /* Has local wake word detection */
    bool ota;       /* Supports server-driven OTA updates */
+   bool music;     /* Plays streamed music (built with Opus) */
 } ws_capabilities_t;
 
 /**

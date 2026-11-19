@@ -21,10 +21,9 @@
  * Unified Command Executor
  *
  * This module provides a single entry point for command execution across
- * all three command paths:
+ * both command paths:
  * 1. Direct pattern matching (text_to_command_nuevo.c)
- * 2. <command> tag parsing (llm_command_parser.c)
- * 3. Native tool calling (llm_tools.c)
+ * 2. Native tool calling (llm_tools.c)
  *
  * Execution logic:
  * - If command has a callback in tool_registry, invoke it directly

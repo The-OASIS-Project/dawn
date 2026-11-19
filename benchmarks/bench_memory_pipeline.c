@@ -75,6 +75,7 @@
 #include "bench_prompt_pieces.h"
 #include "config/dawn_config.h"
 #include "memory/memory_callback_internal.h"
+#include "memory/memory_consolidate.h"
 #include "memory/memory_db.h"
 #include "memory/memory_db_provenance.h"
 #include "memory/memory_embeddings.h"
@@ -84,6 +85,8 @@
 #include "memory/memory_history_loader.h"
 #include "memory/memory_types.h"
 #include "prompts.h"
+#include "tools/tool_own_results.h"
+#include "tools/tool_registry.h"
 
 #ifdef DAWN_DAEMON_BUILD
 #error "bench_memory_pipeline.c is a benchmark harness — do NOT link into the dawn daemon. \
@@ -179,8 +182,149 @@ static int load_prompt_override(void) {
    return 0;
 }
 
+/* --dump-candidates: each batch's raw extraction facts, as facts-JSONL. */
+static FILE *s_candidates;
+static int64_t s_candidate_id;
+static pthread_mutex_t s_candidates_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* One candidate line: @p text from conversation @p conv's extraction
+ * @p sample, its @p kind ("fact" or "correction"), and the source and
+ * confidence the model gave a fact. */
+static void write_candidate(int64_t conv,
+                            int sample,
+                            const char *text,
+                            struct json_object *fact,
+                            const char *kind) {
+   if (!text || !text[0]) {
+      return;
+   }
+   struct json_object *line = json_object_new_object(), *v = NULL;
+   json_object_object_add(line, "id", json_object_new_int64(++s_candidate_id));
+   json_object_object_add(line, "text", json_object_new_string(text));
+   json_object_object_add(line, "conversation", json_object_new_int64(conv));
+   json_object_object_add(line, "kind", json_object_new_string(kind));
+   json_object_object_add(line, "sample", json_object_new_int(sample));
+   if (fact && json_object_object_get_ex(fact, "source", &v)) {
+      json_object_object_add(line, "source", json_object_get(v));
+   }
+   if (fact && json_object_object_get_ex(fact, "confidence", &v)) {
+      json_object_object_add(line, "confidence", json_object_get(v));
+   }
+   fprintf(s_candidates, "%s\n", json_object_to_json_string_ext(line, JSON_C_TO_STRING_PLAIN));
+   json_object_put(line);
+}
+
+static void dump_reply(int64_t conversation_id, const char *reply, int sample) {
+   struct json_object *root = memory_extraction_parse_json(reply), *arr = NULL, *text = NULL;
+   if (!root) {
+      return;
+   }
+   pthread_mutex_lock(&s_candidates_mutex);
+   if (!s_candidates) {
+      pthread_mutex_unlock(&s_candidates_mutex);
+      json_object_put(root);
+      return;
+   }
+   if (json_object_object_get_ex(root, "facts", &arr)) {
+      for (size_t i = 0; i < json_object_array_length(arr); i++) {
+         struct json_object *fact = json_object_array_get_idx(arr, i);
+         if (json_object_object_get_ex(fact, "text", &text)) {
+            write_candidate(conversation_id, sample, json_object_get_string(text), fact, "fact");
+         }
+      }
+   }
+   if (json_object_object_get_ex(root, "corrections", &arr)) {
+      for (size_t i = 0; i < json_object_array_length(arr); i++) {
+         struct json_object *corr = json_object_array_get_idx(arr, i);
+         if (json_object_object_get_ex(corr, "new_fact", &text)) {
+            write_candidate(conversation_id, sample, json_object_get_string(text), NULL,
+                            "correction");
+         }
+      }
+   }
+   fflush(s_candidates);
+   pthread_mutex_unlock(&s_candidates_mutex);
+   json_object_put(root);
+}
+
+static bool s_two_samples;
+
+void bench_mp_set_samples(int n) {
+   s_two_samples = n == 2;
+   memory_consolidate_set_samples(n);
+}
+
+int bench_mp_dump_candidates(const char *path) {
+   /* Owner-only from the first byte: it holds the conversations' facts.  An
+    * existing file keeps its mode through open(), so it is set here too. */
+   const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+   s_candidates = fd >= 0 && fchmod(fd, 0600) == 0 ? fdopen(fd, "w") : NULL;
+   if (!s_candidates) {
+      if (fd >= 0) {
+         close(fd);
+      }
+      fprintf(stderr, "bench: cannot open %s for --dump-candidates\n", path);
+      return 1;
+   }
+   memory_extraction_set_reply_hook(dump_reply);
+   return 0;
+}
+
+/* The daemon's tools aren't registered here, but extraction asks the registry
+ * whose text a stored tool result is: stand-ins for the tools whose every
+ * result is DAWN's own (tools/tool_own_results.h's ALWAYS list), so a replayed
+ * conversation reads as the daemon reads it.  Any other tool is unknown, so
+ * outside, as there; so are the FRAMED tools, whose stored results predate
+ * their framing. */
+static char *bench_no_call(const char *action, char *value, int *should_respond) {
+   (void)action;
+   (void)value;
+   (void)should_respond;
+   return NULL;
+}
+static const char *const s_own_tools[] = { TOOL_OWN_RESULTS_ALWAYS_NAMES };
+static tool_metadata_t s_own_meta[sizeof(s_own_tools) / sizeof(s_own_tools[0])];
+static const treg_param_t s_except_params[] = {
+   {
+       .name = "action",
+       .description = "action",
+       .type = TOOL_PARAM_TYPE_ENUM,
+       .maps_to = TOOL_MAPS_TO_ACTION,
+       .enum_values = { TOOL_OWN_RESULTS_EXCEPT_ACTION },
+       .enum_count = 1,
+   },
+};
+static const tool_action_kind_entry_t s_except_kinds[] = {
+   { TOOL_OWN_RESULTS_EXCEPT_ACTION, TOOL_KIND_READ, NULL, NULL, TOOL_RESULTS_OUTSIDE },
+};
+
+static int register_own_tools(void) {
+   tool_registry_init();
+   for (size_t i = 0; i < sizeof(s_own_tools) / sizeof(s_own_tools[0]); i++) {
+      tool_metadata_t *m = &s_own_meta[i];
+      memset(m, 0, sizeof(*m));
+      m->name = m->device_string = m->description = s_own_tools[i];
+      m->results = TOOL_RESULTS_OWN;
+      m->callback = bench_no_call;
+      m->device_type = TOOL_DEVICE_TYPE_GETTER;
+      if (strcmp(s_own_tools[i], TOOL_OWN_RESULTS_EXCEPT_TOOL) == 0) {
+         m->params = s_except_params;
+         m->param_count = 1;
+         m->action_kinds = s_except_kinds;
+         m->action_kind_count = TOOL_KIND_COUNT(s_except_kinds);
+      }
+      if (tool_registry_register(m) != 0) {
+         fprintf(stderr, "bench_mp_init: can't register stand-in tool %s\n", s_own_tools[i]);
+         return 1;
+      }
+   }
+   return 0;
+}
+
 int bench_mp_init(void) {
    if (load_prompt_override() != 0)
+      return 1;
+   if (register_own_tools() != 0)
       return 1;
 
    /* mkstemp gives us a unique writable path; close the fd immediately so
@@ -230,6 +374,14 @@ void bench_mp_teardown(void) {
    if (s_bench_db_path[0])
       unlink(s_bench_db_path);
    memory_extraction_set_template_pieces(NULL);
+   memory_extraction_set_reply_hook(NULL);
+   tool_registry_shutdown();
+   pthread_mutex_lock(&s_candidates_mutex);
+   if (s_candidates) {
+      fclose(s_candidates);
+      s_candidates = NULL;
+   }
+   pthread_mutex_unlock(&s_candidates_mutex);
    free(s_prompt_pieces);
    s_prompt_pieces = NULL;
    free(s_prompt_text);
@@ -1275,7 +1427,45 @@ const char *bench_mp_extraction_prompt_sha256(void) {
       return hex;
    const char *tmpl = s_prompt_text ? s_prompt_text : MEMORY_EXTRACTION_PROMPT_TEMPLATE;
    unsigned char digest[SHA256_DIGEST_LENGTH];
-   SHA256((const unsigned char *)tmpl, strlen(tmpl), digest);
+   /* What else changes what a batch stores from the same prompt keys the
+    * snapshots too: the bench's real entity linking (snapshots from before it
+    * merged no entities), entity merging turned off (either path: the store's
+    * merge gate, and the consolidator's lists and link op, depend on it), the
+    * consolidator, its sample count, and the fixed text of the prompts it
+    * sends.  Left out: how each list item is written (code), and the persona
+    * half and kind words (the install's own text). */
+   const bool agent = strcmp(g_config.memory.consolidator, "agent") == 0;
+   const bool merging = g_config.memory.entity_merge_enabled;
+   const char *const pieces[] = {
+      tmpl,
+      "\nstore=linked",
+      merging ? "" : "\nentity_merge=off",
+      agent ? "\nconsolidator=agent" : "",
+      agent && s_two_samples ? "\nsamples=2" : "",
+      agent ? MEMORY_CONSOLIDATE_LEAD : "",
+      agent ? MEMORY_CONSOLIDATE_LINK_RULE MEMORY_CONSOLIDATE_LINK_OP : "",
+      agent ? MEMORY_CONSOLIDATE_HEAD_C MEMORY_CONSOLIDATE_HEAD_S MEMORY_CONSOLIDATE_HEAD_R
+                  MEMORY_CONSOLIDATE_HEAD_E MEMORY_CONSOLIDATE_HEAD_F MEMORY_CONSOLIDATE_HEAD_D
+            : "",
+      agent ? MEMORY_CONSOLIDATE_REPAIR_TEMPLATE : "",
+   };
+   size_t len = 0;
+   for (size_t i = 0; i < sizeof(pieces) / sizeof(pieces[0]); i++) {
+      len += strlen(pieces[i]);
+   }
+   char *keyed = malloc(len + 1);
+   if (keyed) {
+      size_t off = 0;
+      for (size_t i = 0; i < sizeof(pieces) / sizeof(pieces[0]); i++) {
+         const size_t n = strlen(pieces[i]);
+         memcpy(keyed + off, pieces[i], n);
+         off += n;
+      }
+      keyed[off] = '\0';
+   }
+   const char *hashed = keyed ? keyed : tmpl;
+   SHA256((const unsigned char *)hashed, strlen(hashed), digest);
+   free(keyed);
    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
       snprintf(hex + i * 2, 3, "%02x", digest[i]);
    }
@@ -1807,6 +1997,42 @@ static long monotonic_ms(void) {
 /* Extract an imported conversation the way memory_recovery.c does, and say
  * whether extraction actually ran: memory_trigger_extraction returns 0 on its
  * skip paths too, so "ran" is the extraction cursor moving. */
+/* {"cmd":"import_forgotten","texts":[...]}: forgotten-fact records the bench
+ * user made after every message, so each batch's extraction is checked
+ * against them (a seeded comeback run).  Replies with how many. */
+static int handle_import_forgotten(struct json_object *cmd) {
+   struct json_object *texts = NULL;
+   if (!json_object_object_get_ex(cmd, "texts", &texts) ||
+       !json_object_is_type(texts, json_type_array)) {
+      respond_error("import_forgotten: missing texts");
+      return 1;
+   }
+   int added = 0;
+   AUTH_DB_LOCK_OR_RETURN((respond_error("import_forgotten: database"), 1));
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(s_db.db,
+                          "INSERT INTO memory_forgotten (user_id, fact_text, forget_msg_id, "
+                          "created_at) VALUES (?1, ?2, ?3, CAST(strftime('%s', 'now') AS INTEGER))",
+                          -1, &st, NULL) == SQLITE_OK) {
+      for (size_t i = 0; i < json_object_array_length(texts); i++) {
+         const char *t = json_object_get_string(json_object_array_get_idx(texts, i));
+         if (!t || !t[0]) {
+            continue;
+         }
+         sqlite3_reset(st);
+         sqlite3_bind_int(st, 1, BENCH_MP_USER_ID);
+         sqlite3_bind_text(st, 2, t, -1, SQLITE_TRANSIENT);
+         sqlite3_bind_int64(st, 3, INT64_MAX / 2); /* after every message the bench holds */
+         added += sqlite3_step(st) == SQLITE_DONE;
+      }
+   }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   fprintf(stdout, "{\"status\":\"ok\",\"forgotten\":%d}\n", added);
+   fflush(stdout);
+   return 1;
+}
+
 static int handle_extract_stored(struct json_object *cmd) {
    struct json_object *conv_obj = NULL;
    if (!json_object_object_get_ex(cmd, "conv_id", &conv_obj)) {
@@ -1906,6 +2132,8 @@ int bench_mp_dispatch(struct json_object *cmd) {
       return handle_import_conversation(cmd);
    if (strcmp(cmd_str, "extract_stored") == 0)
       return handle_extract_stored(cmd);
+   if (strcmp(cmd_str, "import_forgotten") == 0)
+      return handle_import_forgotten(cmd);
 
    return 0;
 }

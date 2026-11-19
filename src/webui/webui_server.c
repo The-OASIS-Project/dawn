@@ -94,6 +94,7 @@
 #include "auth/auth_db.h"
 #include "core/buf_printf.h"
 #include "memory/memory_context.h"
+#include "memory/memory_history_loader.h"
 #include "webui/webui_doc_library.h"
 #ifdef DAWN_ENABLE_CALENDAR_TOOL
 #include "webui/webui_calendar.h"
@@ -122,6 +123,16 @@ struct lws_context *s_lws_context = NULL;
 static pthread_t s_webui_thread;
 _Atomic int s_running = 0;  // atomic: written on shutdown, read in server-thread loop
 volatile int s_client_count = 0;
+/* Shutdown has begun (webui_server_quiesce): connections are closed with 1012
+ * and refused, HTTP answers 503, until webui_server_shutdown() tears down */
+static atomic_bool s_quiescing;
+/* A connection told to close gets this long before lws closes it anyway */
+#define WEBUI_QUIESCE_CLOSE_SEC 2
+/* How long webui_server_quiesce() waits for the connections to close: past
+ * that timeout.  A client that never acknowledges the close (asleep, gone)
+ * can outlast it; the warning says so, and it handles nothing meanwhile */
+#define WEBUI_QUIESCE_WAIT_MS (WEBUI_QUIESCE_CLOSE_SEC * 1000 + 500)
+static bool s_quiesce_closed; /* lws thread only: the open connections were told */
 int s_port = 0;
 char s_www_path[256] = { 0 };
 char s_aurora_path[256] = { 0 }; /* Aurora dist root served at /aurora (empty = disabled) */
@@ -538,7 +549,18 @@ int generate_session_token(char token_out[WEBUI_SESSION_TOKEN_LEN]) {
 /* Queue a JSON response for delivery via the response queue.
  * Safe to call from any context — the JSON is serialized and copied. */
 void send_json_response(ws_connection_t *conn, json_object *response) {
+   /* Sent while handling a request of this connection's that carried `req`: echo
+    * it.  Taken off again after, since some callers send one cached object to
+    * many requests (safe unlocked only because such a request is handled on the
+    * service thread alone). */
+   struct json_object *payload = NULL;
+   json_object_object_get_ex(response, "payload", &payload);
+   bool stamped = webui_protocol_request_stamp(conn->wsi, payload, false);
    const char *json_str = json_object_to_json_string(response);
+   char *copy = json_str ? strdup(json_str) : NULL;
+   if (stamped) {
+      json_object_object_del(payload, "req");
+   }
    if (!json_str) {
       OLOG_ERROR("WebUI: Failed to serialize JSON response");
       return;
@@ -547,7 +569,7 @@ void send_json_response(ws_connection_t *conn, json_object *response) {
    ws_response_t resp = { 0 };
    resp.session = conn->session;
    resp.type = WS_RESP_JSON;
-   resp.generic_json.json = strdup(json_str);
+   resp.generic_json.json = copy;
    if (!resp.generic_json.json) {
       OLOG_ERROR("WebUI: Failed to allocate JSON response string");
       return;
@@ -724,6 +746,62 @@ bool handle_smart_home_message(ws_connection_t *conn,
 /* Forward declaration — defined after handle_text_message */
 static bool webui_conn_create_session(ws_connection_t *conn);
 
+/* Note a whole JSON text frame as the request being handled (see
+ * webui_protocol_request_begin); a binary frame, a fragment or anything that
+ * doesn't parse notes nothing.  The caller ends it. */
+static void request_note_frame(ws_connection_t *conn, struct lws *wsi, const char *in, size_t len) {
+   if (lws_frame_is_binary(wsi) || !lws_is_final_fragment(wsi) || conn->text_buffer_len != 0 ||
+       len > INT_MAX) {
+      return;
+   }
+   struct json_tokener *tok = json_tokener_new();
+   struct json_object *root = tok ? json_tokener_parse_ex(tok, in, (int)len) : NULL;
+   struct json_object *type_obj = NULL, *payload = NULL;
+   if (root && json_object_object_get_ex(root, "type", &type_obj) &&
+       json_object_is_type(type_obj, json_type_string) &&
+       strlen(json_object_get_string(type_obj)) == (size_t)json_object_get_string_len(type_obj)) {
+      json_object_object_get_ex(root, "payload", &payload);
+      webui_protocol_request_begin(wsi, json_object_get_string(type_obj), payload);
+   }
+   json_object_put(root);
+   if (tok) {
+      json_tokener_free(tok);
+   }
+}
+
+/* Connections still in the registry: every socket is registered when it's
+ * established and unregistered when it closes, whether or not it was counted
+ * as a client */
+static int registered_connections(void) {
+   int n = 0;
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      n += s_active_connections[i] != NULL;
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+   return n;
+}
+
+/* Tell every connection the server is restarting (lws thread): 1012, so a
+ * client connects again rather than taking it as signed out; each closes
+ * once its earlier output is out (LWS_CALLBACK_SERVER_WRITEABLE).  One
+ * already closing with its own code (a logout's 4002, an unchecked login's
+ * 1013) keeps it. */
+static void close_all_for_restart(void) {
+   pthread_mutex_lock(&s_conn_registry_mutex);
+   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
+      ws_connection_t *conn = s_active_connections[i];
+      if (conn && conn->wsi && !conn->logged_out && !conn->login_unchecked) {
+         // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+         lws_close_reason(conn->wsi, (enum lws_close_status)WEBUI_CLOSE_RESTART,
+                          (unsigned char *)"restarting", 10);
+         lws_callback_on_writable(conn->wsi);
+         lws_set_timeout(conn->wsi, PENDING_TIMEOUT_CLOSE_SEND, WEBUI_QUIESCE_CLOSE_SEC);
+      }
+   }
+   pthread_mutex_unlock(&s_conn_registry_mutex);
+}
+
 static int callback_websocket(struct lws *wsi,
                               enum lws_callback_reasons reason,
                               void *user,
@@ -744,6 +822,9 @@ static int callback_websocket(struct lws *wsi,
          if (!webui_is_same_origin_request(wsi)) {
             OLOG_WARNING("WebUI: rejected cross-origin WebSocket upgrade");
             return -1; /* reject the handshake (lws API contract) */
+         }
+         if (atomic_load(&s_quiescing)) {
+            return -1; /* shutting down: the client tries again */
          }
          break;
 
@@ -767,7 +848,19 @@ static int callback_websocket(struct lws *wsi,
 
          /* Populate auth state from HTTP cookie (if present) */
          auth_session_t auth_session;
-         if (is_request_authenticated(wsi, &auth_session)) {
+         webui_login_t login = request_login(wsi, &auth_session);
+         if (login == WEBUI_LOGIN_UNAVAILABLE) {
+            /* Not "signed out": tell it to connect again (1013, try again
+             * later) and handle nothing it sends meanwhile, rather than
+             * answer its init as unauthenticated */
+            OLOG_WARNING("WebUI: couldn't check a connection's login; asking it to reconnect");
+            conn->login_unchecked = true;
+            // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+            lws_close_reason(wsi, (enum lws_close_status)WEBUI_CLOSE_TRY_AGAIN,
+                             (unsigned char *)"try again", 9);
+            lws_callback_on_writable(wsi);
+            lws_set_timeout(wsi, PENDING_TIMEOUT_CLOSE_SEND, 3);
+         } else if (login == WEBUI_LOGIN_VALID) {
             conn->authenticated = true;
             conn->auth_user_id = auth_session.user_id;
             safe_strscpy(conn->auth_session_token, auth_session.token);
@@ -780,6 +873,15 @@ static int callback_websocket(struct lws *wsi,
 
          /* Register in connection registry for proactive notifications */
          register_connection(conn);
+
+         /* Accepted just as shutdown began, after the others were told */
+         if (atomic_load(&s_quiescing) && !conn->login_unchecked) {
+            // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+            lws_close_reason(wsi, (enum lws_close_status)WEBUI_CLOSE_RESTART,
+                             (unsigned char *)"restarting", 10);
+            lws_callback_on_writable(wsi);
+            lws_set_timeout(wsi, PENDING_TIMEOUT_CLOSE_SEND, WEBUI_QUIESCE_CLOSE_SEC);
+         }
 
          OLOG_INFO("WebUI: WebSocket connection established, awaiting init message");
          break;
@@ -897,8 +999,9 @@ static int callback_websocket(struct lws *wsi,
       }
 
       case LWS_CALLBACK_RECEIVE: {
-         /* Its login ended: it is closing, and nothing it sends is handled. */
-         if (conn->logged_out) {
+         /* Its login ended, or couldn't be checked: it is closing, and
+          * nothing it sends is handled. */
+         if (conn->logged_out || conn->login_unchecked || atomic_load(&s_quiescing)) {
             break;
          }
          /* Message received from client.
@@ -918,7 +1021,11 @@ static int callback_websocket(struct lws *wsi,
             }
             if (conn->authenticated) {
                OLOG_INFO("WebUI: Session expired for authenticated connection, auto-creating");
-               if (!webui_conn_create_session(conn)) {
+               /* A refusal here drops the message: name it, as dispatch would. */
+               request_note_frame(conn, wsi, (const char *)in, len);
+               bool created = webui_conn_create_session(conn);
+               webui_protocol_request_end();
+               if (!created) {
                   break; /* Error already sent to client */
                }
                /* Fall through to normal message handling below */
@@ -1306,14 +1413,21 @@ static int callback_websocket(struct lws *wsi,
 
       case LWS_CALLBACK_SERVER_WRITEABLE:
          /* Frames held while earlier output was going out go first, one per
-          * callback; a connection whose login ended closes once they're out
-          * (lws_close_reason carries WEBUI_CLOSE_LOGGED_OUT). */
+          * callback; then a connection whose login ended (WEBUI_CLOSE_LOGGED_OUT),
+          * whose login couldn't be checked (WEBUI_CLOSE_TRY_AGAIN) or that a
+          * shutdown is closing (WEBUI_CLOSE_RESTART) closes. */
          if (conn && conn->held_head) {
             int ret = webui_send_held_frame(conn);
             lws_callback_on_writable(wsi);
             return ret;
          }
-         if (conn && conn->logged_out) {
+         if (conn && (conn->logged_out || conn->login_unchecked || atomic_load(&s_quiescing))) {
+            if (!conn->logged_out && !conn->login_unchecked) {
+               /* Shutdown began before close_all_for_restart() told it */
+               // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+               lws_close_reason(wsi, (enum lws_close_status)WEBUI_CLOSE_RESTART,
+                                (unsigned char *)"restarting", 10);
+            }
             return LWS_CLOSE_CONNECTION;
          }
          /* Ready to send more data - process next queued response */
@@ -1324,6 +1438,10 @@ static int callback_websocket(struct lws *wsi,
          /* lws_cancel_service() was called - process response queue */
          process_response_queue();
          webui_login_sweep_run_pending();
+         if (atomic_load(&s_quiescing) && !s_quiesce_closed) {
+            s_quiesce_closed = true;
+            close_all_for_restart();
+         }
          break;
 
       default:
@@ -2014,8 +2132,10 @@ int webui_server_init(int port, const char *www_path) {
    }
 
    /* A turn that finds another conversation loaded reloads its own through the
-    * canonical restore (see session_turn_begin). */
+    * canonical restore (see session_turn_begin); one on the conversation it
+    * holds appends what was written there since (session_catch_up). */
    session_set_history_loader(webui_turn_history_loader);
+   session_set_history_tail_loader(memory_history_request_tail);
 
    OLOG_INFO("WebUI: Server started successfully on port %d", port);
 
@@ -2044,6 +2164,7 @@ void webui_server_shutdown(void) {
    pthread_mutex_unlock(&s_mutex);
 
    session_set_history_loader(NULL);
+   session_set_history_tail_loader(NULL);
 
    /* Tear down silent-observe listener so post-shutdown calls don't dispatch
     * into freed/closing connection state.  Pairs with the registration in
@@ -2114,20 +2235,36 @@ void webui_server_shutdown(void) {
    OLOG_INFO("WebUI: Server shutdown complete");
 }
 
+void webui_server_quiesce(void) {
+   if (!webui_server_is_running() || atomic_exchange(&s_quiescing, true)) {
+      return;
+   }
+   OLOG_INFO("WebUI: Closing connections for shutdown...");
+   if (s_lws_context) {
+      lws_cancel_service(s_lws_context); /* the lws thread closes them */
+   }
+   /* Until the lws thread has closed them all: the registry, not the client
+    * count, which a cookie-authenticated browser never enters */
+   for (int waited = 0; registered_connections() > 0 && waited < WEBUI_QUIESCE_WAIT_MS;
+        waited += 50) {
+      usleep(50000);
+   }
+   int open = registered_connections();
+   if (open > 0) {
+      OLOG_WARNING("WebUI: %d connection(s) still open after %d ms", open, WEBUI_QUIESCE_WAIT_MS);
+   }
+}
+
+bool webui_server_quiescing(void) {
+   return atomic_load(&s_quiescing);
+}
+
 bool webui_server_is_running(void) {
    bool running;
    pthread_mutex_lock(&s_mutex);
    running = s_running != 0;
    pthread_mutex_unlock(&s_mutex);
    return running;
-}
-
-int webui_server_client_count(void) {
-   int count;
-   pthread_mutex_lock(&s_mutex);
-   count = s_client_count;
-   pthread_mutex_unlock(&s_mutex);
-   return count;
 }
 
 int webui_server_get_port(void) {
@@ -2452,13 +2589,6 @@ void webui_send_stream_start(session_t *session) {
    int64_t conv_id = session->stream_conversation_id;
    conv_stream_begin(conv_id, sid);
 
-   /* Reset command tag filter state for new stream */
-   session->cmd_tag_filter.nesting_depth = 0;
-   session->cmd_tag_filter.len = 0;
-
-   /* Cache whether to bypass filtering (native tools enabled) */
-   session->cmd_tag_filter_bypass = llm_tools_enabled(NULL);
-
    /* Transition to "speaking" state when streaming begins */
    webui_send_state(session, "speaking");
 
@@ -2487,14 +2617,6 @@ void webui_send_stream_start(session_t *session) {
    }
 }
 
-/* Command tag filter uses shared constants from core/text_filter.h */
-
-/**
- * @brief Output callback for WebUI streaming (adapter for text_filter API)
- *
- * This callback adapts the shared text_filter's signature to WebUI needs.
- * Session is passed via ctx parameter.
- */
 /* True if [text, text+len) is empty or only whitespace.  Used to avoid opening a
  * streaming bubble for whitespace-only content (e.g. the "\n\n" tool-iteration flush
  * on a tool-only iteration), which would otherwise leave an empty bubble. */
@@ -2507,91 +2629,13 @@ static bool stream_text_is_all_whitespace(const char *text, size_t len) {
    return true;
 }
 
-static void webui_filter_output(const char *text, size_t len, void *ctx) {
-   session_t *session = (session_t *)ctx;
-   if (!session || !text || len == 0) {
-      return;
-   }
-
-   /* Don't open a bubble for whitespace-only first content (iteration-boundary flush). */
-   if (!session->llm_streaming_active && stream_text_is_all_whitespace(text, len)) {
-      return;
-   }
-
-   /* Start stream on first content (lazy initialization) */
-   if (!session->llm_streaming_active) {
-      webui_send_stream_start(session);
-   }
-
-   /* Null-terminate the input for processing */
-   char temp_buf[4096];
-   size_t safe_len = len < sizeof(temp_buf) - 1 ? len : sizeof(temp_buf) - 1;
-   memcpy(temp_buf, text, safe_len);
-   temp_buf[safe_len] = '\0';
-
-   ws_response_t resp = { .session = session,
-                          .type = WS_RESP_STREAM_DELTA,
-                          .stream = {
-                              .stream_id = session->current_stream_id,
-                              .conversation_id = session->stream_conversation_id,
-                          } };
-
-   /* A frame carries at most its text field; a longer chunk is cut there. */
-   snprintf(resp.stream.text, sizeof(resp.stream.text), "%.*s", (int)sizeof(resp.stream.text) - 1,
-            temp_buf);
-
-   session->stream_had_content = true;
-   conv_stream_append(session->stream_conversation_id, session->current_stream_id,
-                      resp.stream.text);
-   queue_response(&resp);
-}
-
-/**
- * @brief Filter command tags and return filtered text
- *
- * Public function for callers that need the filtered text (e.g., TTS).
- * Uses the same state machine as WebUI streaming.
- *
- * @param session Session with filter state
- * @param text Input text to filter
- * @param out_buf Output buffer for filtered text
- * @param out_size Size of output buffer
- * @return Length of filtered text written to out_buf
- */
-int webui_filter_command_tags(session_t *session,
-                              const char *text,
-                              char *out_buf,
-                              size_t out_size) {
-   if (!session || !text || !out_buf || out_size == 0) {
-      return 0;
-   }
-
-   /* Native tools mode: no command tags to filter */
-   if (session->cmd_tag_filter_bypass) {
-      size_t len = strlen(text);
-      size_t copy = len < out_size - 1 ? len : out_size - 1;
-      memcpy(out_buf, text, copy);
-      out_buf[copy] = '\0';
-      return (int)copy;
-   }
-
-   /* Use shared text filter implementation */
-   return text_filter_command_tags_to_buffer(&session->cmd_tag_filter, text, out_buf, out_size);
-}
-
-/* Per-delta stream working-buffer size.  The frame field `ws_response_t.stream.text`
- * is 1024 bytes and snprintf-truncates there, so the intermediate strip buffer
- * never needs to exceed it (with a margin, a round number). */
-#define WEBUI_STREAM_DELTA_BUF 1088
-
 /**
  * @brief Emit one already-tag-stripped delta chunk to the stream.
  *
- * Shared tail of the native-tools stream path: opens the bubble on first real
- * content, appends to the replay ring, and queues the
- * frame.  Callers must pass text that has already passed through any tag filter
- * (it is NOT re-filtered here) — used by both the live delta path and the
- * stream-end <cited> flush.
+ * Opens the bubble on first real content, appends to the replay ring, and
+ * queues the frame.  Callers must pass text that has already passed through the
+ * <cited> filter (it is NOT re-filtered here) — used by both the live delta path
+ * and the stream-end <cited> flush.
  */
 static void webui_emit_clean_delta(session_t *session, const char *text) {
    if (!text || text[0] == '\0') {
@@ -2620,11 +2664,38 @@ static void webui_emit_clean_delta(session_t *session, const char *text) {
    queue_response(&resp);
 }
 
+/* Longest piece of a delta webui_send_stream_delta filters at once: a held
+ * partial <cited> opener (under CITED_TAG_BUF_SIZE bytes) can come out ahead of
+ * it, and the result, with its NUL, must still fit a frame's text.  A thinking
+ * delta has no tag filter: a piece is a frame's text less its NUL. */
+#define WEBUI_STREAM_DELTA_PIECE (WEBUI_STREAM_TEXT_SIZE - CITED_TAG_BUF_SIZE)
+#define WEBUI_THINKING_DELTA_PIECE (WEBUI_STREAM_TEXT_SIZE - 1)
+_Static_assert(WEBUI_STREAM_DELTA_PIECE <= TEXT_PIECE_MAX, "delta piece exceeds TEXT_PIECE_MAX");
+_Static_assert(WEBUI_STREAM_DELTA_PIECE + (CITED_TAG_BUF_SIZE - 1) + 1 <= WEBUI_STREAM_TEXT_SIZE,
+               "a filtered delta piece must fit a frame's text");
+_Static_assert(WEBUI_THINKING_DELTA_PIECE <= TEXT_PIECE_MAX,
+               "thinking piece exceeds TEXT_PIECE_MAX");
+
+/* One piece of a delta (webui_send_stream_delta). */
+static void webui_stream_delta_piece(const char *text, void *ctx) {
+   session_t *session = (session_t *)ctx;
+
+   /* Strip the live <cited> memory-citation tag on EVERY stream path.  The
+    * finalizer only cleans the completed/persisted copy; the browser renders
+    * deltas live, so an unstripped tag leaks its inner text.  Stateful: a tag
+    * may split across deltas; held-back partial-opener bytes surface on a later
+    * delta or the stream-end flush. */
+   char cited_clean[sizeof(((ws_response_t *)0)->stream.text)];
+   text_filter_cited_tags_to_buffer(&session->cited_tag_filter, text, cited_clean,
+                                    sizeof(cited_clean));
+   webui_emit_clean_delta(session, cited_clean);
+}
+
 /**
- * @brief Send streaming text to WebUI with command tag filtering
+ * @brief Send streaming text to WebUI, <cited> tags stripped
  *
- * Filters <command>...</command> tags when in legacy mode (native tools disabled).
  * Automatically starts the stream on first content. Thread-safe per session.
+ * A delta longer than a frame's text goes out in pieces, none lost.
  */
 void webui_send_stream_delta(session_t *session, const char *text) {
    if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2 &&
@@ -2632,33 +2703,7 @@ void webui_send_stream_delta(session_t *session, const char *text) {
       return;
    }
 
-   if (!text || text[0] == '\0') {
-      return;
-   }
-
-   /* Strip the live <cited> memory-citation tag on EVERY stream path.  The
-    * finalizer only cleans the completed/persisted copy; the browser renders
-    * deltas live, so an unstripped tag leaks its inner text.  The tag is gated
-    * purely on citation_enabled (independent of tool mode), so both the native
-    * and legacy branches below can carry it — run the strip before the branch
-    * rather than inside the native one.  Stateful: a tag may split across deltas;
-    * held-back partial-opener bytes surface on a later delta or the stream-end
-    * flush. */
-   char cited_clean[WEBUI_STREAM_DELTA_BUF];
-   text_filter_cited_tags_to_buffer(&session->cited_tag_filter, text, cited_clean,
-                                    sizeof(cited_clean));
-   if (cited_clean[0] == '\0') {
-      return; /* whole delta was tag content, or held back pending more input */
-   }
-
-   /* Native tools: pass through without command-tag filtering. */
-   if (session->cmd_tag_filter_bypass) {
-      webui_emit_clean_delta(session, cited_clean);
-      return;
-   }
-
-   /* Legacy command tag mode: filter the cited-stripped text for <command> tags. */
-   text_filter_command_tags(&session->cmd_tag_filter, cited_clean, webui_filter_output, session);
+   text_split_pieces(text, WEBUI_STREAM_DELTA_PIECE, webui_stream_delta_piece, session);
 }
 
 void webui_send_stream_end(session_t *session, const char *reason) {
@@ -2670,19 +2715,12 @@ void webui_send_stream_end(session_t *session, const char *reason) {
    /* Flush any held-back <cited> filter bytes as a final delta while the stream
     * is still active.  A partial-opener that never completed is real trailing
     * text and must reach the browser + replay ring; a mid-tag remainder (closer
-    * never arrived) is dropped inside the flush.  Route by path exactly as the
-    * delta does — native emits directly (NOT back through webui_send_stream_delta,
-    * which would re-filter the clean bytes); legacy feeds the command filter, since
-    * a held '<' could begin a <command> tag. */
+    * never arrived) is dropped inside the flush.  Emitted directly, NOT back
+    * through webui_send_stream_delta, which would re-filter the clean bytes. */
    char cited_flush[CITED_TAG_BUF_SIZE];
    if (text_filter_cited_flush_to_buffer(&session->cited_tag_filter, cited_flush,
                                          sizeof(cited_flush)) > 0) {
-      if (session->cmd_tag_filter_bypass) {
-         webui_emit_clean_delta(session, cited_flush);
-      } else {
-         text_filter_command_tags(&session->cmd_tag_filter, cited_flush, webui_filter_output,
-                                  session);
-      }
+      webui_emit_clean_delta(session, cited_flush);
    }
 
    /* Mark streaming inactive */
@@ -2705,8 +2743,11 @@ void webui_send_stream_end(session_t *session, const char *reason) {
     * (stream_conversation_id > 0 — the workers only persist when turn_conv > 0, so a
     * conv-less turn, or one whose conversation creation failed mid-dispatch, must not
     * promise a save it won't make).  Over-promising on any of these would make the viewer
-    * drop its streamed partial while the server persists nothing (correctness MEDIUM). */
-   bool will_persist = atomic_load(&session->will_persist_turn) && strcmp(r, "complete") == 0 &&
+    * drop its streamed partial while the server persists nothing (correctness MEDIUM).
+    * A reply the user stopped ("stopped") is saved only as far as it was kept. */
+   const bool saves = strcmp(r, "complete") == 0 ||
+                      (strcmp(r, "stopped") == 0 && session->cancelled_final_response);
+   bool will_persist = atomic_load(&session->will_persist_turn) && saves &&
                        atomic_load(&session->stream_had_content) &&
                        atomic_load(&session->stream_conversation_id) > 0;
 
@@ -2750,14 +2791,9 @@ void webui_send_thinking_start(session_t *session, const char *provider) {
              p, session->session_id);
 }
 
-void webui_send_thinking_delta(session_t *session, const char *text) {
-   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_JOB)) {
-      return;
-   }
-
-   if (!text || text[0] == '\0') {
-      return;
-   }
+/* One frame of a thinking delta (webui_send_thinking_delta). */
+static void webui_thinking_delta_piece(const char *text, void *ctx) {
+   session_t *session = (session_t *)ctx;
 
    ws_response_t resp = { .session = session,
                           .type = WS_RESP_THINKING_DELTA,
@@ -2769,6 +2805,15 @@ void webui_send_thinking_delta(session_t *session, const char *text) {
    safe_strscpy(resp.stream.text, text);
 
    queue_response(&resp);
+}
+
+/* A thinking delta longer than a frame's text goes out in pieces, none lost. */
+void webui_send_thinking_delta(session_t *session, const char *text) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_JOB)) {
+      return;
+   }
+
+   text_split_pieces(text, WEBUI_THINKING_DELTA_PIECE, webui_thinking_delta_piece, session);
 }
 
 void webui_send_thinking_end(session_t *session, bool has_content) {
@@ -3083,27 +3128,6 @@ void webui_send_metrics_update(session_t *session,
    queue_response(&resp);
 }
 
-
-/* =============================================================================
- * Connection Iterator (for per-user broadcasting)
- * ============================================================================= */
-
-void webui_for_each_conn_by_user(int user_id,
-                                 void (*callback)(ws_connection_t *conn, void *ctx),
-                                 void *ctx) {
-   if (user_id <= 0 || !callback) {
-      return;
-   }
-
-   pthread_mutex_lock(&s_conn_registry_mutex);
-   for (int i = 0; i < MAX_ACTIVE_CONNECTIONS; i++) {
-      ws_connection_t *conn = s_active_connections[i];
-      if (conn && conn->authenticated && conn->auth_user_id == user_id && conn->music_state) {
-         callback(conn, ctx);
-      }
-   }
-   pthread_mutex_unlock(&s_conn_registry_mutex);
-}
 
 /* =============================================================================
  * Satellite Connection Helpers

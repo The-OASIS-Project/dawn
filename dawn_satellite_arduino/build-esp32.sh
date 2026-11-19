@@ -23,6 +23,10 @@ SKETCH_DIR="$SCRIPT_DIR"
 
 # ── Single source of truth: board + libraries (shared by local runs and CI) ───
 ESP32_INDEX="https://espressif.github.io/arduino-esp32/package_esp32_index.json"
+# The arduino-esp32 core the firmware is built and tested against.  Pinned: an
+# unpinned install takes whatever is newest, and core 4.0.0 (its mbedtls headers
+# moved) no longer compiles the sketch.  Raise it together with the port.
+ESP32_CORE_VERSION="3.3.12"
 # Adafruit Feather ESP32-S3 TFT, with the Tools-menu settings the sketch needs:
 # QSPI PSRAM, 4 MB flash, "Minimal SPIFFS (1.9MB APP with OTA)" (== partitions.csv).
 # This board is an ESP32-S3R2 (2 MB QSPI PSRAM) — PSRAM=enabled is the board's
@@ -95,7 +99,7 @@ fi
 if [ "$COMPILE_ONLY" -eq 0 ]; then
    echo "==> installing esp32 core + libraries (idempotent)…"
    arduino-cli core update-index --additional-urls "$ESP32_INDEX"
-   arduino-cli core install esp32:esp32 --additional-urls "$ESP32_INDEX"
+   arduino-cli core install "esp32:esp32@${ESP32_CORE_VERSION}" --additional-urls "$ESP32_INDEX"
    for lib in "${LIBS[@]}"; do
       arduino-cli lib install "$lib"
    done

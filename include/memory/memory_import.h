@@ -68,13 +68,15 @@ void memory_import_clean_text(char *s);
  *
  * Truncates to MEMORY_FACT_TEXT_MAX (on a UTF-8 character boundary), clamps
  * @p confidence (memory_import_confidence), applies the injection filter and duplicate
- * check, and when @p commit is set creates the fact (source "import") and queues
- * it for embedding, so it reaches semantic search and focus injection.  With
- * @p commit false nothing is written (preview).
+ * check, and when @p commit is set creates the fact (told, origin import) and
+ * queues it for embedding, so it reaches semantic search and focus injection.
+ * With @p commit false nothing is written (preview).
  *
  * @param user_id    Owner
  * @param text       Fact text
  * @param confidence Stored confidence
+ * @param outside    Its outside kind, as an export recorded it (outside_kind_t;
+ *                   a value out of range reads as UNKNOWN)
  * @param commit     Write the fact (false = dry run)
  * @param out_text   Receives the text as it would be stored (for previews)
  * @return Outcome
@@ -82,6 +84,7 @@ void memory_import_clean_text(char *s);
 memory_import_status_t memory_import_fact(int user_id,
                                           const char *text,
                                           float confidence,
+                                          int outside,
                                           bool commit,
                                           char out_text[MEMORY_FACT_TEXT_MAX]);
 

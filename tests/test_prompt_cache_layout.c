@@ -156,7 +156,8 @@ static struct json_object *parse(const char *json) {
 }
 
 static struct json_object *render(struct json_object *history, const char *model) {
-   struct json_object *req = convert_to_claude_format(history, NULL, model, CARRIER, 0, false);
+   struct json_object *req = convert_to_claude_format(history, NULL, model, CARRIER, 0, false,
+                                                      true);
    TEST_ASSERT_NOT_NULL(req);
    return req;
 }
@@ -405,7 +406,8 @@ static void test_images_follow_the_question(void) {
               "\"data:image/png;base64,iVBORw0KGgo=\"}}]}"
    };
    struct json_object *h = history(msgs, 2);
-   struct json_object *req = convert_to_claude_format(h, NULL, MID_SYSTEM_MODEL, CARRIER, 0, false);
+   struct json_object *req = convert_to_claude_format(h, NULL, MID_SYSTEM_MODEL, CARRIER, 0, false,
+                                                      true);
    struct json_object *messages = field(req, "messages");
    TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(messages));
    struct json_object *blocks = field(json_object_array_get_idx(messages, 0), "content");
@@ -457,7 +459,7 @@ static const char *NEXT = "{\"role\":\"user\",\"content\":\"And now?\"}";
 
 static struct json_object *render_tools(struct json_object *h, bool inline_tools) {
    struct json_object *req = convert_to_claude_format(h, NULL, MID_SYSTEM_MODEL, CARRIER, 0,
-                                                      inline_tools);
+                                                      inline_tools, true);
    TEST_ASSERT_NOT_NULL(req);
    return req;
 }
@@ -818,6 +820,23 @@ static void test_stable_handles_items_sent_once(void) {
    json_object_put(reloaded);
    free(prev);
    json_object_put(h);
+}
+
+/* The window's room (llm_context.c, not linked): the ceiling as given. */
+int llm_context_fit_reply(int max_tokens,
+                          struct json_object *history,
+                          const char *input_text,
+                          struct json_object *tools,
+                          llm_type_t type,
+                          cloud_provider_t provider,
+                          const char *model) {
+   (void)history;
+   (void)input_text;
+   (void)tools;
+   (void)type;
+   (void)provider;
+   (void)model;
+   return max_tokens;
 }
 
 int main(void) {

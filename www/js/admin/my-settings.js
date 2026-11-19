@@ -79,9 +79,13 @@
    function saveMySettings() {
       const myTimezone = document.getElementById('my-timezone');
       const settings = {
+         persona_values: document.getElementById('my-persona-values')?.value || '',
+         persona_values_mode: checkedMode('values'),
+         persona_voice: document.getElementById('my-persona-voice')?.value || '',
+         persona_voice_mode: checkedMode('voice'),
+         // The older single text: only ever cleared from here (its box shows
+         // while it's set), so its mode isn't sent.
          persona_description: document.getElementById('my-persona')?.value || '',
-         persona_mode:
-            document.querySelector('input[name="persona_mode"]:checked')?.value || 'append',
          location: document.getElementById('my-location')?.value || '',
          // Not sent until the list is filled, so a save can't clear the zone
          timezone: myTimezone?.options.length ? myTimezone.value : undefined,
@@ -140,17 +144,18 @@
          return;
       }
 
-      // Store base persona for preview
-      window.basePersona = payload.base_persona || '';
-
-      // Populate base persona display
-      const basePersonaText = document.getElementById('base-persona-text');
-      if (basePersonaText) {
-         basePersonaText.textContent = payload.base_persona || '(No base persona configured)';
+      // The server's half of each (read-only)
+      const baseValues = document.getElementById('base-values-text');
+      if (baseValues) baseValues.textContent = payload.base_values || '(none)';
+      const baseVoice = document.getElementById('base-voice-text');
+      if (baseVoice) {
+         baseVoice.textContent =
+            payload.base_voice ||
+            '(None. The server uses one persona text, shown under Values. ' +
+               'Your voice text is still added.)';
       }
 
       // Populate form fields
-      const persona = document.getElementById('my-persona');
       const location = document.getElementById('my-location');
       const timezone = document.getElementById('my-timezone');
       const realName = document.getElementById('my-real-name');
@@ -162,20 +167,16 @@
       // yet, and untouched fields + savedTheme need their initial values even if
       // the user typed within the sub-RTT window before this arrived.
       if (loadedOnce && formDirty) {
-         // Keep the derived UI (char count / clear button / preview) in sync
-         // with whatever the user has typed, but touch no field values.
-         updatePersonaCharCount();
-         updateClearButtonVisibility();
-         updatePersonaPreview();
+         // Keep the derived UI (char counts / clear buttons) in sync with
+         // whatever the user has typed, but touch no field values.
+         updateAllPersonaBoxes();
          return;
       }
 
-      if (persona) {
-         persona.value = payload.persona_description || '';
-         updatePersonaCharCount();
-         updateClearButtonVisibility();
-         updatePersonaPreview();
-      }
+      setPersonaText('my-persona-values', payload.persona_values);
+      setPersonaText('my-persona-voice', payload.persona_voice);
+      setPersonaText('my-persona', payload.persona_description);
+      showLegacyPersona(payload.persona_description, payload.persona_mode);
       if (location) location.value = payload.location || '';
       window.DawnTimezones.fill(
          timezone,
@@ -186,14 +187,12 @@
       if (aliases) aliases.value = payload.identity_aliases || '';
       if (preferredAddr) preferredAddr.value = payload.preferred_address || '';
 
-      // Set persona mode radio
-      const personaMode = payload.persona_mode || 'append';
-      const modeRadio = document.querySelector(
-         `input[name="persona_mode"][value="${personaMode}"]`
-      );
-      if (modeRadio) {
-         modeRadio.checked = true;
-         updatePersonaModeSelection(personaMode);
+      // Set each half's mode radio
+      for (const half of ['values', 'voice']) {
+         const mode = payload[`persona_${half}_mode`] === 'replace' ? 'replace' : 'append';
+         const radio = document.getElementById(`persona-${half}-${mode}`);
+         if (radio) radio.checked = true;
+         updatePersonaModeSelection(half, mode);
       }
 
       // Set units radio
@@ -263,75 +262,61 @@
     * UI Helpers
     * ============================================================================= */
 
-   function updatePersonaModeSelection(mode) {
-      document.querySelectorAll('.persona-mode-option').forEach((opt) => {
+   function checkedMode(half) {
+      return (
+         document.querySelector(`input[name="persona_${half}_mode"]:checked`)?.value || 'append'
+      );
+   }
+
+   function updatePersonaModeSelection(half, mode) {
+      const block = document.querySelector(`.persona-half[data-half="${half}"]`);
+      if (!block) return;
+      block.querySelectorAll('.persona-mode-option').forEach((opt) => {
          opt.classList.toggle('selected', opt.dataset.mode === mode);
       });
-      // Show/hide replace warning
-      const warning = document.querySelector('.replace-warning');
-      if (warning) {
-         warning.classList.toggle('hidden', mode !== 'replace');
-      }
-      updatePersonaPreview();
+      const warning = block.querySelector('.replace-warning');
+      if (warning) warning.classList.toggle('hidden', mode !== 'replace');
    }
 
-   function updatePersonaCharCount() {
-      const persona = document.getElementById('my-persona');
-      const charCount = document.getElementById('persona-char-count');
-      if (!persona || !charCount) return;
-
-      const len = persona.value.length;
-      const max = 2047;
-      charCount.textContent = `${len} / ${max}`;
-      charCount.classList.toggle('warning', len > max * 0.8 && len < max);
-      charCount.classList.toggle('limit', len >= max);
+   // A persona box's character count and Clear button follow its text.
+   function updatePersonaBox(textarea) {
+      const group = textarea.closest('.settings-group');
+      if (!group) return;
+      const len = textarea.value.length;
+      const max = textarea.maxLength; /* every persona box sets maxlength */
+      const charCount = group.querySelector('.char-count');
+      if (charCount) {
+         charCount.textContent = `${len} / ${max}`;
+         charCount.classList.toggle('warning', len > max * 0.8 && len < max);
+         charCount.classList.toggle('limit', len >= max);
+      }
+      const clearBtn = group.querySelector('.persona-clear');
+      if (clearBtn) clearBtn.classList.toggle('hidden', len === 0);
    }
 
-   function updateClearButtonVisibility() {
-      const persona = document.getElementById('my-persona');
-      const clearBtn = document.getElementById('clear-persona-btn');
-      if (!persona || !clearBtn) return;
-
-      clearBtn.classList.toggle('hidden', persona.value.length === 0);
+   function updateAllPersonaBoxes() {
+      document.querySelectorAll('#my-settings-form .persona-text').forEach(updatePersonaBox);
    }
 
-   function updatePersonaPreview() {
-      const persona = document.getElementById('my-persona');
-      const previewBase = document.getElementById('preview-base');
-      const previewSeparator = document.getElementById('preview-separator');
-      const previewCustom = document.getElementById('preview-custom');
-      const previewLabel = document.getElementById('preview-label-suffix');
-      const modeRadio = document.querySelector('input[name="persona_mode"]:checked');
+   function setPersonaText(id, text) {
+      const textarea = document.getElementById(id);
+      if (!textarea) return;
+      textarea.value = text || '';
+      updatePersonaBox(textarea);
+   }
 
-      if (!previewBase) return;
-
-      const customText = persona?.value.trim() || '';
-      const mode = modeRadio?.value || 'append';
-      const base = window.basePersona || '';
-
-      // Always show base persona (truncated for readability)
-      previewBase.textContent = base.length > 300 ? base.substring(0, 300) + '...' : base;
-
-      // Show custom section only in append mode with content
-      const hasCustom = mode === 'append' && customText.length > 0;
-
-      if (previewSeparator) {
-         previewSeparator.classList.toggle('hidden', !hasCustom);
-      }
-      if (previewCustom) {
-         previewCustom.classList.toggle('hidden', !hasCustom);
-         previewCustom.textContent = hasCustom ? customText : '';
-      }
-      if (previewLabel) {
-         previewLabel.textContent = hasCustom ? '(with your additions)' : '(what the AI sees)';
-      }
-
-      // In replace mode, show what will actually be used
-      if (mode === 'replace' && customText.length > 0) {
-         previewBase.textContent = customText;
-         if (previewLabel) {
-            previewLabel.textContent = '(your replacement)';
-         }
+   // The older single persona text shows only while the server has one, with
+   // what it does now; decided on load, so clearing it doesn't hide the box.
+   function showLegacyPersona(text, mode) {
+      const block = document.getElementById('persona-legacy');
+      if (!block) return;
+      block.classList.toggle('hidden', !text);
+      const note = document.getElementById('persona-legacy-note');
+      if (note) {
+         const effect = mode === 'replace' ? 'replaces both bases' : 'is added after both bases';
+         note.textContent =
+            `While it's here, it ${effect}. Move what you want into Values and Voice ` +
+            'above, then clear this.';
       }
    }
 
@@ -342,48 +327,45 @@
    function init() {
       const form = document.getElementById('my-settings-form');
       const section = document.getElementById('my-settings-section');
-      const persona = document.getElementById('my-persona');
-      const toggleBasePersona = document.getElementById('toggle-base-persona');
-      const basePersonaDisplay = document.getElementById('base-persona-display');
-      const clearPersonaBtn = document.getElementById('clear-persona-btn');
-
-      // Base persona expand/collapse toggle
-      if (toggleBasePersona && basePersonaDisplay) {
-         toggleBasePersona.addEventListener('click', () => {
-            const isCollapsed = basePersonaDisplay.classList.contains('collapsed');
-            basePersonaDisplay.classList.toggle('collapsed', !isCollapsed);
-            basePersonaDisplay.classList.toggle('expanded', isCollapsed);
-            toggleBasePersona.textContent = isCollapsed ? 'Collapse' : 'Show full';
-         });
-      }
-
-      // Persona mode radio buttons
-      document.querySelectorAll('input[name="persona_mode"]').forEach((radio) => {
-         radio.addEventListener('change', (e) => {
-            updatePersonaModeSelection(e.target.value);
+      // Each base's expand/collapse toggle
+      document.querySelectorAll('#my-settings-form .persona-base-toggle').forEach((btn) => {
+         const display = document.getElementById(btn.getAttribute('aria-controls'));
+         if (!display) return;
+         btn.addEventListener('click', () => {
+            const expand = display.classList.contains('collapsed');
+            display.classList.toggle('collapsed', !expand);
+            display.classList.toggle('expanded', expand);
+            btn.setAttribute('aria-expanded', String(expand));
+            btn.textContent = expand ? 'Collapse' : 'Show full';
          });
       });
 
-      // Persona textarea input handlers
-      if (persona) {
-         persona.addEventListener('input', () => {
-            setFormDirty(true);
-            updatePersonaCharCount();
-            updateClearButtonVisibility();
-            updatePersonaPreview();
+      // Each half's mode radios
+      for (const half of ['values', 'voice']) {
+         document.querySelectorAll(`input[name="persona_${half}_mode"]`).forEach((radio) => {
+            radio.addEventListener('change', (e) => {
+               updatePersonaModeSelection(half, e.target.value);
+            });
          });
       }
 
-      // Clear persona button
-      if (clearPersonaBtn && persona) {
-         clearPersonaBtn.addEventListener('click', () => {
-            persona.value = '';
+      // Persona boxes: count and Clear follow the text
+      document.querySelectorAll('#my-settings-form .persona-text').forEach((textarea) => {
+         textarea.addEventListener('input', () => {
             setFormDirty(true);
-            updatePersonaCharCount();
-            updateClearButtonVisibility();
-            updatePersonaPreview();
+            updatePersonaBox(textarea);
          });
-      }
+      });
+      document.querySelectorAll('#my-settings-form .persona-clear').forEach((btn) => {
+         const textarea = document.getElementById(btn.getAttribute('aria-controls'));
+         if (!textarea) return;
+         btn.addEventListener('click', () => {
+            textarea.value = '';
+            setFormDirty(true);
+            updatePersonaBox(textarea);
+            textarea.focus();
+         });
+      });
 
       // Mark the form dirty on any edit so (a) a refetch won't clobber it and
       // (b) the unified Save knows to send it.  A form-level input/change

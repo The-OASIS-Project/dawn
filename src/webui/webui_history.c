@@ -35,11 +35,13 @@
 #include "core/conv_event.h"
 #include "core/conv_images.h"
 #include "core/conv_stream.h"
+#include "core/conv_turn_lease.h"
 #include "core/image_rehydrate.h"
 #include "core/job_manager.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
+#include "core/session_stop.h"
 #include "image_store.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_selection.h"
@@ -431,11 +433,12 @@ static void extract_history_before_replace(ws_connection_t *conn, const char *wh
 static int webui_conv_create_bind(ws_connection_t *conn,
                                   const char *title,
                                   const char *log_detail,
+                                  conv_create_claim_t *claim,
                                   int64_t *conv_id_out) {
    /* Private from its first row when the user turned private on before it existed:
     * the first turn (typed or voice) runs in a private conversation. */
    const bool is_private = atomic_exchange(&conn->pending_private, false);
-   int rc = conv_db_create_ex(conn->auth_user_id, title, NULL, is_private, conv_id_out);
+   int rc = conv_db_create_claimed(conn->auth_user_id, title, NULL, is_private, claim, conv_id_out);
    if (rc != AUTH_DB_SUCCESS) {
       if (is_private) {
          atomic_store(&conn->pending_private, true); /* the next create gets it */
@@ -482,8 +485,16 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
       }
    }
 
+   /* Claimed before anyone can open it: in the name of a turn waiting for a
+    * conversation (it adopts this one), else this thread's while it writes an
+    * ended turn's exchange into it. */
+   const uint64_t turn_token = conn->session ? session_turn_claim_token(conn->session, false) : 0;
+   conv_create_claim_t claim = {
+      .session = conn->session ? conn->session->session_id : CONV_TURN_LEASE_POST_SESSION,
+      .token = turn_token ? turn_token : conv_turn_lease_new_token(),
+   };
    int64_t conv_id = 0;
-   int result = webui_conv_create_bind(conn, title, "New conversation", &conv_id);
+   int result = webui_conv_create_bind(conn, title, "New conversation", &claim, &conv_id);
 
    if (result == AUTH_DB_SUCCESS) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
@@ -537,7 +548,9 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
                char *stored = llm_turn_blocks_answer_stored(reply_blocks);
                const conv_message_row_t row = { .role = "assistant",
                                                 .content = reply_text,
-                                                .llm_blocks = stored };
+                                                .llm_blocks = stored,
+                                                .stopped = session_claimed_reply_stopped(
+                                                    conn->session) };
                (void)conv_db_add_row(conv_id, conn->auth_user_id, &row, &reply_row);
                free(stored);
             }
@@ -554,6 +567,13 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
          if (adopted) {
             OLOG_INFO("WebUI: in-flight turn adopted new conversation %lld", (long long)conv_id);
          }
+      }
+      /* The adopting turn keeps the claim to its end; otherwise it is let go
+       * now that the rows written here are in. */
+      if (claim.claimed &&
+          !(conn->session &&
+            session_turn_keep_created_lease(conn->session, conv_id, claim.token))) {
+         (void)conv_turn_lease_release(conv_id, claim.token);
       }
    } else if (result == AUTH_DB_LIMIT_EXCEEDED) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
@@ -616,8 +636,16 @@ int64_t webui_ensure_active_conversation(ws_connection_t *conn, const char *titl
       sanitize_utf8_for_json(title);
    }
 
+   /* Created for the turn running on this thread: claimed in its name, so no
+    * turn begun from the conversation list comes first (the turn takes it over
+    * as it binds, session_turn_set_conversation).  From any other thread the
+    * turn it's for hasn't begun; it takes the lease when it does. */
+   const uint64_t turn_token = conn->session ? session_turn_claim_token(conn->session, true) : 0;
+   conv_create_claim_t claim = { .session = conn->session ? conn->session->session_id : 0,
+                                 .token = turn_token };
    int64_t conv_id = 0;
-   int rc = webui_conv_create_bind(conn, title[0] ? title : NULL, "Conversation (auto)", &conv_id);
+   int rc = webui_conv_create_bind(conn, title[0] ? title : NULL, "Conversation (auto)",
+                                   turn_token ? &claim : NULL, &conv_id);
    if (rc != AUTH_DB_SUCCESS || conv_id <= 0) {
       OLOG_WARNING("WebUI: conversation auto-create for a turn failed (rc=%d)", rc);
       return 0;
@@ -828,6 +856,9 @@ static int load_msg_callback(const conversation_message_t *msg, void *context) {
       }
    }
    webui_row_add_email_ref(msg_obj, msg->role, msg->email_ref);
+   if (msg->stopped) {
+      json_object_object_add(msg_obj, "stopped", json_object_new_boolean(1));
+   }
 
    json_object_array_add(msg_array, msg_obj);
    return 0;
@@ -1253,7 +1284,9 @@ void handle_load_conversation(ws_connection_t *conn, struct json_object *payload
  * still fire and the pool slot stays held until the turn ends.  Each child's
  * own images go with it, the same way the parent's do.  Batched +
  * progress-guarded so a long-lived chat that spawned many jobs is fully covered
- * without an unbounded stack or a re-fetch loop. */
+ * without an unbounded stack or a re-fetch loop.  A coding child's task runs in
+ * its agent gateway: the cancel there is asked for, and the gateway's late
+ * events find no row. */
 static int cascade_delete_child_jobs(ws_connection_t *conn, int64_t parent_id) {
    int total = 0;
    for (;;) {
@@ -1287,29 +1320,7 @@ static int cascade_delete_child_jobs(ws_connection_t *conn, int64_t parent_id) {
    return total;
 }
 
-void handle_delete_conversation(ws_connection_t *conn, struct json_object *payload) {
-   if (!conn_require_auth(conn)) {
-      return;
-   }
-
-   json_object *response = json_object_new_object();
-   json_object_object_add(response, "type", json_object_new_string("delete_conversation_response"));
-   json_object *resp_payload = json_object_new_object();
-
-   /* Get conversation ID */
-   json_object *id_obj;
-   if (!json_object_object_get_ex(payload, "conversation_id", &id_obj)) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Missing conversation_id"));
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
-      return;
-   }
-
-   int64_t conv_id = json_object_get_int64(id_obj);
-
+const char *webui_delete_conversation(ws_connection_t *conn, int64_t conv_id) {
    /* Refuse to delete a live background-job conversation out from under its
     * running worker (which is still writing to it).  Sidebar-hiding is
     * presentation, not authorization — a conv id learned from `job list` is
@@ -1318,14 +1329,20 @@ void handle_delete_conversation(ws_connection_t *conn, struct json_object *paylo
    if (conv_db_job_get_status(conv_id, conn->auth_user_id, job_status, sizeof(job_status)) ==
            AUTH_DB_SUCCESS &&
        (strcmp(job_status, "running") == 0 || strcmp(job_status, "queued") == 0)) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string(
-                                 "Cancel the background job before deleting it."));
-      json_object_object_add(response, "payload", resp_payload);
-      send_json_response(conn, response);
-      json_object_put(response);
-      return;
+      return "Cancel the background job before deleting it.";
+   }
+   /* A coding job (this one, or a child of this chat) whose task the gateway
+    * still holds: deleting it would leave its clone and branch with nothing in
+    * DAWN to publish or close them.  Close first, which says what would be lost. */
+   int64_t holder = 0;
+   if (conv_db_job_holds_agent_work(conv_id, conn->auth_user_id, &holder) == AUTH_DB_SUCCESS &&
+       holder > 0) {
+      static char why[160]; /* the lws thread is its only caller */
+      snprintf(why, sizeof(why),
+               "Coding job #%lld still has work at the agent: close it first (View changes, "
+               "then Close). If you just closed it, try again in a moment.",
+               (long long)holder);
+      return why;
    }
 
    /* Cancel + delete this conversation's background-job children first, so a
@@ -1342,42 +1359,56 @@ void handle_delete_conversation(ws_connection_t *conn, struct json_object *paylo
 
    /* With the images it owns (its uploads and captures), in one transaction. */
    int result = conv_images_delete_conversation(conv_id, conn->auth_user_id);
+   if (result == AUTH_DB_NOT_FOUND) {
+      return "Conversation not found";
+   }
+   if (result != AUTH_DB_SUCCESS) {
+      return "Failed to delete conversation";
+   }
+   /* Free any live-partial replay-ring entry for the deleted conversation. */
+   conv_stream_clear(conv_id);
 
-   if (result == AUTH_DB_SUCCESS) {
-      /* Free any live-partial replay-ring entry for the deleted conversation. */
-      conv_stream_clear(conv_id);
-
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
-      json_object_object_add(resp_payload, "message",
-                             json_object_new_string("Conversation deleted"));
-
-      /* If the deleted conversation is the one currently loaded into this
-       * session, drop the in-memory copy and reset conversation tracking.
-       * Memory extraction mines session->conversation_history (not the DB), so
-       * without this a later trigger — session teardown (session_manager.c),
-       * or a switch/clear/new in this file — would still consolidate the
-       * just-deleted conversation from RAM.  Deleting must mean "forget it",
-       * so we clear the history and the active-id/private flags (mirrors
-       * handle_clear_session). */
-      if (conn->session && conn->active_conversation_id == conv_id) {
-         session_clear_history(conn->session);
-         webui_conn_set_active_conversation(conn, 0);
-         conn->active_conversation_private = false;
-      }
-
-      char details[64];
-      snprintf(details, sizeof(details), "Deleted conversation %lld", (long long)conv_id);
-      auth_db_log_event("CONVERSATION_DELETED", conn->username, conn->client_ip, details);
-   } else if (result == AUTH_DB_NOT_FOUND) {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Conversation not found"));
-   } else {
-      json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
-      json_object_object_add(resp_payload, "error",
-                             json_object_new_string("Failed to delete conversation"));
+   /* If the deleted conversation is the one currently loaded into this
+    * session, drop the in-memory copy and reset conversation tracking.
+    * Memory extraction mines session->conversation_history (not the DB), so
+    * without this a later trigger — session teardown (session_manager.c),
+    * or a switch/clear/new in this file — would still consolidate the
+    * just-deleted conversation from RAM.  Deleting must mean "forget it",
+    * so we clear the history and the active-id/private flags (mirrors
+    * handle_clear_session). */
+   if (conn->session && conn->active_conversation_id == conv_id) {
+      session_clear_history(conn->session);
+      webui_conn_set_active_conversation(conn, 0);
+      conn->active_conversation_private = false;
    }
 
+   char details[64];
+   snprintf(details, sizeof(details), "Deleted conversation %lld", (long long)conv_id);
+   auth_db_log_event("CONVERSATION_DELETED", conn->username, conn->client_ip, details);
+   return NULL;
+}
+
+void handle_delete_conversation(ws_connection_t *conn, struct json_object *payload) {
+   if (!conn_require_auth(conn)) {
+      return;
+   }
+
+   json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("delete_conversation_response"));
+   json_object *resp_payload = json_object_new_object();
+
+   /* Get conversation ID */
+   json_object *id_obj;
+   const char *err = !json_object_object_get_ex(payload, "conversation_id", &id_obj)
+                         ? "Missing conversation_id"
+                         : webui_delete_conversation(conn, json_object_get_int64(id_obj));
+   json_object_object_add(resp_payload, "success", json_object_new_boolean(err == NULL));
+   if (err) {
+      json_object_object_add(resp_payload, "error", json_object_new_string(err));
+   } else {
+      json_object_object_add(resp_payload, "message",
+                             json_object_new_string("Conversation deleted"));
+   }
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
@@ -1428,6 +1459,12 @@ void handle_rename_conversation(ws_connection_t *conn, struct json_object *paylo
       json_object_object_add(resp_payload, "success", json_object_new_boolean(1));
       json_object_object_add(resp_payload, "message",
                              json_object_new_string("Conversation renamed"));
+      /* The user's other clients show this title too (their lists, a memory
+       * batch's heading): tell them, as an automatic title does. */
+      char safe_title[CONV_TITLE_MAX];
+      snprintf(safe_title, sizeof(safe_title), "%s", title);
+      sanitize_utf8_for_json(safe_title);
+      webui_broadcast_conversation_renamed(conn->auth_user_id, conv_id, safe_title);
    } else if (result == AUTH_DB_NOT_FOUND) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
@@ -1908,6 +1945,9 @@ static int export_msg_callback(const conversation_message_t *msg, void *context)
    time_to_iso8601(msg->created_at, ts, sizeof(ts));
    json_object_object_add(msg_obj, "timestamp", json_object_new_string(ts));
    webui_row_add_email_ref(msg_obj, msg->role, msg->email_ref);
+   if (msg->stopped) {
+      json_object_object_add(msg_obj, "stopped", json_object_new_boolean(1));
+   }
 
    json_object_array_add(msg_array, msg_obj);
    return 0;

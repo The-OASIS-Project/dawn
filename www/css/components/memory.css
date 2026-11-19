@@ -268,6 +268,10 @@
    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.memory-search.hidden {
+   display: none;
+}
+
 /* Search input flexes; the sort select (when shown) takes its natural width. */
 .memory-search #memory-search-input {
    flex: 1 1 auto;
@@ -855,6 +859,11 @@
    font-variant-numeric: tabular-nums;
    flex-shrink: 0;
    white-space: nowrap;
+}
+
+/* The count of a card's relations the server didn't send */
+.entity-relations-unsent {
+   color: var(--text-secondary);
 }
 
 /* Collapsed relations toggle */

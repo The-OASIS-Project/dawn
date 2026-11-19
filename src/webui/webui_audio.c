@@ -784,7 +784,8 @@ typedef struct {
  */
 static void webui_tts_pace_after_send(ws_connection_t *conn,
                                       session_t *session,
-                                      uint64_t audio_duration_us) {
+                                      uint64_t audio_duration_us,
+                                      bool stop_on_cancel) {
    /* Bail if client already disconnected (avoid writing to stale conn) */
    if (session->disconnected)
       return;
@@ -822,8 +823,11 @@ static void webui_tts_pace_after_send(ws_connection_t *conn,
              (unsigned long long)(conn->tts_audio_sent_us / 1000),
              (unsigned long long)(elapsed_us / 1000));
 
-   /* Sleep in chunks, checking for disconnect and cancellation between each */
+   /* Sleep in chunks, checking for disconnect, a new stream and (for a turn's
+    * reply) a Stop between each.  Speech sent outside a turn keeps its pace: the
+    * session's cancel flag stays set from a stopped turn until its next one. */
    while (sleep_us > 0 && !session->disconnected &&
+          !(stop_on_cancel && atomic_load(&session->cancel_requested)) &&
           atomic_load(&session->current_stream_id) == conn->tts_pace_stream_id) {
       uint64_t chunk = sleep_us < WEBUI_TTS_PACE_CHECK_US ? sleep_us : WEBUI_TTS_PACE_CHECK_US;
       usleep((useconds_t)chunk);
@@ -831,15 +835,14 @@ static void webui_tts_pace_after_send(ws_connection_t *conn,
    }
 }
 
-/* Clean one sentence for TTS synthesis: strip residual command/end-of-turn + memory-citation
+/* Clean one sentence for TTS synthesis: strip an end-of-turn marker + memory-citation
  * tags, drop '*' and emojis, trim trailing whitespace.  Returns a malloc'd string (possibly
  * empty for an all-markup sentence — caller checks length), or NULL on alloc failure.  Shared
  * by the single-target and multi-target (§Phase-4 fanout) callbacks so the strip rules can't
  * drift between them. */
 static char *webui_clean_sentence_for_tts(const char *sentence) {
-   /* Fast path: skip 4 string scans if sentence has no special content */
-   bool needs_cleaning = (strstr(sentence, "<command>") != NULL ||
-                          strstr(sentence, "<end_of_turn>") != NULL ||
+   /* Fast path: skip the strips if the sentence has no special content */
+   bool needs_cleaning = (strstr(sentence, END_OF_TURN_TAG) != NULL ||
                           strstr(sentence, "<cited>") != NULL || strchr(sentence, '*') != NULL);
 
    char *cleaned = strdup(sentence);
@@ -847,10 +850,10 @@ static char *webui_clean_sentence_for_tts(const char *sentence) {
       return NULL;
 
    if (needs_cleaning) {
-      /* Defensively strip residual command/end-of-turn tags + the memory-citation tag from
-       * spoken text — shared whole-string strips (the text stream path strips <cited>
-       * separately via the streaming text_filter_cited_tags). */
-      text_filter_command_strip(cleaned, true); /* per-sentence TTS: drop a mid-split tag */
+      /* Strip the end-of-turn marker + the memory-citation tag from spoken text —
+       * shared whole-string strips (the text stream path strips <cited> separately
+       * via the streaming text_filter_cited_tags). */
+      text_filter_end_of_turn_strip(cleaned);
       text_filter_cited_strip(cleaned);
       remove_chars(cleaned, "*");
    }
@@ -880,6 +883,10 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
    session_t *session = (session_t *)userdata;
 
    if (!sentence || strlen(sentence) == 0 || !session || session->disconnected) {
+      return;
+   }
+   /* Stopped: nothing more of this reply is spoken. */
+   if (atomic_load(&session->cancel_requested)) {
       return;
    }
 
@@ -947,7 +954,8 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
                webui_send_audio(session, opus, opus_len);
                webui_send_audio_end(session, true);
                webui_tts_pace_after_send(conn, session,
-                                         (uint64_t)frame_count * WEBUI_OPUS_FRAME_MS * 1000ULL);
+                                         (uint64_t)frame_count * WEBUI_OPUS_FRAME_MS * 1000ULL,
+                                         true);
             }
             free(opus);
          }
@@ -985,7 +993,7 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
                webui_send_audio(session, (const uint8_t *)pcm, bytes);
                webui_send_audio_end(session, false);
                webui_tts_pace_after_send(conn, session,
-                                         (samples * 1000000ULL) / WEBUI_OPUS_SAMPLE_RATE);
+                                         (samples * 1000000ULL) / WEBUI_OPUS_SAMPLE_RATE, true);
             }
             free(pcm);
          }
@@ -1174,7 +1182,7 @@ void webui_sentence_audio_fanout_callback(const char *sentence, void *userdata) 
    /* Do NOT abort on origin->disconnected: the turn survives a mid-turn origin drop (the worker
     * holds a turn ref, so `origin` stays valid), and other speaker-capable viewers should keep
     * hearing the rest of the reply. */
-   if (!sentence || sentence[0] == '\0' || !origin)
+   if (!sentence || sentence[0] == '\0' || !origin || atomic_load(&origin->cancel_requested))
       return;
 
    ws_connection_t *ocon = NULL;
@@ -1245,7 +1253,7 @@ void webui_sentence_audio_fanout_callback(const char *sentence, void *userdata) 
    /* Pace the worker ONCE per sentence (not per recipient), off the origin conn's clock. */
    if (ocon)
       webui_tts_pace_after_send(ocon, origin,
-                                (uint64_t)samples * 1000000ULL / (rate ? rate : 22050));
+                                (uint64_t)samples * 1000000ULL / (rate ? rate : 22050), true);
 
    free(opus);
    free(pcm48);
@@ -1286,7 +1294,7 @@ static void scheduler_tts_sentence_callback(const char *sentence, void *userdata
             webui_send_audio(session, opus, opus_len);
             webui_send_audio_end(session, true);
             webui_tts_pace_after_send(conn, session,
-                                      (uint64_t)frame_count * WEBUI_OPUS_FRAME_MS * 1000ULL);
+                                      (uint64_t)frame_count * WEBUI_OPUS_FRAME_MS * 1000ULL, false);
          }
          free(opus);
       }
@@ -1300,7 +1308,7 @@ static void scheduler_tts_sentence_callback(const char *sentence, void *userdata
             webui_send_audio(session, (const uint8_t *)pcm, bytes);
             webui_send_audio_end(session, false);
             webui_tts_pace_after_send(conn, session,
-                                      (samples * 1000000ULL) / WEBUI_OPUS_SAMPLE_RATE);
+                                      (samples * 1000000ULL) / WEBUI_OPUS_SAMPLE_RATE, false);
          }
          free(pcm);
       }
@@ -1411,24 +1419,20 @@ static void *audio_worker_thread(void *arg) {
    if (!session || REQUEST_SUPERSEDED(session, expected_gen)) {
       OLOG_INFO("WebUI: Audio session disconnected or request superseded, aborting");
       if (session) {
+         /* Stopped before it ran: nothing was saved, and its sender is told. */
+         session_turn_waiting_notice(session, work->conv_id, SESSION_TURN_WAIT_UNSENT, 0);
          session_turn_end(session); /* begun at dequeue; never ran */
-         session_release(session);  /* pre-increment exit: bare release, no turn_in_flight */
+         atomic_fetch_sub(&session->turn_in_flight, 1);
+         session_release(session);
       }
       free(audio_data);
       free(work);
       return NULL;
    }
 
-   /* Passed the supersede check — this turn is now in flight.  Guards
-    * session_cleanup_expired from reaping a still-generating voice turn and makes
-    * conv_has_turn_in_flight see it (parity with text_worker_thread).  Every exit
-    * BELOW this point releases via audio_worker_end (decrement-then-release).
-    * Its input is voice, flagged before it counts as in flight (always-on's
-    * watchdog reads the two together; the prompt builder's ASR hint reads the
-    * flag).  Correctness relies on per-session turn serialization; atomic_bool
-    * guards visibility, not logical interleave. */
-   session->input_was_voice = true;
-   atomic_fetch_add(&session->turn_in_flight, 1);
+   /* In flight since before its wait for the conversation
+    * (audio_turn_thread_entry).  Every exit BELOW this point releases via
+    * audio_worker_end (decrement-then-release). */
 
    OLOG_INFO("WebUI: Processing audio for session %u (%zu bytes, %s)", session->session_id,
              audio_len, work->use_opus ? "opus" : "pcm");
@@ -1503,6 +1507,8 @@ static void *audio_worker_thread(void *arg) {
 
    /* Check if request was superseded */
    if (REQUEST_SUPERSEDED(session, expected_gen)) {
+      /* Stopped before its question was saved: its sender is told. */
+      session_turn_waiting_notice(session, work->conv_id, SESSION_TURN_WAIT_UNSENT, 0);
       audio_worker_end(session);
       free(transcript);
       free(work);
@@ -1537,6 +1543,14 @@ static void *audio_worker_thread(void *arg) {
    }
    if (turn_conv > 0) {
       session_turn_set_conversation(session, turn_conv, true); /* also tags the stream */
+      if (session_turn_unsent(session)) {
+         /* Stopped while another turn had the conversation: the transcript was
+          * never saved (the client was told). */
+         audio_worker_end(session);
+         free(transcript);
+         free(work);
+         return NULL;
+      }
    }
 
    /* Voice reply routing, chosen here so a refusal is spoken the same way as a reply.  A
@@ -1596,10 +1610,12 @@ static void *audio_worker_thread(void *arg) {
    /* Fan the user message out to every OTHER viewer of this conversation (§12c).
     * INVARIANT (mirrors webui_text_processing.c): guard on user_msg_id > 0 so a save
     * failure (id 0) emits ONLY the echo, never a second frame the client can't dedup —
-    * a spoken turn has no optimistic bubble, so an id-0 fan-out would double it. */
+    * a spoken turn has no optimistic bubble, so an id-0 fan-out would double it.
+    * The row names this session, as a typed user message does (an id > 0 means
+    * turn_conv > 0; the transcript is non-blank). */
    if (user_msg_id > 0 && conn && conn->auth_user_id > 0) {
-      conv_event_notify_message_appended(turn_conv, conn->auth_user_id, user_msg_id, "user",
-                                         transcript, NULL, 0);
+      webui_broadcast_message_appended_origin(conn->auth_user_id, turn_conv, user_msg_id, "user",
+                                              transcript, NULL, 0, session, NULL, NULL, false);
    }
 
 
@@ -1695,10 +1711,14 @@ static void *audio_worker_thread(void *arg) {
       if (max_tokens > 0) {
          webui_send_context(session, current_tokens, max_tokens, threshold);
       }
-   } else if (!superseded) {
-      /* Genuine failure: no reply and not superseded. */
-      OLOG_WARNING("WebUI: LLM call failed");
-      webui_send_error(session, "LLM_ERROR", "Failed to get response");
+   } else {
+      /* No reply (failed, stopped or superseded): the tool changes no model
+       * answered go back, as for a typed turn. */
+      (void)session_prefix_take_back_changes(session);
+      if (!superseded) {
+         OLOG_WARNING("WebUI: LLM call failed");
+         webui_send_error(session, "LLM_ERROR", "Failed to get response");
+      }
    }
 
    webui_send_state(session, "idle");
@@ -1753,8 +1773,26 @@ static void *audio_turn_thread_entry(void *arg) {
          turn_queue_turn_done(sid);
          return NULL;
       }
+      /* Fresh flags for THIS turn (G2), before it may wait for its
+       * conversation: a Stop pressed during that wait must count. */
+      session_begin_turn_flags(work->session);
+      /* In flight from before the wait: guards session_cleanup_expired from
+       * reaping a waiting or still-generating voice turn and makes
+       * conv_has_turn_in_flight see it.  Its input is voice, flagged before it
+       * counts as in flight (always-on's watchdog reads the two together; the
+       * prompt builder's ASR hint reads the flag). */
+      work->session->input_was_voice = true;
+      atomic_fetch_add(&work->session->turn_in_flight, 1);
       session_turn_begin(work->session, work->conv_id, (int)work->session->metrics.user_id);
-      session_begin_turn_flags(work->session); /* fresh flags for THIS turn (G2) */
+      if (session_turn_unsent(work->session)) {
+         /* Stopped while another turn had the conversation: nothing ran or was
+          * saved (the client was told). */
+         session_turn_end(work->session);
+         atomic_fetch_sub(&work->session->turn_in_flight, 1);
+         audio_turn_free(work);
+         turn_queue_turn_done(sid);
+         return NULL;
+      }
    }
    audio_worker_thread(work); /* existing turn body — frees work, releases session */
    turn_queue_turn_done(sid); /* chain the next queued turn for this session */

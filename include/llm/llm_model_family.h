@@ -69,6 +69,15 @@ llm_model_family_t llm_model_route(llm_type_t type,
  */
 cloud_provider_t llm_model_anthropic_id(const char *model, char *id_out, size_t id_len);
 
+/**
+ * @brief The first-party provider a bare model name belongs to
+ * "gpt-", OpenAI's o-series ("o3", "o4-mini"), "claude-" and "gemini-".  An
+ * OpenRouter "vendor/model" slug matches none of them.
+ * @param model The model name (may be NULL)
+ * @return The provider, or CLOUD_PROVIDER_NONE when the name names none
+ */
+cloud_provider_t llm_model_provider_from_name(const char *model);
+
 #ifdef __cplusplus
 }
 #endif

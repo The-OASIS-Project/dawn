@@ -166,6 +166,14 @@ int turn_queue_enqueue(uint32_t session_id,
    return TURN_QUEUE_OK;
 }
 
+bool turn_queue_busy(uint32_t session_id) {
+   pthread_mutex_lock(&s_turn_queue_mutex);
+   const session_turn_q_t *q = find_queue(session_id, false);
+   const bool busy = q != NULL && (q->in_flight || q->count > 0);
+   pthread_mutex_unlock(&s_turn_queue_mutex);
+   return busy;
+}
+
 void turn_queue_turn_done(uint32_t session_id) {
    if (session_id == 0) {
       return;

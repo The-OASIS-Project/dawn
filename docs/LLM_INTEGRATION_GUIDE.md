@@ -61,7 +61,7 @@ provider = "openai"    # "openai", "claude", or "gemini"
 # Model lists for quick switching via WebUI or voice command
 openai_models = ["gpt-5-mini", "gpt-5.2", "gpt-5-nano", "gpt-5"]
 claude_models = ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"]
-gemini_models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview"]
+gemini_models = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview"]
 ```
 
 3. Run DAWN — it uses the model at the provider's `*_default_model_idx` (the first one when unset).
@@ -131,10 +131,10 @@ provider = "auto"    # Auto-detects llama.cpp vs Ollama
 |---------|-------|
 | API Key | `secrets.toml`: `gemini_api_key = "AIza..."` |
 | Endpoint | OpenAI-compatible endpoint (auto-configured) |
-| Models | gemini-2.5-flash, gemini-2.5-pro, gemini-3-flash-preview, gemini-3-pro-preview |
+| Models | gemini-3.8-flash, gemini-3.5-flash-lite, gemini-3.1-pro-preview |
 | Vision | Supported |
 | Tools | Native function calling |
-| Thinking | Supported via `reasoning_effort` (Gemini 2.5+; cannot fully disable) |
+| Thinking | Supported via `reasoning_effort`, which Google maps to `thinking_level` (3.x) or `thinking_budget` (2.5); DAWN sends low/medium/high and never turns it off |
 
 ### OpenRouter (Provider)
 
@@ -148,14 +148,14 @@ key. Its model list uses `vendor/model` IDs.
 | API Key | `secrets.toml`: `openrouter_api_key = "sk-or-..."` (get one at [openrouter.ai/keys](https://openrouter.ai/keys)) |
 | Enable | `dawn.toml`: `[llm.cloud] provider = "openrouter"` |
 | Endpoint | `https://openrouter.ai/api/v1` (fixed) |
-| Models | `vendor/model` IDs, e.g. `anthropic/claude-sonnet-4`, `openai/gpt-5.4`, `google/gemini-2.5-flash` |
+| Models | `vendor/model` IDs, e.g. `anthropic/claude-sonnet-4`, `openai/gpt-5.4`, `google/gemini-3.5-flash-lite` |
 | Vision / Tools / Thinking | Depend on the selected upstream model |
 
 ```toml
 [llm.cloud]
 provider = "openrouter"
 # Curated shortlist shown in the WebUI/voice model switcher (vendor/model IDs):
-openrouter_models = ["anthropic/claude-sonnet-4", "openai/gpt-5.4", "google/gemini-2.5-flash", "meta-llama/llama-3.3-70b-instruct"]
+openrouter_models = ["anthropic/claude-sonnet-4", "openai/gpt-5.4", "google/gemini-3.5-flash-lite", "meta-llama/llama-3.3-70b-instruct"]
 openrouter_default_model_idx = 0
 ```
 
@@ -184,7 +184,7 @@ openai_default_model_idx = 0
 claude_models = ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"]
 claude_default_model_idx = 0
 
-gemini_models = ["gemini-2.5-flash", "gemini-2.5-pro"]
+gemini_models = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
 gemini_default_model_idx = 0
 
 # Custom endpoint (empty = use provider's default URL)
@@ -284,7 +284,7 @@ budget_high = 16384
 |----------|-----------|-------|
 | OpenAI (o-series, GPT-5) | `reasoning_effort` parameter | Maps directly to low/medium/high |
 | Claude | `budget_tokens` parameter | Uses the token budget for the selected effort level |
-| Gemini (2.5+) | `reasoning_effort` parameter | Cannot fully disable thinking on 2.5+ models |
+| Gemini (2.5+) | `reasoning_effort` parameter | Google maps it to `thinking_level` (3.x) or `thinking_budget` (2.5). DAWN sends at least `low`, never off: 3.x can't turn thinking off, and Flash-Lite's own default (`minimal`) cuts tool loops short |
 | Local (llama.cpp) | `budget_tokens` parameter | Works with models that support thinking (Qwen3, DeepSeek-R1) |
 
 ### Streaming with Thinking
@@ -425,7 +425,7 @@ All LLM settings in `dawn.toml`:
 ```toml
 [llm]
 type = "cloud"                  # "cloud" or "local"
-max_tokens = 4096               # Maximum response tokens
+max_tokens = 16384              # Reply ceiling; a streamed reply that reasons gets more by effort
 compact_soft_threshold = 0.60   # Async background compaction trigger
 compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)
 compact_use_session = true      # Use session's LLM for compaction
@@ -443,7 +443,7 @@ openai_models = ["gpt-5-mini", "gpt-5.2", "gpt-5-nano", "gpt-5"]
 openai_default_model_idx = 0
 claude_models = ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"]
 claude_default_model_idx = 0
-gemini_models = ["gemini-2.5-flash", "gemini-2.5-pro"]
+gemini_models = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
 gemini_default_model_idx = 0
 
 [llm.local]

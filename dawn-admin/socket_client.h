@@ -736,6 +736,20 @@ admin_resp_code_t admin_client_memory_fact_superseded(int fd,
                                                       char *response,
                                                       size_t resp_len);
 
+/**
+ * @brief Extract rows @p from..@p to of a conversation behind its extraction
+ *        cursor; a dry run (counts only) unless @p confirm
+ * @return Daemon response code
+ */
+admin_resp_code_t admin_client_memory_extract_range(int fd,
+                                                    const char *username,
+                                                    int64_t conversation_id,
+                                                    int64_t from,
+                                                    int64_t to,
+                                                    bool confirm,
+                                                    char *response,
+                                                    size_t resp_len);
+
 /** memory restore: bring a superseded fact back. */
 admin_resp_code_t admin_client_memory_fact_restore(int fd,
                                                    const char *username,

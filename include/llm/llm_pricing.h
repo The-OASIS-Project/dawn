@@ -16,13 +16,14 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * LLM cache-pricing economics — the single source of truth for how much prompt
- * caching saves per provider. Deliberately expressed as discount RATIOS (which
- * are far more stable than absolute per-token prices), not a dollar table.
+ * LLM pricing: each model's base prices and prompt-cache multiples, read from
+ * models.toml [pricing.<provider>], and what caching saves on a call.
  */
 
 #ifndef LLM_PRICING_H
 #define LLM_PRICING_H
+
+#include <stdbool.h>
 
 #include "llm/llm_interface.h" /* llm_type_t, cloud_provider_t */
 
@@ -40,10 +41,12 @@ typedef struct {
 } llm_cache_pricing_t;
 
 /**
- * @brief Load the [cache_pricing.<provider>] tables from models.toml
+ * @brief Load the [pricing.<provider>] tables under @p root
  *
- * Called once at startup with the parsed file (llm_context owns the parse); a
- * missing table leaves that provider on its defaults.  Read-only afterwards.
+ * Each row is "prefix" = { input, output, read, write_5m, write_1h }: base
+ * prices in $ per million tokens (both or neither), cache prices as multiples
+ * of the input price (a missing one takes the provider's default).  A missing
+ * table leaves that provider on its defaults.
  */
 void llm_pricing_load_registry(struct toml_table_t *root);
 
@@ -51,7 +54,7 @@ void llm_pricing_load_registry(struct toml_table_t *root);
 void llm_pricing_free_registry(void);
 
 /**
- * @brief A model's cache prices: its longest-prefix models.toml entry, else its
+ * @brief A model's cache prices: the longest-prefix row that lists them, else its
  * provider's default
  *
  * An OpenRouter model ("anthropic/claude-sonnet-5") is priced by its vendor's
@@ -60,6 +63,23 @@ void llm_pricing_free_registry(void);
 llm_cache_pricing_t llm_cache_pricing(llm_type_t type,
                                       cloud_provider_t provider,
                                       const char *model);
+
+/**
+ * @brief A model's base prices, in $ per million tokens
+ *
+ * The longest-prefix row that lists base prices, by the same routing as
+ * llm_cache_pricing().  A model no row prices (a local model, an unknown
+ * one, a provider with none listed) has no price: false, outputs untouched.
+ *
+ * @param input_usd_per_m  Receives the input price (may be NULL)
+ * @param output_usd_per_m Receives the output price (may be NULL)
+ * @return true when the model has a listed price
+ */
+bool llm_pricing_rate(llm_type_t type,
+                      cloud_provider_t provider,
+                      const char *model,
+                      double *input_usd_per_m,
+                      double *output_usd_per_m);
 
 /**
  * @brief Effective input tokens saved by prompt caching on one call

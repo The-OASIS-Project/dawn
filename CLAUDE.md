@@ -37,9 +37,29 @@ See @ARCHITECTURE.md for subsystem breakdowns, data flow, and module dependencie
   includes anything an outsider can cause through content DAWN reads (email, web, SMS, documents),
   and any silent, irreversible outcome (data loss, a wrong action) even when rare. Justify each fix
   or drop in one sentence: who triggers it, and how, on a default install.
+- **Count the conditions.** A finding is theoretical when it needs two or more unlikely things to
+  line up: outside text that reaches the model *and* steers it *and* the model then misleading the
+  user *and* the user approving without looking; two clients racing inside a few milliseconds; input
+  no client sends. Drop it, with no TODO row, however serious its end state sounds. "Rare but
+  irreversible" covers one likely trigger with a bad outcome, not a chain of unlikely ones. Cheap
+  fixes for theoretical findings aren't built either: each is code to review, test and carry.
 - **A burden is a bug (WWFD).** DAWN should feel like FRIDAY: usable, versatile, faster than doing it
-  yourself. A safeguard that makes a common request ask or fail every time has failed. Weigh
-  usability and security together; neither wins by default.
+  yourself. Security is a key feature, but a safeguard that makes a feature a pain to use has failed:
+  nobody, the developer included, will use it, and an unused feature protects no one. Weigh usability
+  and security together; neither wins by default. In practice:
+  - **The common path is one natural reply.** "Allow it", "yes", "send it" does the thing. A guard
+    that adds a round-trip, a dead end or a retry to the common case needs a different design.
+  - **Judge guards together, not one by one.** Before adding a guard or accepting a reviewer's, walk
+    the whole interaction with every guard in place: what the user says, what the model will
+    actually call, in what order. Each guard can be reasonable alone and the stack unusable.
+  - **A refused or failed call leaves nothing behind** that blocks the user's next step.
+  - **Guard the effect, not the step before it.** Block where something is allowed, sent or changed,
+    not a preview or a read that allows nothing.
+  - **Push back on review findings** whose fix makes the common path worse; list them instead.
+  - **A guard for a rare case never costs a real one.** Before keeping a fix for an obscure bug or
+    attack, check every real input it touches. If it would refuse, rewrite or slow something a real
+    user does (an emoji's joiner or a direction mark in a title, `<!--` in an honest description,
+    a non-breaking space), take it out. One that changes nothing a real user does can stay.
 - **When a real tradeoff exists,** lay the options out honestly, say what each one actually fixes,
   and recommend the proper one even when it's more work. Never quietly pick the easy option, and
   never pick the heavy one just to look thorough.
@@ -206,7 +226,7 @@ still in `dawn.toml`.
 
 1. **Plan** (non-trivial only) — plan mode for features touching multiple subsystems. Explore agent to understand, Plan agent to design, architecture-reviewer / ui-design-architect on the plan before exiting.
 2. **Implement** — task tracking for multi-step work. Build + format + unit tests after each logical chunk.
-3. **Review** — run relevant review agents in parallel on the diff. Consolidate findings, triage (fix / skip / ask), apply fixes, re-verify. Reviewers report everything; we act only on what's reachable.
+3. **Review** — run relevant review agents in parallel on the diff. Consolidate findings, triage (fix / skip / ask), apply fixes, re-verify. Reviewers report findings with a realistic trigger; we act only on what's reachable.
 4. **Test** — developer tests manually and reports. Fix issues found; adjacent bugs may warrant their own mini cycle.
 5. **Document** — update or create the atlas design doc (`~/code/The-OASIS-Project/atlas/dawn/`) for significant features. Memory-subsystem docs land under `atlas/dawn/memory/`; everything else flat under `atlas/dawn/archive/`. Have architecture-reviewer verify the doc against code.
 6. **Update planning docs** — cut the item's row from `docs/private/TODO.md` and paste it into `docs/private/DONE.md` under the matching section, with the `~~strikethrough~~` SHIPPED tag including the commit hash; remove any `§N` detail section from TODO.md.
@@ -221,7 +241,14 @@ Trigger phrases: "code review", "review my changes", "run the agents", "run the 
    - **Big three** (code review / run the big three): `architecture-reviewer`, `embedded-efficiency-reviewer`, `security-auditor` — **plus `correctness-reviewer` in every set** (the general-logic lens; it also checks non-literal format strings such as prompt templates, which `-Wformat` can't).
    - **All four** (run all four): above + `ui-design-architect` (when UI changes present).
    - **All five / all six** (full review / run all five / run all six): above + `coding-standards-auditor` — mandatory for large refactors, new modules, or pre-release audits.
-3. Synthesize into one table with severity and action. Triage on **reachability**, not the label (see the prime directive): **fix** what's reachable in practice, any severity, with the least code; **drop** what isn't — no TODO row — and say so in one line. Pre-existing issues the same way: fixed because they're real and reachable, not because they were found. When two reviewers disagree on a behavior, settle it with a test or a live check, not by picking one.
+
+   **Brief for the real install, not the worst case.** Give each reviewer the change and the install
+   it runs on, and ask for findings that each name a realistic trigger: who does what, on a default
+   install, in one sentence. Ask them to leave out what needs several unlikely things at once (the
+   prime directive's "count the conditions"). Never hand them leading threat-model questions
+   ("could a steered model…?", "what if two tabs…?"): a reviewer asked whether something could
+   happen will find a way it could.
+3. Synthesize into one table with severity and action. Triage on **reachability**, not the label (see the prime directive; count a finding's conditions before weighing its severity): **fix** what's reachable in practice, any severity, with the least code; **drop** what isn't — no TODO row — and say so in one line. Pre-existing issues the same way: fixed because they're real and reachable, not because they were found. When two reviewers disagree on a behavior, settle it with a test or a live check, not by picking one.
 4. Apply the fixes; re-verify format and tests.
 5. **One full review round per commit.** Code written *after* the last agent pass gets **one targeted reviewer** on that delta before the PR, however small: no reviewer has seen it otherwise. The reconnect-state bug on the music branch, and an out-of-bounds read in a calendar fix-of-a-fix, both reached the PR this way and were caught only by the bots. Never re-run the full set for polish.
 

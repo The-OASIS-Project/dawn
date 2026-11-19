@@ -18,8 +18,8 @@
  *
  * Music tool search surface: the shared filter params and the LLM-facing text
  * for 'search' pages, batch searches and the per-artist album listing. Used by
- * both the voice executor (music_tool.c) and the WebUI executor
- * (webui_music_tool.c) so they parse and report identically.
+ * both the local executor (music_tool.c) and the player tool
+ * (music_player_tool.c) so they parse and report identically.
  */
 
 #ifndef MUSIC_SEARCH_H

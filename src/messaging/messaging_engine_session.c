@@ -20,23 +20,20 @@
  *
  * The in-memory channel row -> session_t* slot table: LRU
  * eviction, get-or-create with post-restart history restore + per-turn name
- * refresh, the cross-channel staleness reload, and the self-reset deferral
- * probe.  Split out of messaging_engine.c; see messaging_engine_internal.h
- * and docs/MESSAGING_ENGINE_SPLIT_PLAN.md.
+ * refresh, and the self-reset deferral probe.  Split out of messaging_engine.c; see
+ * messaging_engine_internal.h and docs/MESSAGING_ENGINE_SPLIT_PLAN.md.
  */
-#define AUTH_DB_INTERNAL_ALLOWED
 #define MESSAGING_ENGINE_INTERNAL_ALLOWED
 
 #include <json-c/json.h>
 #include <pthread.h>
-#include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 
 #include "auth/auth_db.h"
-#include "auth/auth_db_internal.h"
+#include "core/outside_kind.h"
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
@@ -46,9 +43,6 @@
 #include "messaging/messaging_engine.h"
 #include "messaging/messaging_engine_internal.h"
 #include "utils/string_utils.h"
-
-/* messaging_conv_get_max_msg_id and history_array_max_msg_id are file-local
- * helpers (used only by the staleness reload + history restore below). */
 
 /* Find the in-memory session slot for a channel row and evict it.  Eviction triggers memory
  * extraction on the closing conversation via session_destroy's existing extraction hook.  No-op
@@ -104,137 +98,6 @@ void messaging_engine_apply_conv_llm(int64_t conversation_id, const session_llm_
       session_set_llm_config(live, cfg); /* a running turn keeps its own */
       session_release(live);
    }
-}
-
-/* Query the highest msg_id present for a conversation.  Returns 0 on
- * lock failure or an empty conversation.  Used by the staleness check
- * in process_inbound to detect external writers (WebUI conversation
- * panel, voice session, MCP) appending to the same conv between
- * messaging-channel turns.  Request-context rows count too: one another
- * surface wrote (a directive, a changed instruction) is part of what a reload
- * replays, so this session must pick it up. */
-static int64_t messaging_conv_get_max_msg_id(int64_t conv_id) {
-   if (conv_id <= 0) {
-      return 0;
-   }
-   AUTH_DB_LOCK_OR_RETURN(0);
-   sqlite3_stmt *stmt = NULL;
-   int64_t max_id = 0;
-   /* kind-rows: see above. */
-   const char *sql = "SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = ?";
-   if (sqlite3_prepare_v2(s_db.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-      sqlite3_bind_int64(stmt, 1, conv_id);
-      if (sqlite3_step(stmt) == SQLITE_ROW) {
-         max_id = sqlite3_column_int64(stmt, 0);
-      }
-   }
-   if (stmt) {
-      sqlite3_finalize(stmt);
-   }
-   AUTH_DB_UNLOCK();
-   return max_id;
-}
-
-/* Walk a loaded history array and return the highest msg_id stamped
- * on any entry.  memory_history_load_from_db adds `id` to every
- * loaded entry — returns 0 if no entries carry one (defensive). */
-static int64_t history_array_max_msg_id(struct json_object *history) {
-   if (!history) {
-      return 0;
-   }
-   int64_t max_id = 0;
-   size_t n = (size_t)json_object_array_length(history);
-   for (size_t i = 0; i < n; i++) {
-      struct json_object *entry = json_object_array_get_idx(history, i);
-      struct json_object *id_obj = NULL;
-      if (entry && json_object_object_get_ex(entry, "id", &id_obj)) {
-         int64_t id = json_object_get_int64(id_obj);
-         if (id > max_id) {
-            max_id = id;
-         }
-      }
-   }
-   return max_id;
-}
-
-/* Update the slot's last_known_msg_id to `max(current, msg_id)`.  Slot
- * lookup by session pointer is safe because the caller holds a retain
- * on the session — eviction (the only path that nulls the slot's
- * session pointer) can't happen concurrently. */
-void slot_bump_last_known_msg_id(session_t *session, int64_t msg_id) {
-   if (!session || msg_id <= 0) {
-      return;
-   }
-   pthread_mutex_lock(&s_session_slots_mutex);
-   for (size_t i = 0; i < MESSAGING_MAX_SESSIONS; i++) {
-      if (s_session_slots[i].session == session) {
-         if (msg_id > s_session_slots[i].last_known_msg_id) {
-            s_session_slots[i].last_known_msg_id = msg_id;
-         }
-         break;
-      }
-   }
-   pthread_mutex_unlock(&s_session_slots_mutex);
-}
-
-/* Cross-channel staleness check.  When an external writer (WebUI,
- * voice, MCP) appends to a conv between messaging turns, the cached
- * session_t holds frozen in-memory history and the LLM responds
- * without seeing those messages.  Detect via DB MAX(id) > slot's
- * last_known_msg_id; recover by reloading session->conversation_history
- * from DB.
- *
- * Universal across all messaging providers — every channel funnels
- * through process_inbound which calls this, so SMS / Telegram /
- * future Discord/Slack all get the fix for free.
- *
- * Called by process_inbound BEFORE dispatch, so the channel-hint
- * builder (which inspects the last assistant message for truncation
- * markers) and the LLM call both see the reloaded history. */
-void reload_session_history_if_stale(session_t *session,
-                                     const char *provider,
-                                     const char *provider_address,
-                                     int64_t conv_id,
-                                     int user_id) {
-   if (!session || !provider || !provider_address || conv_id <= 0 || user_id <= 0) {
-      return;
-   }
-
-   /* Read the slot's last_known_msg_id under the slot mutex, release
-    * before the DB query. */
-   int64_t slot_last_known = 0;
-   pthread_mutex_lock(&s_session_slots_mutex);
-   for (size_t i = 0; i < MESSAGING_MAX_SESSIONS; i++) {
-      if (s_session_slots[i].session == session) {
-         slot_last_known = s_session_slots[i].last_known_msg_id;
-         break;
-      }
-   }
-   pthread_mutex_unlock(&s_session_slots_mutex);
-
-   int64_t db_max = messaging_conv_get_max_msg_id(conv_id);
-   if (db_max <= slot_last_known) {
-      return; /* no drift — common case */
-   }
-
-   /* Drift detected — external writer added messages.  Reload. */
-   OLOG_INFO("messaging: history drift on %s:%s (db_max=%lld > last_known=%lld); reloading",
-             provider, provider_address, (long long)db_max, (long long)slot_last_known);
-
-   size_t restored_chars = 0;
-   struct json_object *loaded = memory_history_load_for_llm(conv_id, user_id, &restored_chars);
-   if (!loaded) {
-      return;
-   }
-   size_t restored_count = (size_t)json_object_array_length(loaded);
-
-   session_replace_history(session, loaded, conv_id);
-
-   int64_t new_high = history_array_max_msg_id(loaded);
-   slot_bump_last_known_msg_id(session, new_high);
-
-   OLOG_INFO("messaging: reloaded %zu messages (%zu chars) from conv %lld; last_known now %lld",
-             restored_count, restored_chars, (long long)conv_id, (long long)new_high);
 }
 
 /* Try to detect that the caller is the LLM running on the same
@@ -446,6 +309,11 @@ session_t *get_or_create_messaging_session(const channel_ref_t *ref,
    /* A sender the provider can't vouch for (SMS) reads and prepares but
     * doesn't act (core/tool_call_policy.h). */
    s->messaging_identity.sender_unverified = !ref->authenticates_sender;
+   /* Anyone can send what reaches it, so what is learned from it counts as
+    * outside text (the conversation's floor; delete this line to trust such
+    * senders as the user). */
+   if (s->messaging_identity.sender_unverified && conversation_id > 0 && user_id > 0)
+      (void)conv_db_raise_outside(conversation_id, user_id, OUTSIDE_MESSAGING);
    s->messaging_identity.channel_id = ref->channel_id;
    if (ref->display_name[0]) {
       snprintf(s->messaging_identity.channel_name, sizeof(s->messaging_identity.channel_name), "%s",
@@ -464,20 +332,18 @@ session_t *get_or_create_messaging_session(const channel_ref_t *ref,
     * starts empty.  conv_db_get_messages also enforces ownership
     * against user_id — defense in depth on the FK already in place.
     * Still safe to call without engine locks: session_t is private. */
-   int64_t restored_max_msg_id = 0;
    if (conversation_id > 0 && user_id > 0) {
       size_t restored_chars = 0;
+      conv_sync_point_t at;
+      const bool at_ok = conv_db_sync_point_get(conversation_id, user_id, &at) == AUTH_DB_SUCCESS;
       struct json_object *loaded = memory_history_load_for_llm(conversation_id, user_id,
                                                                &restored_chars);
       if (loaded) {
          size_t restored_count = (size_t)json_object_array_length(loaded);
          if (restored_count > 0) {
-            /* Capture the highest msg_id BEFORE handing the array off
-             * to the session — used below to seed the slot's
-             * last_known_msg_id so the cross-channel staleness check
-             * in process_inbound knows what we've seen. */
-            restored_max_msg_id = history_array_max_msg_id(loaded);
-            session_replace_history(s, loaded, conversation_id);
+            /* Loaded at this point: each turn's start brings it up to date
+             * with what other sessions write to the conversation after. */
+            session_replace_history_at(s, loaded, conversation_id, user_id, at_ok ? &at : NULL);
             OLOG_INFO("messaging: restored %zu messages (%zu chars) into session %u from conv %lld",
                       restored_count, restored_chars, s->session_id, (long long)conversation_id);
          } else {
@@ -557,11 +423,6 @@ session_t *get_or_create_messaging_session(const channel_ref_t *ref,
    s_session_slots[target].session = s;
    s_session_slots[target].last_used = time(NULL);
    s_session_slots[target].pending_reset = false;
-   /* Seed last_known_msg_id from the freshly-restored history (or 0
-    * when the conv was just created with no messages yet).  The
-    * cross-channel staleness check in process_inbound uses this to
-    * detect external writers between our turns. */
-   s_session_slots[target].last_known_msg_id = restored_max_msg_id;
 
    /* Retain once for the map and once for the caller. */
    session_retain(s);

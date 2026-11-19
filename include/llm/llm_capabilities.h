@@ -68,6 +68,7 @@ typedef struct {
    llm_caps_source_t source;
    int mode_count;                                   /**< 0: the model has no reasoning control */
    llm_think_mode_caps_t modes[LLM_THINK_MODES_MAX]; /**< In display order */
+   int max_output; /**< Most output tokens one request may ask for (0: not listed) */
 } llm_thinking_caps_t;
 
 /** What a request actually sends. */
@@ -209,6 +210,26 @@ void llm_thinking_resolve_current(llm_type_t type,
  * levels of a Claude or llama.cpp "enabled" mode).  Anything else is medium.
  */
 int llm_thinking_budget_size(const char *level);
+
+/**
+ * @brief The max_tokens a reply gets
+ *
+ * Reasoning counts toward max_tokens, so a streamed reply that reasons gets a
+ * ceiling by its effort (low 16K, medium 32K, high 64K, xhigh and max 128K),
+ * never below [llm] max_tokens and never above the model's models.toml
+ * max_output.  Everything else gets [llm] max_tokens: a call that isn't
+ * streamed (a long reply on one idle connection can be dropped), a local
+ * model, a reply that doesn't reason, and a model with no max_output listed.
+ *
+ * @param thinking The setting the request sends (llm_thinking_resolve_current)
+ * @param streamed The request is sent streamed (the transport: an OpenAI
+ *                 Responses request always is, a bare completion included)
+ */
+int llm_reply_max_tokens(llm_type_t type,
+                         cloud_provider_t provider,
+                         const char *model,
+                         const llm_thinking_resolved_t *thinking,
+                         bool streamed);
 
 /**
  * @brief A model's capabilities as the clients receive them

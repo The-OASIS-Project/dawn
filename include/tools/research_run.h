@@ -334,9 +334,8 @@ char *research_canonicalize_url(const char *in, char *out, size_t out_size);
  * bounded digest + dispatch with skip_prompt_rebuild + meter tokens + refresh
  * coverage + stop decision } → synthesize (no-tools LLM turn writes the answer from
  * the evidence → final revision + notes + job-conversation copy).
- * The session MUST already be a bare SESSION_TYPE_JOB session (job_manager_begin)
- * run native-tools-only with legacy <command> execution disabled — the read-only
- * allowlist gates only the native tool path (§11 HIGH-1).
+ * The session MUST already be a bare SESSION_TYPE_JOB session (job_manager_begin);
+ * the read-only allowlist gates its tool calls (§11 HIGH-1).
  *
  * The caller (research_worker) owns the session lifecycle + the terminal job
  * transition; this returns the terminal stop_reason.

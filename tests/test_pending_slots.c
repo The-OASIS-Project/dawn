@@ -77,6 +77,18 @@ static void test_same_session_replaces(void) {
    TEST_ASSERT_EQUAL_STRING("222", b->number);
    item_t *c = stage(7, 1, KIND_TEXT, "333", 1002);
    TEST_ASSERT_NOT_EQUAL(b, c);
+   TEST_ASSERT_EQUAL_UINT32(0, c->hdr.replaced_turn); /* replaced nothing */
+}
+
+/* A replacing item says which turn's item it replaced (that preview won't be
+ * answered now); a fresh one says none. */
+static void test_replacement_names_the_turn(void) {
+   const turn_origin_t t3 = origin(7, 300, 3), t5 = origin(7, 500, 5);
+   item_t *a = (item_t *)pending_slots_stage(&s_slots, &t3, 1, KIND_CALL, 1000, NULL);
+   TEST_ASSERT_EQUAL_UINT32(0, a->hdr.replaced_turn);
+   item_t *b = (item_t *)pending_slots_stage(&s_slots, &t5, 1, KIND_CALL, 1001, NULL);
+   TEST_ASSERT_EQUAL_PTR(a, b);
+   TEST_ASSERT_EQUAL_UINT32(3, b->hdr.replaced_turn);
 }
 
 /* Another session's item is never replaced, and never found from here. */
@@ -197,6 +209,65 @@ static void test_take_checks_the_turn(void) {
                                                            &out, sizeof(out), &orc));
 }
 
+/* A table with later_turns takes its item in any later turn of the session,
+ * never in the turn that made it or another session's. */
+static void test_later_turns(void) {
+   static item_t items[SLOTS];
+   const pending_slots_t later_slots = { .base = items,
+                                         .stride = sizeof(items[0]),
+                                         .count = SLOTS,
+                                         .ttl_sec = TTL,
+                                         .later_turns = 3 };
+   memset(items, 0, sizeof(items));
+   const turn_origin_t made = origin(7, 500, 1);
+   item_t *it = (item_t *)pending_slots_stage(&later_slots, &made, 1, KIND_CALL, 1000, NULL);
+   TEST_ASSERT_NOT_NULL(it);
+   const uint32_t id = it->hdr.item_id;
+   item_t out;
+   turn_origin_rc_t orc = TURN_ORIGIN_OK;
+   TEST_ASSERT_EQUAL_INT(PENDING_NOT_NOW, pending_slots_take(&later_slots, &made, 1, KIND_CALL, id,
+                                                             1001, &out, sizeof(out), &orc));
+   const turn_origin_t elsewhere = origin(8, 600, 3);
+   TEST_ASSERT_EQUAL_INT(PENDING_NONE, pending_slots_take(&later_slots, &elsewhere, 1, KIND_CALL,
+                                                          id, 1001, &out, sizeof(out), &orc));
+   const turn_origin_t too_late = origin(7, 650, 5);
+   TEST_ASSERT_EQUAL_INT(PENDING_NOT_NOW, pending_slots_take(&later_slots, &too_late, 1, KIND_CALL,
+                                                             id, 1001, &out, sizeof(out), &orc));
+   const turn_origin_t two_later = origin(7, 700, 3);
+   TEST_ASSERT_EQUAL_INT(PENDING_FOUND, pending_slots_take(&later_slots, &two_later, 1, KIND_CALL,
+                                                           id, 1001, &out, sizeof(out), &orc));
+}
+
+/* An item made in a turn the user stopped stays, and isn't taken in the next
+ * turn, nor in one of the next few on a table that allows them. */
+static void test_stopped_turn_item_not_taken(void) {
+   static item_t items[SLOTS];
+   const pending_slots_t later_slots = { .base = items,
+                                         .stride = sizeof(items[0]),
+                                         .count = SLOTS,
+                                         .ttl_sec = TTL,
+                                         .later_turns = 3 };
+   memset(items, 0, sizeof(items));
+   const turn_origin_t made = origin(7, 500, 1);
+   item_t *it = (item_t *)pending_slots_stage(&later_slots, &made, 1, KIND_CALL, 1000, NULL);
+   TEST_ASSERT_NOT_NULL(it);
+   const uint32_t id = it->hdr.item_id;
+   item_t out;
+   turn_origin_rc_t orc = TURN_ORIGIN_OK;
+   turn_origin_t next = origin(7, 600, 2);
+   next.stopped_tokens[0] = 500;
+   TEST_ASSERT_EQUAL_INT(PENDING_NOT_NOW, pending_slots_take(&later_slots, &next, 1, KIND_CALL, id,
+                                                             1001, &out, sizeof(out), &orc));
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_STOPPED, orc);
+   /* Another turn stopped since: the first is still remembered. */
+   turn_origin_t two_later = origin(7, 700, 3);
+   two_later.stopped_tokens[0] = 600;
+   two_later.stopped_tokens[1] = 500;
+   TEST_ASSERT_EQUAL_INT(PENDING_NOT_NOW, pending_slots_take(&later_slots, &two_later, 1, KIND_CALL,
+                                                             id, 1001, &out, sizeof(out), &orc));
+   TEST_ASSERT_TRUE(it->hdr.active);
+}
+
 /* Staging clears every expired item first, and replaces this session's own
  * expired one; drop with nothing staged is harmless. */
 static void test_expired_swept_on_stage(void) {
@@ -281,8 +352,10 @@ static void test_tool_messages_name_the_item(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_valid_for_counts_down_from_the_ttl);
+   RUN_TEST(test_stopped_turn_item_not_taken);
    RUN_TEST(test_tool_messages_name_the_item);
    RUN_TEST(test_same_session_replaces);
+   RUN_TEST(test_replacement_names_the_turn);
    RUN_TEST(test_other_session_untouched);
    RUN_TEST(test_other_user_not_found);
    RUN_TEST(test_full_refuses_then_reuses_expired);
@@ -290,6 +363,7 @@ int main(void) {
    RUN_TEST(test_drop_and_origin);
    RUN_TEST(test_item_id_binds_the_confirm);
    RUN_TEST(test_take_checks_the_turn);
+   RUN_TEST(test_later_turns);
    RUN_TEST(test_expired_swept_on_stage);
    RUN_TEST(test_twice_in_one_turn);
    RUN_TEST(test_drop_keeps_this_turns_item);

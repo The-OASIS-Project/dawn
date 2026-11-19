@@ -50,6 +50,7 @@
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
+#include "core/session_stop.h"
 #include "dawn.h"
 #include "document_original_store.h"
 #include "image_store.h"
@@ -336,7 +337,9 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
    } else {
       struct json_object *payload = NULL;
       json_object_object_get_ex(root, "payload", &payload);
+      webui_protocol_request_begin(conn->wsi, json_object_get_string(type_obj), payload);
       dispatch_message(conn, json_object_get_string(type_obj), payload);
+      webui_protocol_request_end();
    }
    json_object_put(root);
    free(json_str);
@@ -624,6 +627,15 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          struct json_object *restore_obj;
          if (json_object_object_get_ex(payload, "from_restore", &restore_obj)) {
             from_restore = json_object_get_boolean(restore_obj);
+         }
+
+         /* A change made for one conversation is not saved to another: the user may
+          * have opened a different one before this request arrived. */
+         struct json_object *for_conv_obj;
+         if (!from_restore &&
+             json_object_object_get_ex(payload, "conversation_id", &for_conv_obj) &&
+             json_object_get_int64(for_conv_obj) != conn->active_conversation_id) {
+            from_restore = true;
          }
 
          /* Apply config if changes were made.  The reasoning pick is stored as
@@ -1149,6 +1161,16 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
       }
    } else if (strcmp(type, "list_memory_superseded") == 0) {
       handle_list_memory_superseded(conn, payload);
+   } else if (strcmp(type, "list_memory_batches") == 0) {
+      handle_list_memory_batches(conn, payload);
+   } else if (strcmp(type, "undo_memory_batch") == 0) {
+      if (payload) {
+         handle_undo_memory_batch(conn, payload);
+      }
+   } else if (strcmp(type, "keep_memory_op") == 0) {
+      if (payload) {
+         handle_keep_memory_op(conn, payload);
+      }
    } else if (strcmp(type, "restore_memory_fact") == 0) {
       if (payload) {
          handle_restore_memory_fact(conn, payload);
@@ -1253,6 +1275,8 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
       if (payload) {
          handle_doc_library_toggle_global(conn, payload);
       }
+   } else if (strcmp(type, "set_document_own") == 0) {
+      handle_set_document_own(conn, payload);
    } else if (strcmp(type, "doc_library_note_save") == 0) {
       if (payload) {
          handle_doc_library_note_save(conn, payload);
@@ -1544,6 +1568,52 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
             limit = json_object_get_int(o);
       }
       webui_jobs_send_history(conn, before_created_at, before_id, limit);
+#ifdef DAWN_ENABLE_CODING_AGENT_TOOL
+   } else if (strcmp(type, "coding_pending") == 0) {
+      /* What the user's coding jobs wait on.  Ownership is checked per job inside. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_pending(conn, payload);
+   } else if (strcmp(type, "coding_reply") == 0) {
+      /* The card's answer; checked against the live request inside. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_reply(conn, payload);
+   } else if (strcmp(type, "coding_view") == 0) {
+      /* The changes viewer; the job's owner is checked inside. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_view(conn, payload);
+   } else if (strcmp(type, "coding_publish_preview") == 0) {
+      /* The viewer's Publish and Close: the click is the user's confirm.  The
+       * job's owner is checked inside; the gateway binds the push to what was
+       * shown. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_publish_preview(conn, payload);
+   } else if (strcmp(type, "coding_publish") == 0) {
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_publish(conn, payload);
+   } else if (strcmp(type, "coding_close") == 0) {
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_close(conn, payload);
+   } else if (strcmp(type, "coding_grants") == 0) {
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_grants(conn, payload);
+   } else if (strcmp(type, "coding_grant_revoke") == 0) {
+      /* The gateway removes only the user's own. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_coding_handle_grant_revoke(conn, payload);
+#endif
+   } else if (strcmp(type, "stop_other_reply") == 0) {
+      /* Same user only, checked inside against the turn holding the conversation. */
+      if (!conn_require_auth(conn))
+         return;
+      webui_handle_stop_other_reply(conn, payload);
    } else if (strcmp(type, "job_action") == 0) {
       /* cancel | resume.  Ownership is checked inside, against conn->auth_user_id. */
       if (!conn_require_auth(conn))
@@ -1733,13 +1803,9 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
          OLOG_DEBUG("WebUI: Ignoring %s message (feature not compiled in)", shown);
       else
          OLOG_WARNING("WebUI: Unknown message type: %s", shown);
-      char req[WEBUI_REQ_MAX + 1];
-      char *reply = webui_protocol_unknown_type_json(
-          type, webui_protocol_payload_req(payload, WEBUI_REQ_MAX, req, sizeof(req)) ? req : NULL);
-      if (reply) {
-         send_json_message(conn->wsi, reply);
-         free(reply);
-      }
+      /* Names the type and the req, as every error sent for a request does. */
+      send_error_frame(conn->wsi, "UNKNOWN_TYPE", "This server doesn't handle that message type",
+                       WS_SEVERITY_ERROR, NULL);
    }
 }
 
@@ -1751,7 +1817,7 @@ static void handle_cancel_message(ws_connection_t *conn) {
        * manager hands &session->cancel_requested to llm_set_cancel_flag before
        * each LLM call, so the CURL progress callback aborts THIS session only.
        * (llm_request_interrupt() is NOT used — its global flag hits all users.) */
-      session_cancel_turn(conn->session);
+      session_stop_turn_by_user(conn->session);
       send_state_impl(conn->wsi, "idle", NULL);
    }
 }

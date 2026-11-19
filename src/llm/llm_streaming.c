@@ -1439,6 +1439,17 @@ char *llm_stream_get_thinking(llm_stream_context_t *ctx) {
    return strdup(ctx->accumulated_thinking);
 }
 
+void llm_stream_fill_stopped(llm_stream_context_t *ctx, llm_tool_response_t *result) {
+   if (!ctx || !result) {
+      return;
+   }
+   result->stopped = true;
+   if (ctx->accumulated_response && ctx->accumulated_size > 0) {
+      result->text = strdup(ctx->accumulated_response);
+   }
+   result->thinking_content = llm_stream_get_thinking(ctx);
+}
+
 struct json_object *llm_stream_take_claude_content(llm_stream_context_t *ctx) {
    if (!ctx || !ctx->anthropic_wire) {
       return NULL;

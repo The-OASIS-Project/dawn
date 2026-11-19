@@ -65,6 +65,7 @@
       // Queue
       queueLength: 0,
       queueIndex: 0,
+      queueRev: 0,
 
       // Source info
       sourceFormat: '--',
@@ -868,6 +869,7 @@
       state.positionSec = payload.position_sec || 0;
       state.queueLength = payload.queue_length || 0;
       state.queueIndex = payload.queue_index || 0;
+      state.queueRev = payload.queue_rev || 0;
       state.sourceFormat = payload.source_format || '--';
       state.sourceRate = payload.source_rate || 0;
       state.quality = payload.quality || 'standard';

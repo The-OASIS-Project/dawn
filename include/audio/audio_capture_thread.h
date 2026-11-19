@@ -65,10 +65,13 @@ typedef struct {
    int use_realtime_priority;  /**< Enable realtime scheduling */
 
    /* Audio backend handle (runtime-selected ALSA or PulseAudio) */
-   audio_stream_capture_handle_t *capture_handle; /**< Backend capture handle */
+   audio_stream_capture_handle_t *capture_handle; /**< Backend capture handle; NULL while
+                                                       the device is missing */
+   audio_stream_params_t params;                  /**< Requested parameters (to reopen) */
    audio_hw_params_t hw_params;                   /**< Actual hardware parameters */
 
    char *pcm_device;   /**< Device name */
+   char *read_buffer;  /**< One period as read from the device */
    size_t buffer_size; /**< Size of capture buffer in bytes */
    size_t frames;      /**< Frames per read (period size) */
 
@@ -87,14 +90,16 @@ typedef struct {
 /**
  * @brief Create and start audio capture thread
  *
- * Initializes audio device, creates ring buffer, spawns capture thread,
- * and optionally sets realtime priority for low-latency operation.
+ * Opens the audio device, creates ring buffer, spawns capture thread,
+ * and optionally sets realtime priority for low-latency operation.  A device
+ * that isn't there yet doesn't fail it: the thread writes silence and opens the
+ * device when it appears (and again whenever it goes away and comes back).
  *
  * @param pcm_device Audio device name (e.g., "plughw:CARD=S3,DEV=0" for ALSA,
  *                   or PulseAudio source name for PulseAudio backend)
  * @param ring_buffer_size Size of ring buffer in bytes (recommend 65536 = 2 seconds at 16kHz)
  * @param use_realtime_priority If non-zero, set SCHED_FIFO realtime priority
- * @return Pointer to capture context, or NULL on error
+ * @return Pointer to capture context, or NULL if it couldn't be allocated or started
  */
 audio_capture_context_t *audio_capture_start(const char *pcm_device,
                                              size_t ring_buffer_size,

@@ -38,6 +38,7 @@
 #include "core/session_prefix.h"
 #include "dawn_error.h"
 #include "logging.h"
+#include "memory/memory_db_consolidation.h"
 #include "memory/memory_extraction.h"
 #include "memory/memory_forget.h"
 #include "webui/webui_internal.h"
@@ -182,9 +183,11 @@ static void send_frame(uint32_t session_id, const char *type, json_object *paylo
  * replaced, current again, in "restored". */
 static void forget_fact(const conv_memory_job_t *job, json_object *payload) {
    memory_forget_result_t fr;
+   /* The forget tells the tabs of the batches whose record it changed. */
    conv_db_withdraw_intent_begin(job->user_id); /* the user removing it */
    const int rc = memory_forget_fact(job->user_id, job->conv_id, &fr);
    conv_db_withdraw_intent_end();
+   json_object_object_add(payload, "fact_id", json_object_new_int64(job->conv_id));
    json_object_object_add(payload, "success", json_object_new_boolean(rc == SUCCESS));
    if (rc == SUCCESS) {
       json_object_object_add(payload, "message", json_object_new_string("Fact deleted"));
@@ -389,7 +392,8 @@ void handle_set_private(ws_connection_t *conn, struct json_object *payload) {
       }
    }
 
-   int result = conv_db_set_private(conv_id, conn->auth_user_id, is_private);
+   conv_db_batches_t batches = { .n = 0 };
+   int result = conv_db_set_private(conv_id, conn->auth_user_id, is_private, &batches);
    if (result == AUTH_DB_NOT_FOUND) {
       send_error(conn, "set_private_response", conv_id, "Conversation not found");
       return;
@@ -430,6 +434,11 @@ void handle_set_private(ws_connection_t *conn, struct json_object *payload) {
    json_object_object_add(response, "payload", resp_payload);
    send_json_response(conn, response);
    json_object_put(response);
+
+   /* Its batches (and its continuations') went from the record: every tab drops them. */
+   for (int i = 0; i < batches.n; i++) {
+      memory_consolidation_batch_notify(conn->auth_user_id, 0, batches.ids[i]);
+   }
 
    /* Going private stops future extraction (for its continuations too).  Report
     * what was already learned, once any extraction in flight has finished, so the
@@ -489,9 +498,21 @@ void handle_forget_conversation_memories(ws_connection_t *conn, struct json_obje
 void webui_forget_memory_fact(ws_connection_t *conn, int64_t fact_id) {
    const conv_memory_start_t st = start_conv_memory_job(conn, fact_id, CONV_MEMORY_FORGET_FACT);
    if (st != CONV_MEMORY_STARTED) {
-      send_error(conn, "delete_memory_fact_response", 0,
-                 st == CONV_MEMORY_BUSY ? "Memory is busy with another change; try again shortly"
-                                        : "Failed to delete fact");
+      /* The fact asked for, as the worker's reply carries it. */
+      json_object *response = json_object_new_object();
+      json_object *payload = json_object_new_object();
+      json_object_object_add(response, "type",
+                             json_object_new_string("delete_memory_fact_response"));
+      json_object_object_add(payload, "fact_id", json_object_new_int64(fact_id));
+      json_object_object_add(payload, "success", json_object_new_boolean(0));
+      json_object_object_add(payload, "error",
+                             json_object_new_string(
+                                 st == CONV_MEMORY_BUSY
+                                     ? "Memory is busy with another change; try again shortly"
+                                     : "Failed to delete fact"));
+      json_object_object_add(response, "payload", payload);
+      send_json_response(conn, response);
+      json_object_put(response);
    }
 }
 

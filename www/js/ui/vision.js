@@ -974,6 +974,19 @@
    }
 
    /**
+    * Put images back as pending (a message that was never sent), up to the limit.
+    * @param {Object[]} images - pendingImages entries ({id, mimeType, previewUrl})
+    */
+   function restoreImages(images) {
+      const state = DawnState.visionState;
+      const room = Math.max(0, state.maxImages - state.pendingImages.length);
+      images.slice(0, room).forEach((img) => state.pendingImages.push(img));
+      rebuildPreviews();
+      updateCounter();
+      return images.slice(room); // the ones the limit left no room for
+   }
+
+   /**
     * Update vision limits from server config
     * Called when config response is received with vision_limits
     * @param {Object} limits - Server-provided limits
@@ -1010,36 +1023,33 @@
       });
    }
 
+   /* The config's llm section and the session's LLM type, from the last updates of each. */
+   let llmConfig = null;
+   let sessionLlmType = null;
+
    /**
     * Check if vision is supported and update UI accordingly
-    * Called when config is received or LLM model changes
+    * Called when config is received; the session's type comes from setLlmType()
     */
    function checkVisionSupport(config) {
-      // Check if vision is enabled in config
-      // This will be determined by the current model's capabilities
-      let visionEnabled = false;
+      if (config?.llm) llmConfig = config.llm;
+      refreshVisionSupport();
+   }
 
-      if (config?.llm?.cloud?.vision_enabled) {
-         visionEnabled = true;
-      } else if (config?.llm?.local?.vision_enabled) {
-         visionEnabled = true;
-      }
+   /**
+    * Note the session's LLM type (it can differ from the config's) and re-check
+    * @param {string} type - 'cloud' or 'local'
+    */
+   function setLlmType(type) {
+      sessionLlmType = type || null;
+      refreshVisionSupport();
+   }
 
-      // Also check model name for known vision models
-      const model = config?.llm?.cloud?.model || config?.llm?.local?.model || '';
-      const visionModels = [
-         'gpt-4o',
-         'gpt-4-vision',
-         'gpt-4-turbo',
-         'claude-3',
-         'gemini',
-         'llava',
-         'qwen-vl',
-         'cogvlm',
-      ];
-      if (visionModels.some((vm) => model.toLowerCase().includes(vm))) {
-         visionEnabled = true;
-      }
+   function refreshVisionSupport() {
+      // The vision_enabled setting of the session's LLM type, as the server decides it
+      const type = sessionLlmType || llmConfig?.type;
+      const visionEnabled =
+         type === 'cloud' || type === 'local' ? !!llmConfig?.[type]?.vision_enabled : false;
 
       DawnState.visionState.visionEnabled = visionEnabled;
 
@@ -1250,7 +1260,9 @@
       init,
       clearImage, // Legacy alias
       clearImages,
+      restoreImages,
       checkVisionSupport,
+      setLlmType,
       updateLimits,
       // Multi-image API
       processMultipleImages,

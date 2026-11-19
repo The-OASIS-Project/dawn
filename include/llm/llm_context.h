@@ -253,6 +253,30 @@ bool llm_context_over_threshold(uint32_t session_id,
                                 float threshold);
 
 /**
+ * @brief @p max_tokens, held to the room the model's window leaves the reply
+ *
+ * The request's input is @p history, @p input_text (counted only when the
+ * history doesn't already end with the user's message: no builder sends the
+ * question twice; NULL from a builder that never sends it apart) and @p tools
+ * (the request's tools array, NULL when none).  Estimated as the compaction
+ * check does: calibrated by its session's measured requests when it is that
+ * session's own conversation request (a measured request carried its tools),
+ * its plain estimate plus the tools when it is a side call, has no session or
+ * has no measured request yet.  Less a margin for the estimate
+ * (llm_compaction_reply_room: 10% of the input and 2% of the window).  A
+ * provider may reject a request whose input plus max_tokens passes the window.
+ * Never below 1024 (a request that close is the compaction's to fix);
+ * unchanged when the window is unknown.
+ */
+int llm_context_fit_reply(int max_tokens,
+                          struct json_object *history,
+                          const char *input_text,
+                          struct json_object *tools,
+                          llm_type_t type,
+                          cloud_provider_t provider,
+                          const char *model);
+
+/**
  * @brief After a compaction: the session's history now estimates at
  *        @p estimate (the last response counted the history before the swap)
  */

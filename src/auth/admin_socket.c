@@ -2261,6 +2261,9 @@ static int handle_client(int client_fd) {
       case ADMIN_MSG_MEMORY_REEXTRACT_STATUS:
          return handle_memory_reextract_status(client_fd, payload, header.payload_len);
 
+      case ADMIN_MSG_MEMORY_EXTRACT_RANGE:
+         return handle_memory_extract_range(client_fd, payload, header.payload_len);
+
       /* Phase 6.5: Entity-merge alias surface (v43) */
       case ADMIN_MSG_MEMORY_ENTITY_MERGE:
          return handle_memory_entity_merge(client_fd, payload, header.payload_len);

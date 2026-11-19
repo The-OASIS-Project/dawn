@@ -79,6 +79,13 @@ From most to least load-bearing:
    it is data; a stored one read again (`result_read`, `context_expand`) is framed again. An attached
    email reaches the model only this way: the turn names it and the model reads it with the tool.
    Memory extraction reads a framed result as a stub, so outside text can't plant a fact through it.
+   A document read through a tool (`document_search`, `document_read`, `document_grep`) goes in a
+   `DOCUMENT CONTENT` frame unless every document it shows is the reader's own words (theirs, and
+   marked own: `documents.outside` NONE or UNKNOWN); then it is unframed and reads as DAWN's own.
+   One frame covers the whole result, so a result mixing the user's notes with an upload frames
+   the notes too. Another user's shared document is never own. The calendar's reads (`today`,
+   `range`, `next`, `search`) go in a `CALENDAR CONTENT` frame, since anyone who shares a calendar
+   or sends an invitation writes event text; its confirmations stay unframed.
 4. **The neutralizer** (`llm_context_neutralize`): defuses imitations of DAWN's own framing, tags and
    item lines in any text DAWN didn't write; the conversation's secret is masked wherever outside text
    could echo it.
@@ -103,8 +110,8 @@ Layers 1 and 2 hold whatever the model does. Layers 3 to 5 lower the odds that i
   isn't limited. Limiting it by kind alone would refuse "read Bob's email and add the meeting to my
   calendar"; by the decision rule below the line is silent or irreversible effects, which is the
   capability mask's job.
-- **Outside text not framed yet.** Messaging channel reads (`read_history`), SMS bodies, calendar
-  invite text, MCP results and the MQTT device-data relay are neutralized but not framed.
+- **Outside text not framed yet.** Messaging channel reads (`read_history`), SMS bodies, MCP
+  results and the MQTT device-data relay are neutralized but not framed.
 - **Attached documents.** An uploaded document's text goes into the user's message
   (`[ATTACHED DOCUMENT: ...]`, neutralized), not a tool result, and the turn is an ordinary one.
 

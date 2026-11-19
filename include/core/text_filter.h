@@ -18,7 +18,7 @@
  * enhancements, or additions to the project. These contributions become
  * part of the project and are adopted by the project author(s).
  *
- * Text filtering utilities for command tag stripping.
+ * Filters for the tags a model writes into its reply text.
  */
 
 #ifndef TEXT_FILTER_H
@@ -27,82 +27,18 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* =============================================================================
- * Command Tag Constants
- *
- * Shared between text_filter and webui_server to ensure consistency.
- * ============================================================================= */
-
-#define CMD_TAG_OPEN "<command>"
-#define CMD_TAG_CLOSE "</command>"
-#define CMD_TAG_OPEN_LEN 9
-#define CMD_TAG_CLOSE_LEN 10
-#define CMD_TAG_BUF_SIZE 16     /* Enough for "</command>" (10) + margin */
-#define CMD_TAG_MAX_NESTING 100 /* Max nesting depth to prevent overflow */
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /**
- * @brief Command tag filter state
- *
- * Tracks state for filtering <command>...</command> tags from streaming text.
- * Must be initialized to zero before first use. Supports nested tags.
- */
-typedef struct {
-   char buffer[CMD_TAG_BUF_SIZE]; /**< Buffer for partial tag detection */
-   unsigned char len;             /**< Current length of partial tag buffer */
-   int nesting_depth;             /**< Nesting depth (0 = outside tags, >0 = inside) */
-} cmd_tag_filter_state_t;
-
-/**
- * @brief Output callback type for command tag filter
+ * @brief Output callback for the streaming tag filter
  *
  * @param text Filtered text chunk
  * @param len Length of text chunk
  * @param ctx User context
  */
 typedef void (*text_filter_output_fn)(const char *text, size_t len, void *ctx);
-
-/**
- * @brief Filter <command>...</command> tags from streaming text
- *
- * Uses a character-by-character state machine that handles partial tags
- * spanning chunk boundaries. Filtered text is emitted via callback.
- *
- * @param state Filter state (must be zeroed before first chunk)
- * @param text Input text to filter
- * @param output_fn Callback to emit filtered text
- * @param ctx User context passed to output_fn
- *
- * @note If stream ends with a partial tag buffer, content is silently dropped.
- */
-void text_filter_command_tags(cmd_tag_filter_state_t *state,
-                              const char *text,
-                              text_filter_output_fn output_fn,
-                              void *ctx);
-
-/**
- * @brief Filter command tags into a buffer
- *
- * Convenience wrapper that filters text into a fixed-size buffer.
- *
- * @param state Filter state (must be zeroed before first chunk)
- * @param text Input text to filter
- * @param out_buf Output buffer
- * @param out_size Size of output buffer
- * @return Length of filtered text written (excluding null terminator)
- */
-int text_filter_command_tags_to_buffer(cmd_tag_filter_state_t *state,
-                                       const char *text,
-                                       char *out_buf,
-                                       size_t out_size);
-
-/**
- * @brief Reset filter state
- *
- * Call this when starting a new stream or to clear partial tag state.
- *
- * @param state Filter state to reset
- */
-void text_filter_reset(cmd_tag_filter_state_t *state);
 
 /* =============================================================================
  * Memory-Citation Tag Constants
@@ -113,8 +49,7 @@ void text_filter_reset(cmd_tag_filter_state_t *state);
  * would reach the browser live (DOMPurify drops the unknown element but keeps
  * its inner text, leaking `M1,M5,M11`) before finalization runs.  This filter is
  * the live-stream strip seam — the streaming twin of the finalizer's strip.
- * Unlike command tags there is no nesting: everything between the open and close
- * is suppressed.
+ * There is no nesting: everything between the open and close is suppressed.
  * ============================================================================= */
 
 #define CITED_TAG_OPEN "<cited>"
@@ -142,12 +77,7 @@ void text_filter_reset(cmd_tag_filter_state_t *state);
 /* Prompt example of citing a tool-surfaced fact by id (see SURFACED_ID_FMT). */
 #define CITED_TAG_ID_EXAMPLE CITED_TAG_OPEN "ID:6432" CITED_TAG_CLOSE
 
-/* Command / end-of-turn tag grammar — the legacy `<command>…</command>` transport
- * and the `<end_of_turn>` marker some local models emit.  Shared by
- * text_filter_command_strip so the finalizer + every TTS path key off one source. */
-#define COMMAND_TAG_OPEN "<command>"
-#define COMMAND_TAG_CLOSE "</command>"
-#define COMMAND_TAG_CLOSE_LEN 10
+/* The end-of-turn marker some local models emit; the reply ends there. */
 #define END_OF_TURN_TAG "<end_of_turn>"
 
 /**
@@ -250,20 +180,115 @@ void text_filter_cited_strip(char *text);
 void text_filter_cited_normalize(char *text);
 
 /**
- * @brief Strip <command>…</command> pairs and truncate at <end_of_turn>, in place.
+ * @brief Truncate at the first <end_of_turn>, in place.
  *
- * The whole-string residual-tag scrub for the legacy command transport plus the
- * end-of-turn marker some local models emit. The single shared strip for the
- * response finalizer, local-voice TTS, and WebUI-audio TTS.
+ * The single shared cut for the response finalizer, local-voice TTS and
+ * WebUI-audio TTS.
  *
  * @param text NUL-terminated, mutable C string. NULL is tolerated (no-op).
- * @param truncate_orphan How to handle an orphan `<command>` opener (no closer):
- *   - true  (per-sentence TTS): drop from the opener to end-of-string, so a
- *           sentence that split mid-tag can't speak a partial `<command>`.
- *   - false (a complete response): leave the remainder as literal text — in an
- *           assembled response an unclosed `<command>` is more likely real prose
- *           than a truncated tag, so it is not destroyed.
  */
-void text_filter_command_strip(char *text, bool truncate_orphan);
+void text_filter_end_of_turn_strip(char *text);
+
+/* =============================================================================
+ * Expression Tags
+ *
+ * `[emote:curious]` at the start of a sentence, written by the model on the
+ * local voice surface while an expressive body is present (the
+ * EXPRESSION_DIRECTIVE).  The tag is taken out of each spoken sentence (its
+ * name goes to TTS, which publishes it as the sentence starts playing) and out
+ * of the finished reply, so it is never spoken, shown or stored.
+ * ============================================================================= */
+
+#define EMOTE_TAG_OPEN "[emote:"
+#define EMOTE_TAG_OPEN_LEN 7
+#define EMOTE_NAME_MAX 24 /* Longest name accepted inside a tag, plus margin */
+#define EMOTE_TAG_SPAN 48 /* A "]" this far past the opener closes a malformed tag */
+
+/* The vocabulary: the prompt lists it and the strip accepts only these.  Feelings
+ * are how FRIDAY feels, spread over what a viewer can read on a low-DoF body
+ * (positive or negative, calm or excited); acts are what she is doing in the
+ * sentence.  The robot bridge maps each name to moves in its own config
+ * (services/reachy-bridge/reachy-bridge.toml); tests/check_reachy_vocab_mirror.sh
+ * keeps the two in step. */
+#define EMOTE_FEELINGS(X) \
+   X(happy)               \
+   X(excited)             \
+   X(calm)                \
+   X(curious)             \
+   X(surprised)           \
+   X(confused)            \
+   X(concerned)           \
+   X(sad)                 \
+   X(frustrated)
+#define EMOTE_ACTS(X) \
+   X(nod)             \
+   X(no)              \
+   X(unsure)          \
+   X(done)            \
+   X(thinking)        \
+   X(greeting)        \
+   X(grateful)        \
+   X(laugh)           \
+   X(oops)
+#define EMOTE_NAMES(X) EMOTE_FEELINGS(X) EMOTE_ACTS(X)
+#define EMOTE_NAME_AS_TEXT(name) " " #name
+#define EMOTE_FEELINGS_TEXT EMOTE_FEELINGS(EMOTE_NAME_AS_TEXT) /* " happy excited ..." */
+#define EMOTE_ACTS_TEXT EMOTE_ACTS(EMOTE_NAME_AS_TEXT)         /* " nod no ..." */
+
+/**
+ * @brief Strip every `[emote:<name>]` tag from complete text, in place.
+ *
+ * A tag is the opener (any case), a name of letters, `_` or `-` (optionally
+ * spaced, any case), and `]`; one space after it goes too.  What the model gets
+ * slightly wrong ("[emote: happy, curious]", an unknown name) is removed as
+ * well, with no name, so it is never spoken: anything the opener starts that a
+ * `]` closes on the same line within EMOTE_TAG_SPAN.  Otherwise it is text.
+ *
+ * Strip these BEFORE <cited>: removing one can join the text around it, and
+ * the later strip must see the result.
+ *
+ * @param text      NUL-terminated, mutable C string. NULL is tolerated (no-op).
+ * @param name_out  Receives the first vocabulary name found, lower-case, or ""
+ *                  (may be NULL when the name isn't wanted)
+ * @param name_size Size of @p name_out (at least EMOTE_NAME_MAX)
+ * @return true when a vocabulary name was found
+ */
+bool text_filter_emote_strip(char *text, char *name_out, size_t name_size);
+
+/* =============================================================================
+ * Pieces of a stream chunk
+ * ============================================================================= */
+
+#define TEXT_PIECE_MAX 1023 /* Longest piece text_split_pieces hands out */
+#define TEXT_PIECE_MIN 4    /* Shortest limit: the longest UTF-8 character */
+
+/** Receives one NUL-terminated piece of text_split_pieces' input. */
+typedef void (*text_piece_fn)(const char *piece, void *ctx);
+
+/**
+ * @brief Hand @p text to @p fn in order, in pieces of at most @p max_bytes
+ *
+ * For a caller that filters a stream chunk into a fixed buffer: a provider's
+ * chunk has no size limit.  Text no longer than @p max_bytes is passed through
+ * as is (the same pointer), in one call; longer text is copied out piece by
+ * piece.  Each cut is moved back over the continuation bytes (10xxxxxx) after
+ * it to the start of a character, so with valid UTF-8 every piece is whole
+ * characters.  Invalid UTF-8 is passed on byte for byte, nothing dropped or
+ * changed: a cut is placed by the same rule, and a run of continuation bytes
+ * reaching back to the piece's start is cut at @p max_bytes.  The tag filters
+ * keep their state across calls, so a tag cut between two pieces is handled
+ * as one cut between chunks.
+ *
+ * @param text      NUL-terminated text; NULL or "" calls nothing
+ * @param max_bytes Longest piece: 0 or over TEXT_PIECE_MAX means TEXT_PIECE_MAX,
+ *                  under TEXT_PIECE_MIN means TEXT_PIECE_MIN
+ * @param fn        Called once per piece
+ * @param ctx       Passed to @p fn
+ */
+void text_split_pieces(const char *text, size_t max_bytes, text_piece_fn fn, void *ctx);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* TEXT_FILTER_H */

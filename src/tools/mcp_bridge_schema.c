@@ -467,3 +467,31 @@ void mcp_param_set_free(mcp_param_set_t *out) {
    out->params = NULL;
    out->param_count = 0;
 }
+
+static bool tools_list_has(struct json_object *tools, const char *name) {
+   int n = (int)json_object_array_length(tools);
+   for (int i = 0; i < n; i++) {
+      struct json_object *name_obj = NULL;
+      if (json_object_object_get_ex(json_object_array_get_idx(tools, i), "name", &name_obj) &&
+          json_object_is_type(name_obj, json_type_string) &&
+          strcmp(json_object_get_string(name_obj), name) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
+bool mcp_schema_is_agent_gateway(struct json_object *tools) {
+   if (tools == NULL || !json_object_is_type(tools, json_type_array)) {
+      return false;
+   }
+   return tools_list_has(tools, "task_start") && tools_list_has(tools, "task_events");
+}
+
+bool mcp_schema_takes_user_id(struct json_object *input_schema) {
+   struct json_object *props = NULL;
+   return input_schema != NULL && json_object_is_type(input_schema, json_type_object) &&
+          json_object_object_get_ex(input_schema, "properties", &props) &&
+          json_object_is_type(props, json_type_object) &&
+          json_object_object_get_ex(props, "dawn_user_id", NULL);
+}

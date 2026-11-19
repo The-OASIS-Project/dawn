@@ -22,7 +22,7 @@
  *
  * Implements OCP v1.3 Component Status protocol:
  * - Publishes dawn/status with LWT and heartbeat
- * - Subscribes to hud/status for Mirage presence
+ * - Subscribes to hud/status (Mirage) and reachy/status (an expressive body)
  * - Enables/disables armor tools based on HUD availability
  */
 
@@ -35,9 +35,11 @@
 #include <unistd.h>
 
 #include "core/ocp_helpers.h"
+#include "core/session_manager.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
+#include "prompts.h"
 #include "tools/hud_discovery.h"
 #include "version.h"
 
@@ -53,9 +55,31 @@ static pthread_t s_heartbeat_thread;
 static _Atomic bool s_heartbeat_running = false;  // atomic: written on shutdown, read in loop
 static struct mosquitto *s_mosq = NULL;
 
-/* HUD status tracking */
-static bool s_hud_online = false;
-static time_t s_hud_last_seen = 0;
+/* The peers whose presence DAWN follows (under s_status_mutex). */
+typedef enum {
+   PEER_HUD,
+   PEER_REACHY,
+   PEER_COUNT
+} peer_id_t;
+
+typedef struct {
+   const char *topic;
+   const char *name;
+   /* What follows it coming or going, called with no lock held.  @p was_seen:
+    * it had been online before since DAWN started. */
+   void (*changed)(bool online, bool was_seen);
+   bool online;
+   bool seen;
+   time_t last_seen;
+} peer_t;
+
+static void hud_changed(bool online, bool was_seen);
+static void reachy_changed(bool online, bool was_seen);
+
+static peer_t s_peers[PEER_COUNT] = {
+   [PEER_HUD] = { STATUS_TOPIC_HUD, "HUD", hud_changed, false, false, 0 },
+   [PEER_REACHY] = { STATUS_TOPIC_REACHY, "Reachy", reachy_changed, false, false, 0 },
+};
 
 /* =============================================================================
  * Internal Helpers
@@ -100,10 +124,8 @@ static int publish_status(struct mosquitto *mosq, const char *status, bool retai
 
    int rc = mosquitto_publish(mosq, NULL, STATUS_TOPIC_DAWN, (int)strlen(payload), payload, 1,
                               retain);
-   if (rc != MOSQ_ERR_SUCCESS) {
+   if (rc != MOSQ_ERR_SUCCESS) { /* success isn't logged: it's every heartbeat */
       OLOG_ERROR("Failed to publish dawn status: %s", mosquitto_strerror(rc));
-   } else {
-      OLOG_INFO("Published dawn status: %s", status);
    }
 
    free(payload);
@@ -111,30 +133,71 @@ static int publish_status(struct mosquitto *mosq, const char *status, bool retai
 }
 
 /**
- * @brief Check HUD timeout and update state
+ * @brief The HUD came or went: the armor tools follow it
  */
-static void check_hud_timeout(void) {
+static void hud_changed(bool online, bool was_seen) {
+   (void)was_seen;
+   if (online && s_mosq) {
+      hud_discovery_request_update(s_mosq); /* what it offers now */
+   }
+   llm_tools_refresh();
+   llm_tools_invalidate_cache();
+   /* Each conversation's next turn tells the model what is unavailable
+    * now (its standing directions). */
+   invalidate_system_instructions();
+}
+
+/**
+ * @brief The robot body came or went: the voice surface's next turn is told
+ *
+ * The standing directions change too, but only by leaving the expression
+ * directive out, which the model doesn't read as "the body is gone"; this says
+ * it once, in the next turn's context.
+ */
+static void reachy_changed(bool online, bool was_seen) {
+   /* Its first coming online since DAWN started isn't news: the standing
+    * directions say it. */
+   if (online && !was_seen) {
+      return;
+   }
+   session_post_notice(session_get_local(), online ? REACHY_BACK_NOTICE : REACHY_GONE_NOTICE);
+}
+
+/**
+ * @brief Mark peers whose heartbeat stopped offline
+ *
+ * Each lost peer's changed() runs after the lock is released.
+ */
+static void check_peer_timeouts(void) {
+   bool lost[PEER_COUNT] = { false };
+   time_t now = time(NULL);
+
    pthread_mutex_lock(&s_status_mutex);
-
-   if (s_hud_online && s_hud_last_seen > 0) {
-      time_t now = time(NULL);
-      if ((now - s_hud_last_seen) > STATUS_TIMEOUT_SEC) {
-         OLOG_WARNING("HUD heartbeat timeout (%ld seconds), marking offline",
-                      (long)(now - s_hud_last_seen));
-         s_hud_online = false;
-
-         /* Refresh tool availability (will disable armor tools) */
-         pthread_mutex_unlock(&s_status_mutex);
-         llm_tools_refresh();
-         llm_tools_invalidate_cache();
-         /* Each conversation's next turn tells the model what is unavailable
-          * now (its standing directions). */
-         invalidate_system_instructions();
-         return;
+   for (int i = 0; i < PEER_COUNT; i++) {
+      peer_t *peer = &s_peers[i];
+      if (peer->online && peer->last_seen > 0 && (now - peer->last_seen) > STATUS_TIMEOUT_SEC) {
+         OLOG_WARNING("%s heartbeat timeout (%ld seconds), marking offline", peer->name,
+                      (long)(now - peer->last_seen));
+         peer->online = false;
+         lost[i] = true;
       }
    }
-
    pthread_mutex_unlock(&s_status_mutex);
+
+   for (int i = 0; i < PEER_COUNT; i++) {
+      if (lost[i]) {
+         s_peers[i].changed(false, true); /* it was online, so seen */
+      }
+   }
+}
+
+static bool peer_is_online(peer_id_t id) {
+   pthread_mutex_lock(&s_status_mutex);
+   const peer_t *peer = &s_peers[id];
+   bool online = peer->online &&
+                 !(peer->last_seen > 0 && (time(NULL) - peer->last_seen) > STATUS_TIMEOUT_SEC);
+   pthread_mutex_unlock(&s_status_mutex);
+   return online;
 }
 
 /**
@@ -160,8 +223,7 @@ static void *heartbeat_thread_func(void *arg) {
          publish_status(s_mosq, "online", true);
       }
 
-      /* Check for HUD timeout */
-      check_hud_timeout();
+      check_peer_timeouts();
    }
 
    OLOG_INFO("Heartbeat thread stopped");
@@ -205,27 +267,31 @@ int component_status_init(struct mosquitto *mosq) {
 
    pthread_mutex_lock(&s_status_mutex);
 
+   /* Every connect, not just the first: the client's session is clean, so the
+    * broker forgets the subscription when the connection drops, and a dropped
+    * connection publishes our "offline" will, which stands until we say
+    * "online" again. */
+   for (int i = 0; i < PEER_COUNT; i++) {
+      int rc = mosquitto_subscribe(mosq, NULL, s_peers[i].topic, 1);
+      if (rc != MOSQ_ERR_SUCCESS) {
+         OLOG_ERROR("Failed to subscribe to %s: %s", s_peers[i].topic, mosquitto_strerror(rc));
+         pthread_mutex_unlock(&s_status_mutex);
+         return 1;
+      }
+      OLOG_INFO("Subscribed to %s", s_peers[i].topic);
+   }
+
+   if (publish_status(mosq, "online", true) != 0) {
+      pthread_mutex_unlock(&s_status_mutex);
+      return 1;
+   }
+
    if (s_initialized) {
       pthread_mutex_unlock(&s_status_mutex);
       return 0;
    }
 
    s_mosq = mosq;
-
-   /* Subscribe to HUD status */
-   int rc = mosquitto_subscribe(mosq, NULL, STATUS_TOPIC_HUD, 1);
-   if (rc != MOSQ_ERR_SUCCESS) {
-      OLOG_ERROR("Failed to subscribe to %s: %s", STATUS_TOPIC_HUD, mosquitto_strerror(rc));
-      pthread_mutex_unlock(&s_status_mutex);
-      return 1;
-   }
-   OLOG_INFO("Subscribed to %s", STATUS_TOPIC_HUD);
-
-   /* Publish online status */
-   if (publish_status(mosq, "online", true) != 0) {
-      pthread_mutex_unlock(&s_status_mutex);
-      return 1;
-   }
 
    /* Start heartbeat thread */
    s_heartbeat_running = true;
@@ -267,8 +333,11 @@ void component_status_shutdown(void) {
    pthread_mutex_lock(&s_status_mutex);
    s_initialized = false;
    s_mosq = NULL;
-   s_hud_online = false;
-   s_hud_last_seen = 0;
+   for (int i = 0; i < PEER_COUNT; i++) {
+      s_peers[i].online = false;
+      s_peers[i].seen = false;
+      s_peers[i].last_seen = 0;
+   }
    pthread_mutex_unlock(&s_status_mutex);
 
    OLOG_INFO("Component status shutdown complete");
@@ -283,15 +352,19 @@ void component_status_handle_message(const char *topic, const char *payload, int
       return;
    }
 
-   /* Only handle hud/status */
-   if (strcmp(topic, STATUS_TOPIC_HUD) != 0) {
+   int id = 0;
+   while (id < PEER_COUNT && strcmp(topic, s_peers[id].topic) != 0) {
+      id++;
+   }
+   if (id == PEER_COUNT) {
       return;
    }
+   const char *name = s_peers[id].name;
 
    /* Parse JSON */
    struct json_object *root = json_tokener_parse(payload);
    if (!root) {
-      OLOG_WARNING("Failed to parse HUD status message");
+      OLOG_WARNING("Failed to parse %s status message", name);
       return;
    }
 
@@ -308,7 +381,7 @@ void component_status_handle_message(const char *topic, const char *payload, int
    /* Extract status */
    struct json_object *status_obj = NULL;
    if (!json_object_object_get_ex(root, "status", &status_obj)) {
-      OLOG_WARNING("HUD status message missing 'status' field");
+      OLOG_WARNING("%s status message missing 'status' field", name);
       json_object_put(root);
       return;
    }
@@ -327,33 +400,24 @@ void component_status_handle_message(const char *topic, const char *payload, int
 
    /* Update state */
    pthread_mutex_lock(&s_status_mutex);
-   bool was_online = s_hud_online;
-   s_hud_online = is_online;
+   bool was_online = s_peers[id].online;
+   bool was_seen = s_peers[id].seen;
+   s_peers[id].seen = s_peers[id].seen || is_online;
+   s_peers[id].online = is_online;
    if (is_online) {
-      s_hud_last_seen = time(NULL);
+      s_peers[id].last_seen = time(NULL);
    }
    pthread_mutex_unlock(&s_status_mutex);
 
-   /* Log state change */
    if (is_online && !was_online) {
-      OLOG_INFO("HUD is now ONLINE (timestamp=%ld)", (long)timestamp);
-
-      /* Request discovery now that HUD is online */
-      if (s_mosq) {
-         hud_discovery_request_update(s_mosq);
-      }
+      OLOG_INFO("%s is now ONLINE (timestamp=%ld)", name, (long)timestamp);
    } else if (!is_online && was_online) {
-      OLOG_INFO("HUD is now OFFLINE (timestamp=%ld, LWT=%s)", (long)timestamp,
+      OLOG_INFO("%s is now OFFLINE (timestamp=%ld, LWT=%s)", name, (long)timestamp,
                 timestamp == 0 ? "yes" : "no");
    }
 
-   /* Refresh tool availability */
    if (is_online != was_online) {
-      llm_tools_refresh();
-      llm_tools_invalidate_cache();
-      /* Each conversation's next turn tells the model what is unavailable
-       * now (its standing directions). */
-      invalidate_system_instructions();
+      s_peers[id].changed(is_online, was_seen);
    }
 }
 
@@ -362,28 +426,19 @@ void component_status_handle_message(const char *topic, const char *payload, int
  * ============================================================================= */
 
 bool component_status_is_hud_online(void) {
-   pthread_mutex_lock(&s_status_mutex);
+   return peer_is_online(PEER_HUD);
+}
 
-   bool online = s_hud_online;
-
-   /* Also check for timeout */
-   if (online && s_hud_last_seen > 0) {
-      time_t now = time(NULL);
-      if ((now - s_hud_last_seen) > STATUS_TIMEOUT_SEC) {
-         online = false;
-      }
-   }
-
-   pthread_mutex_unlock(&s_status_mutex);
-   return online;
+bool component_status_is_reachy_online(void) {
+   return peer_is_online(PEER_REACHY);
 }
 
 int component_status_get_hud_age(void) {
    pthread_mutex_lock(&s_status_mutex);
 
    int age = -1;
-   if (s_hud_last_seen > 0) {
-      age = (int)(time(NULL) - s_hud_last_seen);
+   if (s_peers[PEER_HUD].last_seen > 0) {
+      age = (int)(time(NULL) - s_peers[PEER_HUD].last_seen);
    }
 
    pthread_mutex_unlock(&s_status_mutex);

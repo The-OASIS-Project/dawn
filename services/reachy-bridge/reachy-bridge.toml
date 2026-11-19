@@ -1,0 +1,123 @@
+# reachy-bridge configuration.  Angles in degrees, distances in mm, times in
+# seconds.  Postures and the motion amounts are first guesses: tune them on the
+# robot.  MQTT credentials are NOT here: set REACHY_BRIDGE_MQTT_USER and
+# REACHY_BRIDGE_MQTT_PASSWORD in ~/.config/reachy-bridge/env (mode 600).
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+tls = false
+# ca_file = "/etc/mosquitto/certs/ca.crt"   # with tls = true (port 8883)
+
+[daemon]
+port = 8000
+
+[clips]
+dataset = "pollen-robotics/reachy-mini-emotions-library"
+
+[timing]
+mixer_hz = 50
+idle_hz = 15                 # when only breathing; any event from DAWN wakes it at once
+posture_smoothing = 0.12     # fraction of the way to the new posture per tick
+listen_hold_s = 6.0          # stay attentive this long after the wake word
+speaking_hold_s = 0.6        # bridges the gap while the next sentence is synthesized
+speaking_max_s = 60.0        # a sentence with no speaking_end ends after this
+expression_min_gap_s = 1.5
+clip_min_s = 1.0             # an expression holds at least this long, then lasts while she speaks
+clip_fade_in_s = 0.25
+clip_fade_out_s = 0.4
+offline_grace_s = 5.0        # a drop this short isn't passed on: robot gone (to DAWN), DAWN gone (to the robot)
+
+[neutral]
+antennas_deg = [-10.0, 10.0] # [right, left]; the SDK's resting position
+
+# Offsets from neutral for each thing DAWN can be doing.
+[posture.idle]
+xyz_mm = [0, 0, 0]
+rpy_deg = [0, 0, 0]
+antennas_deg = [0, 0]
+
+[posture.listening]
+xyz_mm = [0, 0, 6]
+rpy_deg = [0, -6, 0]
+antennas_deg = [10, -10]     # upright
+
+[posture.thinking]
+xyz_mm = [0, 0, 2]
+rpy_deg = [6, -3, 0]
+antennas_deg = [-5, 25]      # one up, one out
+
+[posture.speaking]
+xyz_mm = [0, 0, 4]
+rpy_deg = [0, -2, 0]
+antennas_deg = [5, -5]
+
+[idle]
+breath_period_s = 5.0
+breath_z_mm = 1.5
+breath_pitch_deg = 1.0
+antenna_period_s = 11.0
+antenna_drift_deg = 4.0
+listening_damp = 0.15        # stillness reads as attention
+speaking_damp = 0.4
+sleep_after_s = 900          # asleep after this long with no turn and nothing said
+
+[gaze]
+poll_hz = 10
+max_yaw_deg = 45
+window_max_s = 4.0          # stop listening for direction this long after speech began
+hold_s = 8.0                 # keep looking this long after the turn ends
+return_s = 2.0
+
+[speech]
+monitor_source = "@DEFAULT_MONITOR@"   # or "<DAWN's playback sink>.monitor"
+gain = 6.0
+attack = 0.5
+release = 0.15
+wobble_hz = 3.0
+z_mm = 3.0
+roll_deg = 3.0
+pitch_deg = 4.0
+yaw_deg = 2.0
+
+[audio]                      # the mic array's health (a stalled mic is rebooted, the speaker kept balanced)
+device_match = "Pollen_Robotics_Reachy_Mini_Audio"   # in the PulseAudio source/sink names
+stalled_after_s = 60         # only exact zeros this long: the XVF3800 has stalled
+
+[limits]                     # hard clamps on everything the mixer sends
+xyz_mm = [10, 10, 15]
+rpy_deg = [25, 25, 60]
+antenna_deg = 60
+
+[moments]
+clip_sway = 0.3              # speech motion under a playing expression (1.0 = unchanged)
+think_after_s = 2.5          # thinking this long with nothing said: a look from the `thinking` moves
+think_repeat_gap_s = 4.0     # and another only this long after the last one ended
+yawn = { moves = ["tired1"], scale = 0.6 }   # before the idle sleep; "" for none
+
+# DAWN's expression vocabulary -> moves from the clips dataset, picked at random
+# (never the one just played; none of the last three while others remain).  Names must match EMOTE_FEELINGS and
+# EMOTE_ACTS in include/core/text_filter.h (tests/check_reachy_vocab_mirror.sh
+# checks); a move the library lacks is skipped with a warning.  scale shrinks a
+# big gesture to fit under speech.
+[expressions]
+# Feelings: positive or negative, calm or excited.
+happy = { moves = ["cheerful1", "enthusiastic2"], scale = 0.5 }
+excited = { moves = ["enthusiastic1", "success2"], scale = 0.5 }
+calm = { moves = ["calming1", "serenity1", "relief1"], scale = 0.5 }
+curious = { moves = ["inquiring1", "inquiring2", "inquiring3"], scale = 0.6 }
+surprised = { moves = ["surprised1", "surprised2", "amazed1"], scale = 0.5 }
+confused = { moves = ["confused1", "incomprehensible2", "lost1"], scale = 0.6 }
+concerned = { moves = ["anxiety1"], scale = 0.4 }
+sad = { moves = ["downcast1", "sad2"], scale = 0.5 }
+frustrated = { moves = ["frustrated1", "irritated1"], scale = 0.4 }
+# Acts: what FRIDAY is doing in the sentence.
+nod = { moves = ["understanding1", "understanding2", "yes1", "helpful1"], scale = 0.7 }
+no = { moves = ["no1", "displeased2", "no_excited1"], scale = 0.6 }
+unsure = { moves = ["uncertain1", "indifferent1"], scale = 0.6 }
+done = { moves = ["success1", "proud3"], scale = 0.6 }
+thinking = { moves = ["thoughtful1", "thoughtful2"], scale = 0.6 }
+greeting = { moves = ["welcoming1", "welcoming2"], scale = 0.7 }
+grateful = { moves = ["grateful1", "helpful2"], scale = 0.6 }
+laugh = { moves = ["laughing1", "laughing2"], scale = 0.5 }
+oops = { moves = ["oops1", "oops2"], scale = 0.6 }

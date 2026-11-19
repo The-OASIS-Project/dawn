@@ -144,7 +144,7 @@ int webui_ota_push(const char *uuid, const char *version, bool allow_downgrade) 
     * (DAP2 capabilities.ota).  Offering to one that didn't opt in would, if its
     * firmware ignores the offer, wedge the single-flight 'offered' row until the
     * download token expires. */
-   if (!session->capabilities.ota) {
+   if (!session_capabilities(session).ota) {
       session_release(session);
       OLOG_WARNING("OTA: %s does not advertise OTA capability — push refused", uuid);
       return AUTH_DB_FAILURE;

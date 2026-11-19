@@ -57,6 +57,8 @@ void config_set_defaults(dawn_config_t *config) {
 
    /* Persona - empty means use compile-time default from prompts.h */
    config->persona.description[0] = '\0';
+   config->persona.values[0] = '\0';
+   config->persona.voice[0] = '\0';
 
    /* Localization */
    config->localization.location[0] = '\0'; /* No default location */
@@ -114,8 +116,9 @@ void config_set_defaults(dawn_config_t *config) {
    /* LLM */
    safe_strscpy(config->llm.type, "cloud");
    config->llm.local_fallback = false; /* opt-in: a local LLM the user set up */
-   config->llm.max_tokens = 16384;     /* Generous, universally-safe ceiling (= GPT-4o max output,
-                                          well within Claude 4.x 64K); a ceiling, not a target */
+   config->llm.max_tokens = 16384;     /* Universally-safe ceiling (= GPT-4o max output); a streamed
+                                          reply that reasons gets more by its effort
+                                          (llm_reply_max_tokens) */
 
    /* LLM Cloud */
    config->llm.cloud.provider[0] = '\0'; /* Empty = not selected: the local LLM */
@@ -327,6 +330,7 @@ void config_set_defaults(dawn_config_t *config) {
    safe_strscpy(config->memory.extraction_model, "qwen2.5:7b");
    config->memory.extraction_timeout_ms = 120000; /* 2 minutes for fact extraction */
    safe_strscpy(config->memory.extraction_effort, "off");
+   safe_strscpy(config->memory.consolidator, "prompt");
    config->memory.pruning_enabled = true;
    config->memory.prune_superseded_days = 30; /* Delete old superseded facts after 30 days */
    config->memory.prune_stale_days = 180; /* Delete unused low-confidence facts after 6 months */

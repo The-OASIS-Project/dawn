@@ -19,7 +19,7 @@
  * Note-extraction guard — see include/memory/memory_note_guard.h for the
  * rationale.  Two responsibilities: (1) COLLECT, from the full conversation
  * history, the bodies filed via the document_manage save_note/save_text tool
- * and the call-ids of document_read/document_search results that echo stored
+ * and the call-ids of document_read/search/grep results that echo stored
  * text; (2) REDACT those bodies (and echoes) from a per-message copy at
  * extraction time.  Both provider history shapes are handled.
  */
@@ -38,7 +38,7 @@
  * verbatim body is gone. */
 #define GUARD_FILED_MARKER_PLAIN "[filed to notes store]"
 
-/* Marker substituted for a document_read/document_search result that echoes
+/* Marker substituted for a document_read/search/grep result that echoes
  * stored content.  Unconditional for those calls — it is our own deterministic
  * tool output mirroring text already in the document store. */
 #define GUARD_ECHO_MARKER \
@@ -71,7 +71,7 @@ struct memory_note_guard {
    guard_body_t *bodies; /* filed bodies + labels (owned) */
    int body_count;
    int body_cap;
-   char **read_ids; /* tool_call_ids of document_read/search calls (owned) */
+   char **read_ids; /* tool_call_ids of document_read/search/grep calls (owned) */
    int read_id_count;
    int read_id_cap;
 };
@@ -220,7 +220,8 @@ static void guard_collect_tool(memory_note_guard_t *g,
             }
          }
       }
-   } else if (strcmp(name, "document_read") == 0 || strcmp(name, "document_search") == 0) {
+   } else if (strcmp(name, "document_read") == 0 || strcmp(name, "document_search") == 0 ||
+              strcmp(name, "document_grep") == 0) {
       guard_add_read_id(g, id);
    }
 }

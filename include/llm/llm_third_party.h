@@ -23,6 +23,8 @@
 #ifndef LLM_THIRD_PARTY_H
 #define LLM_THIRD_PARTY_H
 
+#include "core/outside_kind.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -49,6 +51,15 @@ char *llm_third_party_frame(const char *name, const char *tag, const char *body)
  *         NULL for none
  */
 const char *llm_third_party_present(const char *text);
+
+/**
+ * @brief The outside kind of text in frame @p frame (a TOOL_FRAME_*, as
+ *        llm_third_party_present returns it): OUTSIDE_EMAIL for an email,
+ *        OUTSIDE_WEB for a page, OUTSIDE_DOCUMENT for a document,
+ *        OUTSIDE_CALENDAR for calendar events; OUTSIDE_OTHER for NULL or any
+ *        other name
+ */
+outside_kind_t llm_third_party_outside_kind(const char *frame);
 
 #ifdef __cplusplus
 }

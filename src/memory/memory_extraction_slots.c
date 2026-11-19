@@ -241,6 +241,14 @@ bool extraction_slot_claim_or_queue(int user_id,
    return false;
 }
 
+bool extraction_slot_claim(int user_id) {
+   pthread_mutex_lock(&s_extraction_mutex);
+   const bool got = !atomic_load(&s_queue_stopped) && !hold_waiting_locked(user_id) &&
+                    extraction_slot_acquire_locked(user_id);
+   pthread_mutex_unlock(&s_extraction_mutex);
+   return got;
+}
+
 void extraction_record_outcome(int user_id, bool was_transient) {
    pthread_mutex_lock(&s_extraction_mutex);
    set_last_outcome_locked(user_id, was_transient);
@@ -329,6 +337,10 @@ void memory_extraction_unqueue_user(int user_id) {
    pthread_mutex_lock(&s_extraction_mutex);
    extraction_queue_drop_user(user_id);
    pthread_mutex_unlock(&s_extraction_mutex);
+}
+
+bool memory_extraction_stopping(void) {
+   return atomic_load(&s_queue_stopped);
 }
 
 void memory_extraction_stop_queue(void) {

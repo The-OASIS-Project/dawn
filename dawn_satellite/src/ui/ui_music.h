@@ -81,6 +81,7 @@ struct ui_music {
    music_track_t queue[MUSIC_MAX_QUEUE];
    int queue_count;
    int queue_index;
+   int queue_rev; /* The daemon's queue_rev when the list was last fetched */
 
    /* Library browse */
    music_browse_type_t browse_type;

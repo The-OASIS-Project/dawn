@@ -52,7 +52,8 @@ int memory_db_fact_list_superseded(int user_id,
    int rc = sqlite3_prepare_v2(
        s_db.db,
        "SELECT f.id, f.superseded_by, COALESCE(f.superseded_at, 0), "
-       "f.fact_text, COALESCE(k.fact_text, ''), f.superseded_kind FROM memory_facts f "
+       "f.fact_text, COALESCE(k.fact_text, ''), f.superseded_kind, f.outside, "
+       "COALESCE(k.outside, 0) FROM memory_facts f "
        "LEFT JOIN memory_facts k ON k.id = f.superseded_by AND k.user_id = f.user_id "
        "WHERE +f.user_id = ?1 AND f.superseded_by IS NOT NULL "
        "AND (?2 = 0 OR f.superseded_by = ?2) "
@@ -84,6 +85,8 @@ int memory_db_fact_list_superseded(int user_id,
       safe_strscpy(f->text, t ? t : "");
       safe_strscpy(f->keeper_text, k ? k : "");
       f->replaced = sqlite3_column_int(st, 5) == MEMORY_SUPERSEDED_REPLACED;
+      f->outside = sqlite3_column_int(st, 6);
+      f->keeper_outside = sqlite3_column_int(st, 7);
    }
    sqlite3_finalize(st);
    AUTH_DB_UNLOCK();
@@ -203,14 +206,12 @@ static bool restore_moved_back_locked(int user_id, int64_t fact_id) {
               user_id, fact_id, 0) == SQLITE_DONE;
 }
 
-int memory_db_fact_restore(int user_id, int64_t fact_id, memory_restore_result_t *out) {
-   if (out) {
-      memset(out, 0, sizeof(*out));
-   }
-   if (user_id <= 0 || fact_id <= 0) {
-      return MEMORY_DB_FAILURE;
-   }
-   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+int memory_db_internal_fact_restore_locked(int user_id,
+                                           int64_t fact_id,
+                                           int64_t *keeper_out,
+                                           memory_restore_result_t *out) {
+   memset(out, 0, sizeof(*out));
+   *keeper_out = 0;
    int64_t keeper_id = 0;
    /* Whether a newer value stays current beside it: some link up its chain
     * is a replace, and the chain reaches a current fact (a walk that runs out
@@ -239,37 +240,97 @@ int memory_db_fact_restore(int user_id, int64_t fact_id, memory_restore_result_t
    }
    sqlite3_finalize(st);
    if (keeper_id <= 0) {
-      AUTH_DB_UNLOCK();
       return MEMORY_DB_NOT_FOUND; /* not the user's, or not superseded */
    }
-
-   bool ok = auth_db_txn_begin_locked("memory_db: restore") == AUTH_DB_SUCCESS;
-   ok = ok && memory_db_internal_exec_locked("UPDATE memory_facts SET superseded_by = NULL, "
-                                             "superseded_at = NULL, merged_from_id = NULL, "
-                                             "superseded_kind = " MEMORY_MERGED_SQL
-                                             " WHERE id = ?2 AND user_id = ?1",
-                                             user_id, fact_id, 0) == SQLITE_DONE;
+   bool ok = memory_db_internal_exec_locked("UPDATE memory_facts SET superseded_by = NULL, "
+                                            "superseded_at = NULL, merged_from_id = NULL, "
+                                            "superseded_kind = " MEMORY_MERGED_SQL
+                                            " WHERE id = ?2 AND user_id = ?1",
+                                            user_id, fact_id, 0) == SQLITE_DONE;
    ok = ok && restore_moved_back_locked(user_id, fact_id);
    int reopened = 0;
    int kept_closed = 0;
    ok = ok && reopen_relations_locked(user_id, fact_id, keeper_id, &reopened, &kept_closed) ==
                   MEMORY_DB_SUCCESS;
-   const bool committed = auth_db_txn_end_locked(ok ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE,
+   if (!ok) {
+      return MEMORY_DB_FAILURE;
+   }
+   *keeper_out = keeper_id;
+   out->reopened = reopened;
+   out->kept_closed = kept_closed;
+   out->replaced = newer_current;
+   return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_fact_restore(int user_id, int64_t fact_id, memory_restore_result_t *out) {
+   memory_restore_result_t local;
+   if (!out) {
+      out = &local;
+   }
+   memset(out, 0, sizeof(*out));
+   if (user_id <= 0 || fact_id <= 0) {
+      return MEMORY_DB_FAILURE;
+   }
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   if (auth_db_txn_begin_locked("memory_db: restore") != AUTH_DB_SUCCESS) {
+      AUTH_DB_UNLOCK();
+      return MEMORY_DB_FAILURE;
+   }
+   int64_t keeper_id = 0;
+   int rc = memory_db_internal_fact_restore_locked(user_id, fact_id, &keeper_id, out);
+   /* The consolidation ops that retired it can't be undone now: restored and
+    * maybe retired again since, it isn't what they left. */
+   if (rc == MEMORY_DB_SUCCESS &&
+       memory_db_internal_exec_locked("UPDATE memory_consolidation_ops SET status = 'stale' WHERE "
+                                      "user_id = ?1 AND fact_id = ?2 AND op IN ('merged', "
+                                      "'replaced') AND status = 'applied'",
+                                      user_id, fact_id, 0) != SQLITE_DONE) {
+      rc = MEMORY_DB_FAILURE;
+   }
+   const bool committed = auth_db_txn_end_locked(rc == MEMORY_DB_SUCCESS ? AUTH_DB_SUCCESS
+                                                                         : AUTH_DB_FAILURE,
                                                  "memory_db: restore") == AUTH_DB_SUCCESS;
    AUTH_DB_UNLOCK();
-   if (!ok || !committed) {
-      return MEMORY_DB_FAILURE;
+   if (rc != MEMORY_DB_SUCCESS || !committed) {
+      memset(out, 0, sizeof(*out));
+      return rc == MEMORY_DB_NOT_FOUND ? MEMORY_DB_NOT_FOUND : MEMORY_DB_FAILURE;
    }
    /* The fact cache holds current facts only: this one is current again.
     * Off the DB lock (a reload reads the DB under the cache's lock). */
    memory_embeddings_invalidate_cache_for_user(user_id);
    OLOG_INFO("memory_db: user %d restored fact %lld (was superseded by %lld; %d relation(s) "
              "reopened)",
-             user_id, (long long)fact_id, (long long)keeper_id, reopened);
-   if (out) {
-      out->reopened = reopened;
-      out->kept_closed = kept_closed;
-      out->replaced = newer_current;
-   }
+             user_id, (long long)fact_id, (long long)keeper_id, out->reopened);
    return MEMORY_DB_SUCCESS;
+}
+
+int memory_db_internal_relation_reopen_locked(int user_id, int64_t relation_id, bool *reopened) {
+   *reopened = false;
+   sqlite3_stmt *sel = NULL;
+   if (sqlite3_prepare_v2(s_db.db, MEMORY_REOPEN_SELECT "AND id = ?2", -1, &sel, NULL) !=
+       SQLITE_OK) {
+      sqlite3_finalize(sel);
+      return MEMORY_DB_FAILURE;
+   }
+   sqlite3_bind_int(sel, 1, user_id);
+   sqlite3_bind_int64(sel, 2, relation_id);
+   int n = 0;
+   int kept_closed = 0;
+   const int rc = memory_db_internal_reopen_rows_locked(user_id, sel, &n, &kept_closed);
+   *reopened = rc == MEMORY_DB_SUCCESS && n > 0;
+   return rc;
+}
+
+int memory_db_relation_reopen(int user_id, int64_t relation_id) {
+   if (user_id <= 0 || relation_id <= 0) {
+      return MEMORY_DB_NOT_FOUND;
+   }
+   AUTH_DB_LOCK_OR_RETURN(MEMORY_DB_FAILURE);
+   bool reopened = false;
+   const int rc = memory_db_internal_relation_reopen_locked(user_id, relation_id, &reopened);
+   AUTH_DB_UNLOCK();
+   if (rc != MEMORY_DB_SUCCESS) {
+      return MEMORY_DB_FAILURE;
+   }
+   return reopened ? MEMORY_DB_SUCCESS : MEMORY_DB_NOT_FOUND;
 }

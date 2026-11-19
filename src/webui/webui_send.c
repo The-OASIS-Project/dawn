@@ -555,6 +555,8 @@ void send_error_frame(struct lws *wsi,
    if (client_ref && client_ref[0]) {
       json_object_object_add(payload, "client_ref", json_object_new_string(client_ref));
    }
+   /* Raised while handling a request of this connection's: say which. */
+   webui_protocol_request_stamp(wsi, payload, true);
    json_object_object_add(obj, "type", json_object_new_string("error"));
    json_object_object_add(obj, "payload", payload);
 

@@ -67,7 +67,8 @@ extern "C" {
  * @brief Initialize the HUD discovery subsystem
  *
  * Subscribes to discovery topics and requests current state from Mirage.
- * Must be called after MQTT connection is established (in on_connect).
+ * Must be called after MQTT connection is established (in on_connect), on
+ * every connect: a reconnect subscribes again and keeps what was discovered.
  *
  * @param mosq Mosquitto client instance
  * @return 0 on success, non-zero on error

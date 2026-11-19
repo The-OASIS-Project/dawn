@@ -42,6 +42,8 @@
 #include <time.h>
 
 #include "auth/auth_db_internal.h"
+#include "core/conv_event.h"    /* CONV_EVENT_AGENT_REQUEST */
+#include "core/event_payload.h" /* EVENT_PAYLOAD_GW_KEY, EVENT_GW_CLOSED */
 #include "logging.h"
 #include "utils/string_utils.h"
 
@@ -278,10 +280,18 @@ int conv_db_create_job_ex(int user_id,
  * ============================================================================= */
 
 /* Shared one-shot UPDATE helper: prepare, bind via callback, step, finalize. */
-static int job_update_exec(const char *sql,
-                           void (*bind)(sqlite3_stmt *st, void *ctx),
-                           void *bind_ctx,
-                           const char *what) {
+#define JOB_ACTIVE_STATUSES "('queued','running')"
+/* Kinds the plain job worker may resume (research and coding have their own). */
+#define JOB_KIND_PLAIN_RESUMABLE_SQL \
+   "(job_kind IS NULL OR job_kind NOT IN ('" JOB_KIND_RESEARCH "','" JOB_KIND_CODING "'))"
+
+/* The one place a job row is updated; @p changed_out (may be NULL) receives
+ * the number of rows the update changed. */
+static int job_update_exec_changed(const char *sql,
+                                   void (*bind)(sqlite3_stmt *st, void *ctx),
+                                   void *bind_ctx,
+                                   const char *what,
+                                   int *changed_out) {
    AUTH_DB_LOCK_OR_FAIL();
    sqlite3_stmt *st = NULL;
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
@@ -293,6 +303,9 @@ static int job_update_exec(const char *sql,
       bind(st, bind_ctx);
    }
    int rc = sqlite3_step(st);
+   if (changed_out != NULL) {
+      *changed_out = sqlite3_changes(s_db.db);
+   }
    sqlite3_finalize(st);
    AUTH_DB_UNLOCK();
    if (rc != SQLITE_DONE) {
@@ -300,6 +313,13 @@ static int job_update_exec(const char *sql,
       return AUTH_DB_FAILURE;
    }
    return AUTH_DB_SUCCESS;
+}
+
+static int job_update_exec(const char *sql,
+                           void (*bind)(sqlite3_stmt *st, void *ctx),
+                           void *bind_ctx,
+                           const char *what) {
+   return job_update_exec_changed(sql, bind, bind_ctx, what, NULL);
 }
 
 int conv_db_job_set_running(int64_t conv_id, time_t started_at) {
@@ -382,6 +402,25 @@ int conv_db_job_set_terminal(int64_t conv_id,
    return job_update_exec(
        "UPDATE conversations SET job_status=?, job_error=?, finished_at=? WHERE id=?",
        bind_terminal, &b, "set_terminal");
+}
+
+int conv_db_job_set_terminal_if_active(int64_t conv_id,
+                                       const char *status,
+                                       const char *error_or_null,
+                                       time_t finished_at) {
+   if (conv_id <= 0 || !status) {
+      return AUTH_DB_INVALID;
+   }
+   struct terminal_bind b = { conv_id, status, error_or_null, finished_at };
+   int changed = 0;
+   int rc = job_update_exec_changed(
+       "UPDATE conversations SET job_status=?, job_error=?, "
+       "finished_at=? WHERE id=? AND job_status IN " JOB_ACTIVE_STATUSES,
+       bind_terminal, &b, "set_terminal_if_active", &changed);
+   if (rc != AUTH_DB_SUCCESS) {
+      return rc;
+   }
+   return changed == 1 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
 static void bind_conv_id_only(sqlite3_stmt *st, void *ctx) {
@@ -508,17 +547,18 @@ int conv_db_job_reset_for_resume(int64_t conv_id, int user_id, bool allow_cancel
     * conversation and corrupt the run (DEEP_RESEARCH_DESIGN §5.5, plan HIGH-2).
     * P0 has no research resume at all; P1 adds a ledger-aware one. Folding the
     * exclusion into the CLAIM keeps it race-free — a research job can never leave
-    * the resumable set here regardless of caller or origin. */
+    * the resumable set here regardless of caller or origin.  'coding' rows are
+    * excluded the same way: their work runs in an agent gateway, not a worker. */
    const char *sql =
        allow_cancelled
            ? "UPDATE conversations SET job_status='queued', job_error=NULL, "
              "started_at=0, finished_at=0, on_complete_fired=0 "
              "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed','cancelled') "
-             "AND (job_kind IS NULL OR job_kind != 'research')"
+             "AND " JOB_KIND_PLAIN_RESUMABLE_SQL
            : "UPDATE conversations SET job_status='queued', job_error=NULL, "
              "started_at=0, finished_at=0, on_complete_fired=0 "
              "WHERE id=? AND user_id=? AND job_status IN ('interrupted','failed') "
-             "AND (job_kind IS NULL OR job_kind != 'research')";
+             "AND " JOB_KIND_PLAIN_RESUMABLE_SQL;
    if (sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL) != SQLITE_OK) {
       OLOG_ERROR("auth_db_jobs: prepare reset_for_resume failed: %s", sqlite3_errmsg(s_db.db));
       AUTH_DB_UNLOCK();
@@ -538,6 +578,71 @@ int conv_db_job_reset_for_resume(int64_t conv_id, int user_id, bool allow_cancel
     * state (running/queued/done, plus cancelled unless @p allow_cancelled).  The
     * caller has already ownership-checked, so this is a state answer, not an
     * authorization one. */
+   return changed == 1 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
+}
+
+int conv_db_job_reopen_coding(int64_t conv_id, int user_id, const char *goal) {
+   if (conv_id <= 0 || user_id <= 0 || goal == NULL) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* The status, owner and kind terms are the claim: two confirms of one job
+    * can't both reopen it.  started_at stays: the job's first start. */
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE conversations SET job_status='queued', job_error=NULL, "
+                          "finished_at=0, on_complete_fired=0, job_goal=? "
+                          "WHERE id=? AND user_id=? AND job_kind='" JOB_KIND_CODING
+                          "' AND job_status IN ('done','failed')",
+                          -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("auth_db_jobs: prepare reopen_coding failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_text(st, 1, goal, -1, SQLITE_TRANSIENT);
+   sqlite3_bind_int64(st, 2, conv_id);
+   sqlite3_bind_int(st, 3, user_id);
+   int rc = sqlite3_step(st);
+   int changed = sqlite3_changes(s_db.db);
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("auth_db_jobs: reopen_coding failed for conv %lld", (long long)conv_id);
+      return AUTH_DB_FAILURE;
+   }
+   return changed == 1 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
+}
+
+int conv_db_job_set_parent(int64_t job_id, int user_id, int64_t parent_id) {
+   if (job_id <= 0 || user_id <= 0 || parent_id <= 0 || parent_id == job_id) {
+      return AUTH_DB_INVALID;
+   }
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* A job of the user's, moved under a conversation of the same user.  Under a
+    * private one it turns private too (never the other way): its trail is now
+    * that conversation's work. */
+   if (sqlite3_prepare_v2(s_db.db,
+                          "UPDATE conversations SET parent_id=?1, is_private=MAX(is_private, "
+                          "(SELECT p.is_private FROM conversations p WHERE p.id=?1)) "
+                          "WHERE id=?2 AND user_id=?3 AND job_status IS NOT NULL AND EXISTS "
+                          "(SELECT 1 FROM conversations p WHERE p.id=?1 AND p.user_id=?3)",
+                          -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("auth_db_jobs: prepare set_parent failed: %s", sqlite3_errmsg(s_db.db));
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, parent_id);
+   sqlite3_bind_int64(st, 2, job_id);
+   sqlite3_bind_int(st, 3, user_id);
+   int rc = sqlite3_step(st);
+   int changed = sqlite3_changes(s_db.db);
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("auth_db_jobs: set_parent failed for conv %lld", (long long)job_id);
+      return AUTH_DB_FAILURE;
+   }
    return changed == 1 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
 }
 
@@ -612,6 +717,58 @@ int conv_db_job_get_status(int64_t conv_id, int user_id, char *status_out, size_
    if (status) {
       safe_strncpy(status_out, status, n);
    }
+   sqlite3_finalize(st);
+   AUTH_DB_UNLOCK();
+   return AUTH_DB_SUCCESS;
+}
+
+/* A coding job row (table alias @p a, a string literal) whose task the gateway
+ * may still hold: it ran there (started, or its trail has a gateway event) and
+ * no event says the task was closed.  CASE, not AND, inside: json_extract
+ * raises on a payload that isn't JSON.  Ordinary conversations stop at the
+ * first test. */
+#define JOB_GW_KIND                                                                              \
+   "CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$." EVENT_PAYLOAD_GW_KEY "') " \
+   "END"
+#define JOB_HOLDS_AGENT_WORK(a)                                                                \
+   "(" a ".job_kind IS '" JOB_KIND_CODING "' AND (" a ".started_at > 0 OR EXISTS (SELECT 1 "   \
+   "FROM conversation_events e WHERE e.conversation_id = " a ".id AND " JOB_GW_KIND            \
+   " IS NOT NULL)) AND NOT EXISTS (SELECT 1 FROM conversation_events e WHERE "                 \
+   "e.conversation_id = " a ".id AND e.kind = '" CONV_EVENT_AGENT_REQUEST "' AND " JOB_GW_KIND \
+   " = '" EVENT_GW_CLOSED "'))"
+
+int conv_db_job_holds_agent_work(int64_t conv_id, int user_id, int64_t *holder) {
+   if (conv_id <= 0 || !holder) {
+      return AUTH_DB_INVALID;
+   }
+   *holder = 0;
+   AUTH_DB_LOCK_OR_FAIL();
+   sqlite3_stmt *st = NULL;
+   /* The conversation itself, then any child job of it (deleted with it). */
+   int rc = sqlite3_prepare_v2(
+       s_db.db,
+       "SELECT c.user_id, CASE WHEN " JOB_HOLDS_AGENT_WORK(
+           "c") " THEN c.id ELSE COALESCE((SELECT k.id FROM conversations k WHERE "
+                "k.parent_id = c.id AND k.user_id = c.user_id AND " JOB_HOLDS_AGENT_WORK(
+                    "k") " LIMIT 1), 0) END FROM conversations c WHERE c.id = ?",
+       -1, &st, NULL);
+   if (rc != SQLITE_OK) {
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, conv_id);
+   rc = sqlite3_step(st);
+   if (rc != SQLITE_ROW) {
+      sqlite3_finalize(st);
+      AUTH_DB_UNLOCK();
+      return (rc == SQLITE_DONE) ? AUTH_DB_NOT_FOUND : AUTH_DB_FAILURE;
+   }
+   if (sqlite3_column_int(st, 0) != user_id) {
+      sqlite3_finalize(st);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_FORBIDDEN;
+   }
+   *holder = sqlite3_column_int64(st, 1);
    sqlite3_finalize(st);
    AUTH_DB_UNLOCK();
    return AUTH_DB_SUCCESS;
@@ -737,6 +894,30 @@ int conv_db_job_scan_active(job_record_t *out, int max, int *count_out) {
    return rc;
 }
 
+struct kind_bind {
+   const char *kind;
+   int limit;
+};
+static void bind_kind_limit(sqlite3_stmt *st, void *ctx) {
+   const struct kind_bind *b = ctx;
+   sqlite3_bind_text(st, 1, b->kind, -1, SQLITE_STATIC);
+   sqlite3_bind_int(st, 2, b->limit);
+}
+
+int conv_db_job_scan_active_kind(const char *kind, job_record_t *out, int max, int *count_out) {
+   if (!count_out || !kind) {
+      return AUTH_DB_INVALID;
+   }
+   struct kind_bind b = { kind, max };
+   AUTH_DB_LOCK_OR_FAIL();
+   int rc = job_select_into("SELECT " JOB_SELECT_COLS " FROM conversations "
+                            "WHERE job_status IN ('running','queued') AND job_kind = ? "
+                            "ORDER BY created_at ASC LIMIT ?",
+                            bind_kind_limit, &b, out, max, count_out);
+   AUTH_DB_UNLOCK();
+   return rc;
+}
+
 /* =============================================================================
  * Reinvoke support (Phase 3 — reinvoke_parent)
  * ============================================================================= */
@@ -837,7 +1018,6 @@ int conv_db_job_bump_reinvoke(int64_t conv_id, int *new_count_out) {
  * surfaces as a wrong count rather than as an obvious failure.  A new
  * non-terminal status (e.g. a paused state) is a one-line change here.
  * NOTE: www/js/ui/jobs-activity.js mirrors this — keep isActive() in sync. */
-#define JOB_ACTIVE_STATUSES "('queued','running')"
 
 struct job_user_limit_bind {
    int user_id;

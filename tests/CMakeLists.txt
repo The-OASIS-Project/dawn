@@ -123,6 +123,7 @@ set_tests_properties(live PROPERTIES LABELS "live" SKIP_RETURN_CODE 77 TIMEOUT 9
 # prepared-statement layer rather than stubbing it.
 set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_core.c
+    ${SRC_ROOT}/src/core/conv_turn_lease.c
     ${SRC_ROOT}/src/auth/auth_db_ids.c
     ${SRC_ROOT}/src/auth/auth_db_schema.c
     ${SRC_ROOT}/src/auth/auth_db_backup.c
@@ -156,6 +157,12 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v107.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v108.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v111.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v112.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v113.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v114.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v115.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v116.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v117.c
     ${SRC_ROOT}/src/core/tz.c
     ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
@@ -252,6 +259,16 @@ dawn_add_unit_test(test_mcp_transport
    LIBS    dawn_common unity ${CURL_LIBRARIES} pthread
    LABEL   ci)
 
+# MCP stateless streamable-HTTP transport — against an in-test loopback server
+# that answers each POST as the test asks, so it is CI-safe.
+dawn_add_unit_test(test_mcp_transport_http
+   SOURCES test_mcp_transport_http.c
+           ${SRC_ROOT}/src/tools/mcp_transport_http.c
+           ${SRC_ROOT}/src/tools/mcp_client.c
+           ${SRC_ROOT}/src/tools/mcp_result.c
+   LIBS    dawn_common unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES} pthread
+   LABEL   ci)
+
 # MCP JSON-RPC client — exercised against an in-test auto-responding mock MCP
 # server (HTTP+SSE, no external network), so it is CI-safe.
 dawn_add_unit_test(test_mcp_client
@@ -333,6 +350,7 @@ dawn_add_unit_test(test_mcp_bridge
            ${SRC_ROOT}/src/tools/mcp_bridge_schema.c
            ${SRC_ROOT}/src/tools/mcp_client.c
            ${SRC_ROOT}/src/tools/mcp_result.c
+           ${SRC_ROOT}/src/tools/mcp_transport_http.c
            ${SRC_ROOT}/src/tools/mcp_transport_http_sse.c
            ${SRC_ROOT}/src/llm/sse_parser.c
            ${SRC_ROOT}/src/auth/auth_db_mcp.c
@@ -550,6 +568,14 @@ dawn_add_unit_test(test_email_account_lease
            ${SRC_ROOT}/src/tools/email_account_lease.c
    LIBS    dawn_common unity pthread
    DEFINES NDEBUG
+   LABEL   ci)
+
+# One turn per conversation: the lease's FIFO handover, re-entry, a stopped
+# wait, posts queued and written in order at release, capacity and shutdown.
+dawn_add_unit_test(test_conv_turn_lease
+   SOURCES test_conv_turn_lease.c
+           ${SRC_ROOT}/src/core/conv_turn_lease.c
+   LIBS    dawn_common unity pthread
    LABEL   ci)
 
 # The WebUI email executor: admission per slot, and the executor under load
@@ -811,6 +837,9 @@ dawn_add_unit_test(test_suit_service
 dawn_add_unit_test(test_session_history
    SOURCES test_session_history.c
            ${SRC_ROOT}/src/core/session_history.c
+           ${SRC_ROOT}/src/core/session_catchup.c
+           ${SRC_ROOT}/src/core/session_turn_lease.c
+           ${SRC_ROOT}/src/core/conv_turn_lease.c
            ${SRC_ROOT}/src/llm/llm_turn_blocks.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
@@ -828,37 +857,70 @@ dawn_add_unit_test(test_llm_context_text
    LIBS    unity
    LABEL   ci)
 
+# The session unit and the request it builds, shared by the tests that run it.
+set(SESSION_UNIT_TEST_SOURCES
+   ${SRC_ROOT}/src/core/session_prefix.c
+   ${SRC_ROOT}/src/core/session_focus.c
+   ${SRC_ROOT}/src/core/focus/focus_incremental.c
+   ${SRC_ROOT}/src/core/session_compaction.c
+   ${SRC_ROOT}/src/llm/llm_compaction.c
+   ${SRC_ROOT}/src/llm/llm_compaction_range.c
+   ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+   ${SRC_ROOT}/src/memory/memory_history_loader.c
+   ${SRC_ROOT}/src/core/image_rehydrate.c
+   ${SRC_ROOT}/src/core/ocp_helpers.c
+   ${SRC_ROOT}/src/image_store.c
+   ${SRC_ROOT}/src/blob_store.c
+   ${SRC_ROOT}/src/blob_store_util.c
+   ${SRC_ROOT}/src/core/prefix_message.c
+   ${SRC_ROOT}/src/core/prefix_in_force.c
+   ${SRC_ROOT}/src/core/prompt_sections.c
+   ${SRC_ROOT}/src/core/strbuf.c
+   ${SRC_ROOT}/src/llm/llm_history_kind.c
+   ${SRC_ROOT}/src/llm/llm_context_text.c
+   ${SRC_ROOT}/src/llm/llm_history_rows.c
+   ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+   ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+   ${SRC_ROOT}/src/llm/llm_claude_parts.c
+   ${AUTH_DB_SOURCES}
+   ${SRC_ROOT}/src/core/prefix_tools.c
+   ${SRC_ROOT}/src/llm/llm_tool_defs.c
+)
+
 # The append-only request: the first turn freezes the system prompt, changes
 # are appended after the question, the turn's context goes in front of it.
 dawn_add_unit_test(test_session_prefix
    SOURCES test_session_prefix.c
-           ${SRC_ROOT}/src/core/session_prefix.c
-           ${SRC_ROOT}/src/core/session_focus.c
-           ${SRC_ROOT}/src/core/focus/focus_incremental.c
-           ${SRC_ROOT}/src/core/session_compaction.c
-           ${SRC_ROOT}/src/llm/llm_compaction.c
-           ${SRC_ROOT}/src/llm/llm_compaction_range.c
-           ${SRC_ROOT}/src/llm/llm_tool_images_render.c
-           ${SRC_ROOT}/src/memory/memory_history_loader.c
-           ${SRC_ROOT}/src/core/image_rehydrate.c
-           ${SRC_ROOT}/src/core/ocp_helpers.c
-           ${SRC_ROOT}/src/image_store.c
-           ${SRC_ROOT}/src/blob_store.c
-           ${SRC_ROOT}/src/blob_store_util.c
-           ${SRC_ROOT}/src/core/prefix_message.c
-           ${SRC_ROOT}/src/core/prefix_in_force.c
-           ${SRC_ROOT}/src/core/prompt_sections.c
-           ${SRC_ROOT}/src/core/strbuf.c
-           ${SRC_ROOT}/src/llm/llm_history_kind.c
-           ${SRC_ROOT}/src/llm/llm_context_text.c
-           ${SRC_ROOT}/src/llm/llm_history_rows.c
-           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
-           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
-           ${SRC_ROOT}/src/llm/llm_claude_parts.c
-           ${AUTH_DB_SOURCES}
-           ${SRC_ROOT}/src/core/prefix_tools.c
-           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+           ${SESSION_UNIT_TEST_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# A session's history after each kind of turn is the request a reload of its
+# conversation builds, as the Claude and Responses builders render them.
+dawn_add_unit_test(test_history_reload
+   SOURCES test_history_reload.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
+           ${SRC_ROOT}/src/core/job_dispatch.c
+           ${SRC_ROOT}/src/core/conv_post.c
+           ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tool_images.c
+           ${SRC_ROOT}/src/core/text_input_dispatch.c
+           ${SRC_ROOT}/src/core/session_manager_llm.c
+           ${SRC_ROOT}/src/core/session_stop.c
+           ${SRC_ROOT}/src/core/session_history.c
+           ${SRC_ROOT}/src/core/session_catchup.c
+           ${SRC_ROOT}/src/core/session_turn_lease.c
+           ${SRC_ROOT}/src/llm/llm_claude_format.c
+           ${SRC_ROOT}/src/llm/llm_claude_tools.c
+           ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
+           ${SRC_ROOT}/src/llm/llm_model_version.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
+           ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
+           ${SRC_ROOT}/src/llm/llm_openai_history.c
+           ${SESSION_UNIT_TEST_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
 
 dawn_add_unit_test(test_satellite_remap
@@ -955,6 +1017,7 @@ dawn_add_unit_test(test_temporal_relations
            ${SRC_ROOT}/src/memory/memory_db_summaries.c
            ${SRC_ROOT}/src/memory/memory_db_prefs.c
            ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_consolidation.c
            ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
@@ -972,6 +1035,7 @@ dawn_add_unit_test(test_relation_supersede
            ${SRC_ROOT}/src/memory/memory_db_summaries.c
            ${SRC_ROOT}/src/memory/memory_db_prefs.c
            ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_consolidation.c
            ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
@@ -990,11 +1054,13 @@ dawn_add_unit_test(test_memory_db_alias
            ${SRC_ROOT}/src/memory/memory_db_alias_scorer.c
            ${SRC_ROOT}/src/memory/memory_db_alias_cascade.c
            ${SRC_ROOT}/src/memory/memory_db_alias_writes.c
+           ${SRC_ROOT}/src/memory/memory_db_alias_nominate.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c
            ${SRC_ROOT}/src/memory/memory_db_summaries.c
            ${SRC_ROOT}/src/memory/memory_db_prefs.c
            ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_consolidation.c
            ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            # memory_bm25.c + memory_stem.c arrive via AUTH_DB_SOURCES below.
@@ -1118,6 +1184,15 @@ dawn_add_unit_test(test_messaging_sender
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# Messages the messaging worker keeps while their conversation is held: other
+# channels go on, a channel's run in order, the caps, shutdown.  The real lease.
+dawn_add_unit_test(test_messaging_parked
+   SOURCES test_messaging_parked.c
+           ${SRC_ROOT}/src/messaging/messaging_engine_parked.c
+           ${SRC_ROOT}/src/core/conv_turn_lease.c
+   LIBS    dawn_common unity pthread sodium ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Schema v101: messaging channel owners + SMS verification backfill on an
 # existing database (the migration re-run over rows shaped like before it).
 dawn_add_unit_test(test_messaging_channels_v101
@@ -1133,6 +1208,7 @@ dawn_add_unit_test(test_messaging_channels_db
    SOURCES test_messaging_channels_db.c
            ${AUTH_DB_SOURCES}
            ${SRC_ROOT}/src/messaging/messaging_engine_channels.c
+           ${SRC_ROOT}/src/core/conv_post.c
            ${SRC_ROOT}/src/messaging/messaging_engine_link.c
            ${SRC_ROOT}/src/core/reply_code.c
            ${SRC_ROOT}/src/core/tool_call_challenge.c
@@ -1423,6 +1499,17 @@ dawn_add_unit_test(test_prompt_builder
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# The server's persona from g_config (llm_command_parser.c): its halves, the
+# built-in bytes, and dropping a stored copy of a built-in.  The rest of the
+# command parser's dependencies are stubbed.
+dawn_add_unit_test(test_llm_persona
+   SOURCES test_llm_persona.c test_llm_persona_stub.c
+           ${SRC_ROOT}/src/llm/llm_command_parser.c
+           ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
 # Incremental focus: which items a history already shows, which a turn sends,
 # and how it says so.  Pure (json-c and the LLM text helpers).
 dawn_add_unit_test(test_focus_incremental
@@ -1517,6 +1604,13 @@ dawn_add_unit_test(test_llm_capabilities
    DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
 
+# The provider a bare model name belongs to.
+dawn_add_unit_test(test_llm_model_family
+   SOURCES test_llm_model_family.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
+   LIBS    dawn_common unity
+   LABEL   ci)
+
 # Loading models.toml: the disk copy over the built-in one, table by table.
 dawn_add_unit_test(test_llm_models_toml
    SOURCES test_llm_models_toml.c
@@ -1576,7 +1670,7 @@ dawn_add_unit_test(test_openai_history
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
-# Per-model prompt-cache pricing, against the shipped models.toml.
+# Per-model base and prompt-cache prices, against the shipped models.toml.
 dawn_add_unit_test(test_llm_pricing
    SOURCES test_llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_pricing.c
@@ -1633,10 +1727,64 @@ dawn_add_unit_test(test_music_queue
    LIBS    dawn_common unity sqlite3 pthread
    LABEL   ci)
 
+# Music player over a fake output; music_open_track() is the test's own
+dawn_add_unit_test(test_music_player
+   SOURCES test_music_player.c
+           ${SRC_ROOT}/src/audio/music_player.c
+           ${SRC_ROOT}/src/audio/music_player_track.c
+           ${SRC_ROOT}/src/audio/music_nav.c
+           ${SRC_ROOT}/src/audio/music_queue.c
+           ${SRC_ROOT}/src/audio/music_queue_db.c
+           ${SRC_ROOT}/src/audio/music_source.c
+           ${DECODER_TEST_SOURCES}
+   LIBS    ${DECODER_TEST_LIBS} sqlite3 pthread m
+   LABEL   ci)
+# A broken player hangs rather than fails (a join that never returns)
+set_tests_properties(test_music_player PROPERTIES TIMEOUT 30)
+
+# The local speaker over a fake playback device (the real player and converter)
+dawn_add_unit_test(test_music_speaker
+   SOURCES test_music_speaker.c
+           ${SRC_ROOT}/src/audio/music_speaker.c
+           ${SRC_ROOT}/src/audio/music_player.c
+           ${SRC_ROOT}/src/audio/music_player_track.c
+           ${SRC_ROOT}/src/audio/music_nav.c
+           ${SRC_ROOT}/src/audio/music_queue.c
+           ${SRC_ROOT}/src/audio/music_queue_apply.c
+           ${SRC_ROOT}/src/audio/music_queue_db.c
+           ${SRC_ROOT}/src/audio/music_source.c
+           ${SRC_ROOT}/src/audio/audio_converter.c
+           ${DECODER_TEST_SOURCES}
+   LIBS    ${DECODER_TEST_LIBS} ${SAMPLERATE_LIBRARIES} sqlite3 pthread m
+   LABEL   ci)
+set_tests_properties(test_music_speaker PROPERTIES TIMEOUT 30)
+
+# The audio converter's channel and rate combinations
+dawn_add_unit_test(test_audio_converter
+   SOURCES test_audio_converter.c
+           ${SRC_ROOT}/src/audio/audio_converter.c
+           ${SRC_ROOT}/common/src/logging.c
+   LIBS    unity ${SAMPLERATE_LIBRARIES} m
+   LABEL   ci)
+
+# Who may play on the local speaker without a player of its own
+dawn_add_unit_test(test_music_tool_route
+   SOURCES test_music_tool_route.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_text_filter
    SOURCES test_text_filter.c
            ${SRC_ROOT}/src/core/text_filter.c
    LIBS    unity
+   LABEL   ci)
+
+# Peer presence (hud, reachy) and re-subscribing on every MQTT connect;
+# libmosquitto and the HUD side effects are stubs in the test.
+dawn_add_unit_test(test_component_status
+   SOURCES test_component_status.c
+           ${SRC_ROOT}/src/core/component_status.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_llm_response_finalize
@@ -1746,14 +1894,18 @@ dawn_add_unit_test(test_calendar_pick
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_extraction_input
-   SOURCES test_memory_extraction_input.c
+   SOURCES test_memory_extraction_input.c test_tool_registry_stub.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
            ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+           ${SRC_ROOT}/src/core/hash_util.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/core/prompt_sections.c
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/llm/llm_third_party.c
-   LIBS    dawn_common unity json-c
+   LIBS    dawn_common unity pthread json-c
    LABEL   ci)
 
 # The dawn-admin cache stats table.
@@ -1788,6 +1940,7 @@ dawn_add_unit_test(test_memory_provenance
            ${SRC_ROOT}/src/core/strbuf.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_forget.c
+           ${SRC_ROOT}/src/memory/memory_db_consolidation.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c
            ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
            ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
@@ -1819,7 +1972,12 @@ dawn_add_unit_test(test_memory_db_admin
            ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/memory/memory_bm25.c
            ${SRC_ROOT}/src/memory/memory_stem.c
+           ${SRC_ROOT}/src/llm/llm_pricing.c
+           ${SRC_ROOT}/src/llm/llm_models_toml.c
+           ${SRC_ROOT}/src/llm/llm_model_family.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    dawn_common unity sqlite3 pthread m stemmer
+   DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
    LABEL   ci)
 
 dawn_add_unit_test(test_memory_source_dedup
@@ -1868,6 +2026,30 @@ dawn_add_unit_test(test_memory_note_bridge
            ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
            ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
            ${SRC_ROOT}/src/memory/memory_db_forget.c
+           ${SRC_ROOT}/src/memory/memory_db_consolidation.c
+           ${SRC_ROOT}/src/memory/memory_similarity.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# The session-start memory block leaves out summaries of batches that read
+# outside text.
+dawn_add_unit_test(test_memory_context
+   SOURCES test_memory_context.c
+           ${SRC_ROOT}/src/memory/memory_context.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/core/memory_filter.c
+           ${SRC_ROOT}/src/memory/memory_db.c
+           ${SRC_ROOT}/src/memory/memory_db_facts.c
+           ${SRC_ROOT}/src/memory/memory_db_summaries.c
+           ${SRC_ROOT}/src/memory/memory_db_prefs.c
+           ${SRC_ROOT}/src/memory/memory_db_entities.c
+           ${SRC_ROOT}/src/memory/memory_db_relations.c
+           ${SRC_ROOT}/src/memory/memory_db_provenance.c
+           ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
+           ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
+           ${SRC_ROOT}/src/memory/memory_db_forget.c
+           ${SRC_ROOT}/src/memory/memory_db_consolidation.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
@@ -1887,6 +2069,7 @@ dawn_add_unit_test(test_memory_fact_prune
            ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
            ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
            ${SRC_ROOT}/src/memory/memory_db_forget.c
+           ${SRC_ROOT}/src/memory/memory_db_consolidation.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
@@ -2001,6 +2184,23 @@ dawn_add_unit_test(test_auth_db_migrations_v73
    LIBS    dawn_common unity sqlite3 pthread
    LABEL   ci)
 
+# v113 on a v112 database: origin and outside filled in, the record tables, the
+# category index gone, a migrated schema matching a new one.
+dawn_add_unit_test(test_auth_db_migrations_v113
+   SOURCES test_auth_db_migrations_v113.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# v114 on a v113 database: a note's outside kind from its research run and its
+# gloss, a rerun leaving new tags alone, a migrated documents table matching a
+# new one.
+dawn_add_unit_test(test_auth_db_migrations_v114
+   SOURCES test_auth_db_migrations_v114.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_auth_db_migrations_v75
    SOURCES test_auth_db_migrations_v75.c
            ${SRC_ROOT}/src/auth/auth_db_migrations_v72.c
@@ -2021,10 +2221,40 @@ dawn_add_unit_test(test_auth_db_statements
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# Posts from outside a turn: written now, or at the end of the turn holding
+# the conversation.
+dawn_add_unit_test(test_conv_post
+   SOURCES test_conv_post.c
+           ${SRC_ROOT}/src/core/conv_post.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # messages.llm_blocks: replay-only read, assistant-only CHECK, watermark GC,
 # edit trigger, and the v92 re-render of legacy voice rows.
 dawn_add_unit_test(test_conv_db_llm_blocks
    SOURCES test_conv_db_llm_blocks.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# A Claude stream cut by a stop: the text so far and its finished blocks.
+dawn_add_unit_test(test_llm_stream_stopped
+   SOURCES test_llm_stream_stopped.c
+           ${SRC_ROOT}/src/llm/llm_streaming.c
+           ${SRC_ROOT}/src/llm/llm_claude_blocks.c
+           ${SRC_ROOT}/src/llm/llm_claude_binding.c
+           ${SRC_ROOT}/src/llm/llm_reasoning_details.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread m ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# message_stopped: a reply the user stopped, marked and read back (v117).
+dawn_add_unit_test(test_conv_db_stopped
+   SOURCES test_conv_db_stopped.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
@@ -2161,6 +2391,31 @@ dawn_add_unit_test(test_research_allowlist
    LIBS    unity
    LABEL   ci)
 
+# Extraction's outside kind over stored rows, on the real loader and schema.
+dawn_add_unit_test(test_memory_extraction_stored
+   SOURCES test_memory_extraction_stored.c test_tool_registry_stub.c
+           ${SRC_ROOT}/src/memory/memory_extraction_input.c
+           ${SRC_ROOT}/src/tools/tool_registry.c
+           ${SRC_ROOT}/src/llm/llm_third_party.c
+           ${SRC_ROOT}/src/core/prompt_sections.c
+           ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/core/prefix_message.c
+           ${SRC_ROOT}/src/core/image_rehydrate.c
+           ${SRC_ROOT}/src/core/ocp_helpers.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/image_store.c
+           ${SRC_ROOT}/src/blob_store.c
+           ${SRC_ROOT}/src/blob_store_util.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/llm/llm_compaction_range.c
+           ${SRC_ROOT}/src/llm/llm_tool_defs.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # A compaction point recorded inside a tool exchange reloads cleanly (real
 # auth_db, in memory).
 dawn_add_unit_test(test_history_reload_watermark
@@ -2207,10 +2462,69 @@ dawn_add_unit_test(test_history_strip_markers
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# coding_agent tool: start order, confirm gating, cancel hook (gateway and job
+# store stubbed).
+dawn_add_unit_test(test_coding_agent_tool
+   SOURCES test_coding_agent_tool.c
+           ${SRC_ROOT}/src/tools/coding_agent_tool.c
+           ${SRC_ROOT}/src/tools/coding_agent_delegate.c
+           ${SRC_ROOT}/src/tools/coding_agent_requests.c
+           ${SRC_ROOT}/src/tools/coding_agent_publish.c
+           ${SRC_ROOT}/src/tools/coding_agent_github.c
+           ${SRC_ROOT}/src/tools/coding_agent_github_post.c
+           ${SRC_ROOT}/src/tools/coding_agent_gateway.c
+           ${SRC_ROOT}/src/core/pending_slots.c
+           ${SRC_ROOT}/src/tools/tool_pending.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# coding_agent on GitHub: reads framed as web content; replies and Copilot
+# requests staged, confirmed and described; the [coding_agent] section's round trip.
+dawn_add_unit_test(test_coding_agent_github
+   SOURCES test_coding_agent_github.c
+           ${SRC_ROOT}/src/tools/coding_agent_tool.c
+           ${SRC_ROOT}/src/tools/coding_agent_github.c
+           ${SRC_ROOT}/src/tools/coding_agent_github_post.c
+           ${SRC_ROOT}/src/tools/coding_agent_gateway.c
+           ${SRC_ROOT}/src/core/pending_slots.c
+           ${SRC_ROOT}/src/tools/tool_pending.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# coding-agent report-back: what is posted, what the no-tools take is asked.
+dawn_add_unit_test(test_coding_agent_report
+   SOURCES test_coding_agent_report.c
+           ${SRC_ROOT}/src/tools/coding_agent_report.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${SRC_ROOT}/src/core/conv_turn_lease.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# What DAWN posted into a conversation, told to the next turn.
+dawn_add_unit_test(test_session_posts
+   SOURCES test_session_posts.c
+           ${SRC_ROOT}/src/core/session_posts.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# coding-agent watcher: gateway events onto jobs, start-up check, cursor.
+dawn_add_unit_test(test_coding_agent_watch
+   SOURCES test_coding_agent_watch.c
+           ${SRC_ROOT}/src/tools/coding_agent_watch.c
+           ${SRC_ROOT}/src/core/event_payload.c
+   LIBS    dawn_common unity pthread m ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Background-job session pool.
 dawn_add_unit_test(test_job_manager
    SOURCES test_job_manager.c
            ${SRC_ROOT}/src/core/job_manager.c
+           ${SRC_ROOT}/src/core/conv_turn_lease.c
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
@@ -2257,6 +2571,7 @@ dawn_add_unit_test(test_config_roundtrip
            ${SRC_ROOT}/src/config/config_parser.c
            ${SRC_ROOT}/src/config/config_env.c
            ${SRC_ROOT}/src/config/config_defaults.c
+           ${SRC_ROOT}/common/src/utils/string_utils.c
            ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    unity json-c m pthread
    LABEL   ci)
@@ -2469,12 +2784,19 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
            ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
            ${SRC_ROOT}/src/memory/memory_db_forget.c
+           ${SRC_ROOT}/src/memory/memory_db_consolidation.c
            ${SRC_ROOT}/src/memory/contacts_db.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c
            ${SRC_ROOT}/src/memory/memory_db_summaries.c
            ${SRC_ROOT}/src/memory/memory_db_prefs.c
            ${SRC_ROOT}/src/memory/memory_db_entities.c
+           # The real entity linking: the consolidator's merges depend on it.
+           ${SRC_ROOT}/src/memory/memory_db_alias.c
+           ${SRC_ROOT}/src/memory/memory_db_alias_scorer.c
+           ${SRC_ROOT}/src/memory/memory_db_alias_cascade.c
+           ${SRC_ROOT}/src/memory/memory_db_alias_writes.c
+           ${SRC_ROOT}/src/memory/memory_db_alias_nominate.c
            ${SRC_ROOT}/src/memory/memory_db_relations.c
            ${SRC_ROOT}/src/memory/memory_db_provenance.c
            # memory_bm25.c + memory_stem.c arrive via AUTH_DB_SOURCES below.
@@ -2487,9 +2809,13 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_candidates.c
+           ${SRC_ROOT}/src/memory/memory_consolidate.c
+           ${SRC_ROOT}/src/memory/memory_consolidate_ops.c
            ${SRC_ROOT}/src/memory/memory_forgotten.c
            ${SRC_ROOT}/src/memory/memory_extraction_queue.c
            ${SRC_ROOT}/src/memory/memory_extraction_slots.c
+           ${SRC_ROOT}/src/memory/memory_extraction_range.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/memory/memory_history_loader.c
            ${SRC_ROOT}/src/core/prompt_sections.c
@@ -2555,6 +2881,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
            ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
            ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
            ${SRC_ROOT}/src/llm/llm_tool_view.c
@@ -2601,6 +2928,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
            ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
            ${SRC_ROOT}/src/memory/memory_db_forget.c
+           ${SRC_ROOT}/src/memory/memory_db_consolidation.c
            ${SRC_ROOT}/src/memory/contacts_db.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c
@@ -2619,9 +2947,13 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_candidates.c
+           ${SRC_ROOT}/src/memory/memory_consolidate.c
+           ${SRC_ROOT}/src/memory/memory_consolidate_ops.c
            ${SRC_ROOT}/src/memory/memory_forgotten.c
            ${SRC_ROOT}/src/memory/memory_extraction_queue.c
            ${SRC_ROOT}/src/memory/memory_extraction_slots.c
+           ${SRC_ROOT}/src/memory/memory_extraction_range.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/memory/memory_note_guard.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
@@ -2684,6 +3016,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
            ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
            ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
            ${SRC_ROOT}/src/llm/llm_tool_view.c
@@ -2725,6 +3058,7 @@ dawn_add_unit_test(test_memory_supersede_kinds
            ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
            ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
            ${SRC_ROOT}/src/memory/memory_db_forget.c
+           ${SRC_ROOT}/src/memory/memory_db_consolidation.c
            ${SRC_ROOT}/src/memory/contacts_db.c
            ${SRC_ROOT}/src/memory/memory_db.c
            ${SRC_ROOT}/src/memory/memory_db_facts.c
@@ -2743,9 +3077,13 @@ dawn_add_unit_test(test_memory_supersede_kinds
            ${SRC_ROOT}/src/memory/memory_terms.c
            ${SRC_ROOT}/src/memory/memory_embed_backfill.c
            ${SRC_ROOT}/src/memory/memory_extraction.c
+           ${SRC_ROOT}/src/memory/memory_candidates.c
+           ${SRC_ROOT}/src/memory/memory_consolidate.c
+           ${SRC_ROOT}/src/memory/memory_consolidate_ops.c
            ${SRC_ROOT}/src/memory/memory_forgotten.c
            ${SRC_ROOT}/src/memory/memory_extraction_queue.c
            ${SRC_ROOT}/src/memory/memory_extraction_slots.c
+           ${SRC_ROOT}/src/memory/memory_extraction_range.c
            ${SRC_ROOT}/src/memory/memory_extraction_input.c
            ${SRC_ROOT}/src/memory/memory_note_guard.c
            ${SRC_ROOT}/src/memory/memory_fact_search.c
@@ -2808,6 +3146,7 @@ dawn_add_unit_test(test_memory_supersede_kinds
            ${SRC_ROOT}/src/llm/llm_pricing.c
            ${SRC_ROOT}/src/llm/llm_command_parser.c
            ${SRC_ROOT}/src/llm/llm_tool_loop.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
            ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
            ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
            ${SRC_ROOT}/src/llm/llm_tool_view.c
@@ -2825,6 +3164,224 @@ dawn_add_unit_test(test_memory_supersede_kinds
    LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
            unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
    LABEL   ci)
+
+# What the consolidator links against on a real schema (its tests, and the
+# record's undo and Keep).  memory_bm25.c and memory_stem.c come with
+# AUTH_DB_SOURCES.
+set(MEMORY_CONSOLIDATE_TEST_SOURCES
+    ${SRC_ROOT}/src/memory/memory_db_alias.c
+    ${SRC_ROOT}/src/memory/memory_db_alias_scorer.c
+    ${SRC_ROOT}/src/memory/memory_db_alias_cascade.c
+    ${SRC_ROOT}/src/memory/memory_db_alias_writes.c
+    ${SRC_ROOT}/src/memory/memory_db_alias_nominate.c
+    ${SRC_ROOT}/benchmarks/bench_retrieval_stub.c
+    ${SRC_ROOT}/src/tools/document_db.c
+    ${SRC_ROOT}/src/auth/auth_db_ids.c
+    ${SRC_ROOT}/src/tools/document_db_embeddings.c
+    ${SRC_ROOT}/src/core/strbuf.c
+    ${SRC_ROOT}/src/core/prompt_sections.c
+    ${SRC_ROOT}/src/llm/llm_third_party.c
+    ${SRC_ROOT}/src/core/time_query_parser.c
+    ${SRC_ROOT}/src/core/embedding_engine.c
+    ${SRC_ROOT}/src/memory/memory_embed_ollama.c
+    ${SRC_ROOT}/src/memory/memory_embed_openai.c
+    ${AUTH_DB_SOURCES}
+    ${SRC_ROOT}/src/memory/memory_callback.c
+    ${SRC_ROOT}/src/memory/memory_callback_restore.c
+    ${SRC_ROOT}/src/memory/memory_callback_forget.c
+    ${SRC_ROOT}/src/memory/memory_db_facts_restore.c
+    ${SRC_ROOT}/src/memory/memory_db_fact_settle.c
+    ${SRC_ROOT}/src/memory/memory_db_forget.c
+    ${SRC_ROOT}/src/memory/memory_db_consolidation.c
+    ${SRC_ROOT}/src/memory/contacts_db.c
+    ${SRC_ROOT}/src/memory/memory_db.c
+    ${SRC_ROOT}/src/memory/memory_db_facts.c
+    ${SRC_ROOT}/src/memory/memory_db_summaries.c
+    ${SRC_ROOT}/src/memory/memory_db_prefs.c
+    ${SRC_ROOT}/src/memory/memory_db_entities.c
+    ${SRC_ROOT}/src/memory/memory_db_relations.c
+    ${SRC_ROOT}/src/memory/memory_db_provenance.c
+    ${SRC_ROOT}/src/memory/memory_source_dedup.c
+    ${SRC_ROOT}/src/memory/memory_score_floor.c
+    ${SRC_ROOT}/src/memory/memory_graph_retrieval.c
+    ${SRC_ROOT}/src/memory/memory_predicate_dedup.c
+    ${SRC_ROOT}/src/memory/memory_embeddings.c
+    ${SRC_ROOT}/src/memory/memory_embeddings_entity.c
+    ${SRC_ROOT}/src/memory/memory_terms.c
+    ${SRC_ROOT}/src/memory/memory_embed_backfill.c
+    ${SRC_ROOT}/src/memory/memory_extraction.c
+    ${SRC_ROOT}/src/memory/memory_candidates.c
+    ${SRC_ROOT}/src/memory/memory_consolidate.c
+    ${SRC_ROOT}/src/memory/memory_consolidate_ops.c
+    ${SRC_ROOT}/src/memory/memory_forgotten.c
+    ${SRC_ROOT}/src/memory/memory_extraction_queue.c
+    ${SRC_ROOT}/src/memory/memory_extraction_slots.c
+    ${SRC_ROOT}/src/memory/memory_extraction_range.c
+    ${SRC_ROOT}/src/memory/memory_extraction_input.c
+    ${SRC_ROOT}/src/memory/memory_note_guard.c
+    ${SRC_ROOT}/src/memory/memory_fact_search.c
+    ${SRC_ROOT}/src/memory/memory_implied.c
+    ${SRC_ROOT}/src/core/memory_filter.c
+    ${SRC_ROOT}/src/memory/memory_similarity.c
+    ${SRC_ROOT}/src/llm/llm_interface.c
+    ${SRC_ROOT}/src/llm/llm_selection.c
+    ${SRC_ROOT}/src/llm/llm_local_fallback.c
+    ${SRC_ROOT}/src/llm/llm_model_retire.c
+    ${SRC_ROOT}/src/llm/llm_turn_result.c
+    ${SRC_ROOT}/src/llm/llm_local_provider.c
+    ${SRC_ROOT}/src/llm/llm_claude.c
+    ${SRC_ROOT}/src/llm/llm_request_capture.c
+    ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+    ${SRC_ROOT}/src/llm/llm_history_kind.c
+    ${SRC_ROOT}/src/llm/llm_context_text.c
+    ${SRC_ROOT}/src/llm/llm_claude_blocks.c
+    ${SRC_ROOT}/src/llm/llm_claude_betas.c
+    ${SRC_ROOT}/src/llm/llm_claude_route.c
+    ${SRC_ROOT}/src/llm/llm_claude_binding.c
+    ${SRC_ROOT}/src/llm/llm_claude_format.c
+    ${SRC_ROOT}/src/llm/llm_claude_tools.c
+    ${SRC_ROOT}/src/llm/llm_tool_defs.c
+    ${SRC_ROOT}/src/llm/llm_capabilities.c
+    ${SRC_ROOT}/src/llm/llm_model_family.c
+    ${SRC_ROOT}/src/llm/llm_model_version.c
+    ${SRC_ROOT}/src/llm/llm_openai.c
+    ${SRC_ROOT}/src/llm/llm_openai_cache.c
+    ${SRC_ROOT}/src/llm/llm_openai_chat_completions.c
+    ${SRC_ROOT}/src/llm/llm_key_tag.c
+    ${SRC_ROOT}/src/core/crypto_store.c
+    ${SRC_ROOT}/src/llm/llm_openai_history.c
+    ${SRC_ROOT}/src/llm/llm_streaming.c
+    ${SRC_ROOT}/src/llm/llm_reasoning_details.c
+    ${SRC_ROOT}/src/llm/llm_tools.c
+    ${SRC_ROOT}/src/core/tool_call_policy.c
+    ${SRC_ROOT}/src/core/tool_call_challenge.c
+    ${SRC_ROOT}/src/llm/llm_tools_reply_code.c
+    ${SRC_ROOT}/src/core/reply_code.c
+    ${SRC_ROOT}/src/core/pending_slots.c
+    ${SRC_ROOT}/src/llm/llm_tools_filter.c
+    ${SRC_ROOT}/src/llm/llm_tools_results.c
+    ${SRC_ROOT}/src/llm/llm_tool_images.c
+    ${SRC_ROOT}/src/llm/llm_tool_images_render.c
+    ${SRC_ROOT}/src/core/image_rehydrate.c
+    ${SRC_ROOT}/src/image_store.c
+    ${SRC_ROOT}/src/blob_store.c
+    ${SRC_ROOT}/src/blob_store_util.c
+    ${SRC_ROOT}/src/llm/llm_tools_dup.c
+    ${SRC_ROOT}/src/llm/llm_rate_limit.c
+    ${SRC_ROOT}/src/llm/llm_openai_responses.c
+    ${SRC_ROOT}/src/llm/llm_openai_responses_input.c
+    ${SRC_ROOT}/src/llm/llm_claude_parts.c
+    ${SRC_ROOT}/src/llm/llm_context.c
+    ${SRC_ROOT}/src/llm/llm_compaction_range.c
+    ${SRC_ROOT}/src/llm/llm_compaction.c
+    ${SRC_ROOT}/src/llm/llm_models_toml.c
+    ${SRC_ROOT}/src/llm/llm_cache_monitor.c
+    ${SRC_ROOT}/src/llm/llm_pricing.c
+    ${SRC_ROOT}/src/llm/llm_command_parser.c
+    ${SRC_ROOT}/src/llm/llm_tool_loop.c
+    ${SRC_ROOT}/src/llm/llm_tool_history.c
+    ${SRC_ROOT}/src/llm/llm_tool_views_plan.c
+    ${SRC_ROOT}/src/llm/llm_tool_views_apply.c
+    ${SRC_ROOT}/src/llm/llm_tool_view.c
+    ${SRC_ROOT}/src/llm/llm_tool_view_path.c
+    ${SRC_ROOT}/src/llm/llm_history_rows.c
+    ${SRC_ROOT}/src/llm/llm_turn_blocks_stored.c
+    ${SRC_ROOT}/src/llm/sse_parser.c
+    ${SRC_ROOT}/src/core/ocp_helpers.c
+    ${SRC_ROOT}/src/tools/tool_registry.c
+    ${SRC_ROOT}/src/config/config_parser.c
+    ${SRC_ROOT}/src/config/config_defaults.c
+    ${SRC_ROOT}/src/config/config_validate.c
+    ${SRC_ROOT}/src/config/config_env.c
+    ${SRC_ROOT}/third_party/tomlc99/toml.c
+)
+
+# The consolidator on a real schema, with scripted model replies: every guard,
+# every stop, the record and the forget scrub.
+dawn_add_unit_test(test_memory_consolidate
+   SOURCES test_memory_consolidate.c test_memory_consolidate_stub.c
+           ${MEMORY_CONSOLIDATE_TEST_SOURCES}
+   LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
+           unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# Undo and Keep of what a batch did: each op kind's undo and its stale check,
+# owner checks, list paging and the record's caps.
+dawn_add_unit_test(test_memory_consolidation_db
+   SOURCES test_memory_consolidation_db.c test_memory_consolidate_stub.c
+           ${MEMORY_CONSOLIDATE_TEST_SOURCES}
+           ${SRC_ROOT}/src/memory/memory_db_consolidation_undo.c
+           ${SRC_ROOT}/src/memory/memory_consolidation_undo.c
+   LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
+           unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# Memory extraction end to end with a fake model: the real trigger, thread,
+# history loader and recovery pass on a real schema.  The model call is
+# wrapped, so no request leaves the process.  A wrap reaches calls from
+# other objects only: it holds while nothing in llm_interface.c, which
+# defines the function, calls it itself (each test asserts the call count).
+dawn_add_unit_test(test_memory_extraction_run
+   SOURCES test_memory_extraction_run.c
+           ${MEMORY_CONSOLIDATE_TEST_SOURCES}
+           ${SRC_ROOT}/src/memory/memory_history_loader.c
+           ${SRC_ROOT}/src/memory/memory_recovery.c
+           ${SRC_ROOT}/src/core/text_input_dispatch.c
+           ${SRC_ROOT}/src/core/session_manager_llm.c
+           ${SRC_ROOT}/src/core/session_stop.c
+           ${SRC_ROOT}/src/core/session_history.c
+           ${SRC_ROOT}/src/core/session_catchup.c
+           ${SRC_ROOT}/src/core/session_turn_lease.c
+           ${SRC_ROOT}/src/llm/llm_tool_history.c
+           ${SRC_ROOT}/src/llm/llm_tools_results.c
+           ${SRC_ROOT}/src/llm/llm_tool_images.c
+           ${SESSION_UNIT_TEST_SOURCES}
+   LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
+           unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
+   LABEL   ci)
+target_link_options(test_memory_extraction_run PRIVATE
+                    -Wl,--wrap=llm_chat_completion_with_config
+                    -Wl,--wrap=llm_chat_completion_streaming_with_config)
+
+# The memory batches frames: the batch object, keyset pages, one "Not found"
+# for missing and foreign ids, the undo and keep replies.  Its handlers take a
+# WebSocket connection (webui_internal.h, which needs libwebsockets), so it
+# builds only with the WebUI, like the source it tests.
+if(ENABLE_WEBUI)
+   dawn_add_unit_test(test_webui_memory_batches
+      SOURCES test_webui_memory_batches.c test_memory_consolidate_stub.c
+              ${MEMORY_CONSOLIDATE_TEST_SOURCES}
+              ${SRC_ROOT}/src/memory/memory_db_consolidation_undo.c
+              ${SRC_ROOT}/src/memory/memory_consolidation_undo.c
+              ${SRC_ROOT}/src/memory/memory_consolidation_view.c
+              ${SRC_ROOT}/src/webui/webui_memory_batches.c
+      LIBS    dawn_common sqlite3 pthread m ssl crypto stemmer ${JSONC_LIBRARIES} sodium
+              unity ${CURL_LIBRARIES} ${JSONC_LIBRARIES}
+      LABEL   ci)
+endif()
+
+# The message_appended frame: its fields, which session a persisted row names,
+# and the sender's client_ref copy.  Built with the WebUI, like its source.
+if(ENABLE_WEBUI)
+   dawn_add_unit_test(test_webui_message_appended
+      SOURCES test_webui_message_appended.c
+              ${SRC_ROOT}/src/webui/webui_message_frame.c
+              ${SRC_ROOT}/src/webui/webui_email_ref.c
+      LIBS    dawn_common unity sodium ${JSONC_LIBRARIES}
+      LABEL   ci)
+endif()
+
+# stop_other_reply: which turn on a conversation a user may stop from another
+# session.  Built with the WebUI, like its source (webui_internal.h).
+if(ENABLE_WEBUI)
+   dawn_add_unit_test(test_webui_turn_wait
+      SOURCES test_webui_turn_wait.c
+              ${SRC_ROOT}/src/webui/webui_turn_wait.c
+              ${SRC_ROOT}/src/core/session_turn_lease.c
+              ${SRC_ROOT}/src/core/conv_turn_lease.c
+      LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+      LABEL   ci)
+endif()
 
 dawn_add_unit_test(bench_contradiction
    NO_TEST
@@ -2881,6 +3438,28 @@ add_test(NAME check_swap_eligible_types_mirror
          WORKING_DIRECTORY ${SRC_ROOT})
 set_tests_properties(check_swap_eligible_types_mirror PROPERTIES LABELS "ci")
 
+# DAWN's expression vocabulary (EMOTE_FEELINGS/EMOTE_ACTS in text_filter.h) and
+# the Reachy Mini bridge's move map (reachy-bridge.toml) must name the same
+# expressions; the bridge, being Python, can't check the C header itself.
+add_test(NAME check_reachy_vocab_mirror
+         COMMAND bash ${SRC_ROOT}/tests/check_reachy_vocab_mirror.sh
+         WORKING_DIRECTORY ${SRC_ROOT})
+set_tests_properties(check_reachy_vocab_mirror PROPERTIES LABELS "ci")
+
+# The bridge's robot-free logic (services/reachy-bridge/expression.py and
+# audio_health.py), standard library only.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+   foreach(t test_reachy_expression test_reachy_audio_health)
+      add_test(NAME ${t}
+               COMMAND ${Python3_EXECUTABLE} -I ${SRC_ROOT}/tests/${t}.py
+               WORKING_DIRECTORY ${SRC_ROOT})
+      set_tests_properties(${t} PROPERTIES LABELS "ci")
+   endforeach()
+else()
+   message(STATUS "python3 not found: the reachy-bridge tests are not registered")
+endif()
+
 # SECTION_CATEGORIES in schema.js is the settings render gate — a section absent
 # from it is invisible in the UI no matter how correctly it is wired everywhere
 # else.  `[attention]` and `[jobs]` both shipped that way before this guard.
@@ -2893,4 +3472,11 @@ set_tests_properties(check_settings_sections_rendered PROPERTIES LABELS "ci")
 add_dependencies(bench_retrieval models_toml_builtin)
 add_dependencies(test_memory_remember models_toml_builtin)
 add_dependencies(test_memory_supersede_kinds models_toml_builtin)
+add_dependencies(test_memory_consolidate models_toml_builtin)
+add_dependencies(test_memory_consolidation_db models_toml_builtin)
+add_dependencies(test_memory_extraction_run models_toml_builtin)
+if(ENABLE_WEBUI)
+   add_dependencies(test_webui_memory_batches models_toml_builtin)
+endif()
 add_dependencies(test_llm_models_toml models_toml_builtin)
+add_dependencies(test_memory_db_admin models_toml_builtin)

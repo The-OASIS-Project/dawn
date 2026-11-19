@@ -54,6 +54,31 @@ jobs:
         run: ./scripts/check_messaging_send_funnel.sh
 
   # -------------------------------------------------------------------------
+  # Job 1c: agent-gateway tests (~1 min)
+  # The Python service in services/agent-gateway.  ubuntu-22.04 because its
+  # tests run git inside bubblewrap, which needs unprivileged user namespaces
+  # (24.04 runners restrict them).
+  # -------------------------------------------------------------------------
+  agent-gateway-tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install bubblewrap and uv
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*google-chrome*
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          python3 -m pip install --user uv==0.13.5
+
+      - name: Run tests
+        working-directory: services/agent-gateway
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python -r requirements.txt pytest==9.2.0 httpx==0.28.1
+          .venv/bin/python -m pytest -q tests
+
+  # -------------------------------------------------------------------------
   # Job 2: Unit Tests (~2 min)
   # Uses ci CMake preset: WEBUI=OFF, TUI=OFF, AEC=OFF, VOSK=ON
   # No submodules needed (VOSK=ON skips whisper.cpp submodule)

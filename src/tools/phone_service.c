@@ -38,6 +38,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "audio/music_speaker.h"
 #include "core/command_router.h"
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
@@ -48,7 +49,6 @@
 #include "memory/contacts_db.h"
 #include "memory/memory_db.h"
 #include "messaging/messaging_engine.h"
-#include "tools/music_tool.h"
 #include "tools/phone_audio_bridge.h"
 #include "tools/phone_contacts.h"
 #include "tools/phone_db.h"
@@ -155,9 +155,8 @@ static phone_state_t get_state(void) {
 /**
  * @brief Reverse-lookup a phone number to a contact name.
  *
- * Uses contacts_find with the number as the search term. contacts_find does
- * a LIKE match on entity name, so we search all phone contacts and check
- * value equality. This avoids the O(N) scan of contacts_list.
+ * Matches the number exactly against stored phone values (no normalization
+ * here: callers normalize the incoming number first).
  */
 static void reverse_lookup(int user_id,
                            const char *number,
@@ -172,34 +171,13 @@ static void reverse_lookup(int user_id,
       return;
    }
 
-   /* List phone contacts and match by exact value.
-    * TODO: Add contacts_find_by_value() to contacts_db for O(1) lookup.
-    * For now, paginate through all phone contacts to avoid the 20-contact ceiling. */
-   int offset = 0;
-   const int page_size = 50;
-   const int max_pages = 200; /* hard cap (~10k contacts) so a misbehaving
-                               * contacts_list that ignores offset can't loop
-                               * forever on the event thread */
-   contact_result_t results[50];
-   for (int page = 0; page < max_pages; page++) {
-      int count = 0;
-      contacts_list(user_id, "phone", results, page_size, offset, &count);
-      if (count <= 0) {
-         break;
+   contact_result_t match;
+   int count = 0;
+   if (contacts_find_by_value(user_id, "phone", number, &match, 1, &count) == 0 && count > 0) {
+      snprintf(name_out, name_size, "%s", match.entity_name);
+      if (entity_id_out) {
+         *entity_id_out = match.entity_id;
       }
-      for (int i = 0; i < count; i++) {
-         if (strcmp(results[i].value, number) == 0) {
-            snprintf(name_out, name_size, "%s", results[i].entity_name);
-            if (entity_id_out) {
-               *entity_id_out = results[i].entity_id;
-            }
-            return;
-         }
-      }
-      if (count < page_size) {
-         break; /* no more pages */
-      }
-      offset += count;
    }
 }
 
@@ -691,7 +669,7 @@ void phone_service_handle_event(const char *payload, int payload_len) {
          const char *port = acfg.pcm_port[0] ? acfg.pcm_port : PHONE_PCM_PORT_DEFAULT;
          /* Keep music out of the call mix (the mic would pick it up).  Paused,
           * so it keeps its place; only the user resumes it. */
-         if (music_tool_pause()) {
+         if (music_speaker_pause()) {
             OLOG_INFO("phone_service: paused music for the call");
          }
          phone_bridge_config_t bcfg = {

@@ -20,17 +20,18 @@
  *
  * DAWN Audio Backend - PulseAudio Implementation
  *
- * Provides PulseAudio-based audio capture and playback using the async API
- * for proper buffer queries and partial read/write support.
+ * Provides PulseAudio-based audio capture and playback.
  *
  * Memory Management:
  *   - Uses static handle pools (no malloc/free per stream)
  *   - Maximum concurrent streams: PULSE_MAX_CAPTURE_HANDLES + PULSE_MAX_PLAYBACK_HANDLES
  *
- * API Choice:
- *   - Uses pa_simple API for simplicity and reliability
- *   - The async API (pa_stream) would provide avail() but adds significant complexity
- *   - For DAWN's use case (voice I/O), pa_simple is sufficient
+ * Streams (pulse_stream.c):
+ *   - Blocking read/write, as pa_simple, one mainloop per stream
+ *   - A stream on a named device stays on it: when the device goes away, reads
+ *     and writes fail with AUDIO_ERR_NO_DEVICE and the caller reopens it by name
+ *     (pa_simple would move it to the default without saying so).  "default"
+ *     follows the default device.
  *
  * Behavioral Notes:
  *   - avail() returns an estimate based on timing (not exact like ALSA)
@@ -40,13 +41,14 @@
 
 #include <pthread.h>
 #include <pulse/error.h>
-#include <pulse/simple.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 
 #include "audio/audio_backend.h"
+#include "audio/pulse_stream.h"
+#include "dawn_error.h"
 #include "logging.h"
 
 /* =============================================================================
@@ -64,7 +66,7 @@
 struct audio_stream_capture_handle {
    uint32_t magic; /* PULSE_HANDLE_MAGIC for validation */
    bool in_use;    /* Handle allocation flag */
-   pa_simple *pa;  /* PulseAudio simple handle */
+   pulse_stream_t *pa;
    audio_hw_params_t hw_params;
    size_t bytes_per_frame;
    uint64_t last_read_time_us; /* For avail() estimation */
@@ -73,7 +75,7 @@ struct audio_stream_capture_handle {
 struct audio_stream_playback_handle {
    uint32_t magic; /* PULSE_HANDLE_MAGIC for validation */
    bool in_use;    /* Handle allocation flag */
-   pa_simple *pa;  /* PulseAudio simple handle */
+   pulse_stream_t *pa;
    audio_hw_params_t hw_params;
    size_t bytes_per_frame;
    bool drain_on_close; /* Whether to drain on close */
@@ -201,6 +203,43 @@ static uint64_t get_time_us(void) {
    return (uint64_t)tv.tv_sec * 1000000ULL + (uint64_t)tv.tv_usec;
 }
 
+/** A stream error as an audio error: the device gone (or never there) is
+ *  AUDIO_ERR_NO_DEVICE, so its caller knows to reopen it. */
+static int pulse_error_to_audio(int error) {
+   switch (error) {
+      case PA_ERR_KILLED:
+      case PA_ERR_NOENTITY:
+         return AUDIO_ERR_NO_DEVICE;
+      case PULSE_STREAM_ERR_SUSPENDED:
+         return AUDIO_ERR_SUSPENDED;
+      default:
+         return AUDIO_ERR_IO;
+   }
+}
+
+/* A source or sink named by its index ("3") gets a new index when its card is
+ * plugged in again, so the stream can't find it after that.  Said once. */
+static void pulse_warn_index_name(const char *device) {
+   static bool warned = false;
+   if (warned || !device || !*device) {
+      return;
+   }
+   for (const char *p = device; *p; p++) {
+      if (*p < '0' || *p > '9') {
+         return;
+      }
+   }
+   OLOG_WARNING("PulseAudio: device '%s' is an index, which changes when a USB device is "
+                "plugged in again; use its name (pactl list sources/sinks short)",
+                device);
+   warned = true;
+}
+
+static const char *pulse_error_name(int error) {
+   const char *name = error == PULSE_STREAM_ERR_SUSPENDED ? "suspended" : pa_strerror(error);
+   return name ? name : "unknown error";
+}
+
 /* =============================================================================
  * PulseAudio Capture Implementation
  * ============================================================================= */
@@ -236,20 +275,18 @@ audio_stream_capture_handle_t *pulse_capture_open(const char *device,
       pa_device = device;
    }
 
-   OLOG_INFO("PulseAudio: Opening capture device: %s", pa_device ? pa_device : "(default)");
+   OLOG_DEBUG("PulseAudio: Opening capture device: %s", pa_device ? pa_device : "(default)");
+   pulse_warn_index_name(pa_device);
 
-   handle->pa = pa_simple_new(NULL,             /* Server name (NULL = default) */
-                              "DAWN",           /* Application name */
-                              PA_STREAM_RECORD, /* Stream direction */
-                              pa_device,        /* Device name (NULL = default) */
-                              "Audio Capture",  /* Stream description */
-                              &ss,              /* Sample format */
-                              NULL,             /* Channel map (NULL = default) */
-                              &attr,            /* Buffering attributes */
-                              &error);
-
+   handle->pa = pulse_stream_new(PA_STREAM_RECORD, pa_device, "Audio Capture", &ss, &attr, &error);
    if (!handle->pa) {
-      OLOG_ERROR("PulseAudio: Cannot open capture: %s", pa_strerror(error));
+      /* A missing device is its caller's to report (it may be waiting for it). */
+      if (error == PA_ERR_NOENTITY) {
+         OLOG_DEBUG("PulseAudio: capture device %s not available",
+                    pa_device ? pa_device : "(default)");
+      } else {
+         OLOG_ERROR("PulseAudio: Cannot open capture: %s", pulse_error_name(error));
+      }
       free_capture_handle(handle);
       return NULL;
    }
@@ -267,8 +304,8 @@ audio_stream_capture_handle_t *pulse_capture_open(const char *device,
       *hw_params = handle->hw_params;
    }
 
-   OLOG_INFO("PulseAudio capture: rate=%u ch=%u format=%d", handle->hw_params.sample_rate,
-             handle->hw_params.channels, handle->hw_params.format);
+   OLOG_INFO("PulseAudio capture: %s rate=%u ch=%u format=%d", pa_device ? pa_device : "(default)",
+             handle->hw_params.sample_rate, handle->hw_params.channels, handle->hw_params.format);
 
    return handle;
 }
@@ -281,9 +318,11 @@ ssize_t pulse_capture_read(audio_stream_capture_handle_t *handle, void *buffer, 
    int error = 0;
    size_t bytes = frames * handle->bytes_per_frame;
 
-   if (pa_simple_read(handle->pa, buffer, bytes, &error) < 0) {
-      OLOG_ERROR("PulseAudio capture read failed: %s", pa_strerror(error));
-      return -AUDIO_ERR_IO;
+   if (pulse_stream_read(handle->pa, buffer, bytes, &error) != SUCCESS) {
+      if (error != PULSE_STREAM_ERR_SUSPENDED) { /* the caller says that once */
+         OLOG_DEBUG("PulseAudio capture read failed: %s", pulse_error_name(error));
+      }
+      return -pulse_error_to_audio(error);
    }
 
    /* Update timing for avail() estimation */
@@ -298,7 +337,7 @@ ssize_t pulse_capture_avail(audio_stream_capture_handle_t *handle) {
    }
 
    /*
-    * PulseAudio simple API doesn't provide avail query.
+    * The stream gives no avail query here.
     * Estimate based on time since last read and sample rate.
     * This is approximate but sufficient for flow control decisions.
     */
@@ -321,7 +360,7 @@ int pulse_capture_recover(audio_stream_capture_handle_t *handle, int err) {
       return AUDIO_ERR_INVALID;
    }
 
-   /* PulseAudio simple API handles recovery internally */
+   /* Nothing to recover in place: a failed stream stays failed (reopen it) */
    /* Just reset timing state */
    handle->last_read_time_us = get_time_us();
 
@@ -335,7 +374,7 @@ void pulse_capture_close(audio_stream_capture_handle_t *handle) {
    }
 
    if (handle->pa) {
-      pa_simple_free(handle->pa);
+      pulse_stream_free(handle->pa);
    }
 
    free_capture_handle(handle);
@@ -377,20 +416,19 @@ audio_stream_playback_handle_t *pulse_playback_open(const char *device,
       pa_device = device;
    }
 
-   OLOG_INFO("PulseAudio: Opening playback device: %s", pa_device ? pa_device : "(default)");
+   OLOG_DEBUG("PulseAudio: Opening playback device: %s", pa_device ? pa_device : "(default)");
+   pulse_warn_index_name(pa_device);
 
-   handle->pa = pa_simple_new(NULL,               /* Server name (NULL = default) */
-                              "DAWN",             /* Application name */
-                              PA_STREAM_PLAYBACK, /* Stream direction */
-                              pa_device,          /* Device name (NULL = default) */
-                              "Audio Playback",   /* Stream description */
-                              &ss,                /* Sample format */
-                              NULL,               /* Channel map (NULL = default) */
-                              &attr,              /* Buffering attributes */
-                              &error);
-
+   handle->pa = pulse_stream_new(PA_STREAM_PLAYBACK, pa_device, "Audio Playback", &ss, &attr,
+                                 &error);
    if (!handle->pa) {
-      OLOG_ERROR("PulseAudio: Cannot open playback: %s", pa_strerror(error));
+      /* A missing device is its caller's to report (it may be waiting for it). */
+      if (error == PA_ERR_NOENTITY) {
+         OLOG_DEBUG("PulseAudio: playback device %s not available",
+                    pa_device ? pa_device : "(default)");
+      } else {
+         OLOG_ERROR("PulseAudio: Cannot open playback: %s", pulse_error_name(error));
+      }
       free_playback_handle(handle);
       return NULL;
    }
@@ -408,8 +446,8 @@ audio_stream_playback_handle_t *pulse_playback_open(const char *device,
       *hw_params = handle->hw_params;
    }
 
-   OLOG_INFO("PulseAudio playback: rate=%u ch=%u format=%d", handle->hw_params.sample_rate,
-             handle->hw_params.channels, handle->hw_params.format);
+   OLOG_INFO("PulseAudio playback: %s rate=%u ch=%u format=%d", pa_device ? pa_device : "(default)",
+             handle->hw_params.sample_rate, handle->hw_params.channels, handle->hw_params.format);
 
    return handle;
 }
@@ -424,9 +462,9 @@ ssize_t pulse_playback_write(audio_stream_playback_handle_t *handle,
    int error = 0;
    size_t bytes = frames * handle->bytes_per_frame;
 
-   if (pa_simple_write(handle->pa, buffer, bytes, &error) < 0) {
-      OLOG_ERROR("PulseAudio playback write failed: %s", pa_strerror(error));
-      return -AUDIO_ERR_IO;
+   if (pulse_stream_write(handle->pa, buffer, bytes, &error) != SUCCESS) {
+      OLOG_DEBUG("PulseAudio playback write failed: %s", pulse_error_name(error));
+      return -pulse_error_to_audio(error);
    }
 
    return (ssize_t)frames;
@@ -438,7 +476,7 @@ ssize_t pulse_playback_avail(audio_stream_playback_handle_t *handle) {
    }
 
    /*
-    * PulseAudio simple API doesn't provide avail query.
+    * The stream gives no avail query here.
     * Return the buffer size as an estimate - this indicates
     * how much can potentially be written without blocking.
     *
@@ -454,9 +492,9 @@ int pulse_playback_drain(audio_stream_playback_handle_t *handle) {
    }
 
    int error = 0;
-   if (pa_simple_drain(handle->pa, &error) < 0) {
-      OLOG_ERROR("PulseAudio playback drain failed: %s", pa_strerror(error));
-      return AUDIO_ERR_IO;
+   if (pulse_stream_drain(handle->pa, &error) != SUCCESS) {
+      OLOG_DEBUG("PulseAudio playback drain failed: %s", pulse_error_name(error));
+      return pulse_error_to_audio(error);
    }
 
    return AUDIO_SUCCESS;
@@ -468,9 +506,9 @@ int pulse_playback_drop(audio_stream_playback_handle_t *handle) {
    }
 
    int error = 0;
-   if (pa_simple_flush(handle->pa, &error) < 0) {
-      OLOG_ERROR("PulseAudio playback flush failed: %s", pa_strerror(error));
-      return AUDIO_ERR_IO;
+   if (pulse_stream_flush(handle->pa, &error) != SUCCESS) {
+      OLOG_DEBUG("PulseAudio playback flush failed: %s", pulse_error_name(error));
+      return pulse_error_to_audio(error);
    }
 
    /* Don't drain on close after explicit drop */
@@ -484,7 +522,7 @@ int pulse_playback_recover(audio_stream_playback_handle_t *handle, int err) {
       return AUDIO_ERR_INVALID;
    }
 
-   /* PulseAudio simple API handles recovery internally */
+   /* Nothing to recover in place: a failed stream stays failed (reopen it) */
    (void)err;
    return AUDIO_SUCCESS;
 }
@@ -498,11 +536,11 @@ void pulse_playback_close(audio_stream_playback_handle_t *handle) {
       /* Only drain if not previously dropped */
       if (handle->drain_on_close) {
          int error = 0;
-         if (pa_simple_drain(handle->pa, &error) < 0) {
-            OLOG_WARNING("PulseAudio playback: drain on close failed: %s", pa_strerror(error));
+         if (pulse_stream_drain(handle->pa, &error) != SUCCESS) {
+            OLOG_DEBUG("PulseAudio playback: drain on close failed: %s", pulse_error_name(error));
          }
       }
-      pa_simple_free(handle->pa);
+      pulse_stream_free(handle->pa);
    }
 
    free_playback_handle(handle);
