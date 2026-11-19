@@ -16,8 +16,9 @@
  * under the GPLv3 (or any later version) or any future licenses chosen by
  * the project author(s).
  *
- * Unit tests for dawn-admin against a daemon speaking another admin protocol
- * version: the client must fail, never report success or a session list.
+ * Unit tests for dawn-admin's socket client: it parses the session list in
+ * this build's wire layout, and against a daemon speaking another admin
+ * protocol version it fails rather than report success or a session list.
  */
 
 #include <string.h>
@@ -57,6 +58,77 @@ static int count_session(const admin_session_entry_t *session, void *ctx) {
    return 0;
 }
 
+/* Pack one LIST_SESSIONS entry in the wire layout; returns its length. */
+static size_t pack_session(uint8_t *p,
+                           const char *prefix,
+                           const char *user,
+                           int64_t created,
+                           int64_t last,
+                           const char *ip) {
+   const uint8_t *start = p;
+   memcpy(p, prefix, ADMIN_SESSION_PREFIX_LEN);
+   p += ADMIN_SESSION_PREFIX_LEN;
+   *p++ = (uint8_t)strlen(user);
+   memcpy(p, &created, 8);
+   p += 8;
+   memcpy(p, &last, 8);
+   p += 8;
+   *p++ = (uint8_t)strlen(ip);
+   memcpy(p, user, strlen(user));
+   p += strlen(user);
+   memcpy(p, ip, strlen(ip));
+   p += strlen(ip);
+   return (size_t)(p - start);
+}
+
+typedef struct {
+   admin_session_entry_t got[2];
+   int count;
+} session_capture_t;
+
+static int capture_session(const admin_session_entry_t *session, void *ctx) {
+   session_capture_t *cap = ctx;
+   if (cap->count < 2) {
+      cap->got[cap->count] = *session;
+   }
+   cap->count++;
+   return 0;
+}
+
+/* A same-version list: each login's full 16-character prefix (what
+ * `session revoke` needs) and the fields after it come through intact. */
+static void test_list_sessions_parses_full_prefix(void) {
+   uint8_t payload[256];
+   size_t len = pack_session(payload, "a1b2c3d4e5f60718", "alice", 1700000000, 1700000600,
+                             "192.168.1.20");
+   len += pack_session(payload + len, "0f1e2d3c4b5a6978", "bob", 1700001000, 1700001900, "");
+
+   admin_list_response_t hdr = { .version = ADMIN_PROTOCOL_VERSION,
+                                 .response_code = ADMIN_RESP_SUCCESS,
+                                 .payload_len = (uint16_t)len,
+                                 .item_count = 2,
+                                 .flags = 0 };
+   TEST_ASSERT_EQUAL_INT((int)sizeof(hdr), (int)write(s_daemon_fd, &hdr, sizeof(hdr)));
+   TEST_ASSERT_EQUAL_INT((int)len, (int)write(s_daemon_fd, payload, len));
+
+   session_capture_t cap = { 0 };
+   TEST_ASSERT_EQUAL_INT(ADMIN_RESP_SUCCESS,
+                         admin_client_list_sessions(s_client_fd, capture_session, &cap));
+   TEST_ASSERT_EQUAL_INT(2, cap.count);
+
+   TEST_ASSERT_EQUAL_STRING("a1b2c3d4e5f60718", cap.got[0].token_prefix);
+   TEST_ASSERT_EQUAL_STRING("alice", cap.got[0].username);
+   TEST_ASSERT_EQUAL_INT64(1700000000, cap.got[0].created_at);
+   TEST_ASSERT_EQUAL_INT64(1700000600, cap.got[0].last_activity);
+   TEST_ASSERT_EQUAL_STRING("192.168.1.20", cap.got[0].ip_address);
+
+   TEST_ASSERT_EQUAL_STRING("0f1e2d3c4b5a6978", cap.got[1].token_prefix);
+   TEST_ASSERT_EQUAL_STRING("bob", cap.got[1].username);
+   TEST_ASSERT_EQUAL_INT64(1700001000, cap.got[1].created_at);
+   TEST_ASSERT_EQUAL_INT64(1700001900, cap.got[1].last_activity);
+   TEST_ASSERT_EQUAL_STRING("", cap.got[1].ip_address);
+}
+
 /* The client stamps its requests with this build's version. */
 static void test_request_carries_protocol_version(void) {
    daemon_replies(ADMIN_PROTOCOL_VERSION, ADMIN_RESP_SUCCESS);
@@ -88,6 +160,7 @@ static void test_revoke_rejects_other_version_reply(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_request_carries_protocol_version);
+   RUN_TEST(test_list_sessions_parses_full_prefix);
    RUN_TEST(test_list_sessions_fails_on_older_daemon);
    RUN_TEST(test_revoke_rejects_other_version_reply);
    return UNITY_END();
