@@ -37,7 +37,9 @@ void code_project_service_shutdown(void);
  *        checks them: the feature enabled, [code_projects] import_user_required
  *        (a requester of 0 is the operator, never refused by it), the name
  *        charset, the URL (HTTPS, SSRF guard, host allowlist), the branch, and a
- *        duplicate name.  Does no network I/O.
+ *        duplicate name.  Blocks on a DNS lookup: the SSRF guard (valid_url ->
+ *        url_is_blocked) resolves the URL's host with getaddrinfo() unless it
+ *        is a literal IP.  It makes no other network call.
  *
  * @return NULL when it would be accepted, else a static sentence for the user.
  */

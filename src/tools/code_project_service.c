@@ -579,6 +579,8 @@ void code_project_service_shutdown(void) {
    code_project_git_global_shutdown(); /* libgit2 refcount: once per process (sec-S6) */
 }
 
+/* See the header.  valid_url's SSRF guard (url_is_blocked) resolves the URL's
+ * host with getaddrinfo(), so this blocks on a DNS lookup for any hostname. */
 const char *code_project_import_refusal(int64_t requester_user_id,
                                         const char *source_url,
                                         const char *desired_name,
