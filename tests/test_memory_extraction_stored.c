@@ -35,6 +35,7 @@
 #include "config/dawn_config.h"
 #include "core/outside_kind.h"
 #include "llm/llm_third_party.h"
+#include "llm/llm_turn_blocks.h"
 #include "memory/memory_extraction_input.h"
 #include "memory/memory_history_loader.h"
 #include "memory/memory_note_guard.h"
@@ -447,9 +448,20 @@ static void test_stopped_replies_are_left_out(void) {
    TEST_ASSERT_NOT_NULL(hist);
    int kind = -1;
    struct json_object *in = memory_extraction_build_input(s_user, conv, hist, 0, &kind);
-   json_object_put(hist);
    TEST_ASSERT_NOT_NULL(in);
    TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, kind);
+   TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(in));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(in), "Your cat"));
+   json_object_put(in);
+
+   /* Nor from the copy a session hands over when its chat is switched or
+    * it ends: the copy keeps the mark. */
+   struct json_object *snapshot = llm_history_copy_marked(hist);
+   json_object_put(hist);
+   TEST_ASSERT_NOT_NULL(snapshot);
+   in = memory_extraction_build_input(s_user, conv, snapshot, 0, &kind);
+   json_object_put(snapshot);
+   TEST_ASSERT_NOT_NULL(in);
    TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(in));
    TEST_ASSERT_NULL(strstr(json_object_to_json_string(in), "Your cat"));
    json_object_put(in);

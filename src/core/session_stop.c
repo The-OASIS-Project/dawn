@@ -42,14 +42,7 @@ void session_stop_turn_by_user(session_t *session) {
       return;
    }
    pthread_mutex_lock(&session->history_mutex);
-   const uint64_t token = session->turn_owner_token;
-   if (session->turn_active && token != 0 && !session->turn_reply &&
-       stopped_index_locked(session, token) < 0) {
-      /* Newest first; the oldest falls off. */
-      memmove(&session->stopped_turn_tokens[1], &session->stopped_turn_tokens[0],
-              (TURN_ORIGIN_STOPPED_MAX - 1) * sizeof(session->stopped_turn_tokens[0]));
-      session->stopped_turn_tokens[0] = token;
-   }
+   session_stop_record_locked(session);
    pthread_mutex_unlock(&session->history_mutex);
    session_cancel_turn(session);
 }

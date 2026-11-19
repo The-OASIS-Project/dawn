@@ -26,12 +26,34 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include "core/session_manager.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * Record the running turn as stopped by the user, while its reply hasn't
+ * arrived: newest first among the session's last TURN_ORIGIN_STOPPED_MAX, the
+ * oldest falling off.  Caller holds history_mutex.  Inline: the lease's
+ * "stop the other reply" records too.
+ */
+static inline void session_stop_record_locked(session_t *session) {
+   const uint64_t token = session->turn_owner_token;
+   if (!session->turn_active || token == 0 || session->turn_reply) {
+      return;
+   }
+   for (int i = 0; i < TURN_ORIGIN_STOPPED_MAX; i++) {
+      if (session->stopped_turn_tokens[i] == token) {
+         return;
+      }
+   }
+   memmove(&session->stopped_turn_tokens[1], &session->stopped_turn_tokens[0],
+           (TURN_ORIGIN_STOPPED_MAX - 1) * sizeof(session->stopped_turn_tokens[0]));
+   session->stopped_turn_tokens[0] = token;
+}
 
 /**
  * @brief Stop the running turn at the user's request

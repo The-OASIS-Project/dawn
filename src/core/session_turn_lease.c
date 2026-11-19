@@ -31,6 +31,7 @@
 
 #include "core/conv_turn_lease.h"
 #include "core/session_manager.h"
+#include "core/session_stop.h"
 #include "logging.h"
 
 /* No client to tell in a build without the WebUI. */
@@ -231,6 +232,8 @@ bool session_turn_cancel_if_holds(session_t *session, int64_t conv_id, uint64_t 
    const bool holds = session->turn_active && session->turn_lease_conv == conv_id &&
                       session->turn_lease_token == token;
    if (holds) {
+      /* The user's Stop, pressed from another of their clients. */
+      session_stop_record_locked(session);
       session_cancel_turn(session);
    }
    pthread_mutex_unlock(&session->history_mutex);

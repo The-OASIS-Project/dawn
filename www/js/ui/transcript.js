@@ -854,16 +854,21 @@
    function markStopped(entry, savedText) {
       if (!entry) return;
       const textEl = entry.querySelector('.text');
+      // As a streamed reply is drawn: without the tags a model writes itself.
+      const shown =
+         typeof savedText === 'string'
+            ? savedText.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '')
+            : null;
       if (
          textEl &&
-         typeof savedText === 'string' &&
-         savedText !== textEl.getAttribute('data-raw-text') &&
-         savedText.indexOf('<dawn-visual') === -1 &&
-         savedText.indexOf('[IMAGE:') === -1
+         shown !== null &&
+         shown !== textEl.getAttribute('data-raw-text') &&
+         shown.indexOf('<dawn-visual') === -1 &&
+         shown.indexOf('[IMAGE:') === -1
       ) {
-         textEl.innerHTML = DawnFormat.markdown(savedText);
+         textEl.innerHTML = DawnFormat.markdown(shown);
          DawnFormat.addCopyButtons(textEl);
-         textEl.setAttribute('data-raw-text', savedText);
+         textEl.setAttribute('data-raw-text', shown);
          DawnFormat.addMessageCopyButton(textEl);
       }
       if (entry.querySelector('.transcript-stopped')) return;

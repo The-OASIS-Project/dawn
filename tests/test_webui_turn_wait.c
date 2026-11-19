@@ -172,9 +172,14 @@ static void test_the_users_other_session_is_stopped(void) {
    new_session(1, SESSION_TYPE_WEBUI);
    session_t *other = new_session(2, SESSION_TYPE_WEBUI);
    const uint64_t t = run_turn(other, ALICE, 504);
+   pthread_mutex_lock(&other->history_mutex);
+   other->turn_owner_token = t;
+   pthread_mutex_unlock(&other->history_mutex);
    TEST_ASSERT_NULL(webui_stop_other_reply_core(1, ALICE, 504));
    TEST_ASSERT_TRUE(atomic_load(&other->cancel_requested));
    TEST_ASSERT_EQUAL_INT(0, s_job_cancels);
+   /* The user's Stop, like the one pressed on that reply's own client. */
+   TEST_ASSERT_EQUAL_UINT64(t, other->stopped_turn_tokens[0]);
    end_turn(other, 504, t);
 }
 

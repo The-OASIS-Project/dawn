@@ -626,7 +626,8 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
             llm_tool_response_free(&result);
             char *answer = final_answer_without_tools(params, TOOL_LOOP_DIRECTIVE_REPORT_OUTCOME,
                                                       iteration);
-            if (answer) {
+            /* Stopped during that call: no reply, never an empty finished one. */
+            if (answer || llm_interrupt_ctx_triggered(&ictx)) {
                return answer;
             }
             memset(&result, 0, sizeof(result)); /* freed above: nothing left to free */

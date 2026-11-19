@@ -592,10 +592,12 @@ size_t llm_turn_message_reasoning_chars(struct json_object *message) {
    return chars;
 }
 
-/* A key DAWN keeps for itself.  @p keep_kind spares the kind mark (a log on
- * disk shows which messages were request context). */
+/* A key DAWN keeps for itself.  @p keep_kind spares the marks a reader of the
+ * copy goes by: the kind (a log on disk shows which messages were request
+ * context) and a stopped reply's (extraction leaves it out). */
 static bool internal_key(const char *key, bool keep_kind) {
-   return key[0] == '_' && !(keep_kind && strcmp(key, MESSAGE_KIND_KEY) == 0);
+   return key[0] == '_' && !(keep_kind && (strcmp(key, MESSAGE_KIND_KEY) == 0 ||
+                                           strcmp(key, LLM_HISTORY_STOPPED_KEY) == 0));
 }
 
 static bool has_internal_key(struct json_object *obj, bool keep_kind) {
