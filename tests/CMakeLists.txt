@@ -2226,6 +2226,20 @@ dawn_add_unit_test(test_conv_db_llm_blocks
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# A Claude stream cut by a stop: the text so far and its finished blocks.
+dawn_add_unit_test(test_llm_stream_stopped
+   SOURCES test_llm_stream_stopped.c
+           ${SRC_ROOT}/src/llm/llm_streaming.c
+           ${SRC_ROOT}/src/llm/llm_claude_blocks.c
+           ${SRC_ROOT}/src/llm/llm_claude_binding.c
+           ${SRC_ROOT}/src/llm/llm_reasoning_details.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread m ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # message_stopped: a reply the user stopped, marked and read back (v117).
 dawn_add_unit_test(test_conv_db_stopped
    SOURCES test_conv_db_stopped.c

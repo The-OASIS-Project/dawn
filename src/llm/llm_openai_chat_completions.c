@@ -767,6 +767,8 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
                               (res == CURLE_WRITE_ERROR && llm_transfer_cancelled());
          if (stopped) {
             OLOG_INFO("LLM transfer interrupted by user");
+            /* What had streamed; no blocks: which reasoning finished can't be told. */
+            llm_stream_fill_stopped(stream_ctx, result);
          } else {
             OLOG_ERROR("curl_easy_perform() failed: %s", curl_easy_strerror(res));
          }

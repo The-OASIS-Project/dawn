@@ -246,6 +246,8 @@ typedef struct llm_tool_response {
    int reasoning_tokens; /**< Reasoning token count (OpenAI o-series / Responses); 0 if none */
    /* OpenAI Responses API round-trip fields (NULL for chat-completions / Claude paths) */
    char *response_id; /**< response.id from /v1/responses (Mode A future use) */
+   bool stopped;      /**< The transfer was cut by a stop: the call failed (its rc says
+                           so) and the fields hold what had streamed (llm_stream_fill_stopped) */
 } llm_tool_response_t;
 
 /* =============================================================================

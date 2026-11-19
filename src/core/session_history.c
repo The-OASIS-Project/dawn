@@ -458,6 +458,8 @@ void session_final_answer_clear(session_t *session) {
    session->final_answer.blocks = NULL;
    json_object_put(session->final_answer.reply_blocks);
    session->final_answer.reply_blocks = NULL;
+   free(session->final_answer.stopped_text);
+   session->final_answer.stopped_text = NULL;
 }
 
 struct json_object *session_take_reply_blocks(session_t *session) {

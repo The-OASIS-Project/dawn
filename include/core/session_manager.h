@@ -721,10 +721,14 @@ typedef struct session {
    //     taken by whichever writer saves the reply (session_take_reply_blocks), so the
    //     row carries its own turn's blocks and never an earlier turn's.  Also cleared
    //     at turn begin and turn end (session_turn_begin / _end).
+   //   - stopped_text: the reply as far as it had streamed when a stop cut the call (the
+   //     tool loop keeps it, with its blocks and reasoning in the fields above, only for a
+   //     turn whose caller saves its reply); taken by llm_call_finalize.
    struct {
       char *reasoning_json;
       struct json_object *blocks;
       struct json_object *reply_blocks;
+      char *stopped_text;
    } final_answer;
 
    // Whether THIS turn's step events (tool_call/tool_result) should be persisted
