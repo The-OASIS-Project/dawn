@@ -104,8 +104,11 @@ extern "C" {
  *
  * Increment when making breaking changes to the protocol.
  * Clients with mismatched versions receive ADMIN_RESP_VERSION_MISMATCH.
+ *
+ * 0x02: LIST_SESSIONS entries and REVOKE_SESSION carry a 16-character token
+ *       prefix (ADMIN_SESSION_PREFIX_LEN), up from 8.
  */
-#define ADMIN_PROTOCOL_VERSION 0x01
+#define ADMIN_PROTOCOL_VERSION 0x02
 
 /**
  * @brief Token-prefix length carried by LIST_SESSIONS and REVOKE_SESSION.

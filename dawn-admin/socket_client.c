@@ -146,8 +146,7 @@ static int recv_response(int fd, admin_msg_response_t *resp) {
 
    /* Validate protocol version */
    if (resp->version != ADMIN_PROTOCOL_VERSION) {
-      fprintf(stderr, "Error: Protocol version mismatch (got 0x%02x, expected 0x%02x)\n",
-              resp->version, ADMIN_PROTOCOL_VERSION);
+      fprintf(stderr, "Error: %s\n", admin_resp_strerror(ADMIN_RESP_VERSION_MISMATCH));
       return -1;
    }
 
@@ -296,7 +295,7 @@ static int recv_list_response(int fd,
    }
 
    if (resp->version != ADMIN_PROTOCOL_VERSION) {
-      fprintf(stderr, "Error: Protocol version mismatch\n");
+      fprintf(stderr, "Error: %s\n", admin_resp_strerror(ADMIN_RESP_VERSION_MISMATCH));
       return -1;
    }
 
@@ -936,7 +935,8 @@ const char *admin_resp_strerror(admin_resp_code_t code) {
       case ADMIN_RESP_SERVICE_ERROR:
          return "Internal service error";
       case ADMIN_RESP_VERSION_MISMATCH:
-         return "Protocol version mismatch - update dawn-admin";
+         return "dawn-admin and the running daemon are from different builds - restart "
+                "dawn after an update, or use the dawn-admin built with it";
       case ADMIN_RESP_UNAUTHORIZED:
          return "Unauthorized - run as root, the daemon user, or a member of the daemon's group";
       case ADMIN_RESP_LAST_ADMIN:
@@ -1318,7 +1318,7 @@ static admin_resp_code_t recv_text_response(int fd, char *response, size_t resp_
    }
 
    if (resp.version != ADMIN_PROTOCOL_VERSION) {
-      fprintf(stderr, "Error: Protocol version mismatch\n");
+      fprintf(stderr, "Error: %s\n", admin_resp_strerror(ADMIN_RESP_VERSION_MISMATCH));
       return ADMIN_RESP_SERVICE_ERROR;
    }
 
