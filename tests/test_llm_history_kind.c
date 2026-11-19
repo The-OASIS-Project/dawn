@@ -434,6 +434,36 @@ static void test_stopped_marked_for_a_summary(void) {
    json_object_put(h);
 }
 
+/* A stopped reply's blocks end with its text: reasoning that finished after it
+ * (before a tool call the stop dropped) goes, reasoning before it stays. */
+static void test_stopped_reply_blocks_end_with_the_text(void) {
+   struct json_object *blocks = llm_turn_blocks_new();
+   llm_turn_blocks_add_reasoning(blocks, "api.openai.com#0", LLM_FORMAT_OPENAI, "m",
+                                 parse("{\"type\":\"reasoning\",\"id\":\"rs_1\"}"));
+   llm_turn_blocks_add_text(blocks, "Half an");
+   llm_turn_blocks_add_reasoning(blocks, "api.openai.com#0", LLM_FORMAT_OPENAI, "m",
+                                 parse("{\"type\":\"reasoning\",\"id\":\"rs_2\"}"));
+   struct json_object *out = llm_turn_blocks_stopped_reply(blocks, "Half an ans");
+   TEST_ASSERT_EQUAL_INT(2, (int)json_object_array_length(out));
+   const char *s = json_object_to_json_string_ext(out, FLAGS);
+   TEST_ASSERT_NOT_NULL(strstr(s, "rs_1"));
+   TEST_ASSERT_NULL(strstr(s, "rs_2"));
+   TEST_ASSERT_NOT_NULL(strstr(s, "Half an ans"));
+   json_object_put(out);
+   json_object_put(blocks);
+
+   /* Only reasoning came before the cut: the text follows it. */
+   blocks = llm_turn_blocks_new();
+   llm_turn_blocks_add_reasoning(blocks, "api.openai.com#0", LLM_FORMAT_OPENAI, "m",
+                                 parse("{\"type\":\"reasoning\",\"id\":\"rs_1\"}"));
+   out = llm_turn_blocks_stopped_reply(blocks, "Half");
+   TEST_ASSERT_EQUAL_INT(2, (int)json_object_array_length(out));
+   TEST_ASSERT_EQUAL_STRING("text", json_object_get_string(json_object_object_get(
+                                        json_object_array_get_idx(out, 1), "type")));
+   json_object_put(out);
+   json_object_put(blocks);
+}
+
 /* The frozen prefix is the first message only when it is marked as one; its
  * in-force record is read without being made unless the caller asks. */
 static void test_prefix_and_its_in_force_record(void) {
@@ -480,5 +510,6 @@ int main(void) {
    RUN_TEST(test_stopped_note_goes_in_the_next_question);
    RUN_TEST(test_stopped_note_waits_and_never_joins_an_envelope);
    RUN_TEST(test_stopped_marked_for_a_summary);
+   RUN_TEST(test_stopped_reply_blocks_end_with_the_text);
    return UNITY_END();
 }

@@ -1686,9 +1686,10 @@ bool turn_origin_capture(turn_origin_t *out) {
    const uint32_t number = ctx->turn_number;
    const bool from_visual = ctx->turn_from_visual;
    const bool third_party = ctx->turn_attached != NULL;
-   const uint64_t stopped = ctx->stopped_turn_token;
+   memcpy(out->stopped_tokens, ctx->stopped_turn_tokens, sizeof(out->stopped_tokens));
    pthread_mutex_unlock(&ctx->history_mutex);
    if (!user) {
+      *out = (turn_origin_t){ 0 };
       return false;
    }
    out->session_id = ctx->session_id;
@@ -1697,7 +1698,6 @@ bool turn_origin_capture(turn_origin_t *out) {
    out->code_redeemed = s_call_code_redeemed;
    out->from_visual = from_visual;
    out->third_party = third_party;
-   out->stopped_token = stopped;
    return true;
 }
 

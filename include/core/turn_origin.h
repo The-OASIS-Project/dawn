@@ -46,10 +46,20 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/** Turns after a preview the user was shown in which DAWN stages nothing
+ *  unasked in that session (the user may still be answering it).  At least
+ *  every pending table's later_turns (each such table asserts it). */
+#define TURN_ORIGIN_UNASKED_QUIET_TURNS 3
+
+/** The stopped turns a session remembers: one for each turn an item can still
+ *  be confirmed in (the widest later_turns window), and the turn itself. */
+#define TURN_ORIGIN_STOPPED_MAX (TURN_ORIGIN_UNASKED_QUIET_TURNS + 1)
 
 typedef struct {
    uint32_t session_id;
@@ -65,9 +75,9 @@ typedef struct {
    /* The turn carries someone else's text the user attached (an email), which
     * could itself say "yes".  Read only from the confirming side. */
    bool third_party;
-   /* The session's last turn the user stopped (its token; 0 = none).  Read
-    * only from the confirming side; ignored on a stored origin. */
-   uint64_t stopped_token;
+   /* The session's last turns the user stopped (their tokens; 0 = none).
+    * Read only from the confirming side; ignored on a stored origin. */
+   uint64_t stopped_tokens[TURN_ORIGIN_STOPPED_MAX];
 } turn_origin_t;
 
 typedef enum {
@@ -95,8 +105,10 @@ static inline turn_origin_rc_t turn_origin_check(const turn_origin_t *made,
       return TURN_ORIGIN_THIRD_PARTY; /* the yes could be the attached text's */
    if (now->turn_token == 0 || now->turn_token == made->turn_token)
       return TURN_ORIGIN_SAME_TURN; /* not a person's later turn */
-   if (now->stopped_token != 0 && made->turn_token == now->stopped_token)
-      return TURN_ORIGIN_STOPPED; /* the user cut its read-back; no code revives it */
+   for (int i = 0; i < TURN_ORIGIN_STOPPED_MAX; i++) {
+      if (now->stopped_tokens[i] == made->turn_token)
+         return TURN_ORIGIN_STOPPED; /* the user cut its read-back; no code revives it */
+   }
    if (now->code_redeemed)
       return now->turn_number > made->turn_number ? TURN_ORIGIN_OK : TURN_ORIGIN_SAME_TURN;
    if (now->turn_number != made->turn_number + 1)
@@ -111,7 +123,7 @@ static inline turn_origin_t turn_origin_stored(const turn_origin_t *origin) {
    stored.code_redeemed = false;
    stored.from_visual = false;
    stored.third_party = false;
-   stored.stopped_token = 0;
+   memset(stored.stopped_tokens, 0, sizeof(stored.stopped_tokens));
    return stored;
 }
 
@@ -166,8 +178,8 @@ static inline const char *turn_origin_retry_hint(turn_origin_rc_t rc) {
  *
  * code_redeemed is copied from session_call_code_redeemed(); from_visual and
  * third_party from the running turn (session_turn_mark_from_visual,
- * session_turn_attach_email); stopped_token from the session's last turn the
- * user stopped.
+ * session_turn_attach_email); stopped_tokens from the session's last turns
+ * the user stopped.
  *
  * @param out Receives the origin (zeroed on false)
  * @return false with no command context, in a job's session, on a background
@@ -177,11 +189,6 @@ static inline const char *turn_origin_retry_hint(turn_origin_rc_t rc) {
 bool turn_origin_capture(turn_origin_t *out);
 
 struct session;
-
-/** Turns after a preview the user was shown in which DAWN stages nothing
- *  unasked in that session (the user may still be answering it).  At least
- *  every pending table's later_turns (each such table asserts it). */
-#define TURN_ORIGIN_UNASKED_QUIET_TURNS 3
 
 /**
  * @brief An origin for an item DAWN stages in @p session on its own, outside

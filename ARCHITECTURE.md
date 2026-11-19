@@ -179,7 +179,8 @@ Layer 1 (Core infrastructure) — deps: Layer 0
 │                               the live extraction scan and the SQL over stored rows match the same definitions
 ├── include/core/turn_origin.h  Where a pending action was made; a confirm carries it out only in the same
 │                               session, in a later turn (the next one, or one of the next few where a
-│                               table allows it), and never in a turn carrying an email the user attached
+│                               table allows it), never in a turn carrying an email the user attached,
+│                               and never for an action prepared in a turn the user stopped
 ├── src/core/conv_turn_lease.c  One turn per conversation at a time: a turn takes its conversation's lease, waiting
 │                               FIFO behind the holder; a post from outside a turn never waits (written now, or
 │                               queued and written by the holder's release before the next turn starts)
@@ -249,7 +250,8 @@ Layer 4 (Application) — deps: everything below
 `session_prefix.c` (the append-only request: frozen prefix, appended changes and turn context, live withdrawal),
 `session_catchup.c` (a turn's history brought up to date with its conversation),
 `session_turn_lease.c` (a turn's wait for its conversation's lease, and what others may ask of the turn holding it),
-`session_compaction.c`, `session_focus.c`, `session_posts.c`, `prompt_builder.c` and `session_image_hold.c`
+`session_compaction.c`, `session_focus.c`, `session_posts.c`, `prompt_builder.c`, `session_image_hold.c` and
+`session_stop.c` (the user's Stop: which turns the user stopped, and whether a turn's reply is one)
 call into each other: read them as one Layer-2 unit, not as separate modules with a direction between them.
 
 **Deliberate upward calls.** Each goes through a weak symbol or a registered function pointer, never an `#include`:

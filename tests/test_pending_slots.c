@@ -255,12 +255,14 @@ static void test_stopped_turn_item_not_taken(void) {
    item_t out;
    turn_origin_rc_t orc = TURN_ORIGIN_OK;
    turn_origin_t next = origin(7, 600, 2);
-   next.stopped_token = 500;
+   next.stopped_tokens[0] = 500;
    TEST_ASSERT_EQUAL_INT(PENDING_NOT_NOW, pending_slots_take(&later_slots, &next, 1, KIND_CALL, id,
                                                              1001, &out, sizeof(out), &orc));
    TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_STOPPED, orc);
+   /* Another turn stopped since: the first is still remembered. */
    turn_origin_t two_later = origin(7, 700, 3);
-   two_later.stopped_token = 500;
+   two_later.stopped_tokens[0] = 600;
+   two_later.stopped_tokens[1] = 500;
    TEST_ASSERT_EQUAL_INT(PENDING_NOT_NOW, pending_slots_take(&later_slots, &two_later, 1, KIND_CALL,
                                                              id, 1001, &out, sizeof(out), &orc));
    TEST_ASSERT_TRUE(it->hdr.active);

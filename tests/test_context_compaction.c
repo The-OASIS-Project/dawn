@@ -449,8 +449,9 @@ static void test_summarize_falls_through_to_l3(void) {
    json_object_put(h);
 }
 
-/* A reply the user stopped reads as cut off at every level: the summarizer is
- * given the note after its text, and L3 labels it. */
+/* A reply the user stopped reads as cut off at every level: the note after its
+ * text for the summarizer, and on its role in the mechanical L3, whose snippet
+ * is cut before a long reply's end. */
 static char *seen_input(struct json_object *in, llm_compaction_level_t level, void *ctx) {
    (void)level;
    free(*(char **)ctx);
@@ -468,7 +469,7 @@ static void test_summary_input_marks_a_stopped_reply(void) {
    TEST_ASSERT_NOT_NULL(in);
    TEST_ASSERT_NOT_NULL(strstr(in, STOPPED_REPLY_NOTE));
    TEST_ASSERT_EQUAL_INT(LLM_COMPACT_DETERMINISTIC, level);
-   TEST_ASSERT_NOT_NULL(strstr(s, "- assistant (stopped by the user): "));
+   TEST_ASSERT_NOT_NULL(strstr(s, " (stopped by the user): "));
    free(in);
    free(s);
    json_object_put(h);

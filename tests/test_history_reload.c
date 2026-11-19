@@ -106,6 +106,7 @@ typedef struct {
    const char *partial;   /* what had streamed when the stop cut the call (the tool loop's
                              final_answer.stopped_text) */
    bool capture;          /* the turn's confirm origin is read (s_origin), as a tool would */
+   bool stop_after;       /* the user's Stop lands once the answer is complete (speech) */
    const char *post;      /* DAWN posts this into the conversation mid-turn */
    bool boundary;         /* the turn declares a boundary: reasoning so far left behind */
 } script_t;
@@ -266,6 +267,9 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
    }
    if (s_script.cancel_after) {
       atomic_store(&s->cancel_requested, true);
+   }
+   if (s_script.stop_after) {
+      session_stop_turn_by_user(s);
    }
    return strdup(s_script.reply);
 }
@@ -1263,9 +1267,26 @@ static void test_a_partial_reply_the_user_stopped(void) {
    assert_live_is_reload(s_conv, STOPPED_REPLY_USER_NOTE);
    /* What the stopped turn prepared isn't confirmed by the next one. */
    run_turn(s_conv, "Q3", (script_t){ .reply = "A3", .capture = true });
-   TEST_ASSERT_EQUAL_UINT64(stopped.turn_token, s_origin.stopped_token);
+   TEST_ASSERT_EQUAL_UINT64(stopped.turn_token, s_origin.stopped_tokens[0]);
    TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_STOPPED, turn_origin_check(&stopped, &s_origin));
    TEST_ASSERT_FALSE(last_reply_stopped(s_conv));
+   assert_live_is_reload(s_conv, STOPPED_REPLY_USER_NOTE);
+}
+
+/* A Stop once the whole reply arrived (cutting its speech) leaves no stopped
+ * turn: what it staged is confirmed by the next.  Two Stops mid-stream in a
+ * row: the first turn's item is still refused after the second. */
+static void test_which_stops_discard_what_a_turn_staged(void) {
+   run_turn(s_conv, "Q1", (script_t){ .reply = "A1", .stop_after = true, .capture = true });
+   const turn_origin_t whole = s_origin;
+   TEST_ASSERT_TRUE(saved_reply_has(s_conv, "A1"));
+   TEST_ASSERT_FALSE(last_reply_stopped(s_conv));
+   run_turn(s_conv, "Q2", (script_t){ .user_stop = true, .partial = "Half", .capture = true });
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_OK, turn_origin_check(&whole, &s_origin));
+   const turn_origin_t first = s_origin;
+   run_turn(s_conv, "Q3", (script_t){ .user_stop = true, .partial = "Again", .capture = true });
+   run_turn(s_conv, "Q4", (script_t){ .reply = "A4", .capture = true });
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_STOPPED, turn_origin_check(&first, &s_origin));
    assert_live_is_reload(s_conv, STOPPED_REPLY_USER_NOTE);
 }
 
@@ -1677,6 +1698,7 @@ int main(void) {
    RUN_TEST(test_a_tail_from_an_empty_conversation);
    RUN_TEST(test_a_failed_turn_takes_its_tool_change_back);
    RUN_TEST(test_a_partial_reply_the_user_stopped);
+   RUN_TEST(test_which_stops_discard_what_a_turn_staged);
    RUN_TEST(test_a_stopped_partial_keeps_its_reasoning_and_tools);
    RUN_TEST(test_a_stop_that_keeps_no_partial);
    RUN_TEST(test_a_new_chats_stopped_reply);

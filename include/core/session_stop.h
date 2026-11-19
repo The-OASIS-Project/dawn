@@ -24,6 +24,7 @@
 #ifndef SESSION_STOP_H
 #define SESSION_STOP_H
 
+#include <pthread.h>
 #include <stdbool.h>
 
 #include "core/session_manager.h"
@@ -35,13 +36,37 @@ extern "C" {
 /**
  * @brief Stop the running turn at the user's request
  *
- * Records the turn as stopped by the user, then cancels it
- * (session_cancel_turn).  With no turn running it only cancels.
+ * Records the turn as stopped by the user while its reply hasn't arrived
+ * (among the session's last TURN_ORIGIN_STOPPED_MAX), then cancels it
+ * (session_cancel_turn).  With no turn running, or one whose reply is in, it
+ * only cancels.
  */
 void session_stop_turn_by_user(session_t *session);
 
-/** Whether the running turn is one the user stopped (session_stop_turn_by_user). */
-bool session_turn_stopped_by_user(session_t *session);
+/**
+ * @brief The running turn's reply arrived whole: it isn't a stopped turn
+ *
+ * Takes the running turn out of the stopped turns (what it staged can be
+ * confirmed: the user saw the whole read-back).
+ */
+void session_turn_stop_forget(session_t *session);
+
+/** Whether the running turn is one the user stopped (session_stop_turn_by_user).
+ *  Inline: the tool loop asks too, and links no session unit. */
+static inline bool session_turn_stopped_by_user(session_t *session) {
+   if (!session) {
+      return false;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   bool stopped = false;
+   if (session->turn_active && session->turn_owner_token != 0) {
+      for (int i = 0; i < TURN_ORIGIN_STOPPED_MAX && !stopped; i++) {
+         stopped = session->stopped_turn_tokens[i] == session->turn_owner_token;
+      }
+   }
+   pthread_mutex_unlock(&session->history_mutex);
+   return stopped;
+}
 
 /** Whether the running turn's reply in its history is one the user stopped. */
 bool session_turn_reply_stopped(session_t *session);

@@ -211,6 +211,7 @@ char *llm_compaction_deterministic(struct json_object *to_summarize, int token_b
              ((unsigned char)content[snippet_len] & 0xC0) == 0x80)
          snippet_len--;
 
+      /* Said on the role: the snippet is cut long before a note at the reply's end. */
       written = snprintf(buf + offset, remaining, "- %s%s: %.*s%s\n", role,
                          llm_history_is_stopped(msg) ? " (stopped by the user)" : "", snippet_len,
                          content, (content_len > snippet_len) ? "..." : "");
@@ -234,6 +235,15 @@ char *llm_compaction_summarize(struct json_object *to_summarize,
                                void *ctx,
                                const atomic_bool *cancel,
                                llm_compaction_level_t *level_out) {
+   /* A reply the user stopped reads as cut off, not as a whole answer, at
+    * every level. */
+   struct json_object *marked = llm_history_stopped_marked(to_summarize);
+   if (!marked) {
+      OLOG_ERROR("llm_compaction: out of memory marking stopped replies; not summarizing");
+      return NULL;
+   }
+   to_summarize = marked;
+
    /* The input's own size, for the size gate below. */
    const int input_tokens = llm_compaction_estimate_range(
        to_summarize, 0, (int)json_object_array_length(to_summarize));
@@ -247,10 +257,7 @@ char *llm_compaction_summarize(struct json_object *to_summarize,
       if (level == LLM_COMPACT_DETERMINISTIC) {
          summary = llm_compaction_deterministic(to_summarize, LLM_CONTEXT_SUMMARY_TARGET_L3);
       } else if (summarize) {
-         /* A reply the user stopped reads as cut off, not as a whole answer. */
-         struct json_object *marked = llm_history_stopped_marked(to_summarize);
-         summary = marked ? summarize(marked, level, ctx) : NULL;
-         json_object_put(marked);
+         summary = summarize(to_summarize, level, ctx);
       }
       if (summary) {
          /* Written from history that holds untrusted text: what imitates DAWN's
@@ -265,6 +272,7 @@ char *llm_compaction_summarize(struct json_object *to_summarize,
 
       if (!summary && cancel && atomic_load(cancel)) {
          OLOG_INFO("llm_compaction: summary cancelled");
+         json_object_put(marked);
          return NULL;
       }
       if (!summary) {
@@ -274,6 +282,7 @@ char *llm_compaction_summarize(struct json_object *to_summarize,
             continue;
          }
          OLOG_ERROR("llm_compaction: All compaction levels failed");
+         json_object_put(marked);
          return NULL;
       }
 
@@ -312,6 +321,7 @@ char *llm_compaction_summarize(struct json_object *to_summarize,
    if (level_out) {
       *level_out = level;
    }
+   json_object_put(marked);
    return summary;
 }
 

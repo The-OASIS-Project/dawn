@@ -22,30 +22,52 @@
 #include "core/session_stop.h"
 
 #include <pthread.h>
+#include <string.h>
 
 #include "llm/llm_history_kind.h"
+
+/* Caller holds history_mutex.  The index of @p token among the stopped turns,
+ * or -1. */
+static int stopped_index_locked(const session_t *session, uint64_t token) {
+   for (int i = 0; i < TURN_ORIGIN_STOPPED_MAX; i++) {
+      if (session->stopped_turn_tokens[i] == token) {
+         return i;
+      }
+   }
+   return -1;
+}
 
 void session_stop_turn_by_user(session_t *session) {
    if (!session) {
       return;
    }
    pthread_mutex_lock(&session->history_mutex);
-   if (session->turn_active) {
-      session->stopped_turn_token = session->turn_owner_token;
+   const uint64_t token = session->turn_owner_token;
+   if (session->turn_active && token != 0 && !session->turn_reply &&
+       stopped_index_locked(session, token) < 0) {
+      /* Newest first; the oldest falls off. */
+      memmove(&session->stopped_turn_tokens[1], &session->stopped_turn_tokens[0],
+              (TURN_ORIGIN_STOPPED_MAX - 1) * sizeof(session->stopped_turn_tokens[0]));
+      session->stopped_turn_tokens[0] = token;
    }
    pthread_mutex_unlock(&session->history_mutex);
    session_cancel_turn(session);
 }
 
-bool session_turn_stopped_by_user(session_t *session) {
+void session_turn_stop_forget(session_t *session) {
    if (!session) {
-      return false;
+      return;
    }
    pthread_mutex_lock(&session->history_mutex);
-   const bool stopped = session->turn_active && session->turn_owner_token != 0 &&
-                        session->stopped_turn_token == session->turn_owner_token;
+   const int i = session->turn_owner_token != 0
+                     ? stopped_index_locked(session, session->turn_owner_token)
+                     : -1;
+   if (i >= 0) {
+      memmove(&session->stopped_turn_tokens[i], &session->stopped_turn_tokens[i + 1],
+              (size_t)(TURN_ORIGIN_STOPPED_MAX - 1 - i) * sizeof(session->stopped_turn_tokens[0]));
+      session->stopped_turn_tokens[TURN_ORIGIN_STOPPED_MAX - 1] = 0;
+   }
    pthread_mutex_unlock(&session->history_mutex);
-   return stopped;
 }
 
 bool session_turn_reply_stopped(session_t *session) {

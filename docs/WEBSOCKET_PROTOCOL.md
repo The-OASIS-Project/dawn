@@ -2681,10 +2681,13 @@ End of LLM token stream.
    "type": "stream_end",
    "payload": {
       "stream_id": 1,
-      "reason": "complete|stopped|error|transient_error|tool_iteration"
+      "reason": "complete|stopped|error|transient_error|tool_iteration",
+      "will_persist": true
    }
 }
 ```
+`will_persist` is present only when the daemon will save the reply's row (it then arrives as
+`message_appended`); the client doesn't save it.
 `"stopped"` (flag `stopped_replies_saved`): the user's Stop ended the reply. With
 `will_persist: true`, what had streamed is saved and arrives as `message_appended` with
 `stopped: true`; without it, nothing of the reply was saved.

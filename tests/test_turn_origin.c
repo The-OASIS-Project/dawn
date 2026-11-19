@@ -134,15 +134,15 @@ static void test_stopped_turn_refused(void) {
    turn_origin_t reply = { .session_id = 7,
                            .turn_token = 160,
                            .turn_number = 5,
-                           .stopped_token = 100 };
+                           .stopped_tokens = { 130, 100 } };
    TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_STOPPED, turn_origin_check(&made, &reply));
    reply.code_redeemed = true;
    TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_STOPPED, turn_origin_check(&made, &reply));
    const turn_origin_t unasked = { .session_id = 7, .turn_token = 999, .turn_number = 4 };
    reply.code_redeemed = false;
    TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_OK, turn_origin_check(&unasked, &reply));
-   TEST_ASSERT_EQUAL_UINT64(0, turn_origin_stored(&reply).stopped_token);
-   TEST_ASSERT_EQUAL_INT(EMAIL_CONFIRM_RC_NOT_NEXT, email_confirm_rc(TURN_ORIGIN_STOPPED));
+   TEST_ASSERT_EQUAL_UINT64(0, turn_origin_stored(&reply).stopped_tokens[1]);
+   TEST_ASSERT_EQUAL_INT(EMAIL_CONFIRM_RC_STOPPED, email_confirm_rc(TURN_ORIGIN_STOPPED));
    TEST_ASSERT_NOT_NULL(strstr(turn_origin_retry_hint(TURN_ORIGIN_STOPPED), "stopped"));
 }
 

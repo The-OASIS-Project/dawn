@@ -661,7 +661,8 @@ body.debug-mode .transcript-entry.debug {
    border-radius: var(--border-radius);
 }
 
-.transcript-entry .role {
+.transcript-entry .role,
+.transcript-entry .transcript-stopped {
    /* System font: labels */
    font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
    font-size: 0.65rem;
@@ -673,12 +674,7 @@ body.debug-mode .transcript-entry.debug {
 
 /* A reply the user stopped before it finished (DawnTranscript.markStopped). */
 .transcript-entry .transcript-stopped {
-   font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
-   font-size: 0.65rem;
-   color: var(--text-secondary);
-   margin-top: 0.25rem;
-   text-transform: uppercase;
-   letter-spacing: 0.08em;
+   margin: 0.25rem 0 0;
 }
 
 .transcript-entry .text {

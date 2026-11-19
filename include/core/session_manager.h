@@ -39,6 +39,7 @@
 #include "core/conv_turn_lease.h"
 #include "core/prompt_parts.h"  // For composed_prompt_t
 #include "core/text_filter.h"   // For cited_tag_filter_state_t
+#include "core/turn_origin.h"   // For TURN_ORIGIN_STOPPED_MAX
 #include "dawn_error.h"
 #include "llm/llm_interface.h"  // For session_llm_config_t
 
@@ -632,9 +633,10 @@ typedef struct session {
    // by a disconnect mid-turn).
    _Atomic int64_t viewed_conversation_id;
    uint64_t turn_owner_token;
-   uint64_t turn_outer_token;    // the begin thread's token before this turn  // the running turn's
-                                 // token (session_turn_token()), readable under history_mutex
-   uint64_t stopped_turn_token;  // the last turn the user stopped (session_stop.h); history_mutex
+   uint64_t turn_outer_token;  // the begin thread's token before this turn  // the running turn's
+                               // token (session_turn_token()), readable under history_mutex
+   // The last turns the user stopped mid-reply, newest first (session_stop.h); history_mutex
+   uint64_t stopped_turn_tokens[TURN_ORIGIN_STOPPED_MAX];
    // Recent device events (phone ringing, a call answered elsewhere, a proactive
    // alert), oldest first.  Posted by any thread; each turn's context takes the
    // ones its history hasn't been told (session_take_new_notices_locked).

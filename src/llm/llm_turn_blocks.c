@@ -507,6 +507,16 @@ struct json_object *llm_turn_blocks_with_final_text(struct json_object *blocks,
    return out;
 }
 
+struct json_object *llm_turn_blocks_stopped_reply(struct json_object *blocks,
+                                                  const char *partial_text) {
+   struct json_object *out = llm_turn_blocks_with_final_text(blocks, partial_text);
+   size_t n = out ? json_object_array_length(out) : 0;
+   while (n > 0 && !is(str_of(json_object_array_get_idx(out, n - 1), "type"), "text")) {
+      json_object_array_del_idx(out, --n, 1);
+   }
+   return out;
+}
+
 void llm_turn_message_set_text(struct json_object *message, const char *text) {
    if (!message || !text) {
       return;
