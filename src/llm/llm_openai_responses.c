@@ -1067,6 +1067,10 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
                            (res == CURLE_WRITE_ERROR && llm_transfer_cancelled());
       if (stopped) {
          OLOG_INFO("Responses: transfer interrupted by user");
+         /* What had streamed, with the output items that finished. */
+         llm_stream_fill_stopped(rctx.stream_ctx, result);
+         result->blocks = rctx.blocks;
+         rctx.blocks = NULL;
       } else {
          OLOG_ERROR("Responses: curl_easy_perform failed: %s", curl_easy_strerror(res));
       }

@@ -68,7 +68,7 @@
  * DAWN_ENABLE_MCP_BRIDGE_TOOL / DAWN_ENABLE_CODE_PROJECTS. Gating them on a
  * feature flag would fork the schema timeline across binaries; do not do it.
  * (arch-A2) */
-#define AUTH_DB_SCHEMA_VERSION 116
+#define AUTH_DB_SCHEMA_VERSION 117
 
 /* v90 llm_usage_log: in the base schema (created on every start) and repeated by
  * the v90 migration step, so the two can't drift.  The binding_* columns (v91)
@@ -170,12 +170,16 @@
  * reaches the blocks after it on a migrated table (user rows hold none). */
 #define CONV_MSG_EMAIL_REF_COL(t) "CASE WHEN " #t ".role = 'user' THEN " #t ".email_ref END"
 
+/* A display read's stopped flag: whether the user stopped the reply before it
+ * finished (message_stopped, a primary-key lookup that never reads the row). */
+#define CONV_MSG_STOPPED_COL(t) \
+   "EXISTS (SELECT 1 FROM message_stopped s WHERE s.message_id = " #t ".id)"
+
 /* messages has foreign-key children (message_unprompted, which DAWN's own posts are
- * recorded in), so a rebuild of messages must keep every row id and run with
- * foreign_keys OFF and legacy_alter_table ON, never dropping the live table
- * while children point at it (as v98 does): otherwise the children are
- * cascade-deleted or left pointing at a renamed table, silently.  The test
- * test_messages_fk_children lists them. */
+ * recorded in, and message_stopped, the replies the user stopped), so a rebuild of messages must
+ * keep every row id and run with foreign_keys OFF and legacy_alter_table ON, never dropping the
+ * live table while children point at it (as v98 does): otherwise the children are cascade-deleted
+ * or left pointing at a renamed table, silently.  The test test_messages_fk_children lists them. */
 #define CONV_MESSAGES_TABLE_SQL                                                      \
    "CREATE TABLE IF NOT EXISTS messages ("                                           \
    "   id INTEGER PRIMARY KEY AUTOINCREMENT,"                                        \
@@ -1392,6 +1396,9 @@ int auth_db_migrations_v115(sqlite3 *db);
 /** v116: the reasoning floor of conversations whose replay dropped signed
  *  reasoning raised to their newest row; memory_extract_ranges. */
 int auth_db_migrations_v116(sqlite3 *db);
+
+/** v117: message_stopped, replies the user stopped before they finished. */
+int auth_db_migrations_v117(sqlite3 *db);
 
 /**
  * @brief The v98 rebuild's room check: the bytes it needs free next to the

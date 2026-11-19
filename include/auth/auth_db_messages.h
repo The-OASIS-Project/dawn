@@ -93,6 +93,10 @@ typedef struct {
                               Recorded in message_unprompted; extraction finds it by row
                               id, so a post must reach a history only from the
                               database, never appended live without its id */
+   bool stopped;             /**< ordinary assistant reply with text and no tool calls that
+                                  the user stopped before it finished, saved as far as it
+                                  had streamed; recorded in message_stopped (anything else
+                                  is saved unmarked) */
 } conv_message_row_t;
 
 /** Longest email_ref a question row holds. */
@@ -158,6 +162,7 @@ typedef struct {
    time_t created_at;
    int is_error;
    const char *images; /**< a tool row's image ids (JSON array), or NULL */
+   bool stopped;       /**< a reply the user stopped before it finished */
 } conversation_llm_row_t;
 
 /** @return 0 to continue, non-zero to stop. */

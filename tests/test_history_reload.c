@@ -55,7 +55,9 @@
 #include "core/session_manager.h"
 #include "core/session_posts.h"
 #include "core/session_prefix.h"
+#include "core/session_stop.h"
 #include "core/text_input_dispatch.h"
+#include "core/turn_origin.h"
 #include "core/turn_queue.h"
 #include "dawn_error.h"
 #include "image_store.h"
@@ -74,6 +76,7 @@
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "memory/memory_history_loader.h"
+#include "prompts.h"
 #include "unity.h"
 
 dawn_config_t g_config;
@@ -99,11 +102,17 @@ typedef struct {
    bool parallel;         /* a second call runs beside the first (its id + "b") */
    bool cancel_after;     /* the user's stop lands once the answer is complete */
    bool cancel_during;    /* the stop lands mid-stream: no answer */
+   bool user_stop;        /* the user's Stop lands mid-stream (session_stop_turn_by_user) */
+   const char *partial;   /* what had streamed when the stop cut the call (the tool loop's
+                             final_answer.stopped_text) */
+   bool capture;          /* the turn's confirm origin is read (s_origin), as a tool would */
+   bool stop_after;       /* the user's Stop lands once the answer is complete (speech) */
    const char *post;      /* DAWN posts this into the conversation mid-turn */
    bool boundary;         /* the turn declares a boundary: reasoning so far left behind */
 } script_t;
 
 static script_t s_script;
+static turn_origin_t s_origin;
 static session_t *s; /* the session running the turn (one of s_sessions) */
 static int s_user;
 static int64_t s_conv;
@@ -229,6 +238,20 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
       s->pending_visual = strdup(s_script.visual);
       pthread_mutex_unlock(&s->tools_mutex);
    }
+   if (s_script.capture) {
+      TEST_ASSERT_TRUE(turn_origin_capture(&s_origin));
+   }
+   if (s_script.partial) {
+      /* What the tool loop keeps of a call a stop cut. */
+      s->final_answer.stopped_text = strdup(s_script.partial);
+      if (s_script.thinking) {
+         s->final_answer.blocks = signed_blocks(s_script.partial);
+      }
+   }
+   if (s_script.user_stop) {
+      session_stop_turn_by_user(s);
+      return NULL;
+   }
    if (s_script.cancel_during) {
       atomic_store(&s->cancel_requested, true);
       return NULL;
@@ -244,6 +267,9 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
    }
    if (s_script.cancel_after) {
       atomic_store(&s->cancel_requested, true);
+   }
+   if (s_script.stop_after) {
+      session_stop_turn_by_user(s);
    }
    return strdup(s_script.reply);
 }
@@ -615,7 +641,8 @@ static void persist_reply(int64_t conv, const char *body) {
    const conv_message_row_t row = { .role = "assistant",
                                     .content = combined ? combined : body,
                                     .reasoning = reasoning,
-                                    .llm_blocks = stored };
+                                    .llm_blocks = stored,
+                                    .stopped = session_turn_reply_stopped(s) };
    int64_t id = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_add_row(conv, s_user, &row, &id));
    free(combined);
@@ -1213,6 +1240,106 @@ static void test_two_sessions_alternate_turns_of_every_kind(void) {
    TEST_ASSERT_EQUAL_INT(reloads, s_reloads);
 }
 
+/* Whether the conversation's last assistant row is marked as a stopped reply. */
+static bool last_reply_stopped(int64_t conv) {
+   sqlite3_stmt *st = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK,
+                         sqlite3_prepare_v2(s_db.db,
+                                            "SELECT EXISTS (SELECT 1 FROM message_stopped s "
+                                            "WHERE s.message_id = (SELECT MAX(id) FROM messages "
+                                            "WHERE conversation_id = ?1 AND role = 'assistant'))",
+                                            -1, &st, NULL));
+   sqlite3_bind_int64(st, 1, conv);
+   const bool stopped = sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) != 0;
+   sqlite3_finalize(st);
+   return stopped;
+}
+
+/* The user's Stop mid-stream: the reply as far as it streamed is saved and
+ * kept, marked, and the next question carries the note, live and reloaded. */
+static void test_a_partial_reply_the_user_stopped(void) {
+   run_turn(s_conv, "Q1", (script_t){ .reply = "A1" });
+   run_turn(s_conv, "Q2",
+            (script_t){ .user_stop = true, .partial = "Half an ans", .capture = true });
+   const turn_origin_t stopped = s_origin;
+   TEST_ASSERT_TRUE(saved_reply_has(s_conv, "Half an ans"));
+   TEST_ASSERT_TRUE(last_reply_stopped(s_conv));
+   assert_live_is_reload(s_conv, STOPPED_REPLY_USER_NOTE);
+   /* What the stopped turn prepared isn't confirmed by the next one. */
+   run_turn(s_conv, "Q3", (script_t){ .reply = "A3", .capture = true });
+   TEST_ASSERT_EQUAL_UINT64(stopped.turn_token, s_origin.stopped_tokens[0]);
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_STOPPED, turn_origin_check(&stopped, &s_origin));
+   TEST_ASSERT_FALSE(last_reply_stopped(s_conv));
+   assert_live_is_reload(s_conv, STOPPED_REPLY_USER_NOTE);
+}
+
+/* A Stop once the whole reply arrived (cutting its speech) leaves no stopped
+ * turn: what it staged is confirmed by the next.  Two Stops mid-stream in a
+ * row: the first turn's item is still refused after the second. */
+static void test_which_stops_discard_what_a_turn_staged(void) {
+   run_turn(s_conv, "Q1", (script_t){ .reply = "A1", .stop_after = true, .capture = true });
+   const turn_origin_t whole = s_origin;
+   TEST_ASSERT_TRUE(saved_reply_has(s_conv, "A1"));
+   TEST_ASSERT_FALSE(last_reply_stopped(s_conv));
+   run_turn(s_conv, "Q2", (script_t){ .user_stop = true, .partial = "Half", .capture = true });
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_OK, turn_origin_check(&whole, &s_origin));
+   const turn_origin_t first = s_origin;
+   run_turn(s_conv, "Q3", (script_t){ .user_stop = true, .partial = "Again", .capture = true });
+   run_turn(s_conv, "Q4", (script_t){ .reply = "A4", .capture = true });
+   TEST_ASSERT_EQUAL_INT(TURN_ORIGIN_STOPPED, turn_origin_check(&first, &s_origin));
+   assert_live_is_reload(s_conv, STOPPED_REPLY_USER_NOTE);
+}
+
+/* The same with its signed reasoning, and after a tool exchange. */
+static void test_a_stopped_partial_keeps_its_reasoning_and_tools(void) {
+   run_turn(s_conv, "Q1", (script_t){ .user_stop = true, .partial = "Half", .thinking = true });
+   TEST_ASSERT_TRUE(saved_reply_has(s_conv, "Half"));
+   assert_live_is_reload(s_conv, SIGNED);
+   run_turn(s_conv, "Q2",
+            (script_t){ .user_stop = true, .partial = "Sunny, so", .tool_call = "toolu_k" });
+   TEST_ASSERT_TRUE(saved_reply_has(s_conv, "Sunny, so"));
+   assert_live_is_reload(s_conv, "toolu_k");
+   assert_live_is_reload(s_conv, STOPPED_REPLY_USER_NOTE);
+}
+
+/* A partial with nothing left of it, and a cancel that isn't the user's Stop
+ * (a superseding turn): nothing saved, nothing in the history. */
+static void test_a_stop_that_keeps_no_partial(void) {
+   run_turn(s_conv, "Q1", (script_t){ .reply = "A1" });
+   run_turn(s_conv, "Q2", (script_t){ .user_stop = true, .partial = "" });
+   TEST_ASSERT_TRUE(saved_reply_has(s_conv, "A1"));
+   assert_live_is_reload(s_conv, "Q2");
+   run_turn(s_conv, "Q3", (script_t){ .cancel_during = true, .partial = "Not kept" });
+   TEST_ASSERT_TRUE(saved_reply_has(s_conv, "A1"));
+   assert_live_is_reload(s_conv, "Q3");
+   struct json_object *h = s->conversation_history;
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(h), "Not kept"));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(h), "_stopped"));
+}
+
+/* A new chat's first exchange stopped after its conversation was created. */
+static void test_a_new_chats_stopped_reply(void) {
+   session_clear_history(s);
+   s_new_chat = true;
+   run_turn(s_conv, "Q1",
+            (script_t){ .user_stop = true, .partial = "Half", .tool_call = "toolu_c" });
+   s_new_chat = false;
+   TEST_ASSERT_TRUE(last_reply_stopped(s_conv));
+   assert_live_is_reload(s_conv, STOPPED_REPLY_USER_NOTE);
+}
+
+/* The other session catches up to a stopped reply and notes it the same way. */
+static void test_a_stopped_reply_seen_by_the_other_session(void) {
+   session_t *a = s_sessions[0];
+   session_t *b = second_session();
+   turn_on(a, "DA", "Q1", (script_t){ .reply = "A1" });
+   caught_up(b, "A1");
+   turn_on(a, "DA", "Q2", (script_t){ .user_stop = true, .partial = "Half", .thinking = true });
+   caught_up(b, STOPPED_REPLY_USER_NOTE);
+   turn_on(b, "DB", "Q3", (script_t){ .reply = "A3" });
+   caught_up(a, STOPPED_REPLY_USER_NOTE);
+}
+
 /* A tool result's image, rebuilt from the store on either side. */
 static void test_two_sessions_share_a_tool_result_image(void) {
    char dir[] = "/tmp/dawn_shared_img_XXXXXX";
@@ -1570,5 +1697,11 @@ int main(void) {
    RUN_TEST(test_a_tail_carrying_a_tool_change);
    RUN_TEST(test_a_tail_from_an_empty_conversation);
    RUN_TEST(test_a_failed_turn_takes_its_tool_change_back);
+   RUN_TEST(test_a_partial_reply_the_user_stopped);
+   RUN_TEST(test_which_stops_discard_what_a_turn_staged);
+   RUN_TEST(test_a_stopped_partial_keeps_its_reasoning_and_tools);
+   RUN_TEST(test_a_stop_that_keeps_no_partial);
+   RUN_TEST(test_a_new_chats_stopped_reply);
+   RUN_TEST(test_a_stopped_reply_seen_by_the_other_session);
    return UNITY_END();
 }

@@ -853,6 +853,7 @@ list(APPEND DAWN_SOURCES
     src/core/session_turn_lease.c
     src/core/turn_queue.c
     src/core/session_manager_llm.c
+    src/core/session_stop.c
     src/core/job_manager.c
     src/core/job_worker.c
     src/core/job_reinvoke.c
@@ -1030,6 +1031,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v114.c
     src/auth/auth_db_migrations_v115.c
     src/auth/auth_db_migrations_v116.c
+    src/auth/auth_db_migrations_v117.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c

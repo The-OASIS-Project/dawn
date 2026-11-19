@@ -40,6 +40,7 @@
 #include "core/llm_response_finalize.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
+#include "core/session_stop.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_turn_blocks.h"
@@ -145,17 +146,46 @@ static void keep_reply_blocks(session_t *session, struct json_object *blocks) {
 
 /* The turn's reply into its history, with its blocks (the model's reasoning,
  * and the answer as DAWN keeps it): the message a reload of its saved row
- * rebuilds. */
-static void add_reply_to_history(session_t *session, const char *text) {
+ * rebuilds.  @p stopped: a reply the user stopped, as far as it streamed. */
+static void add_reply_to_history(session_t *session, const char *text, bool stopped) {
    struct json_object *blocks = NULL;
    if (session->final_answer.blocks) {
-      blocks = llm_turn_blocks_with_final_text(session->final_answer.blocks, text);
+      blocks = stopped ? llm_turn_blocks_stopped_reply(session->final_answer.blocks, text)
+                       : llm_turn_blocks_with_final_text(session->final_answer.blocks, text);
       json_object_put(session->final_answer.blocks);
       session->final_answer.blocks = NULL;
    }
    keep_reply_blocks(session, blocks);
-   session_add_turn_assistant(session, text, blocks);
+   session_add_turn_assistant(session, text, blocks, stopped);
    json_object_put(blocks);
+}
+
+/* The reply as far as it streamed when the user pressed Stop (the tool loop
+ * kept it: final_answer.stopped_text), made safe as a finished reply is, for
+ * the turn's caller to save; NULL when there is none to keep: no Stop of the
+ * user's (@p user_stop) cut it, or nothing is left of it.  The loop kept the
+ * text only for a turn whose caller saves it.  Decided before the stream ends,
+ * so the end promises the save only when one follows. */
+static char *take_stopped_partial(session_t *session, bool user_stop) {
+   char *raw = session->final_answer.stopped_text;
+   session->final_answer.stopped_text = NULL;
+   if (!raw || !user_stop) {
+      free(raw);
+      return NULL;
+   }
+   response_final_t fin;
+   const int rc = llm_response_finalize(session, raw, &fin);
+   free(raw);
+   if (rc != SUCCESS) {
+      OLOG_ERROR("Session %u: out of memory finalizing a stopped reply; dropped",
+                 session->session_id);
+      return NULL;
+   }
+   if (!*fin.text) {
+      free(fin.text);
+      return NULL;
+   }
+   return fin.text;
 }
 
 /**
@@ -300,6 +330,11 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
     * read LLM_ERR_NONE here.  All current callers (session_llm_call,
     * session_llm_call_no_add) satisfy this. */
    int post_call_error = llm_last_error();
+   /* What a Stop the user pressed leaves of the reply: the caller saves it
+    * (cancelled_final_response), and it joins the history below. */
+   const bool user_stop = !response && atomic_load(&session->cancel_requested) &&
+                          session_turn_stopped_by_user(session);
+   session->cancelled_final_response = take_stopped_partial(session, user_stop);
 #ifdef ENABLE_WEBUI
    // End WebSocket streaming.  JOB is included so a viewed job's stream is
    // properly closed (webui_send_stream_end finalizes the replay ring + fans out
@@ -318,6 +353,8 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
          const char *reason;
          if (response) {
             reason = "complete";
+         } else if (user_stop) {
+            reason = "stopped"; /* promises a save only with a reply kept */
          } else if (post_call_error == LLM_ERR_TRANSIENT_NETWORK) {
             reason = "transient_error";
          } else {
@@ -374,12 +411,17 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
        * workers, Tier-2 satellite voice, the live reinvoke): a caller that doesn't
        * arm it (the local mic, Tier-1 satellites, jobs, messaging, the detached
        * reinvoke, research) keeps today's abort semantics, byte-for-byte. */
+      if (response && *response) {
+         /* The whole reply arrived: whatever cut it after, it isn't a stopped
+          * turn (the user saw the read-back of what it staged). */
+         session_turn_stop_forget(session);
+      }
       if (response && *response && atomic_load(&session->will_persist_turn)) {
          response_final_t fin;
          if (llm_response_finalize(session, response, &fin) == SUCCESS) {
             free(response);
             if (*fin.text) {
-               add_reply_to_history(session, fin.text);
+               add_reply_to_history(session, fin.text, false);
             }
             session->cancelled_final_response = fin.text; /* caller takes + frees */
          } else {
@@ -392,6 +434,9 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
          }
       } else {
          free(response);
+         if (session->cancelled_final_response) {
+            add_reply_to_history(session, session->cancelled_final_response, true);
+         }
       }
       return NULL;
    }
@@ -433,7 +478,7 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
 
    // Add assistant response to history (only if non-empty to avoid Claude API errors)
    if (*response) {
-      add_reply_to_history(session, response);
+      add_reply_to_history(session, response, false);
    } else {
       OLOG_WARNING("Session %u: LLM returned empty response, not adding to history",
                    session->session_id);

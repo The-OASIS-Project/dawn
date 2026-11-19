@@ -39,6 +39,7 @@
 #include "core/conv_turn_lease.h"
 #include "core/prompt_parts.h"  // For composed_prompt_t
 #include "core/text_filter.h"   // For cited_tag_filter_state_t
+#include "core/turn_origin.h"   // For TURN_ORIGIN_STOPPED_MAX
 #include "dawn_error.h"
 #include "llm/llm_interface.h"  // For session_llm_config_t
 
@@ -634,6 +635,8 @@ typedef struct session {
    uint64_t turn_owner_token;
    uint64_t turn_outer_token;  // the begin thread's token before this turn  // the running turn's
                                // token (session_turn_token()), readable under history_mutex
+   // The last turns the user stopped mid-reply, newest first (session_stop.h); history_mutex
+   uint64_t stopped_turn_tokens[TURN_ORIGIN_STOPPED_MAX];
    // Recent device events (phone ringing, a call answered elsewhere, a proactive
    // alert), oldest first.  Posted by any thread; each turn's context takes the
    // ones its history hasn't been told (session_take_new_notices_locked).
@@ -721,10 +724,14 @@ typedef struct session {
    //     taken by whichever writer saves the reply (session_take_reply_blocks), so the
    //     row carries its own turn's blocks and never an earlier turn's.  Also cleared
    //     at turn begin and turn end (session_turn_begin / _end).
+   //   - stopped_text: the reply as far as it had streamed when a stop cut the call (the
+   //     tool loop keeps it, with its blocks and reasoning in the fields above, only for a
+   //     turn whose caller saves its reply); taken by llm_call_finalize.
    struct {
       char *reasoning_json;
       struct json_object *blocks;
       struct json_object *reply_blocks;
+      char *stopped_text;
    } final_answer;
 
    // Whether THIS turn's step events (tool_call/tool_result) should be persisted
@@ -1606,7 +1613,8 @@ bool session_add_turn_message(session_t *session, const char *role, const char *
  * As session_add_turn_message(session, "assistant", content), with the answer's
  * provider-neutral blocks (llm_turn_blocks.h) under LLM_TURN_BLOCKS_KEY, so each
  * provider replays it with its own reasoning.  @p blocks may be NULL (plain text);
- * the message takes a reference.
+ * the message takes a reference.  A reply the user stopped is marked as one
+ * (@p stopped: LLM_HISTORY_STOPPED_KEY), as its row is.
  *
  * @return true if appended
  */
@@ -1616,7 +1624,8 @@ void session_final_answer_clear(session_t *session);
 
 bool session_add_turn_assistant(session_t *session,
                                 const char *content,
-                                struct json_object *blocks);
+                                struct json_object *blocks,
+                                bool stopped);
 
 /**
  * @brief Check if session has user messages (beyond system prompt)

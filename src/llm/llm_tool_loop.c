@@ -36,6 +36,7 @@
 
 #include "config/dawn_config.h"
 #include "core/session_manager.h"
+#include "core/session_stop.h"
 #include "core/tool_result_store.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_claude.h"
@@ -223,6 +224,29 @@ static void tool_loop_stash_final(const llm_tool_loop_params_t *params,
    session_release(s);
 }
 
+/* A call a stop cut (@p result failed, holding what had streamed): its text
+ * is kept with its finished blocks and reasoning, for the turn's finalizer to
+ * save, when the user's Stop cut this turn (session_stop.h; no other cancel)
+ * and the turn's caller saves its reply.  The loop still returns NULL:
+ * nothing here reads as a finished reply. */
+static void keep_stopped_reply(const llm_tool_loop_params_t *params,
+                               const llm_tool_response_t *result) {
+   if (!result->stopped || !result->text || !*result->text) {
+      return;
+   }
+   session_t *s = call_session(params, true);
+   if (!s) {
+      return;
+   }
+   if (atomic_load(&s->will_persist_turn) && session_turn_stopped_by_user(s)) {
+      tool_loop_stash_final(params, result,
+                            reasoning_provider_label(params->llm_type, params->cloud_provider));
+      free(s->final_answer.stopped_text);
+      s->final_answer.stopped_text = strdup(result->text);
+   }
+   session_release(s);
+}
+
 /* Fire the per-session iteration-boundary hook (if installed).  Called when an
  * iteration produced tool calls, just before the tools execute, so the WebUI can
  * close the current streaming bubble — the next iteration's text then opens a fresh
@@ -273,6 +297,8 @@ static char *final_answer_without_tools(llm_tool_loop_params_t *params,
       text = strdup(result.text);
       tool_loop_stash_final(params, &result,
                             reasoning_provider_label(params->llm_type, params->cloud_provider));
+   } else if (rc != 0) {
+      keep_stopped_reply(params, &result);
    }
    llm_tool_response_free(&result);
    return text;
@@ -573,6 +599,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          } else {
             OLOG_ERROR("Tool loop: Provider call failed at iteration %d", iteration);
          }
+         keep_stopped_reply(params, &result);
          llm_tool_response_free(&result);
          return NULL;
       }
@@ -599,7 +626,8 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
             llm_tool_response_free(&result);
             char *answer = final_answer_without_tools(params, TOOL_LOOP_DIRECTIVE_REPORT_OUTCOME,
                                                       iteration);
-            if (answer) {
+            /* Stopped during that call: no reply, never an empty finished one. */
+            if (answer || llm_interrupt_ctx_triggered(&ictx)) {
                return answer;
             }
             memset(&result, 0, sizeof(result)); /* freed above: nothing left to free */
@@ -675,6 +703,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
                                   params->callback_userdata, LLM_TOOLS_MAX_ITERATIONS, &result);
 
          if (rc != 0) {
+            keep_stopped_reply(params, &result);
             llm_tool_response_free(&result);
             return NULL;
          }

@@ -406,7 +406,8 @@ static void test_messages_fk_children(void) {
                                             "'table' AND f.\"table\" = 'messages' ORDER BY m.name)",
                                             -1, &st, NULL));
    TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
-   TEST_ASSERT_EQUAL_STRING("message_unprompted", (const char *)sqlite3_column_text(st, 0));
+   TEST_ASSERT_EQUAL_STRING("message_stopped,message_unprompted",
+                            (const char *)sqlite3_column_text(st, 0));
    sqlite3_finalize(st);
 }
 

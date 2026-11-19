@@ -95,6 +95,7 @@ When to add what:
 
 | Flag | Since | Meaning |
 |------|-------|---------|
+| `stopped_replies_saved` | 2026-11-18 | A reply the user stops (`cancel`, or `stop_other_reply` from another of their clients when the stopped turn is a WebUI client's) while it streams is saved as far as it had streamed: its `stream_end` has `reason` `"stopped"`, with `will_persist: true` when the row is saved (nothing is saved when nothing of the reply was left), and the row comes back with `stopped: true` on `message_appended`, `load_conversation_response` rows, `get_memory_fact_source_response` messages and exports. Show the saved text (it can differ from what was drawn: tags removed) and mark it stopped. Only the user's Stop does this; any other end of a turn is as before. Without it, a Stop mid-stream ends with `reason` `"error"` and saves nothing. |
 | `memory_batches` | 2026-11-03 | The daemon records what memory learned per batch and answers `list_memory_batches`, `undo_memory_batch` and `keep_memory_op`, and pushes `memory_batch` (see Memory Management, Consolidation). Advertised while memory is enabled; a build without the WebUI never advertises it. Without it, offer no marker, Learned tab or undo. |
 | `email_refs` | 2026-10-09 | A `text` frame may carry `email_refs`: one email the user attached, by account and message id. The model reads it with the email tool, and the question row comes back with `email_ref` on every frame that delivers it (see Email, Email in chat). Advertised with `email_client`. Without it, send no `email_refs` (an older daemon ignores them, and the model never sees the email). |
 | `email_client` | 2026-10-07 | The mail panel's verbs answer: `email_list`, `email_search`, `email_read`, `email_set_flags`, `email_unread_counts`, `email_archive`, `email_trash`, `email_undo`, and the server pushes `email_changed` (see Email). Advertised only while the email service is up; a build without the WebUI or the email tool never advertises it. |
@@ -824,7 +825,8 @@ not on the default type and provider: it runs that type's or provider's own defa
 
 A user row that asked about an attached email carries `email_ref` (an object:
 `account_id`, `message_id`, `from`, `subject`; see Email, Email in chat). Rows without one
-have no such field.
+have no such field.  An assistant row the user stopped before it finished carries
+`stopped: true` (flag `stopped_replies_saved`); other rows have no such field.
 
 #### `set_active_conversation`
 Re-anchor the connection's active conversation **without** replaying history — a
@@ -1155,8 +1157,8 @@ messages (system/tool messages are omitted):
    }
 }
 ```
-A user message that asked about an attached email carries `email_ref`, as in
-`load_conversation_response`. An empty `messages` array with `success: true` means the range
+A user message that asked about an attached email carries `email_ref`, and a stopped reply
+`stopped: true`, as in `load_conversation_response`. An empty `messages` array with `success: true` means the range
 held no user/assistant messages (only system/tool). On failure, `success` is `false`
 and `reason` is one of: `not_available` (no provenance recorded, fact not
 found, source conversation deleted, or private), `forbidden` (the source
@@ -2196,6 +2198,11 @@ to its turn even if its `transcript` echo was dropped. Other connections' copies
 A user message that asked about an attached email carries `email_ref` in every copy, the
 sender's included (its `transcript` echo doesn't: the sender shows the chip it attached).
 
+A reply the user stopped while it streamed (flag `stopped_replies_saved`) carries
+`stopped: true`, and `text` is what was saved of it. The sender adopts it like any reply and
+replaces its bubble's text with `text`: the bubble may hold a little more (text drawn after the
+saved point) or tags the saved row doesn't.
+
 ### Background-Job List Frames (Phase 2)
 
 Job state reaches a client through three frames **split by object lifetime**. The
@@ -2674,10 +2681,16 @@ End of LLM token stream.
    "type": "stream_end",
    "payload": {
       "stream_id": 1,
-      "reason": "complete|cancelled|error"
+      "reason": "complete|stopped|error|transient_error|tool_iteration",
+      "will_persist": true
    }
 }
 ```
+`will_persist` is present only when the daemon will save the reply's row (it then arrives as
+`message_appended`); the client doesn't save it.
+`"stopped"` (flag `stopped_replies_saved`): the user's Stop ended the reply. With
+`will_persist: true`, what had streamed is saved and arrives as `message_appended` with
+`stopped: true`; without it, nothing of the reply was saved.
 
 ---
 

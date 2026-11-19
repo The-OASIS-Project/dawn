@@ -94,7 +94,7 @@ static const char *str_field(json_object *p, const char *key) {
 /* The type and the always-present fields, with their values and types. */
 static void test_fields(void) {
    json_object *f = webui_message_appended_frame(1006, 21547, "assistant", "hello", NULL, 4, NULL,
-                                                 NULL);
+                                                 NULL, false);
    TEST_ASSERT_EQUAL_STRING("message_appended", str_field(f, "type"));
    json_object *p = payload_of(f);
    TEST_ASSERT_EQUAL_INT64(1006, int_field(p, "conversation_id"));
@@ -109,11 +109,11 @@ static void test_fields(void) {
 /* No role is sent as "assistant"; a given role as given; stream_id 0 is sent;
  * an unsigned stream_id above INT32_MAX stays positive. */
 static void test_role_and_stream(void) {
-   json_object *f = webui_message_appended_frame(1, 2, NULL, "x", NULL, 0, NULL, NULL);
+   json_object *f = webui_message_appended_frame(1, 2, NULL, "x", NULL, 0, NULL, NULL, false);
    TEST_ASSERT_EQUAL_STRING("assistant", str_field(payload_of(f), "role"));
    TEST_ASSERT_EQUAL_INT64(0, int_field(payload_of(f), "stream_id"));
    json_object_put(f);
-   f = webui_message_appended_frame(1, 2, "user", "x", NULL, 0xFFFFFFFFu, NULL, NULL);
+   f = webui_message_appended_frame(1, 2, "user", "x", NULL, 0xFFFFFFFFu, NULL, NULL, false);
    TEST_ASSERT_EQUAL_STRING("user", str_field(payload_of(f), "role"));
    TEST_ASSERT_EQUAL_INT64(4294967295LL, int_field(payload_of(f), "stream_id"));
    json_object_put(f);
@@ -122,16 +122,16 @@ static void test_role_and_stream(void) {
 /* session_id: present and equal with an origin (0 included), absent without. */
 static void test_session_id(void) {
    session_t s = { .session_id = 7, .type = SESSION_TYPE_WEBUI };
-   json_object *f = webui_message_appended_frame(1, 2, "assistant", "x", NULL, 1, &s, NULL);
+   json_object *f = webui_message_appended_frame(1, 2, "assistant", "x", NULL, 1, &s, NULL, false);
    TEST_ASSERT_EQUAL_INT64(7, int_field(payload_of(f), "session_id"));
    json_object_put(f);
 
    session_t local = { .session_id = 0, .type = SESSION_TYPE_LOCAL };
-   f = webui_message_appended_frame(1, 2, "assistant", "x", NULL, 1, &local, NULL);
+   f = webui_message_appended_frame(1, 2, "assistant", "x", NULL, 1, &local, NULL, false);
    TEST_ASSERT_EQUAL_INT64(0, int_field(payload_of(f), "session_id"));
    json_object_put(f);
 
-   f = webui_message_appended_frame(1, 2, "assistant", "x", NULL, 1, NULL, NULL);
+   f = webui_message_appended_frame(1, 2, "assistant", "x", NULL, 1, NULL, NULL, false);
    TEST_ASSERT_FALSE(has(payload_of(f), "session_id"));
    json_object_put(f);
 }
@@ -145,20 +145,21 @@ static void test_origin_rule(void) {
    TEST_ASSERT_NULL(webui_message_origin(NULL));
 
    json_object *f = webui_message_appended_frame(1, 2, "assistant", "x", NULL, 1,
-                                                 webui_message_origin(&job), NULL);
+                                                 webui_message_origin(&job), NULL, false);
    TEST_ASSERT_FALSE(has(payload_of(f), "session_id"));
    json_object_put(f);
 }
 
 /* reasoning: only when non-empty. */
 static void test_reasoning(void) {
-   json_object *f = webui_message_appended_frame(1, 2, "assistant", "x", "why", 1, NULL, NULL);
+   json_object *f = webui_message_appended_frame(1, 2, "assistant", "x", "why", 1, NULL, NULL,
+                                                 false);
    TEST_ASSERT_EQUAL_STRING("why", str_field(payload_of(f), "reasoning"));
    json_object_put(f);
-   f = webui_message_appended_frame(1, 2, "assistant", "x", "", 1, NULL, NULL);
+   f = webui_message_appended_frame(1, 2, "assistant", "x", "", 1, NULL, NULL, false);
    TEST_ASSERT_FALSE(has(payload_of(f), "reasoning"));
    json_object_put(f);
-   f = webui_message_appended_frame(1, 2, "assistant", "x", NULL, 1, NULL, NULL);
+   f = webui_message_appended_frame(1, 2, "assistant", "x", NULL, 1, NULL, NULL, false);
    TEST_ASSERT_FALSE(has(payload_of(f), "reasoning"));
    json_object_put(f);
 }
@@ -166,7 +167,7 @@ static void test_reasoning(void) {
 /* email_ref: an object, on a user row holding a valid one; never on another
  * role (a NULL role included, though it is sent as "assistant"). */
 static void test_email_ref(void) {
-   json_object *f = webui_message_appended_frame(1, 2, "user", "x", NULL, 0, NULL, REF);
+   json_object *f = webui_message_appended_frame(1, 2, "user", "x", NULL, 0, NULL, REF, false);
    json_object *ref = NULL;
    TEST_ASSERT_TRUE(json_object_object_get_ex(payload_of(f), "email_ref", &ref));
    TEST_ASSERT_TRUE(json_object_is_type(ref, json_type_object));
@@ -175,15 +176,28 @@ static void test_email_ref(void) {
 
    const char *roles[] = { "assistant", NULL };
    for (size_t i = 0; i < 2; i++) {
-      f = webui_message_appended_frame(1, 2, roles[i], "x", NULL, 0, NULL, REF);
+      f = webui_message_appended_frame(1, 2, roles[i], "x", NULL, 0, NULL, REF, false);
       TEST_ASSERT_FALSE(has(payload_of(f), "email_ref"));
       json_object_put(f);
    }
-   f = webui_message_appended_frame(1, 2, "user", "x", NULL, 0, NULL, "not json");
+   f = webui_message_appended_frame(1, 2, "user", "x", NULL, 0, NULL, "not json", false);
    TEST_ASSERT_FALSE(has(payload_of(f), "email_ref"));
    json_object_put(f);
-   f = webui_message_appended_frame(1, 2, "user", "x", NULL, 0, NULL, "");
+   f = webui_message_appended_frame(1, 2, "user", "x", NULL, 0, NULL, "", false);
    TEST_ASSERT_FALSE(has(payload_of(f), "email_ref"));
+   json_object_put(f);
+}
+
+/* stopped: true on a reply the user stopped, absent otherwise. */
+static void test_stopped(void) {
+   json_object *f = webui_message_appended_frame(1, 2, "assistant", "Half", NULL, 1, NULL, NULL,
+                                                 true);
+   json_object *v = NULL;
+   TEST_ASSERT_TRUE(json_object_object_get_ex(payload_of(f), "stopped", &v));
+   TEST_ASSERT_TRUE(json_object_get_boolean(v));
+   json_object_put(f);
+   f = webui_message_appended_frame(1, 2, "assistant", "Whole", NULL, 1, NULL, NULL, false);
+   TEST_ASSERT_FALSE(has(payload_of(f), "stopped"));
    json_object_put(f);
 }
 
@@ -191,7 +205,7 @@ static void test_email_ref(void) {
  * gets doesn't, before or after. */
 static void test_client_ref(void) {
    session_t s = { .session_id = 7, .type = SESSION_TYPE_WEBUI };
-   json_object *f = webui_message_appended_frame(1, 2, "user", "x", NULL, 0, &s, NULL);
+   json_object *f = webui_message_appended_frame(1, 2, "user", "x", NULL, 0, &s, NULL, false);
 
    char *copy = webui_message_appended_origin_json(f, &s, "turn-42");
    TEST_ASSERT_NOT_NULL(copy);
@@ -221,5 +235,6 @@ int main(void) {
    RUN_TEST(test_reasoning);
    RUN_TEST(test_email_ref);
    RUN_TEST(test_client_ref);
+   RUN_TEST(test_stopped);
    return UNITY_END();
 }

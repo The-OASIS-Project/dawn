@@ -96,6 +96,8 @@ static const char *DDL =
    ");"
    "CREATE TABLE IF NOT EXISTS message_unprompted ("
    "  message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE);"
+   "CREATE TABLE IF NOT EXISTS message_stopped ("
+   "  message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE);"
    "INSERT INTO messages (id, conversation_id, role, content) VALUES (100, 10, 'user', 'hello');"
    "INSERT INTO messages (id, conversation_id, role, content) VALUES (101, 10, 'assistant', 'hi');"
    "INSERT INTO messages (id, conversation_id, role, content) VALUES (200, 20, 'user', 'secret');"

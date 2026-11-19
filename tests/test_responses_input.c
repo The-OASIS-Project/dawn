@@ -29,6 +29,7 @@
 
 #include "llm/llm_openai_responses_input.h"
 #include "llm/llm_turn_blocks.h"
+#include "prompts.h"
 #include "unity.h"
 
 /* A Claude request's carrier: its endpoint and key tag (llm_request_carrier). */
@@ -521,8 +522,30 @@ static void test_question_keeps_its_context(void) {
    json_object_put(history);
 }
 
+/* After a reply the user stopped, the next question's first part is the note;
+ * the reply is its own message item, as saved. */
+static void test_stopped_reply_noted_in_the_next_question(void) {
+   struct json_object *history = json_tokener_parse(
+       "[{\"role\":\"user\",\"content\":\"Q1\"},"
+       "{\"role\":\"assistant\",\"content\":\"Half\",\"_stopped\":true},"
+       "{\"role\":\"user\",\"content\":\"Go on\"}]");
+   struct json_object *input = llm_responses_build_input(history, "Go on", NULL, 0, false, HOST,
+                                                         "gpt-5.6");
+   TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(input));
+   TEST_ASSERT_EQUAL_STRING("assistant", item_role(input, 1));
+   TEST_ASSERT_NOT_NULL(
+       strstr(json_object_to_json_string(json_object_array_get_idx(input, 1)), "Half"));
+   TEST_ASSERT_EQUAL_STRING("[Operator note] " STOPPED_REPLY_USER_NOTE, item_text(input, 2));
+   TEST_ASSERT_EQUAL_INT(2, (int)json_object_array_length(json_object_object_get(
+                                json_object_array_get_idx(input, 2), "content")));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(input), "_stopped"));
+   json_object_put(input);
+   json_object_put(history);
+}
+
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_stopped_reply_noted_in_the_next_question);
    RUN_TEST(test_question_keeps_its_context);
    RUN_TEST(test_extract_stable_and_volatile);
    RUN_TEST(test_single_system_has_no_volatile);

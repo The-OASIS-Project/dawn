@@ -754,6 +754,11 @@ static char *handle_send(struct json_object *details, int user_id, const turn_or
    return buf;
 }
 
+/* A confirm of an item prepared in a turn the user stopped. */
+#define EMAIL_STOPPED_REFUSAL                                                               \
+   TOOL_RESULT_ERROR_MARK "Error: not confirmed. The user stopped the reply that prepared " \
+                          "it. Prepare it again and read it back to the user."
+
 static char *handle_confirm_send(struct json_object *details,
                                  int user_id,
                                  const turn_origin_t *origin) {
@@ -775,6 +780,8 @@ static char *handle_confirm_send(struct json_object *details,
                        "Error: not confirmed. A confirm counts only in the user's reply right "
                        "after the read-back; the conversation has moved on since. Prepare it "
                        "again and read it back if the user still wants it.");
+      case EMAIL_CONFIRM_RC_STOPPED:
+         return strdup(EMAIL_STOPPED_REFUSAL);
       case EMAIL_CONFIRM_RC_FROM_VISUAL:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: not confirmed. This turn came from a rendered visual, not the "
@@ -901,6 +908,8 @@ static char *handle_confirm_trash(struct json_object *details,
                        "Error: not confirmed. A confirm counts only in the user's reply right "
                        "after the read-back; the conversation has moved on since. Prepare it "
                        "again and read it back if the user still wants it.");
+      case EMAIL_CONFIRM_RC_STOPPED:
+         return strdup(EMAIL_STOPPED_REFUSAL);
       case EMAIL_CONFIRM_RC_FROM_VISUAL:
          return strdup(TOOL_RESULT_ERROR_MARK
                        "Error: not confirmed. This turn came from a rendered visual, not the "

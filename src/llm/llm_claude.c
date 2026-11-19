@@ -641,6 +641,12 @@ static int claude_single_shot_once(struct json_object *conversation_history,
                               (res == CURLE_WRITE_ERROR && llm_transfer_cancelled());
          if (stopped) {
             OLOG_INFO("LLM transfer interrupted by user");
+            /* What had streamed, with the blocks that finished (an open one,
+             * reasoning not yet signed among them, is left out). */
+            llm_stream_fill_stopped(stream_ctx, result);
+            struct json_object *native = llm_stream_take_claude_content(stream_ctx);
+            result->blocks = llm_turn_blocks_from_claude(native, carrier, model);
+            json_object_put(native);
          } else {
             OLOG_ERROR("CURL failed: %s", curl_easy_strerror(res));
          }

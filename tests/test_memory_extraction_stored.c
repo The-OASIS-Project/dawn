@@ -35,6 +35,7 @@
 #include "config/dawn_config.h"
 #include "core/outside_kind.h"
 #include "llm/llm_third_party.h"
+#include "llm/llm_turn_blocks.h"
 #include "memory/memory_extraction_input.h"
 #include "memory/memory_history_loader.h"
 #include "memory/memory_note_guard.h"
@@ -432,6 +433,40 @@ static void test_stored_frames_agree_with_the_live_scan(void) {
    }
 }
 
+/* A reply the user stopped is never extracted, read from the database or from
+ * a live history, and doesn't make the batch outside text (it is no post). */
+static void test_stopped_replies_are_left_out(void) {
+   int64_t conv = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Stopped", &conv));
+   add(conv, &(conv_message_row_t){ .role = "user", .content = "my dog is Ash" });
+   add(conv,
+       &(conv_message_row_t){ .role = "assistant", .content = "Your cat Ash is", .stopped = true });
+   add(conv, &(conv_message_row_t){ .role = "user", .content = "dog, not cat" });
+   add(conv, &(conv_message_row_t){ .role = "assistant", .content = "Your dog Ash. Noted." });
+
+   struct json_object *hist = memory_history_load_from_db(conv, s_user, NULL);
+   TEST_ASSERT_NOT_NULL(hist);
+   int kind = -1;
+   struct json_object *in = memory_extraction_build_input(s_user, conv, hist, 0, &kind);
+   TEST_ASSERT_NOT_NULL(in);
+   TEST_ASSERT_EQUAL_INT(OUTSIDE_NONE, kind);
+   TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(in));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(in), "Your cat"));
+   json_object_put(in);
+
+   /* Nor from the copy a session hands over when its chat is switched or
+    * it ends: the copy keeps the mark. */
+   struct json_object *snapshot = llm_history_copy_marked(hist);
+   json_object_put(hist);
+   TEST_ASSERT_NOT_NULL(snapshot);
+   in = memory_extraction_build_input(s_user, conv, snapshot, 0, &kind);
+   json_object_put(snapshot);
+   TEST_ASSERT_NOT_NULL(in);
+   TEST_ASSERT_EQUAL_INT(3, (int)json_object_array_length(in));
+   TEST_ASSERT_NULL(strstr(json_object_to_json_string(in), "Your cat"));
+   json_object_put(in);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_loaded_history_reads_request_context);
@@ -443,5 +478,6 @@ int main(void) {
    RUN_TEST(test_compacted_history_reads_the_database_unless_it_kept_its_rows);
    RUN_TEST(test_another_sessions_framed_result_taints_the_batch);
    RUN_TEST(test_stored_frames_agree_with_the_live_scan);
+   RUN_TEST(test_stopped_replies_are_left_out);
    return UNITY_END();
 }

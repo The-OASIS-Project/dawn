@@ -154,6 +154,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v114.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v115.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v116.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v117.c
     ${SRC_ROOT}/src/core/tz.c
     ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
@@ -897,6 +898,7 @@ dawn_add_unit_test(test_history_reload
            ${SRC_ROOT}/src/llm/llm_tool_images.c
            ${SRC_ROOT}/src/core/text_input_dispatch.c
            ${SRC_ROOT}/src/core/session_manager_llm.c
+           ${SRC_ROOT}/src/core/session_stop.c
            ${SRC_ROOT}/src/core/session_history.c
            ${SRC_ROOT}/src/core/session_catchup.c
            ${SRC_ROOT}/src/core/session_turn_lease.c
@@ -2225,6 +2227,27 @@ dawn_add_unit_test(test_conv_db_llm_blocks
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# A Claude stream cut by a stop: the text so far and its finished blocks.
+dawn_add_unit_test(test_llm_stream_stopped
+   SOURCES test_llm_stream_stopped.c
+           ${SRC_ROOT}/src/llm/llm_streaming.c
+           ${SRC_ROOT}/src/llm/llm_claude_blocks.c
+           ${SRC_ROOT}/src/llm/llm_claude_binding.c
+           ${SRC_ROOT}/src/llm/llm_reasoning_details.c
+           ${SRC_ROOT}/src/llm/llm_turn_blocks.c
+           ${SRC_ROOT}/src/llm/llm_history_kind.c
+           ${SRC_ROOT}/src/llm/llm_context_text.c
+           ${SRC_ROOT}/src/core/strbuf.c
+   LIBS    dawn_common unity pthread m ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# message_stopped: a reply the user stopped, marked and read back (v117).
+dawn_add_unit_test(test_conv_db_stopped
+   SOURCES test_conv_db_stopped.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # messages.kind (request-context rows only the replay read returns), the frozen
 # prefix and tool set, the reasoning floor, and stable citation handles.
 dawn_add_unit_test(test_conv_db_kind_prefix
@@ -3257,6 +3280,7 @@ dawn_add_unit_test(test_memory_extraction_run
            ${SRC_ROOT}/src/memory/memory_recovery.c
            ${SRC_ROOT}/src/core/text_input_dispatch.c
            ${SRC_ROOT}/src/core/session_manager_llm.c
+           ${SRC_ROOT}/src/core/session_stop.c
            ${SRC_ROOT}/src/core/session_history.c
            ${SRC_ROOT}/src/core/session_catchup.c
            ${SRC_ROOT}/src/core/session_turn_lease.c

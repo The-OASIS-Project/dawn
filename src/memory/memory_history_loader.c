@@ -241,6 +241,11 @@ static int on_llm_row(const conversation_llm_row_t *row, void *p) {
                                 json_object_new_int64(row->context_of));
       }
    }
+   /* A reply the user stopped (llm_history_stopped_noted). */
+   if (row->stopped && json_object_array_length(lc->rows) == before + 1) {
+      json_object_object_add(json_object_array_get_idx(lc->rows, before), LLM_HISTORY_STOPPED_KEY,
+                             json_object_new_boolean(1));
+   }
    /* Copied now (the row's text is gone after the callback) and parsed after
     * the read, outside the database lock. */
    if (lc->with_blocks && row->llm_blocks && json_object_array_length(lc->rows) == before + 1) {
@@ -260,7 +265,8 @@ static int on_message(const conversation_message_t *msg, void *p) {
                                   .tool_calls = msg->tool_calls,
                                   .tool_call_id = msg->tool_call_id,
                                   .created_at = msg->created_at,
-                                  .is_error = msg->is_error };
+                                  .is_error = msg->is_error,
+                                  .stopped = msg->stopped };
    memcpy(row.role, msg->role, sizeof(row.role));
    return on_llm_row(&row, p);
 }
@@ -454,6 +460,9 @@ static int stage_row(const conversation_llm_row_t *row, void *ctx) {
    if (row->tool_call_id && row->tool_call_id[0]) {
       json_object_object_add(obj, "tool_call_id", json_object_new_string(row->tool_call_id));
    }
+   if (row->stopped) {
+      json_object_object_add(obj, LLM_HISTORY_STOPPED_KEY, json_object_new_boolean(1));
+   }
    if (row->images && strcmp(row->role, "tool") == 0) {
       struct json_object *images = json_tokener_parse(row->images);
       if (json_object_is_type(images, json_type_array)) {
@@ -566,7 +575,8 @@ static struct json_object *request_message(int user_id, struct json_object *row)
    if (kind == MESSAGE_KIND_TOOL_CHANGE && !llm_tool_change_normalize(m)) {
       OLOG_WARNING("memory_history_loader: a tool change row holds no usable definition");
    }
-   static const char *const carried[] = { "id", LLM_HISTORY_CONTEXT_OF_KEY, LLM_TURN_BLOCKS_KEY };
+   static const char *const carried[] = { "id", LLM_HISTORY_CONTEXT_OF_KEY, LLM_TURN_BLOCKS_KEY,
+                                          LLM_HISTORY_STOPPED_KEY };
    for (size_t i = 0; i < sizeof(carried) / sizeof(carried[0]); i++) {
       struct json_object *v = NULL;
       if (json_object_object_get_ex(row, carried[i], &v)) {

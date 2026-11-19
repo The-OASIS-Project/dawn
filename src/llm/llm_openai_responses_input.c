@@ -273,9 +273,14 @@ struct json_object *llm_responses_build_input(struct json_object *history,
                                               bool enable_cache_breakpoint,
                                               const char *carrier,
                                               const char *model) {
-   struct json_object *input = json_object_new_array();
-   if (!input)
+   /* The user's next message after a reply they stopped says so. */
+   struct json_object *noted = llm_history_stopped_noted(history);
+   struct json_object *input = noted ? json_object_new_array() : NULL;
+   if (!input) {
+      json_object_put(noted);
       return NULL;
+   }
+   history = noted;
 
    /* The newest user item while it is still the conversation's last word (an
     * operator's direction after it doesn't change that). */
@@ -518,5 +523,6 @@ struct json_object *llm_responses_build_input(struct json_object *history,
       }
    }
 
+   json_object_put(noted);
    return input;
 }

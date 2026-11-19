@@ -804,14 +804,20 @@ json_object *llm_openai_prepare_chat_history(struct json_object *conversation_hi
                                              const char *carrier,
                                              const char *model) {
    const bool system_notes = takes_mid_system(carrier);
-   /* Notes as text go in the question, ahead of the user's words. */
-   json_object *noted = system_notes ? NULL : llm_history_notes_before_words(conversation_history);
-   if (!system_notes && !noted) {
+   /* The user's next message after a reply they stopped says so. */
+   json_object *stop_noted = llm_history_stopped_noted(conversation_history);
+   if (!stop_noted) {
       return NULL;
    }
-   json_object *in_place = render_context_for_chat(noted ? noted : conversation_history,
-                                                   system_notes);
+   /* Notes as text go in the question, ahead of the user's words. */
+   json_object *noted = system_notes ? NULL : llm_history_notes_before_words(stop_noted);
+   if (!system_notes && !noted) {
+      json_object_put(stop_noted);
+      return NULL;
+   }
+   json_object *in_place = render_context_for_chat(noted ? noted : stop_noted, system_notes);
    json_object_put(noted);
+   json_object_put(stop_noted);
    if (!in_place) {
       return NULL;
    }

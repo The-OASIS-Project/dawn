@@ -182,6 +182,19 @@ struct json_object *llm_turn_blocks_with_final_text(struct json_object *blocks,
                                                     const char *final_text);
 
 /**
+ * @brief A stopped reply's blocks: as llm_turn_blocks_with_final_text(), with
+ *        nothing after its text
+ *
+ * A stop can cut a turn after its text and a later block finished (reasoning
+ * before a tool call left out): a reply ending in reasoning is refused when
+ * replayed, so what follows the text goes.
+ *
+ * @return New blocks (caller owns them), or NULL
+ */
+struct json_object *llm_turn_blocks_stopped_reply(struct json_object *blocks,
+                                                  const char *partial_text);
+
+/**
  * @brief Render blocks as OpenAI Responses input items, appended to @p input
  *
  * Each run of text as one assistant message (output_text), tool calls as

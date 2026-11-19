@@ -37,7 +37,8 @@ json_object *webui_message_appended_frame(int64_t conv_id,
                                           const char *reasoning,
                                           unsigned stream_id,
                                           const session_t *origin,
-                                          const char *email_ref) {
+                                          const char *email_ref,
+                                          bool stopped) {
    json_object *root = json_object_new_object();
    json_object_object_add(root, "type", json_object_new_string("message_appended"));
 
@@ -59,6 +60,9 @@ json_object *webui_message_appended_frame(int64_t conv_id,
       json_object_object_add(p, "session_id", json_object_new_int64(origin->session_id));
    }
    webui_row_add_email_ref(p, role, email_ref);
+   if (stopped) {
+      json_object_object_add(p, "stopped", json_object_new_boolean(1));
+   }
    json_object_object_add(root, "payload", p);
    return root;
 }

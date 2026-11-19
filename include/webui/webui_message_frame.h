@@ -25,6 +25,7 @@
 #define WEBUI_MESSAGE_FRAME_H
 
 #include <json-c/json.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "core/session_manager.h"
@@ -48,6 +49,7 @@ const session_t *webui_message_origin(const session_t *session);
  * @param reasoning Sent only when non-empty
  * @param origin    Sent as payload.session_id when non-NULL
  * @param email_ref A user row's email_ref (webui_row_add_email_ref), or NULL
+ * @param stopped   A reply the user stopped: sent as payload.stopped
  * @return The frame ({type, payload}); the caller owns it
  */
 json_object *webui_message_appended_frame(int64_t conv_id,
@@ -57,7 +59,8 @@ json_object *webui_message_appended_frame(int64_t conv_id,
                                           const char *reasoning,
                                           unsigned stream_id,
                                           const session_t *origin,
-                                          const char *email_ref);
+                                          const char *email_ref,
+                                          bool stopped);
 
 /**
  * @brief The origin connection's copy of @p frame, naming its turn

@@ -56,7 +56,7 @@
  *     CONVERSATION_SUMMARY_LEAD
  *     STANDING_DIRECTIONS_NONE
  *     HISTORY_VISUAL_ONLY_REPLY
- *     STOPPED_REPLY_NOTE
+ *     STOPPED_REPLY_NOTE, STOPPED_REPLY_USER_NOTE
  *     SESSION_POSTS_HEADER, SESSION_POSTS_EARLIER, SESSION_POST_CUT
  *   MEMORY
  *     MEMORY_EXTRACTION_PROMPT_TEMPLATE
@@ -504,8 +504,13 @@
  * (prefix_in_force.c). */
 #define STANDING_DIRECTIONS_NONE "No standing directions apply to this surface now."
 
-/* Recorded in place of the reply a cancel phrase stopped (dawn.c). */
+/* Recorded in place of the reply a cancel phrase stopped (dawn.c), and after
+ * a stopped reply's text in a summarizer's transcript (llm_history_kind.c). */
 #define STOPPED_REPLY_NOTE "(Stopped at the user's request before finishing.)"
+
+/* In front of the user's next message after a reply they stopped mid-stream
+ * (the reply replays as far as it streamed; llm_history_stopped_noted). */
+#define STOPPED_REPLY_USER_NOTE "The user stopped your previous reply before it finished."
 
 /* =============================================================================
  * MEMORY
