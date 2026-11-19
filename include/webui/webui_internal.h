@@ -983,6 +983,7 @@ void send_error_impl_ex(struct lws *wsi,
  *                   and every connection gets the same
  * @param client_ref That turn's client_ref; NULL or "" sends none
  * @param email_ref  A user row's email_ref (messages.email_ref), or NULL
+ * @param stopped    A reply the user stopped (payload.stopped)
  * Otherwise as webui_broadcast_message_appended (conv_event.h).
  */
 void webui_broadcast_message_appended_origin(int user_id,
@@ -994,7 +995,8 @@ void webui_broadcast_message_appended_origin(int user_id,
                                              unsigned stream_id,
                                              const session_t *origin,
                                              const char *client_ref,
-                                             const char *email_ref);
+                                             const char *email_ref,
+                                             bool stopped);
 
 /**
  * @brief Send an error frame naming the text turn it refuses.

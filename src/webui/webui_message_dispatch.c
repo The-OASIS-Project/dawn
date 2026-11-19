@@ -50,6 +50,7 @@
 #include "core/scheduler_db.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
+#include "core/session_stop.h"
 #include "dawn.h"
 #include "document_original_store.h"
 #include "image_store.h"
@@ -1934,7 +1935,7 @@ static void handle_cancel_message(ws_connection_t *conn) {
        * manager hands &session->cancel_requested to llm_set_cancel_flag before
        * each LLM call, so the CURL progress callback aborts THIS session only.
        * (llm_request_interrupt() is NOT used — its global flag hits all users.) */
-      session_cancel_turn(conn->session);
+      session_stop_turn_by_user(conn->session);
       send_state_impl(conn->wsi, "idle", NULL);
    }
 }

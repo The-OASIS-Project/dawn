@@ -2743,8 +2743,11 @@ void webui_send_stream_end(session_t *session, const char *reason) {
     * (stream_conversation_id > 0 — the workers only persist when turn_conv > 0, so a
     * conv-less turn, or one whose conversation creation failed mid-dispatch, must not
     * promise a save it won't make).  Over-promising on any of these would make the viewer
-    * drop its streamed partial while the server persists nothing (correctness MEDIUM). */
-   bool will_persist = atomic_load(&session->will_persist_turn) && strcmp(r, "complete") == 0 &&
+    * drop its streamed partial while the server persists nothing (correctness MEDIUM).
+    * A reply the user stopped ("stopped") is saved only as far as it was kept. */
+   const bool saves = strcmp(r, "complete") == 0 ||
+                      (strcmp(r, "stopped") == 0 && session->cancelled_final_response);
+   bool will_persist = atomic_load(&session->will_persist_turn) && saves &&
                        atomic_load(&session->stream_had_content) &&
                        atomic_load(&session->stream_conversation_id) > 0;
 

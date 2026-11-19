@@ -632,8 +632,9 @@ typedef struct session {
    // by a disconnect mid-turn).
    _Atomic int64_t viewed_conversation_id;
    uint64_t turn_owner_token;
-   uint64_t turn_outer_token;  // the begin thread's token before this turn  // the running turn's
-                               // token (session_turn_token()), readable under history_mutex
+   uint64_t turn_outer_token;    // the begin thread's token before this turn  // the running turn's
+                                 // token (session_turn_token()), readable under history_mutex
+   uint64_t stopped_turn_token;  // the last turn the user stopped (session_stop.h); history_mutex
    // Recent device events (phone ringing, a call answered elsewhere, a proactive
    // alert), oldest first.  Posted by any thread; each turn's context takes the
    // ones its history hasn't been told (session_take_new_notices_locked).
@@ -1610,7 +1611,8 @@ bool session_add_turn_message(session_t *session, const char *role, const char *
  * As session_add_turn_message(session, "assistant", content), with the answer's
  * provider-neutral blocks (llm_turn_blocks.h) under LLM_TURN_BLOCKS_KEY, so each
  * provider replays it with its own reasoning.  @p blocks may be NULL (plain text);
- * the message takes a reference.
+ * the message takes a reference.  A reply the user stopped is marked as one
+ * (@p stopped: LLM_HISTORY_STOPPED_KEY), as its row is.
  *
  * @return true if appended
  */
@@ -1620,7 +1622,8 @@ void session_final_answer_clear(session_t *session);
 
 bool session_add_turn_assistant(session_t *session,
                                 const char *content,
-                                struct json_object *blocks);
+                                struct json_object *blocks,
+                                bool stopped);
 
 /**
  * @brief Check if session has user messages (beyond system prompt)

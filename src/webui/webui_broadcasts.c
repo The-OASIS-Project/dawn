@@ -59,6 +59,7 @@
 #include "core/missed_notifications_db.h"
 #include "core/scheduler.h"
 #include "core/session_compaction.h"
+#include "core/session_stop.h"
 #include "dawn_error.h"
 #include "image_store.h"
 #include "llm/llm_cache_monitor.h"
@@ -754,7 +755,7 @@ void webui_broadcast_message_appended(int user_id,
                                       const char *reasoning,
                                       unsigned stream_id) {
    webui_broadcast_message_appended_origin(user_id, conv_id, msg_id, role, text, reasoning,
-                                           stream_id, NULL, NULL, NULL);
+                                           stream_id, NULL, NULL, NULL, false);
 }
 
 void webui_broadcast_message_appended_origin(int user_id,
@@ -766,7 +767,8 @@ void webui_broadcast_message_appended_origin(int user_id,
                                              unsigned stream_id,
                                              const session_t *origin,
                                              const char *client_ref,
-                                             const char *email_ref) {
+                                             const char *email_ref,
+                                             bool stopped) {
    if (user_id <= 0 || conv_id <= 0 || text == NULL) {
       return;
    }
@@ -777,7 +779,7 @@ void webui_broadcast_message_appended_origin(int user_id,
    }
 
    json_object *root = webui_message_appended_frame(conv_id, msg_id, role, text, reasoning,
-                                                    stream_id, origin, email_ref);
+                                                    stream_id, origin, email_ref, stopped);
 
    /* browsers_only (SERVER_AUTHORITATIVE §8): message_appended is a transcript frame
     * a satellite renders nothing for — keep it strictly WEBUI, matching the
@@ -819,6 +821,8 @@ int webui_persist_final_answer(session_t *session,
    struct json_object *reply_blocks = session_take_reply_blocks(session);
    char *stored_blocks = llm_turn_blocks_answer_stored(reply_blocks);
    json_object_put(reply_blocks);
+   /* A reply the user stopped is saved, and sent, as one. */
+   const bool stopped = session_turn_reply_stopped(session);
 
    /* Take the accumulated visual under tools_mutex, then RELEASE before the body build /
     * DB write / fan-out — never hold a leaf lock across the persist (lock-ordering). */
@@ -850,7 +854,8 @@ int webui_persist_final_answer(session_t *session,
       const conv_message_row_t row = { .role = "assistant",
                                        .content = persist_body,
                                        .reasoning = reasoning,
-                                       .llm_blocks = stored_blocks };
+                                       .llm_blocks = stored_blocks,
+                                       .stopped = stopped };
       rc = conv_db_add_row(conv_id, (int)user_id, &row, &msg_id);
       if (rc == AUTH_DB_SUCCESS) {
          break;
@@ -884,7 +889,7 @@ int webui_persist_final_answer(session_t *session,
       webui_broadcast_message_appended_origin((int)user_id, conv_id, msg_id, "assistant",
                                               persist_body, reasoning,
                                               atomic_load(&session->current_stream_id),
-                                              webui_message_origin(session), NULL, NULL);
+                                              webui_message_origin(session), NULL, NULL, stopped);
    }
 
    free(combined);

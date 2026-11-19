@@ -75,6 +75,10 @@ static const char *const s_features[] = {
     * stopped first, nothing saved), and stop_other_reply stops the turn it
     * waits for. */
    "turn_wait",
+   /* A reply the user stops mid-stream is saved as far as it streamed: its
+    * stream_end has reason "stopped" (will_persist when it is saved), its
+    * message_appended and its rows wherever they are read carry stopped: true. */
+   "stopped_replies_saved",
 };
 
 /* The email panel's check (webui_email_panel.c); a build without the panel has

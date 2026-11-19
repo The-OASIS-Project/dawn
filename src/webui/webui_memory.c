@@ -241,6 +241,9 @@ static int source_msg_to_json(const conversation_message_t *msg, void *ctx) {
    json_object_object_add(obj, "content", json_object_new_string(msg->content));
    json_object_object_add(obj, "created_at", json_object_new_int64((int64_t)msg->created_at));
    webui_row_add_email_ref(obj, msg->role, msg->email_ref);
+   if (msg->stopped) {
+      json_object_object_add(obj, "stopped", json_object_new_boolean(1));
+   }
    json_object_array_add(arr, obj);
    return 0;
 }

@@ -41,6 +41,7 @@
 #include "core/ocp_helpers.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
+#include "core/session_stop.h"
 #include "image_store.h"
 #include "llm/llm_command_parser.h"
 #include "llm/llm_tools.h"
@@ -546,7 +547,9 @@ void handle_new_conversation(ws_connection_t *conn, struct json_object *payload)
                char *stored = llm_turn_blocks_answer_stored(reply_blocks);
                const conv_message_row_t row = { .role = "assistant",
                                                 .content = reply_text,
-                                                .llm_blocks = stored };
+                                                .llm_blocks = stored,
+                                                .stopped = session_claimed_reply_stopped(
+                                                    conn->session) };
                (void)conv_db_add_row(conv_id, conn->auth_user_id, &row, &reply_row);
                free(stored);
             }
@@ -852,6 +855,9 @@ static int load_msg_callback(const conversation_message_t *msg, void *context) {
       }
    }
    webui_row_add_email_ref(msg_obj, msg->role, msg->email_ref);
+   if (msg->stopped) {
+      json_object_object_add(msg_obj, "stopped", json_object_new_boolean(1));
+   }
 
    json_object_array_add(msg_array, msg_obj);
    return 0;
@@ -1977,6 +1983,9 @@ static int export_msg_callback(const conversation_message_t *msg, void *context)
    time_to_iso8601(msg->created_at, ts, sizeof(ts));
    json_object_object_add(msg_obj, "timestamp", json_object_new_string(ts));
    webui_row_add_email_ref(msg_obj, msg->role, msg->email_ref);
+   if (msg->stopped) {
+      json_object_object_add(msg_obj, "stopped", json_object_new_boolean(1));
+   }
 
    json_object_array_add(msg_array, msg_obj);
    return 0;

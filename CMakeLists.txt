@@ -853,6 +853,7 @@ list(APPEND DAWN_SOURCES
     src/core/session_turn_lease.c
     src/core/turn_queue.c
     src/core/session_manager_llm.c
+    src/core/session_stop.c
     src/core/job_manager.c
     src/core/job_worker.c
     src/core/job_reinvoke.c

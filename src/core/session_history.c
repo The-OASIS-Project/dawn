@@ -233,7 +233,8 @@ static bool add_message_impl(session_t *session,
                              const char *role,
                              const char *content,
                              bool turn,
-                             struct json_object *blocks) {
+                             struct json_object *blocks,
+                             bool stopped) {
    if (!session || !role || !content) {
       return false;
    }
@@ -270,6 +271,9 @@ static bool add_message_impl(session_t *session,
    json_object_object_add(message, "content", json_object_new_string(content));
    if (blocks) {
       json_object_object_add(message, LLM_TURN_BLOCKS_KEY, json_object_get(blocks));
+   }
+   if (stopped) {
+      json_object_object_add(message, LLM_HISTORY_STOPPED_KEY, json_object_new_boolean(1));
    }
 
    if (!turn && session_turn_defers_writes_locked(session)) {
@@ -441,11 +445,11 @@ bool session_stop_turn(session_t *session, const char *note) {
 }
 
 void session_add_message(session_t *session, const char *role, const char *content) {
-   (void)add_message_impl(session, role, content, false, NULL);
+   (void)add_message_impl(session, role, content, false, NULL, false);
 }
 
 bool session_add_turn_message(session_t *session, const char *role, const char *content) {
-   return add_message_impl(session, role, content, true, NULL);
+   return add_message_impl(session, role, content, true, NULL, false);
 }
 
 void session_final_answer_clear(session_t *session) {
@@ -473,8 +477,9 @@ struct json_object *session_take_reply_blocks(session_t *session) {
 
 bool session_add_turn_assistant(session_t *session,
                                 const char *content,
-                                struct json_object *blocks) {
-   return add_message_impl(session, "assistant", content, true, blocks);
+                                struct json_object *blocks,
+                                bool stopped) {
+   return add_message_impl(session, "assistant", content, true, blocks, stopped);
 }
 
 

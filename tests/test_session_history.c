@@ -1485,7 +1485,7 @@ void test_reply_blocks_never_outlive_their_turn(void) {
 void test_replace_reply_text_in_the_turn(void) {
    session_turn_begin(s, 3, 1);
    struct json_object *blocks = json_tokener_parse("[{\"type\":\"text\",\"text\":\"full reply\"}]");
-   TEST_ASSERT_TRUE(session_add_turn_assistant(s, "full reply", blocks));
+   TEST_ASSERT_TRUE(session_add_turn_assistant(s, "full reply", blocks, false));
    json_object_put(blocks);
    TEST_ASSERT_TRUE(session_replace_last_message_content(s, "assistant", "full"));
    const char *wire = json_object_to_json_string(s->turn_reply);

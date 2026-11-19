@@ -1586,7 +1586,7 @@ static void *audio_worker_thread(void *arg) {
     * turn_conv > 0; the transcript is non-blank). */
    if (user_msg_id > 0 && conn && conn->auth_user_id > 0) {
       webui_broadcast_message_appended_origin(conn->auth_user_id, turn_conv, user_msg_id, "user",
-                                              transcript, NULL, 0, session, NULL, NULL);
+                                              transcript, NULL, 0, session, NULL, NULL, false);
    }
 
 

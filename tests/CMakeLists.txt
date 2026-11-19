@@ -898,6 +898,7 @@ dawn_add_unit_test(test_history_reload
            ${SRC_ROOT}/src/llm/llm_tool_images.c
            ${SRC_ROOT}/src/core/text_input_dispatch.c
            ${SRC_ROOT}/src/core/session_manager_llm.c
+           ${SRC_ROOT}/src/core/session_stop.c
            ${SRC_ROOT}/src/core/session_history.c
            ${SRC_ROOT}/src/core/session_catchup.c
            ${SRC_ROOT}/src/core/session_turn_lease.c
@@ -3279,6 +3280,7 @@ dawn_add_unit_test(test_memory_extraction_run
            ${SRC_ROOT}/src/memory/memory_recovery.c
            ${SRC_ROOT}/src/core/text_input_dispatch.c
            ${SRC_ROOT}/src/core/session_manager_llm.c
+           ${SRC_ROOT}/src/core/session_stop.c
            ${SRC_ROOT}/src/core/session_history.c
            ${SRC_ROOT}/src/core/session_catchup.c
            ${SRC_ROOT}/src/core/session_turn_lease.c

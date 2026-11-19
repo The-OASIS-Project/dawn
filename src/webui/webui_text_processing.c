@@ -44,6 +44,7 @@
 #include "core/image_rehydrate.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
+#include "core/session_stop.h"
 #include "core/text_input_dispatch.h"
 #include "core/turn_queue.h"
 #include "core/worker_pool.h"
@@ -137,7 +138,8 @@ static void write_prior_exchange(session_t *session,
       char *stored = llm_turn_blocks_answer_stored(reply_blocks);
       const conv_message_row_t row = { .role = "assistant",
                                        .content = reply,
-                                       .llm_blocks = stored };
+                                       .llm_blocks = stored,
+                                       .stopped = session_claimed_reply_stopped(session) };
       (void)conv_db_add_row(conv_id, user_id, &row, &reply_row);
       free(stored);
    }
@@ -330,7 +332,7 @@ static void webui_text_dispatch_on_user_msg(void *ctx,
          /* The sender's copy names its turn too, in case its echo was dropped. */
          webui_broadcast_message_appended_origin(conn->auth_user_id, conv_id, message_id, "user",
                                                  body, NULL, 0, session, webui_turn_ref_get(),
-                                                 uctx->email_ref);
+                                                 uctx->email_ref, false);
       }
    }
 }
