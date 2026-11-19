@@ -87,6 +87,7 @@ PR_FOOTER = "\n\nMade by a coding agent for DAWN."
 SHORT_HEAD = 12  # hex digits of a commit named to the user or the agent
 CONFLICTS_CAP = 50  # conflicted paths a revise's merge names to the agent and to DAWN
 PR_TITLE_CAP = 120  # asked for 72; GitHub allows more, a runaway line is cut here
+PR_TEXT_LOGGED = 200  # characters of an answer that wasn't pull request text, logged
 
 # A revise reads its pull request's open feedback first, for at most this long.
 FEEDBACK_S = 15
@@ -134,12 +135,20 @@ def pr_title(t: dict, fallback: str | None = None) -> str:
 
 
 def parse_pr(text: str) -> tuple[str, str] | None:
-   """The agent's "TITLE: ..." line and the description after it, or None."""
+   """The agent's "TITLE: ..." line and the description after it, or None.  A line
+   before the title ("Here's the pull request:") and a code fence around the
+   answer are left out."""
    lines = (text or "").strip().splitlines()
-   if not lines or not lines[0].upper().startswith("TITLE:"):
+   start = next((i for i, l in enumerate(lines) if l.strip().upper().startswith("TITLE:")), None)
+   if start is None:
       return None
-   title = " ".join(lines[0][len("TITLE:"):].split())[:PR_TITLE_CAP]
-   body = "\n".join(lines[1:]).strip()
+   rest = lines[start + 1:]
+   # A fence left over from wrapping the answer: the body's fences don't pair up.
+   if rest and rest[-1].strip().startswith("```") and \
+         sum(l.strip().startswith("```") for l in rest) % 2:
+      rest = rest[:-1]
+   title = " ".join(lines[start].strip()[len("TITLE:"):].split())[:PR_TITLE_CAP]
+   body = "\n".join(rest).strip()
    return (title, body) if title and body else None
 
 
@@ -882,6 +891,10 @@ class Runner:
          # Its own kind (DAWN reads run_end as a run's end), counted in the day's spend.
          self.store.add_event(task_id, "pr_written", cost_usd=cost)
       pr = parse_pr(result.result if result and not result.is_error else "")
+      if not pr:  # its report describes the work instead: say why, once
+         log.warning("task %s: no pull request text (%s): %r", task_id,
+                     result.subtype if result else "no result",
+                     ((result.result or "") if result else "")[:PR_TEXT_LOGGED])
       if pr:
          self.store.update_task(task_id, pr_title=pr[0], pr_description=pr[1], pr_head=head)
 
