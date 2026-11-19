@@ -71,7 +71,8 @@ typedef struct {
    int64_t comment_id;
    int line; /* 0: none */
    bool outdated;
-   bool resolve; /* resolve the thread after the reply */
+   bool resolve;          /* resolve the thread after the reply */
+   bool copilot_resolved; /* resolved by Copilot already: left as it is */
    char path[CG_PATH_SHOWN + CG_EXCERPT_MARK];
    char author[CG_LOGIN_MAX + CG_EXCERPT_MARK];
    char opening[CG_OPENING_SHOWN + CG_EXCERPT_MARK];
@@ -144,7 +145,13 @@ static void signature(char *out, size_t len) {
    snprintf(out, len, "\n\n\xe2\x80\x94 %s", name); /* an em dash */
 }
 
-/* The thread of @p threads whose first comment is @p comment_id, or NULL. */
+static bool jtrue(struct json_object *o, const char *key) {
+   return json_object_get_boolean(json_object_object_get(o, key));
+}
+
+/* The thread of @p threads whose first comment is @p comment_id, or NULL; a
+ * thread someone other than Copilot resolved is NULL too: replies don't reopen
+ * a discussion a person closed. */
 static struct json_object *find_thread(struct json_object *threads, int64_t comment_id) {
    const size_t n = json_object_is_type(threads, json_type_array)
                         ? json_object_array_length(threads)
@@ -152,7 +159,7 @@ static struct json_object *find_thread(struct json_object *threads, int64_t comm
    for (size_t i = 0; i < n; i++) {
       struct json_object *t = json_object_array_get_idx(threads, i);
       if (json_object_get_int64(json_object_object_get(t, "comment_id")) == comment_id) {
-         return t;
+         return jtrue(t, "resolved") && !jtrue(t, "resolved_by_copilot") ? NULL : t;
       }
    }
    return NULL;
@@ -208,9 +215,9 @@ static char *check_replies(struct json_object *replies) {
    if (n == 0 || n > CODING_GITHUB_REPLIES_MAX) {
       return coding_agent_error(
           "reply needs the pull request ({\"ref\": ...} or {\"job\": N}) and \"replies\": 1 "
-          "to " CODING_GITHUB_STR(CODING_GITHUB_REPLIES_MAX) " of {\"comment_id\": <the "
-                                                             "thread's comment_id, as pr_threads "
-                                                             "lists it>, \"body\": <the reply>}.");
+          "to " CA_STR(CODING_GITHUB_REPLIES_MAX) " of {\"comment_id\": <the "
+                                                  "thread's comment_id, as pr_threads "
+                                                  "lists it>, \"body\": <the reply>}.");
    }
    for (size_t i = 0; i < n; i++) {
       struct json_object *r = json_object_array_get_idx(replies, i);
@@ -236,7 +243,7 @@ static char *check_replies(struct json_object *replies) {
          strbuf_t sb;
          strbuf_init(&sb, 64);
          strbuf_appendf(&sb,
-                        "Reply %zu is over " CODING_GITHUB_STR(
+                        "Reply %zu is over " CA_STR(
                             CODING_GITHUB_REPLY_BODY_MAX) " bytes; say it more briefly.",
                         i + 1);
          return coding_agent_error_free(taken(&sb));
@@ -281,8 +288,10 @@ static void fill_reply(cg_reply_t *r,
                        bool resolve) {
    r->comment_id = reply_comment_id(reply);
    (void)coding_agent_yes_no(reply, "resolve", resolve, &r->resolve); /* checked by check_replies */
+   r->copilot_resolved = jtrue(t, "resolved_by_copilot");
+   r->resolve = r->resolve && !r->copilot_resolved;
    r->line = json_object_get_int(json_object_object_get(t, "line"));
-   r->outdated = json_object_get_boolean(json_object_object_get(t, "outdated"));
+   r->outdated = jtrue(t, "outdated");
    str_excerpt_line(coding_gateway_jstr(t, "path"), CG_PATH_SHOWN, r->path, sizeof(r->path));
    struct json_object *first = json_object_array_get_idx(json_object_object_get(t, "comments"), 0);
    str_excerpt_line(coding_gateway_jstr(first, "author"), CG_LOGIN_MAX, r->author,
@@ -304,6 +313,9 @@ char *coding_github_reply(struct json_object *details, int user_id, const turn_o
    }
    char *refusal = NULL;
    struct json_object *args = coding_github_pr_args(details, user_id, &refusal);
+   if (args != NULL) { /* resolved too: one Copilot resolved takes a reply */
+      json_object_object_add(args, "all", json_object_new_boolean(true));
+   }
    struct json_object *ans = args ? coding_github_call(user_id, "pr_threads", args, &refusal)
                                   : NULL;
    if (ans == NULL) {
@@ -326,8 +338,9 @@ char *coding_github_reply(struct json_object *details, int user_id, const turn_o
       strbuf_t sb;
       strbuf_init(&sb, 256);
       strbuf_appendf(&sb,
-                     "comment_id %s doesn't start an unresolved review thread on %s; reply only "
-                     "on threads pr_threads lists, by their comment_id.",
+                     "comment_id %s doesn't start an unresolved review thread on %s, or one "
+                     "Copilot resolved; reply only on threads pr_threads lists, by their "
+                     "comment_id.",
                      strbuf_len(&unknown) ? strbuf_str(&unknown) : "?", pr[0] ? pr : "it");
       strbuf_free(&unknown);
       json_object_put(ans);
@@ -388,18 +401,20 @@ char *coding_github_reply(struct json_object *details, int user_id, const turn_o
    strbuf_append(&sb, "The replies, as they will be posted:\n");
    for (int i = 0; i < staged->count; i++) {
       strbuf_appendf(&sb, "Reply %d (%s):\n%s\n", i + 1,
-                     staged->items[i].resolve ? "then resolve its thread" : "its thread stays open",
+                     staged->items[i].copilot_resolved ? "its thread is already resolved by Copilot"
+                     : staged->items[i].resolve        ? "then resolve its thread"
+                                                       : "its thread stays open",
                      staged->items[i].body);
    }
    if (unpublished) {
-      strbuf_append(&sb, "Warning: the fixes aren't all on the pull request yet: publish first, so "
-                         "the commits these replies name are there. On the user's yes, call "
-                         "confirm_publish first, then confirm_reply.\n");
+      strbuf_append(&sb, "Warning: the fixes aren't all on the pull request yet: propose the "
+                         "publish too, so the commits these replies name are there; one confirm "
+                         "can name both.\n");
    }
    strbuf_appendf(&sb,
                   "Read the replies to the user and ask them to confirm; if they say yes in "
-                  "their reply, call coding_agent with action 'confirm_reply' and arguments "
-                  "{\"id\": %u} (this one only).",
+                  "their reply, call coding_agent with action 'confirm' and arguments "
+                  "{\"ids\": [%u]}.",
                   (unsigned)id);
    free(staged);
    return taken(&sb);
@@ -422,7 +437,9 @@ static struct json_object *reply_args(const cg_replies_pending_t *p) {
 }
 
 /* What pr_reply did, reply by reply. */
-static char *replies_result(const cg_replies_pending_t *p, struct json_object *ans) {
+static char *replies_result(const cg_replies_pending_t *p,
+                            struct json_object *ans,
+                            bool *complete) {
    struct json_object *results = json_object_object_get(ans, "results");
    const size_t n = json_object_is_type(results, json_type_array)
                         ? json_object_array_length(results)
@@ -463,21 +480,21 @@ static char *replies_result(const cg_replies_pending_t *p, struct json_object *a
    }
    strbuf_appendf(&sb, ":\n%s", strbuf_str(&lines));
    strbuf_free(&lines);
-   return taken(&sb);
+   /* A reply not posted leaves the batch unfinished (a confirm stops there); an
+    * error result only when none was, since one that posted did something. */
+   *complete = posted == p->count;
+   return posted == 0 ? coding_agent_error_free(taken(&sb)) : taken(&sb);
 }
 
-char *coding_github_confirm_reply(struct json_object *details,
+char *coding_github_confirm_reply(uint32_t id,
                                   int user_id,
-                                  const turn_origin_t *origin) {
-   const uint32_t id = coding_agent_details_id(details);
-   if (id == 0) {
-      return tool_pending_missing_id("reply batch");
+                                  const turn_origin_t *origin,
+                                  bool *complete) {
+   bool done_all = false;
+   if (complete == NULL) {
+      complete = &done_all;
    }
-   /* Not in a turn that read GitHub or the agent: a yes there could be their words. */
-   if (coding_agent_turn_read(origin)) {
-      return coding_agent_error("This turn read text from GitHub or the coding agent, so the "
-                                "replies can't be confirmed in it. Ask the user again.");
-   }
+   *complete = false;
    cg_replies_pending_t *p = malloc(sizeof(*p));
    if (p == NULL) {
       return coding_agent_error("Out of memory.");
@@ -506,7 +523,7 @@ char *coding_github_confirm_reply(struct json_object *details,
    }
    char *out = NULL;
    if (sent == CODING_GW_OK) {
-      out = replies_result(p, ans);
+      out = replies_result(p, ans, complete);
       free(err);
    } else if (sent == CODING_GW_FAILED) { /* the first try may have posted them */
       strbuf_t sb;
@@ -542,38 +559,17 @@ char *coding_github_request_review(struct json_object *details,
    pr_name(ans, pr, sizeof(pr));
    struct json_object *jnew = json_object_object_get(ans, "new_commits");
    const int fresh = json_object_is_type(jnew, json_type_int) ? json_object_get_int(jnew) : -1;
-   const bool reviewed = json_object_is_type(json_object_object_get(ans, "copilot_round"),
-                                             json_type_object);
-   /* No new commits yet: a request for after the publish that brings them. */
-   const bool after_publish = json_object_get_boolean(
-       json_object_object_get(ans, "no_new_commits"));
-   const bool unpublished = after_publish && fixes_unpublished(user_id, ans);
-   /* Its re-review found nothing new: the loop is over, not waiting on a publish. */
    struct json_object *round = json_object_object_get(ans, "copilot_round");
-   const bool loop_over = json_object_get_boolean(json_object_object_get(round, "rereview")) &&
-                          json_object_get_int(json_object_object_get(round, "new")) == 0;
+   const bool reviewed = json_object_is_type(round, json_type_object);
+   /* No new commits: the fixes may be waiting on a publish, or there are none. */
+   const bool unpublished = fresh == 0 && fixes_unpublished(user_id, ans);
+   /* Its re-review found nothing new: it had threads, and each repeats an answered one. */
+   const bool only_repeats = json_object_get_boolean(json_object_object_get(round, "rereview")) &&
+                             json_object_get_int(json_object_object_get(round, "new")) == 0 &&
+                             json_object_get_int(json_object_object_get(round, "repeats")) > 0;
    json_object_put(ans);
    if (pr[0] == '\0') {
       return coding_agent_error("The gateway didn't say which pull request it is.");
-   }
-   if (after_publish && !unpublished && loop_over) {
-      strbuf_t sb;
-      strbuf_init(&sb, 256);
-      strbuf_appendf(&sb,
-                     "Copilot has nothing meaningfully new on %s; it is ready for the user's "
-                     "review. Don't ask Copilot again.",
-                     pr);
-      return coding_agent_error_free(taken(&sb));
-   }
-   if (after_publish && !unpublished) {
-      strbuf_t sb;
-      strbuf_init(&sb, 256);
-      strbuf_appendf(&sb,
-                     "%s has no new commits since Copilot's last review (merges of the base "
-                     "don't count), and none are waiting to be published. Publish the fixes "
-                     "first.",
-                     pr);
-      return coding_agent_error_free(taken(&sb));
    }
    pending_stage_rc_t rc = PENDING_STAGED;
    pthread_mutex_lock(&s_pending_mutex);
@@ -593,8 +589,15 @@ char *coding_github_request_review(struct json_object *details,
    strbuf_t sb;
    strbuf_init(&sb, 768);
    strbuf_appendf(&sb, "About to ask Copilot to review %s (", pr);
-   if (after_publish) {
-      strbuf_append(&sb, "after the publish: its fixes aren't on the pull request yet");
+   if (unpublished) {
+      strbuf_append(&sb, "after the publish: its fixes aren't on the pull request yet; propose "
+                         "the publish too if it isn't waiting, so one confirm names both");
+   } else if (fresh == 0) {
+      strbuf_append(&sb, "no new commits since Copilot's last review, merges of the base aside; "
+                         "likely nothing new");
+      if (only_repeats) {
+         strbuf_append(&sb, "; its last re-review only repeated answered threads");
+      }
    } else if (reviewed && fresh >= 0) {
       strbuf_appendf(&sb, "%d new commit%s since Copilot's last review", fresh,
                      fresh == 1 ? "" : "s");
@@ -604,29 +607,15 @@ char *coding_github_request_review(struct json_object *details,
    }
    strbuf_append(&sb, "). Its review is posted on the pull request and uses the account's "
                       "Copilot review quota. Read this to the user and ask them to confirm; ");
-   if (after_publish) {
-      strbuf_append(&sb, "on their yes, call confirm_publish first, then ");
-   } else {
-      strbuf_append(&sb, "if they say yes in their reply, ");
-   }
    strbuf_appendf(&sb,
-                  "call coding_agent with action 'confirm_request_review' and arguments "
-                  "{\"id\": %u} (this one only).",
-                  (unsigned)id);
+                  "if they say yes in their reply, call coding_agent with action 'confirm' and "
+                  "arguments {\"ids\": [%u%s]}%s.",
+                  (unsigned)id, unpublished ? ", <the publish's id>" : "",
+                  unpublished ? " (the publish runs first, in the same confirm)" : "");
    return taken(&sb);
 }
 
-char *coding_github_confirm_request_review(struct json_object *details,
-                                           int user_id,
-                                           const turn_origin_t *origin) {
-   const uint32_t id = coding_agent_details_id(details);
-   if (id == 0) {
-      return tool_pending_missing_id("Copilot review request");
-   }
-   if (coding_agent_turn_read(origin)) {
-      return coding_agent_error("This turn read text from GitHub or the coding agent, so the "
-                                "request can't be confirmed in it. Ask the user again.");
-   }
+char *coding_github_confirm_request_review(uint32_t id, int user_id, const turn_origin_t *origin) {
    cg_review_pending_t p;
    turn_origin_rc_t orc = TURN_ORIGIN_OK;
    pthread_mutex_lock(&s_pending_mutex);
@@ -684,7 +673,9 @@ static int describe_replies(const cg_replies_pending_t *p, char *out, size_t out
          snprintf(where + strlen(where), sizeof(where) - strlen(where), ":%d", p->items[i].line);
       }
       strbuf_appendf(&sb, " %d) on %s \"%s\"%s", i + 1, where, line,
-                     p->items[i].resolve ? " (resolve)" : " (leave open)");
+                     p->items[i].copilot_resolved ? " (resolved by Copilot already)"
+                     : p->items[i].resolve        ? " (resolve)"
+                                                  : " (leave open)");
    }
    const int n = snprintf(out, out_len, "%s", strbuf_str(&sb));
    strbuf_free(&sb);
@@ -697,14 +688,11 @@ static int describe_replies(const cg_replies_pending_t *p, char *out, size_t out
    return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
 }
 
-int coding_github_describe(const char *value,
+int coding_github_describe(uint32_t id,
                            bool review,
                            char *out,
                            size_t out_len,
                            int *valid_for_sec) {
-   struct json_object *details = tool_parse_details(value, true);
-   const uint32_t id = coding_agent_details_id(details);
-   json_object_put(details);
    turn_origin_t origin;
    snprintf(out, out_len, "that %s isn't waiting any more; propose it again",
             review ? "Copilot review request" : "reply");
@@ -729,4 +717,18 @@ int coding_github_describe(const char *value,
    }
    pthread_mutex_unlock(&s_pending_mutex);
    return rc;
+}
+
+ca_confirm_kind_t coding_github_staged(uint32_t id, const turn_origin_t *origin, int user_id) {
+   int kind = 0;
+   pthread_mutex_lock(&s_pending_mutex);
+   const time_t now = pending_slots_now();
+   ca_confirm_kind_t found = CA_CONFIRM_NONE;
+   if (pending_slots_kind_of(&s_reply_slots, origin, user_id, id, now, &kind)) {
+      found = CA_CONFIRM_REPLY;
+   } else if (pending_slots_kind_of(&s_review_slots, origin, user_id, id, now, &kind)) {
+      found = CA_CONFIRM_REVIEW;
+   }
+   pthread_mutex_unlock(&s_pending_mutex);
+   return found;
 }

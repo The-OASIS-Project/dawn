@@ -199,6 +199,23 @@ void pending_slots_drop(const pending_slots_t *slots,
    }
 }
 
+bool pending_slots_kind_of(const pending_slots_t *slots,
+                           const turn_origin_t *current,
+                           int user_id,
+                           uint32_t item_id,
+                           time_t now,
+                           int *kind_out) {
+   for (int i = 0; slots && current && item_id != 0 && i < slots->count; i++) {
+      const pending_slot_t *s = slot_at(slots, i);
+      if (s->active && s->item_id == item_id && s->user_id == user_id &&
+          s->origin.session_id == current->session_id && !expired(slots, s, now)) {
+         *kind_out = s->kind;
+         return true;
+      }
+   }
+   return false;
+}
+
 int pending_slots_valid_for(const pending_slots_t *slots, const pending_slot_t *slot, time_t now) {
    if (!slots || !slot) {
       return 0;
