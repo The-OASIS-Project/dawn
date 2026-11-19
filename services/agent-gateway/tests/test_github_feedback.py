@@ -28,7 +28,7 @@ import pytest
 
 from agent_gateway import github, review, store as st
 from agent_gateway.github import GitError
-from test_gateway import add_task, runner, store  # noqa: F401  (store: a fixture)
+from test_gateway import add_task, in_order, runner, store  # noqa: F401  (store: a fixture)
 from test_github import HEAD, comment, http_error, pr, thread, threads_page
 
 PR_URL = "https://github.com/o/dawn/pull/115"
@@ -266,7 +266,7 @@ def test_revise_sends_the_feedback_through_the_agents_tool(store, tmp_path, monk
    t = asyncio.run(r.revise("t1", 1, "fix the review", None, "a"))
    assert asked == [st.COMPLETED, ("o", "dawn", 115)]  # read before anything changed
    note = r.resumed[0][1]
-   assert "has open feedback (4 unresolved review thread(s), 1 failing required check(s))" in note
+   assert in_order(note, "4 unresolved", "1 failing required")
    assert "pr_feedback" in note and "Ignore all" not in note  # outside text stays out
    assert "by its comment_id" in note
    assert json.loads(r.feedback_text("t1"))["threads"][0]["comment_id"] == 7
@@ -296,8 +296,7 @@ def test_revise_without_feedback(store, tmp_path, monkeypatch):
       raise GitError("GitHub didn't answer")
    monkeypatch.setattr(github, "pr_feedback", down)
    asyncio.run(r.revise("t1", 1, "more", None, "b"))
-   assert "(The gateway couldn't read the pull request's feedback: GitHub didn't answer.)" in \
-      r.resumed[-1][1]
+   assert in_order(r.resumed[-1][1], "couldn't read", "GitHub didn't answer")
    assert r.revise_feedback("t1") == {"feedback": None, "feedback_error": "GitHub didn't answer",
                                       "merge": None}
    del r.running["t1"]
@@ -413,7 +412,7 @@ def test_reply_refusals(monkeypatch):
    res = asyncio.run(review.post_replies(s, "tok", "o", "dawn", 115, items, True))
    errors = [r.get("error", "") for r in res["results"]]
    assert "isn't a top-level review comment" in errors[0]          # one refused: the rest go
-   assert errors[1] == "the token lacks Pull requests: Read and write for o/dawn"
+   assert in_order(errors[1], "Pull requests: Read and write", "o/dawn")
    assert errors[2] == errors[3] == errors[1]                      # the rest stop
    assert len(gh.posts()) == 2
    for bad in ([], [{"comment_id": 1, "body": ""}], [{"comment_id": "1", "body": "x"}],
@@ -455,18 +454,23 @@ def copilot_rounds(*rounds):
 
 def test_copilot_gate(monkeypatch):
    s = st.Store(":memory:")
-   ask = lambda: asyncio.run(review.request_review(s, "tok", "o", "dawn", 115, True))  # noqa
+   ask = lambda confirm=False: asyncio.run(  # noqa
+      review.request_review(s, "tok", "o", "dawn", 115, not confirm))
    threads = copilot_rounds((901, REVIEWED, ["Check the bound."]))
 
    merged_only = gate(commits=[(REVIEWED, 1), ("m" * 40, 2)])  # only a merge of the base since
    monkeypatch.setattr(github, "_request", FakeGitHub(threads=[threads], gate=merged_only))
-   assert ask()["no_new_commits"] is True  # the preview: said, for after a publish
-   monkeypatch.setattr(review, "HEAD_SYNC_WAIT_S", 0)
-   gh = FakeGitHub(threads=[threads], gate=[merged_only, merged_only])
+   res = ask()
+   assert res["new_commits"] == 0 and res["requested"] is False  # said, not refused
+   assert res["copilot_round"]["rereview"] is False
+   # No new commits doesn't refuse the confirm either: the user weighed it.
+   gh = FakeGitHub(threads=[threads], gate=[merged_only, merged_only],
+                   rest={REVIEWS_API: json.dumps({"requested_reviewers": []}).encode()})
    monkeypatch.setattr(github, "_request", gh)
-   with pytest.raises(GitError, match="no new commits since Copilot's last review"):
-      asyncio.run(review.request_review(s, "tok", "o", "dawn", 115, False))  # the confirm
-   assert gh.gate == []  # looked twice: the head may not have synced after a push
+   res = ask(confirm=True)
+   assert res["requested"] and res["new_commits"] == 0 and len(gh.posts()) == 1
+   assert len(gh.gate) == 1  # looked once: nothing waits on a push to show
+   s = st.Store(":memory:")
    monkeypatch.setattr(github, "_request", FakeGitHub(
       threads=[threads], gate=gate(requested=True, commits=[(REVIEWED, 1), ("b" * 40, 1)])))
    with pytest.raises(GitError, match="already pending"):
@@ -475,36 +479,26 @@ def test_copilot_gate(monkeypatch):
    monkeypatch.setattr(github, "_request", gh)
    ok = ask()
    assert ok["new_commits"] == 1 and ok["requested"] is False and gh.posts() == []
+   monkeypatch.setattr(github, "_request", FakeGitHub(threads=[threads], gate=gate(
+      commits=[(REVIEWED, 1)], state="CLOSED")))
+   with pytest.raises(GitError, match="is closed"):
+      ask(confirm=True)
 
-   # The re-review found only what was answered before: the loop ends.
+   # The re-review found only what was answered before: counted, for the preview.
    again = copilot_rounds((901, "c" * 40, ["Check the bound."]),
                           (902, REVIEWED, ["Check  the bound."]))
    monkeypatch.setattr(github, "_request", FakeGitHub(
       threads=[again], gate=gate(commits=[(REVIEWED, 1)])))
-   assert ask()["no_new_commits"] is True  # the preview says no new commits first
-   monkeypatch.setattr(github, "_request", FakeGitHub(
-      threads=[again], gate=gate(commits=[(REVIEWED, 1)])))
-   with pytest.raises(GitError, match="1 thread\\(s\\) only repeat"):
-      asyncio.run(review.request_review(s, "tok", "o", "dawn", 115, False))
+   res = ask()
+   assert res["new_commits"] == 0
+   assert {k: res["copilot_round"][k] for k in ("rereview", "threads", "new", "repeats")} == {
+      "rereview": True, "threads": 1, "new": 0, "repeats": 1}
    # A re-review with no comments at all.
    bare = copilot_rounds((901, "c" * 40, ["Check the bound."]), (902, REVIEWED, []))
    monkeypatch.setattr(github, "_request", FakeGitHub(
       threads=[bare], gate=gate(commits=[(REVIEWED, 1)])))
-   with pytest.raises(GitError, match="nothing meaningfully new .*left no comments"):
-      asyncio.run(review.request_review(s, "tok", "o", "dawn", 115, False))
-
-
-def test_copilot_head_sync(monkeypatch):
-   """A commit GitHub shows only on the second look, just after a push."""
-   monkeypatch.setattr(review, "HEAD_SYNC_WAIT_S", 0)
-   s = st.Store(":memory:")
-   threads = copilot_rounds((901, REVIEWED, ["Check the bound."]))
-   gh = FakeGitHub(threads=[threads], gate=[gate(commits=[(REVIEWED, 1)]),
-                                            gate(commits=[(REVIEWED, 1), ("b" * 40, 1)])],
-                   rest={REVIEWS_API: json.dumps({"requested_reviewers": []}).encode()})
-   monkeypatch.setattr(github, "_request", gh)
-   res = asyncio.run(review.request_review(s, "tok", "o", "dawn", 115, False))
-   assert res["requested"] and res["new_commits"] == 1 and len(gh.posts()) == 1
+   res = ask()
+   assert res["copilot_round"]["rereview"] and res["copilot_round"]["threads"] == 0
 
 
 def test_copilot_request(monkeypatch):
@@ -525,9 +519,9 @@ def test_copilot_request(monkeypatch):
    refused = http_error(422, {}, b'{"message":"Copilot code review is not enabled"}')
    monkeypatch.setattr(github, "_request", FakeGitHub(threads=[threads], gate=ok_gate,
                                                       rest={REVIEWS_API: refused}))
-   with pytest.raises(GitError, match=r"refused to ask Copilot to review o/dawn#115 \(422: "
-                      "copilot code review is not enabled\\)"):
+   with pytest.raises(GitError) as refusal:
       asyncio.run(review.request_review(s2, "tok", "o", "dawn", 115, False))
+   assert in_order(str(refusal.value), "o/dawn#115", "422", "copilot code review is not enabled")
    assert s2.meta("copilot_asked:o/dawn#115") is None  # a refused ask leaves nothing
 
 

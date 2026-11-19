@@ -132,6 +132,19 @@ static void test_full_refuses_then_reuses_expired(void) {
    TEST_ASSERT_EQUAL_STRING("c", s_items[2].number);
 }
 
+/* An id names its kind only for its own session and user, while it is live. */
+static void test_kind_of_an_id(void) {
+   const uint32_t id = stage(7, 1, KIND_TEXT, "111", 1000)->hdr.item_id;
+   const turn_origin_t now = origin(7, 500, 2), elsewhere = origin(8, 500, 2);
+   int kind = 0;
+   TEST_ASSERT_TRUE(pending_slots_kind_of(&s_slots, &now, 1, id, 1001, &kind));
+   TEST_ASSERT_EQUAL_INT(KIND_TEXT, kind);
+   TEST_ASSERT_FALSE(pending_slots_kind_of(&s_slots, &elsewhere, 1, id, 1001, &kind));
+   TEST_ASSERT_FALSE(pending_slots_kind_of(&s_slots, &now, 2, id, 1001, &kind));
+   TEST_ASSERT_FALSE(pending_slots_kind_of(&s_slots, &now, 1, id + 1, 1001, &kind));
+   TEST_ASSERT_FALSE(pending_slots_kind_of(&s_slots, &now, 1, id, 1000 + TTL + 1, &kind));
+}
+
 /* An expired item is reported and cleared. */
 static void test_expired(void) {
    stage(7, 1, KIND_CALL, "111", 1000);
@@ -360,6 +373,7 @@ int main(void) {
    RUN_TEST(test_other_user_not_found);
    RUN_TEST(test_full_refuses_then_reuses_expired);
    RUN_TEST(test_expired);
+   RUN_TEST(test_kind_of_an_id);
    RUN_TEST(test_drop_and_origin);
    RUN_TEST(test_item_id_binds_the_confirm);
    RUN_TEST(test_take_checks_the_turn);

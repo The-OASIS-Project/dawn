@@ -31,7 +31,6 @@ from .github import GitError
 
 REPLY_PACE_S = 1.0  # between two replies: well under GitHub's content-creation limits
 COPILOT_PENDING_S = 3600  # a request with no review since counts as pending this long
-HEAD_SYNC_WAIT_S = 3.0  # GitHub may not show a just-pushed commit yet: one more look after this
 
 _locks: dict[str, asyncio.Lock] = {}  # one write at a time per pull request
 
@@ -135,7 +134,7 @@ def _asked_key(where: str) -> str:
 async def request_review(store, token: str, owner: str, repo: str, number: int,
                          check: bool) -> dict:
    """Ask Copilot to review the pull request again, when github.review_gate
-   allows it; with `check`, only whether it would."""
+   allows it; with `check`, only what the gate says (for the preview)."""
    where = f"{owner}/{repo}#{number}"
    async with _lock(where):
       raw = store.meta(_asked_key(where))
@@ -143,13 +142,8 @@ async def request_review(store, token: str, owner: str, repo: str, number: int,
          asked_at = float(json.loads(raw)["at"]) if raw else 0.0
       except (ValueError, KeyError, TypeError):
          asked_at = 0.0
-      args = (github.review_gate, owner, repo, number, token, asked_at, COPILOT_PENDING_S,
-              check)
-      try:
-         gate = await asyncio.to_thread(*args)
-      except github.NoNewCommits:  # only on the confirm: a check says it instead
-         await asyncio.sleep(HEAD_SYNC_WAIT_S)
-         gate = await asyncio.to_thread(*args)
+      gate = await asyncio.to_thread(github.review_gate, owner, repo, number, token, asked_at,
+                                     COPILOT_PENDING_S)
       if check:
          return {**gate, "requested": False}
       res = await asyncio.to_thread(github.request_copilot, owner, repo, number, token)

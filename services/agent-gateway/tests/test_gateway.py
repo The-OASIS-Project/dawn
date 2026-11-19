@@ -33,6 +33,18 @@ from agent_gateway.repos import Repos
 from agent_gateway.runner import NO_BACKGROUND_TOOLS, PR_FOOTER, Runner
 
 
+def in_order(text, *facts):
+   """Each fact is in @text, after the one before it: a rendered text checked by
+   its facts, so the words around them can change."""
+   at = 0
+   for f in facts:
+      at = text.find(f, at)
+      if at < 0:
+         return False
+      at += len(f)
+   return True
+
+
 def test_policy(tmp_path):
    wt = str(tmp_path)
    assert policy.decide("Bash", {"command": "make; echo $?"}, wt, []).allow
@@ -770,7 +782,7 @@ def test_revise_merging_the_base(store, tmp_path):
    assert r.revise_feedback("t1")["merge"] == {"merged": "c0ffee001122",
                                                 "base_head": "feedface00112233"}
    note = r.resumed[0][1]
-   assert "merged main (feedface0011) into this branch (now at c0ffee001122)" in note
+   assert in_order(note, "merged main", "feedface0011", "c0ffee001122")
    assert not r.base_out_of_date(store.task("t1"))       # the run doesn't sync again
    del r.running["t1"]
    asyncio.run(r.revise("t1", 1, "merge main", None, "job:1", merge_base=True))
@@ -902,7 +914,7 @@ def test_publish_sends_the_users_own_title_and_description(store, monkeypatch):
                                                  "head": head}))
    monkeypatch.setattr(rmod, "read_pull_request",
                        lambda url, token: {"state": "closed", "merged_at": "2026-11-01"})
-   with pytest.raises(ValueError, match="merged, and there is nothing new"):
+   with pytest.raises(ValueError, match="merged.*nothing new"):
       asyncio.run(r.publish("t1", 1, True, None, head, None, "Other", None))
    # Its state unreadable: the push may join it, so its text isn't sent as used.
    store.update_task("t1", published='{"pr_url": "https://github.com/o/r/pull/9", "head": "old"}')
@@ -1044,7 +1056,7 @@ def test_publish_refuses_an_edit_of_a_pull_request_merged_since_shown(store, mon
    r.repos = Pushes()
    add_task(store)
    published_with_pr(store, head="1111111111111111")
-   with pytest.raises(ValueError, match="merged or closed since it was shown; publish again"):
+   with pytest.raises(ValueError, match="merged or closed.*publish again"):
       asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890", None, "Mine", None, None,
                             True))
    assert r.repos.pushes == [] and gh.patches == []
@@ -1059,7 +1071,7 @@ def test_publish_refuses_to_replace_a_description_that_changed(store, monkeypatc
    add_task(store)
    published_with_pr(store, head="1111111111111111")
    for shown in (rmod.body_sha256("agent text"), None):
-      with pytest.raises(ValueError, match="description changed since it was shown; look again"):
+      with pytest.raises(ValueError, match="description changed.*look again"):
          asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890", None, None, "Mine",
                                shown))
    assert r.repos.pushes == [] and gh.patches == []
@@ -1889,9 +1901,9 @@ def test_follow_up_run_updates_the_base_first(store, monkeypatch):
    store.update_task("t1", published='{"pushed": "o/r:b"}')   # published: merge, not rebase
    store.add_event("t1", "revised", revise_ref="b", budget_added=0)
    asyncio.run(r.run("t1", "more"))
-   assert "already pushed: to bring in the new base, merge it" in asked[-1]
+   assert in_order(asked[-1], "already pushed", "merge")
    assert asked[0] == "first" and asked[1] == "the answer"
-   assert asked[2].startswith("(Before this run the gateway updated origin/main to feedface0011.)")
+   assert in_order(asked[2], "origin/main", "feedface0011", "rebase onto main")  # before it
    assert asked[2].endswith("rebase onto main")
 
 
@@ -2034,6 +2046,24 @@ def test_canary_needs_positive_refusals():
    assert canary.section("2) skipped, not run\n", 2) == " skipped, not run\n"
    assert not any(w in canary.section("2) skipped\n", 2)
                   for w in canary.REFUSED["no loopback"])
+
+
+def test_canary_checks_the_sandbox_placeholders():
+   from agent_gateway import canary
+   from agent_gateway.repos import SANDBOX_PLACEHOLDERS
+   asked = canary.section(canary.prompt(9760, "/tmp/x"), 8)
+   assert all(p.lower() in asked for p in SANDBOX_PLACEHOLDERS)
+   assert canary.section(canary.prompt(9760, "/tmp/x"), 7).strip() == "cat /tmp/x"
+   held = "8) the loop\nPLACEHOLDERS CHECKED\n"
+   assert canary.placeholders_writable(canary.section(held, 8)) == []
+   leaked = "7) cat\nNo such file\n8) the loop\nWRITABLE: .bashrc\nWRITABLE: .claude/skills\n" \
+            "PLACEHOLDERS CHECKED\n"
+   assert canary.placeholders_writable(canary.section(leaked, 8)) == [".bashrc", ".claude/skills"]
+   assert canary.placeholders_writable(canary.section("8) not run\n", 8)) is None  # inconclusive
+   assert canary.placeholders_writable(canary.section(leaked, 7)) is None
+   # The command copied as the header, with no output: the loop never ran.
+   copied = f"8) {canary.placeholder_probe()}\n9) next\n"
+   assert canary.placeholders_writable(canary.section(copied, 8)) is None
 
 
 def test_every_run_carries_the_whole_floor():
@@ -2252,7 +2282,7 @@ def test_publish_without_a_body_hash_still_publishes(store):
    add_task(store)
    store.update_task("t1", status=st.COMPLETED, summary="Done.")
    asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890"))
-   assert r.repos.sent == "Done.\n\nMade by a coding agent for DAWN."
+   assert r.repos.sent == "Done." + PR_FOOTER
 
 
 class GitHub:

@@ -113,6 +113,18 @@ static const pending_slots_t s_pending_slots = {
    .later_turns = CP_CONFIRM_TURNS,
 };
 
+ca_confirm_kind_t coding_publish_staged(uint32_t id, const turn_origin_t *origin, int user_id) {
+   int kind = 0;
+   pthread_mutex_lock(&s_pending_mutex);
+   const bool found = pending_slots_kind_of(&s_pending_slots, origin, user_id, id,
+                                            pending_slots_now(), &kind);
+   pthread_mutex_unlock(&s_pending_mutex);
+   if (!found) {
+      return CA_CONFIRM_NONE;
+   }
+   return kind == CP_PENDING_CLOSE ? CA_CONFIRM_CLOSE : CA_CONFIRM_PUBLISH;
+}
+
 /* Whether a preview of @p kind waits in @p session_id. */
 static bool live(uint32_t session_id, int kind) {
    pthread_mutex_lock(&s_pending_mutex);
@@ -752,8 +764,8 @@ char *coding_publish_propose(struct json_object *details,
    strbuf_appendf(
        &sb,
        " Read this to the user%s and ask them to confirm; if they say yes in their "
-       "reply, call coding_agent with action 'confirm_publish' and arguments "
-       "{\"id\": %u}. %s\n%s%s%s",
+       "reply, call coding_agent with action 'confirm' and arguments "
+       "{\"ids\": [%u]}. %s\n%s%s%s",
        want.text_only ? "" : " (the protected paths too)", (unsigned)id,
        want.text_only ? "The new text:" : "The agent's commits and files, its own words:", agent,
        github ? "\n" : "", github ? github : "");
@@ -762,25 +774,13 @@ char *coding_publish_propose(struct json_object *details,
    return strbuf_steal(&sb);
 }
 
-/* The slot @p kind named by @p details, taken for its confirm. */
-static char *take(struct json_object *details,
+/* Slot @p id of @p kind, taken for its confirm. */
+static char *take(uint32_t id,
                   int user_id,
                   const turn_origin_t *origin,
                   int kind,
                   const char *what,
                   cp_pending_t *out) {
-   const uint32_t id = coding_agent_details_id(details);
-   if (id == 0) {
-      return tool_pending_missing_id(what);
-   }
-   if (coding_agent_turn_read(origin)) {
-      char msg[160];
-      snprintf(msg, sizeof(msg),
-               "This turn read the coding agent's words, so the %s can't be confirmed in it. Ask "
-               "the user again.",
-               what);
-      return coding_agent_error(msg);
-   }
    turn_origin_rc_t orc = TURN_ORIGIN_OK;
    pthread_mutex_lock(&s_pending_mutex);
    const pending_find_rc_t rc = pending_slots_take(&s_pending_slots, origin, user_id, kind, id,
@@ -877,11 +877,9 @@ static char *publish_run(int user_id, const cp_pending_t *p, const char *body_sh
    return strdup(buf);
 }
 
-char *coding_publish_confirm(struct json_object *details,
-                             int user_id,
-                             const turn_origin_t *origin) {
+char *coding_publish_confirm(uint32_t id, int user_id, const turn_origin_t *origin) {
    cp_pending_t p = { 0 };
-   char *bad = take(details, user_id, origin, CP_PENDING_PUBLISH, "publish", &p);
+   char *bad = take(id, user_id, origin, CP_PENDING_PUBLISH, "publish", &p);
    if (bad != NULL) {
       return bad;
    }
@@ -1145,16 +1143,16 @@ char *coding_close(struct json_object *details, int user_id, const turn_origin_t
    strbuf_appendf(&sb,
                   "Closing %s%s deletes %s on branch %s%s%.12s%s; nothing else has them. Read this "
                   "to the user and ask them to confirm; if they say yes in their reply, call "
-                  "coding_agent with action 'confirm_close' and arguments {\"id\": %u}.",
+                  "coding_agent with action 'confirm' and arguments {\"ids\": [%u]}.",
                   want.label, stopped ? " (now stopped)" : "", lost,
                   want.branch[0] ? want.branch : "(its branch)", want.head[0] ? " (at " : "",
                   want.head, want.head[0] ? ")" : "", (unsigned)id);
    return strbuf_steal(&sb);
 }
 
-char *coding_close_confirm(struct json_object *details, int user_id, const turn_origin_t *origin) {
+char *coding_close_confirm(uint32_t id, int user_id, const turn_origin_t *origin) {
    cp_pending_t p = { 0 };
-   char *bad = take(details, user_id, origin, CP_PENDING_CLOSE, "close", &p);
+   char *bad = take(id, user_id, origin, CP_PENDING_CLOSE, "close", &p);
    if (bad != NULL) {
       return bad;
    }
@@ -1459,14 +1457,11 @@ struct json_object *coding_close_click(int user_id,
 
 /* ========== reply codes: DAWN's facts only, never the agent's words ========== */
 
-int coding_publish_describe(const char *value,
+int coding_publish_describe(uint32_t id,
                             bool close,
                             char *out,
                             size_t out_len,
                             int *valid_for_sec) {
-   struct json_object *details = tool_parse_details(value, true);
-   const uint32_t id = coding_agent_details_id(details);
-   json_object_put(details);
    turn_origin_t origin;
    int n = -1;
    snprintf(out, out_len, "that %s isn't waiting any more; ask for it again",

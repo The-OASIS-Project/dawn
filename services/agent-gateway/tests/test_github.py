@@ -273,6 +273,32 @@ def test_pr_threads_pages_filters_and_keys(monkeypatch):
    assert len(github.pr_threads("o", "dawn", 115, "tok", everything=True)["threads"]) == 2
 
 
+def test_pr_threads_say_which_copilot_resolved(monkeypatch):
+   monkeypatch.setattr(github, "_token_logins", {"tok": "me"})
+   by_copilot, by_person = thread(1, 100, resolved=True), thread(2, 200, resolved=True)
+   by_copilot["resolvedBy"] = {"login": "Copilot"}
+   by_person["resolvedBy"] = {"login": "KerseyFabrications"}
+   gh = GitHub(threads=[threads_page([by_copilot, by_person, thread(3, 300)])])
+   monkeypatch.setattr(github, "_request", gh)
+   res = github.pr_threads("o", "dawn", 115, "tok", everything=True)
+   assert "resolvedBy { login }" in gh.calls[0]["data"]["query"]
+   assert [t["resolved_by_copilot"] for t in res["threads"]] == [True, False, False]
+
+
+def test_pr_threads_put_replyable_threads_before_answered_ones(monkeypatch):
+   # With everything, a long PR's answered threads must not use up the cap
+   # ahead of a new round's thread a reply needs.
+   monkeypatch.setattr(github, "_token_logins", {"tok": "me"})
+   old = [thread(i, 1000 * i, resolved=True) for i in range(1, 50)]
+   for t in old:
+      t["head"]["nodes"][0]["body"] = "x" * 5000
+      t["resolvedBy"] = {"login": "KerseyFabrications"}
+   gh = GitHub(threads=[threads_page(old + [thread(99, 99000)])])
+   monkeypatch.setattr(github, "_request", gh)
+   res = github.pr_threads("o", "dawn", 115, "tok", everything=True)
+   assert res["truncated"] and res["threads"][0]["comment_id"] == 99000
+
+
 def test_pr_threads_caps(monkeypatch):
    monkeypatch.setattr(github, "_token_logins", {"tok": "me"})
    long = [thread(i, 1000 * i) for i in range(1, 50)]

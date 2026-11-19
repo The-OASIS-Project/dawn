@@ -18,7 +18,7 @@
  *
  * Answering what a coding task waits on.  Allowing a host or a tool widens
  * what the agent reaches, so it is a preview DAWN renders from the gateway's
- * open request and the user's yes (approve, then confirm_approve), for that
+ * open request and the user's yes (approve, then confirm), for that
  * task or, when the user asks, every task on its repo.  Declining and
  * answering a question reach no further, so they act at once, as does
  * removing a standing approval (grants lists them).
@@ -291,8 +291,7 @@ char *coding_requests_approve(struct json_object *details,
                               int user_id,
                               const turn_origin_t *origin) {
    /* A preview may follow reading the agent's words: it shows only the checked
-    * host or tool, and allows nothing.  Its confirm needs the user's yes in a
-    * turn that read none (confirm_approve). */
+    * host or tool, and allows nothing until the user's yes. */
    const int64_t job = coding_agent_details_job(details);
    job_record_t rec;
    char *bad = coding_agent_check_job(job, user_id, &rec);
@@ -323,7 +322,7 @@ char *coding_requests_approve(struct json_object *details,
       char msg[CODING_GATEWAY_REQUEST_LINE_MAX + 256];
       snprintf(msg, sizeof(msg),
                "DAWN already asked the user about this (approval %u: %s): if their message "
-               "agrees, call confirm_approve {\"id\": %u} (with \"scope\": \"repo\" if they "
+               "agrees, call confirm {\"ids\": [%u]} (with \"scope\": \"repo\" if they "
                "chose every task on the repo).",
                (unsigned)asked, asked_line, (unsigned)asked);
       return coding_agent_error(msg);
@@ -384,24 +383,16 @@ char *coding_requests_approve(struct json_object *details,
    strbuf_init(&sb, 512);
    strbuf_appendf(&sb,
                   "About to allow coding job #%lld (%s) to %s, %s. Ask the user to confirm; if "
-                  "they say yes in their reply, call coding_agent with action 'confirm_approve' "
-                  "and arguments {\"id\": %u} (this one only).",
+                  "they say yes in their reply, call coding_agent with action 'confirm' "
+                  "and arguments {\"ids\": [%u]}.",
                   (long long)job, rec.title, line, scope, (unsigned)id);
    return strbuf_steal(&sb);
 }
 
-char *coding_requests_confirm_approve(struct json_object *details,
+char *coding_requests_confirm_approve(uint32_t id,
+                                      struct json_object *details,
                                       int user_id,
                                       const turn_origin_t *origin) {
-   const uint32_t id = coding_agent_details_id(details);
-   if (id == 0) {
-      return tool_pending_missing_id("approval");
-   }
-   /* Not in a turn that read the agent's report: a yes there could be its words. */
-   if (coding_agent_turn_read(origin)) {
-      return coding_agent_error("This turn read the coding agent's report, so the approval "
-                                "can't be confirmed in it. Ask the user again.");
-   }
    cr_pending_t p;
    turn_origin_rc_t orc = TURN_ORIGIN_OK;
    bool for_repo = false;
@@ -538,15 +529,16 @@ void coding_requests_drop_unasked(uint32_t id) {
    pthread_mutex_unlock(&s_pending_mutex);
 }
 
-/* What confirm_approve, waiting for the user's reply code, allows. */
-int coding_requests_describe(const char *value, char *out, size_t out_len, int *valid_for_sec) {
-   struct json_object *details = tool_parse_details(value, true);
-   const uint32_t id = coding_agent_details_id(details);
+/* What a confirm of approval @p id, waiting for the user's reply code, allows. */
+int coding_requests_describe(struct json_object *details,
+                             uint32_t id,
+                             char *out,
+                             size_t out_len,
+                             int *valid_for_sec) {
    turn_origin_t origin;
    int n = -1;
    snprintf(out, out_len, "that approval isn't waiting any more; ask for it again");
    if (id == 0 || !turn_origin_capture(&origin)) {
-      json_object_put(details);
       return FAILURE;
    }
    pthread_mutex_lock(&s_pending_mutex);
@@ -566,8 +558,16 @@ int coding_requests_describe(const char *value, char *out, size_t out_len, int *
       free(bad);
    }
    pthread_mutex_unlock(&s_pending_mutex);
-   json_object_put(details);
    return (n > 0 && (size_t)n < out_len) ? SUCCESS : FAILURE;
+}
+
+ca_confirm_kind_t coding_requests_staged(uint32_t id, const turn_origin_t *origin, int user_id) {
+   int kind = 0;
+   pthread_mutex_lock(&s_pending_mutex);
+   const bool found = pending_slots_kind_of(&s_pending_slots, origin, user_id, id,
+                                            pending_slots_now(), &kind);
+   pthread_mutex_unlock(&s_pending_mutex);
+   return found ? CA_CONFIRM_APPROVE : CA_CONFIRM_NONE;
 }
 
 /* ========== deny and answer: at once ========== */

@@ -70,6 +70,21 @@ static char *message(const char *lead, const char *reason) {
    return out;
 }
 
+/* Calls that change something and, sent once with no answer, may have done it
+ * (task_start and task_revise settle that themselves; pr_reply and
+ * pr_request_review say it their own way). */
+static const char *const k_acts[] = { "task_publish", "task_close",   "task_cancel",
+                                      "task_reply",   "grant_revoke", NULL };
+
+static bool acts(const char *tool) {
+   for (int i = 0; k_acts[i] != NULL; i++) {
+      if (strcmp(tool, k_acts[i]) == 0) {
+         return true;
+      }
+   }
+   return false;
+}
+
 int coding_gateway_call(int user_id,
                         const char *tool,
                         struct json_object *args,
@@ -116,9 +131,10 @@ int coding_gateway_call_timed(int user_id,
    if (rc != SUCCESS) {
       /* Text comes back only when the gateway itself said no. */
       const int why = text ? CODING_GW_REFUSED : CODING_GW_FAILED;
-      *err = message(text ? "The coding-agent gateway refused"
-                          : "The coding-agent gateway didn't answer",
-                     text);
+      *err = text         ? message("The coding-agent gateway refused", text)
+             : acts(tool) ? strdup("The coding-agent gateway didn't answer in time; it may still "
+                                   "have done it, so check before trying again.")
+                          : message("The coding-agent gateway didn't answer", NULL);
       free(text);
       return why;
    }

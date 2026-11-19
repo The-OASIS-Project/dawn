@@ -78,7 +78,6 @@ REPEAT_SIMILARITY = 0.85
 REPEAT_COMPARED = 400  # characters of each (normalized) first comment compared
 REPEAT_LINES = 20  # a repeat sits within this many lines of the one it repeats
 
-HASH_SHOWN = 12           # a commit's hash, in words
 LIST_SEP = 2              # ", " between two items of a JSON list
 REPLIES_CAP = 20          # replies one pr_reply posts
 REPLY_BODY_LIMIT = 65536  # GitHub's own limit on a comment's text
@@ -88,6 +87,7 @@ COMMITS_ASKED = 100       # commits read to tell what came after Copilot's last 
 RATE_WAIT_S = 60  # a secondary limit that doesn't say for how long
 HTTP_REDIRECTS = (301, 302, 303, 307, 308)
 COPILOT = "copilot-pull-request-reviewer"
+COPILOT_RESOLVER = "copilot"  # the login a thread Copilot resolved names (GraphQL resolvedBy)
 COPILOT_REVIEWER = COPILOT + "[bot]"  # how a REST review request names it
 WRITE_NEED = "Pull requests: Read and write"
 FAILED = ("failure", "error", "timed_out", "cancelled", "action_required", "startup_failure")
@@ -108,10 +108,6 @@ PR_NEED = "Pull requests: Read-only"
 
 class GitError(Exception):
    pass
-
-
-class NoNewCommits(GitError):
-   """review_gate's refusal for no commit after Copilot's last review."""
 
 
 _SEG = r"[A-Za-z0-9._-]+"
@@ -543,7 +539,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String, $first: Bo
       headRefOid
       reviewThreads(first: %(page)d, after: $after) {
         pageInfo { hasNextPage endCursor }
-        nodes { id isResolved isOutdated path line originalLine
+        nodes { id isResolved resolvedBy { login } isOutdated path line originalLine
                 head: comments(first: 1) { totalCount nodes { ...C } }
                 tail: comments(last: %(tail)d) { nodes { ...C } } }
       }
@@ -585,9 +581,12 @@ def _thread(t: dict) -> dict | None:
    outdated = bool(t.get("isOutdated"))
    line = t.get("originalLine") if outdated or t.get("line") is None else t.get("line")
    first = (head.get("nodes") or [{}])[0] or {}
+   resolved = bool(t.get("isResolved"))
    return {"id": clean(t.get("id"), ID_CAP), "comment_id": comments[0]["comment_id"],
            "path": clean(t.get("path"), PATH_CAP), "line": line if isinstance(line, int) else None,
-           "outdated": outdated, "resolved": bool(t.get("isResolved")), "comments": comments,
+           "outdated": outdated, "resolved": resolved,
+           "resolved_by_copilot": resolved and login(t.get("resolvedBy")) == COPILOT_RESOLVER,
+           "comments": comments,
            "comments_total": head.get("totalCount") or len(comments),
            # The review it came in, kept internal: which of Copilot's rounds it is from.
            "review_id": (first.get("pullRequestReview") or {}).get("databaseId")}
@@ -693,6 +692,9 @@ def pr_threads(owner: str, repo: str, number: int, token: str, everything: bool 
    reviews_raw = (first.get("reviews") or {}).get("nodes") or []
    shown = [{k: v for k, v in t.items() if k != "review_id"} for t in found
             if everything or not t["resolved"]]
+   # Threads a reply can still go on first, so the cap cuts old answered ones,
+   # never a new round's (stable: each group keeps GitHub's order).
+   shown.sort(key=lambda t: t["resolved"] and not t["resolved_by_copilot"])
    reviews = [{"author": login(r.get("author")), "state": lower(r.get("state")),
                "body": clean(r.get("body"), BODY_CAP), "submitted": clean(r.get("submittedAt"),
                                                                           NAME_CAP),
@@ -958,15 +960,13 @@ def _when(stamp: str) -> float:
 
 
 def review_gate(owner: str, repo: str, number: int, token: str, asked_at: float = 0.0,
-                pending_s: float = 0.0, check: bool = False) -> dict:
-   """Whether Copilot may be asked to review again: refused (GitError) while its
-   review is pending (requested, or asked at `asked_at` within `pending_s` with no
-   review since), and when no commit came after its last review (merges, of the
-   base, don't count): NoNewCommits, or the loop's end when its re-review found
-   nothing new.  With `check`, no new commits is said (no_new_commits) rather
-   than refused, the loop's end included (the user may publish next).  Else the pull
-   request, Copilot's round, and the new commits since it (None when its commit
-   is past the ones read)."""
+                pending_s: float = 0.0) -> dict:
+   """Whether Copilot may be asked to review again: refused (GitError) while the
+   pull request isn't open and while its review is pending (requested, or asked at
+   `asked_at` within `pending_s` with no review since).  Else the pull request,
+   Copilot's round (its repeats marked), and the commits since its last review
+   (new_commits; merges of the base don't count; None when its commit is past the
+   ones read): what the user weighs before asking."""
    where = f"{owner}/{repo}#{number}"
    pr, _ = _pull_request(GATE_QUERY, {"owner": owner, "name": repo, "number": number}, token,
                          f"{owner}/{repo}", number)
@@ -974,6 +974,7 @@ def review_gate(owner: str, repo: str, number: int, token: str, asked_at: float 
    if state != "open":
       raise GitError(f"{where} is {state}: Copilot reviews only an open pull request")
    found, first, _ = threads_raw(owner, repo, number, token)
+   _mark_repeats(found, as_login(token))
    reviews = (first.get("reviews") or {}).get("nodes") or []
    last = copilot_round(found, reviews)
    requested = any(login((r or {}).get("requestedReviewer")) == COPILOT
@@ -989,23 +990,9 @@ def review_gate(owner: str, repo: str, number: int, token: str, asked_at: float 
       if last["commit"] in oids:
          after = commits[oids.index(last["commit"]) + 1:]
          new = sum(1 for c in after if ((c.get("parents") or {}).get("totalCount") or 0) < 2)
-   out = {"pr": {"owner": owner, "repo": repo, "number": number, "url": link(pr.get("url"))},
-          "head_sha": clean(pr.get("headRefOid"), NAME_CAP), "copilot_round": last,
-          "new_commits": new}
-   if new == 0:
-      _mark_repeats(found, as_login(token))
-      last = out["copilot_round"] = copilot_round(found, reviews)
-      if check:
-         return {**out, "no_new_commits": True}
-      if last["rereview"] and last["new"] == 0:
-         said = (f"its latest review's {last['threads']} thread(s) only repeat ones already "
-                 "answered" if last["threads"] else "its latest review left no comments")
-         raise GitError(f"Copilot has nothing meaningfully new on {where}: {said}; it is ready "
-                        "for the user's review")
-      raise NoNewCommits(f"{where} has no new commits since Copilot's last review (of "
-                     f"{last['commit'][:HASH_SHOWN]}); merges of the base don't count. Publish "
-                     "the fixes first")
-   return out
+   return {"pr": {"owner": owner, "repo": repo, "number": number, "url": link(pr.get("url"))},
+           "head_sha": clean(pr.get("headRefOid"), NAME_CAP), "copilot_round": last,
+           "new_commits": new}
 
 
 def request_copilot(owner: str, repo: str, number: int, token: str) -> dict:
