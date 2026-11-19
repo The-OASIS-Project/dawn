@@ -1915,6 +1915,14 @@ dawn_add_unit_test(test_admin_cache_stats
    LIBS    dawn_common unity
    LABEL   ci)
 
+# dawn-admin against a daemon of another admin protocol version.
+dawn_add_unit_test(test_admin_client_version
+   SOURCES  test_admin_client_version.c
+            ${SRC_ROOT}/dawn-admin/socket_client.c
+   INCLUDES ${SRC_ROOT}/dawn-admin
+   LIBS     dawn_common unity
+   LABEL    ci)
+
 dawn_add_unit_test(test_llm_request_capture
    SOURCES test_llm_request_capture.c
            ${SRC_ROOT}/src/llm/llm_request_capture.c

@@ -146,8 +146,7 @@ static int recv_response(int fd, admin_msg_response_t *resp) {
 
    /* Validate protocol version */
    if (resp->version != ADMIN_PROTOCOL_VERSION) {
-      fprintf(stderr, "Error: Protocol version mismatch (got 0x%02x, expected 0x%02x)\n",
-              resp->version, ADMIN_PROTOCOL_VERSION);
+      fprintf(stderr, "Error: %s\n", admin_resp_strerror(ADMIN_RESP_VERSION_MISMATCH));
       return -1;
    }
 
@@ -296,7 +295,7 @@ static int recv_list_response(int fd,
    }
 
    if (resp->version != ADMIN_PROTOCOL_VERSION) {
-      fprintf(stderr, "Error: Protocol version mismatch\n");
+      fprintf(stderr, "Error: %s\n", admin_resp_strerror(ADMIN_RESP_VERSION_MISMATCH));
       return -1;
    }
 
@@ -528,16 +527,16 @@ admin_resp_code_t admin_client_list_sessions(int fd, admin_session_callback_t ca
    const char *end = buffer + resp.payload_len;
 
    for (uint16_t i = 0; i < resp.item_count && p < end; i++) {
-      /* Each entry: 8 bytes token_prefix, 1 byte uname_len, 8 bytes created,
-       * 8 bytes last_activity, 1 byte ip_len, N bytes username, M bytes ip */
-      if (p + 26 > end)
+      /* Each entry: ADMIN_SESSION_PREFIX_LEN bytes token_prefix, 1 byte uname_len,
+       * 8 bytes created, 8 bytes last_activity, 1 byte ip_len, N bytes username,
+       * M bytes ip */
+      if (p + ADMIN_SESSION_PREFIX_LEN + 18 > end)
          break;
 
       admin_session_entry_t entry = { 0 };
 
-      memcpy(entry.token_prefix, p, 8);
-      entry.token_prefix[8] = '\0';
-      p += 8;
+      memcpy(entry.token_prefix, p, ADMIN_SESSION_PREFIX_LEN);
+      p += ADMIN_SESSION_PREFIX_LEN;
 
       uint8_t uname_len = (uint8_t)*p++;
 
@@ -575,8 +574,7 @@ admin_resp_code_t admin_client_revoke_session(int fd,
       return ADMIN_RESP_FAILURE;
    }
 
-   size_t prefix_len = strlen(token_prefix);
-   if (prefix_len < 8) {
+   if (strlen(token_prefix) != ADMIN_SESSION_PREFIX_LEN) {
       return ADMIN_RESP_FAILURE;
    }
 
@@ -585,15 +583,16 @@ admin_resp_code_t admin_client_revoke_session(int fd,
    size_t auth_len = build_auth_prefix(payload, admin_user, admin_password);
 
    /* Add token prefix length and token prefix */
-   if (auth_len + 1 + 8 > sizeof(payload)) {
+   if (auth_len + 1 + ADMIN_SESSION_PREFIX_LEN > sizeof(payload)) {
       return ADMIN_RESP_FAILURE;
    }
 
    char *ptr = payload + auth_len;
-   *ptr++ = 8;
-   memcpy(ptr, token_prefix, 8);
+   *ptr++ = ADMIN_SESSION_PREFIX_LEN;
+   memcpy(ptr, token_prefix, ADMIN_SESSION_PREFIX_LEN);
 
-   if (send_message(fd, ADMIN_MSG_REVOKE_SESSION, payload, (uint16_t)(auth_len + 1 + 8)) != 0) {
+   if (send_message(fd, ADMIN_MSG_REVOKE_SESSION, payload,
+                    (uint16_t)(auth_len + 1 + ADMIN_SESSION_PREFIX_LEN)) != 0) {
       return ADMIN_RESP_SERVICE_ERROR;
    }
 
@@ -936,13 +935,17 @@ const char *admin_resp_strerror(admin_resp_code_t code) {
       case ADMIN_RESP_SERVICE_ERROR:
          return "Internal service error";
       case ADMIN_RESP_VERSION_MISMATCH:
-         return "Protocol version mismatch - update dawn-admin";
+         return "dawn-admin and the running daemon are from different builds - restart "
+                "dawn after an update, or use the dawn-admin built with it";
       case ADMIN_RESP_UNAUTHORIZED:
          return "Unauthorized - run as root, the daemon user, or a member of the daemon's group";
       case ADMIN_RESP_LAST_ADMIN:
          return "Cannot delete the last admin user";
       case ADMIN_RESP_NOT_FOUND:
          return "User or session not found";
+      case ADMIN_RESP_AMBIGUOUS:
+         return "Token prefix matches more than one session - nothing revoked; revoke by "
+                "user instead";
       default:
          return "Unknown error";
    }
@@ -1315,7 +1318,7 @@ static admin_resp_code_t recv_text_response(int fd, char *response, size_t resp_
    }
 
    if (resp.version != ADMIN_PROTOCOL_VERSION) {
-      fprintf(stderr, "Error: Protocol version mismatch\n");
+      fprintf(stderr, "Error: %s\n", admin_resp_strerror(ADMIN_RESP_VERSION_MISMATCH));
       return ADMIN_RESP_SERVICE_ERROR;
    }
 
