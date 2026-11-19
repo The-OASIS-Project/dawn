@@ -1148,6 +1148,7 @@ typedef struct {
    int is_error; /**< role='tool' rows: 1 = confirmed failure (reds the pill on reload); else 0 */
    char *email_ref; /**< user rows: the email the question was asked about (a JSON object), else
                          NULL (borrowed) */
+   bool stopped;    /**< assistant rows: a reply the user stopped before it finished */
 } conversation_message_t;
 
 /**

@@ -154,6 +154,7 @@ set(AUTH_DB_SOURCES
     ${SRC_ROOT}/src/auth/auth_db_migrations_v114.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v115.c
     ${SRC_ROOT}/src/auth/auth_db_migrations_v116.c
+    ${SRC_ROOT}/src/auth/auth_db_migrations_v117.c
     ${SRC_ROOT}/src/core/tz.c
     ${SRC_ROOT}/src/core/user_tz.c
     ${SRC_ROOT}/src/core/iso8601.c
@@ -2221,6 +2222,13 @@ dawn_add_unit_test(test_conv_post
 # edit trigger, and the v92 re-render of legacy voice rows.
 dawn_add_unit_test(test_conv_db_llm_blocks
    SOURCES test_conv_db_llm_blocks.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
+# message_stopped: a reply the user stopped, marked and read back (v117).
+dawn_add_unit_test(test_conv_db_stopped
+   SOURCES test_conv_db_stopped.c
            ${AUTH_DB_SOURCES}
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)

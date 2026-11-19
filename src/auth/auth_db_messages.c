@@ -94,10 +94,11 @@ static const auth_db_stmt_def_t s_msg_stmts[] = {
      "CASE WHEN m.id > MAX(?4, c.reasoning_floor_msg_id) AND c.reasoning_floor_pending = 0 "
      "AND m.llm_blocks_len IS NOT NULL "
      "THEN m.llm_blocks END, "
-     "m.created_at, m.is_error, m.kind, m.context_of, m.images FROM messages m "
-     "INNER JOIN conversations c ON m.conversation_id = c.id "
-     "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 " NOT_POSTED_SQL
-     "ORDER BY m.id ASC",
+     "m.created_at, m.is_error, m.kind, m.context_of, m.images, " CONV_MSG_STOPPED_COL(
+         m) " FROM messages m "
+            "INNER JOIN conversations c ON m.conversation_id = c.id "
+            "WHERE m.conversation_id = ?1 AND c.user_id = ?2 AND m.id > ?3 " NOT_POSTED_SQL
+            "ORDER BY m.id ASC",
      &s_db.stmt_msg_get_llm },
    { "msg_bind_images", IMAGES_BIND_SQL, &s_db.stmt_msg_bind_images },
    { "msg_ref_captures", IMAGES_REF_SQL("source = 5"), &s_db.stmt_msg_ref_captures },
@@ -432,6 +433,24 @@ static char *tool_change_blob_locked(const conversation_llm_row_t *row) {
    return bytes;
 }
 
+/* Record row @p id in a side table with @p sql (one id parameter).  Caller
+ * holds the lock, in its transaction. */
+static bool mark_row_locked(const char *sql, int64_t id) {
+   sqlite3_stmt *st = NULL;
+   int rc = sqlite3_prepare_v2(s_db.db, sql, -1, &st, NULL);
+   if (rc == SQLITE_OK) {
+      sqlite3_bind_int64(st, 1, id);
+      rc = sqlite3_step(st) == SQLITE_DONE ? SQLITE_OK : SQLITE_ERROR;
+   }
+   sqlite3_finalize(st);
+   if (rc != SQLITE_OK) {
+      OLOG_ERROR("conv_db_add_row: marking row %lld failed: %s", (long long)id,
+                 sqlite3_errmsg(s_db.db));
+      return false;
+   }
+   return true;
+}
+
 int msg_insert_locked(int64_t conv_id,
                       int user_id,
                       const conv_message_row_t *row,
@@ -508,30 +527,22 @@ int msg_insert_locked(int64_t conv_id,
    }
    *id_out = sqlite3_last_insert_rowid(s_db.db);
 
-   /* DAWN's own post (only an ordinary assistant row with text and no tool
-    * calls can be one), marked in the caller's transaction so it is never
-    * extracted unmarked. */
-   const bool can_post = strcmp(row->role, "assistant") == 0 && kind == MESSAGE_KIND_NONE &&
+   /* DAWN's own post, or a reply the user stopped (only an ordinary assistant
+    * row with text and no tool calls can be either), marked in the caller's
+    * transaction so it is never extracted unmarked. */
+   const bool can_mark = strcmp(row->role, "assistant") == 0 && kind == MESSAGE_KIND_NONE &&
                          !row->tool_calls && row->content[0] != '\0';
-   if (row->unprompted && !can_post) {
-      OLOG_WARNING("conv_db_add_row: a %s row in conv %lld can't be a post; saved unmarked",
+   if ((row->unprompted || row->stopped) && !can_mark) {
+      OLOG_WARNING("conv_db_add_row: a %s row in conv %lld can't be a post or a stopped reply; "
+                   "saved unmarked",
                    row->role, (long long)conv_id);
    }
-   if (row->unprompted && can_post) {
-      sqlite3_stmt *post = NULL;
-      int prc = sqlite3_prepare_v2(s_db.db,
-                                   "INSERT INTO message_unprompted (message_id) VALUES (?)", -1,
-                                   &post, NULL);
-      if (prc == SQLITE_OK) {
-         sqlite3_bind_int64(post, 1, *id_out);
-         prc = sqlite3_step(post) == SQLITE_DONE ? SQLITE_OK : SQLITE_ERROR;
-      }
-      sqlite3_finalize(post);
-      if (prc != SQLITE_OK) {
-         OLOG_ERROR("conv_db_add_row: marking post failed: %s", sqlite3_errmsg(s_db.db));
-         *id_out = 0;
-         return AUTH_DB_FAILURE;
-      }
+   if ((row->unprompted && can_mark &&
+        !mark_row_locked("INSERT INTO message_unprompted (message_id) VALUES (?)", *id_out)) ||
+       (row->stopped && can_mark &&
+        !mark_row_locked("INSERT INTO message_stopped (message_id) VALUES (?)", *id_out))) {
+      *id_out = 0;
+      return AUTH_DB_FAILURE;
    }
 
    /* The conversation names the images the row holds (a tool row's captures,
@@ -577,8 +588,9 @@ int conv_db_add_row(int64_t conv_id, int user_id, const conv_message_row_t *row,
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   /* A row naming images, or a post, is one transaction with what records it. */
-   const bool txn = images || row->unprompted ||
+   /* A row naming images, a post or a stopped reply is one transaction with
+    * what records it. */
+   const bool txn = images || row->unprompted || row->stopped ||
                     (strcmp(row->role, "user") == 0 && strstr(row->content, "[IMAGE:"));
    if (txn && auth_db_txn_begin_locked("messages") != AUTH_DB_SUCCESS) {
       AUTH_DB_UNLOCK();
@@ -813,6 +825,7 @@ int conv_db_get_messages_for_llm(int64_t conv_id,
       row.kind = (const char *)sqlite3_column_text(st, 8);
       row.context_of = sqlite3_column_int64(st, 9);
       row.images = (const char *)sqlite3_column_text(st, 10);
+      row.stopped = sqlite3_column_int(st, 11) != 0;
       char *stored = tool_change_blob_locked(&row);
       if (stored) {
          row.content = stored;

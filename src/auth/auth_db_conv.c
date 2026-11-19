@@ -1980,6 +1980,7 @@ static void msg_read_columns(conversation_message_t *msg, sqlite3_stmt *stmt) {
    msg->created_at = (time_t)sqlite3_column_int64(stmt, 7);
    msg->is_error = sqlite3_column_int(stmt, 8);
    msg->email_ref = (char *)sqlite3_column_text(stmt, 9);
+   msg->stopped = sqlite3_column_int(stmt, 10) != 0;
 }
 
 int conv_db_get_messages(int64_t conv_id, int user_id, message_callback_t callback, void *ctx) {
@@ -2270,19 +2271,19 @@ int conv_db_get_messages_by_range(int64_t conv_id,
    const char *base =
        include_private
            ? "SELECT m.id, m.conversation_id, m.role, m.content, "
-             "m.created_at, " CONV_MSG_EMAIL_REF_COL(
+             "m.created_at, " CONV_MSG_EMAIL_REF_COL(m) ", " CONV_MSG_STOPPED_COL(
                  m) " FROM messages m "
                     "INNER JOIN conversations c ON m.conversation_id = c.id "
                     "WHERE m.conversation_id = ? AND c.user_id = ? "
                     "AND m.id BETWEEN ? AND ? AND m.kind IS NULL ORDER BY m.id ASC"
            : "SELECT m.id, m.conversation_id, m.role, m.content, "
-             "m.created_at, " CONV_MSG_EMAIL_REF_COL(
+             "m.created_at, " CONV_MSG_EMAIL_REF_COL(m) ", " CONV_MSG_STOPPED_COL(
                  m) " FROM messages m "
                     "INNER JOIN conversations c ON m.conversation_id = c.id "
                     "WHERE m.conversation_id = ? AND c.user_id = ? AND c.is_private = 0 "
                     "AND m.id BETWEEN ? AND ? AND m.kind IS NULL ORDER BY m.id ASC";
 
-   char sql[512];
+   char sql[768];
    snprintf(sql, sizeof(sql), "%s%s", base, max_rows > 0 ? " LIMIT ?" : "");
 
    sqlite3_stmt *stmt = NULL;
@@ -2313,6 +2314,7 @@ int conv_db_get_messages_by_range(int64_t conv_id,
       msg.content = (char *)sqlite3_column_text(stmt, 3);
       msg.created_at = (time_t)sqlite3_column_int64(stmt, 4);
       msg.email_ref = (char *)sqlite3_column_text(stmt, 5);
+      msg.stopped = sqlite3_column_int(stmt, 6) != 0;
 
       if (callback(&msg, ctx) != 0)
          break;

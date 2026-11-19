@@ -1030,6 +1030,7 @@ list(APPEND DAWN_SOURCES
     src/auth/auth_db_migrations_v114.c
     src/auth/auth_db_migrations_v115.c
     src/auth/auth_db_migrations_v116.c
+    src/auth/auth_db_migrations_v117.c
     src/auth/auth_db_messages.c
     src/auth/auth_db_conv_prefix.c
     src/auth/auth_db_focus_handles.c
