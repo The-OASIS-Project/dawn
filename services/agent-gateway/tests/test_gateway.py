@@ -2405,7 +2405,7 @@ def test_parse_pr_reads_the_title_and_description():
    from agent_gateway.runner import parse_pr
    assert parse_pr("TITLE: Fix the parser\n\nIt fixed it.\n\n## Changes\n- a") == (
       "Fix the parser", "It fixed it.\n\n## Changes\n- a")
-   assert parse_pr("Here you go:\nTITLE: x\n\nbody") is None    # anything before: refused
+   assert parse_pr("Here you go:\nTITLE: x\n\nbody") == ("x", "body")  # a preamble is left out
    assert parse_pr("TITLE: only a title") is None
    assert parse_pr("TITLE:   \n\nbody") is None
    assert len(parse_pr("TITLE: " + "x" * 300 + "\n\nbody")[0]) == 120
@@ -2592,3 +2592,19 @@ def test_merge_scope_lists_a_conflict_kept_to_the_branchs_side(tmp_path, service
    merge = mirror("rev-parse", "refs/agent/aaaa0001")
    ch = changes(merge[:10], None, {out["base_head"]: merge_report(out)})
    assert [(f["path"], f["added"], f["removed"]) for f in ch["files"]] == [("f", 0, 0)]
+
+
+def test_parse_pr_finds_the_title_past_a_preamble_and_a_fence():
+   from agent_gateway.runner import parse_pr
+   assert parse_pr("TITLE: Fix it\n\nBody.") == ("Fix it", "Body.")
+   assert parse_pr("Here's the pull request:\n\nTITLE: Fix it\n\nBody.") == ("Fix it", "Body.")
+   assert parse_pr("```markdown\nTITLE: Fix it\n\nBody.\n```") == ("Fix it", "Body.")
+   # A fence inside the description stays.
+   assert parse_pr("TITLE: Fix it\n\n```c\nx();\n```") == ("Fix it", "```c\nx();\n```")
+   # Unclosed wrapping, a body ending in a block: the block stays whole.
+   assert parse_pr("```markdown\nTITLE: x\n\nbody\n```c\nx();\n```") == (
+      "x", "body\n```c\nx();\n```")
+   assert parse_pr("TITLE: x\n\nbody\n```") == ("x", "body")  # a lone closing fence
+   assert parse_pr("TITLE: x\n\nbody\nTITLE: y") == ("x", "body\nTITLE: y")  # first wins
+   assert parse_pr("no title here") is None
+   assert parse_pr("TITLE: only a title") is None
