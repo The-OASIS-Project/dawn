@@ -644,7 +644,7 @@ static void test_reply_then_confirm(void) {
           "{\"results\":[{\"comment_id\":2501,\"error\":\"GitHub refused the reply\"},"
           "{\"comment_id\":2601,\"url\":\"https://github.com/o/dawn/pull/115#d2\"}]}");
    char *done = call("confirm", args);
-   TEST_ASSERT_TRUE_MESSAGE(is_error(done), done); /* a reply not posted: unfinished */
+   TEST_ASSERT_FALSE_MESSAGE(is_error(done), done); /* one reply was posted: not an error */
    TEST_ASSERT_EQUAL_STRING("pr_reply", g_tool);
    struct json_object *sent = json_tokener_parse(g_args);
    TEST_ASSERT_EQUAL_STRING("o/dawn#115",
@@ -1129,6 +1129,40 @@ static void test_unposted_reply_stops_the_rest(void) {
    free(out);
 }
 
+/* A batch that posted one reply and not the other did something: not an
+ * error, but unfinished, so the Copilot request after it still waits. */
+static void test_partly_posted_replies_stop_the_rest(void) {
+   answer(0, "pr_threads", THREADS_TO_ANSWER);
+   answer(1, "task_list", TASK_PUBLISHED("0"));
+   answer(2, "pr_request_review",
+          "{" PR_IDENT ",\"new_commits\":1,\"copilot_round\":{\"commit\":\"" HEAD "\"},"
+          "\"requested\":false}");
+   char *reply = call("reply",
+                      "{\"ref\": \"o/dawn#115\", \"replies\": [{\"comment_id\": 2501, "
+                      "\"body\": \"Fixed.\"}, {\"comment_id\": 2601, \"body\": \"Kept.\"}]}");
+   char *review = call("request_review", "{\"ref\": \"o/dawn#115\"}");
+   const unsigned rep = preview_id(reply), rev = preview_id(review);
+   TEST_ASSERT_NOT_EQUAL(0, rep);
+   TEST_ASSERT_NOT_EQUAL(0, rev);
+   free(reply);
+   free(review);
+   g_turn++;
+   g_ran[0] = '\0';
+   answer(3, "pr_reply",
+          "{\"results\":[{\"comment_id\":2501,\"url\":\"https://github.com/o/dawn/pull/115#d1\"},"
+          "{\"comment_id\":2601,\"error\":\"rate limited\"}]}");
+   char args[64];
+   snprintf(args, sizeof(args), "{\"ids\": [%u, %u]}", rev, rep);
+   char *out = call("confirm", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(out), out); /* a reply is on GitHub */
+   TEST_ASSERT_EQUAL_STRING("pr_reply;", g_ran);
+   char revs[16];
+   snprintf(revs, sizeof(revs), "%u", rev);
+   ASSERT_FACTS_IN_ORDER(out, "replies", "done in part", "1 of 2", "not posted", "Still waiting",
+                         revs);
+   free(out);
+}
+
 /* The publish refused: nothing else runs, the result is an error, and every
  * item still waits, the refused publish too. */
 static void test_refused_publish_stops_the_rest(void) {
@@ -1191,6 +1225,7 @@ int main(void) {
    RUN_TEST(test_failure_leaves_the_rest_staged);
    RUN_TEST(test_refused_publish_stops_the_rest);
    RUN_TEST(test_unposted_reply_stops_the_rest);
+   RUN_TEST(test_partly_posted_replies_stop_the_rest);
    RUN_TEST(test_unknown_id_runs_nothing);
    RUN_TEST(test_reads_are_web_and_mark_the_turn);
    RUN_TEST(test_job_is_sent_as_its_client_ref);

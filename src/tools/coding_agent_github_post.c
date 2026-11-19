@@ -437,7 +437,9 @@ static struct json_object *reply_args(const cg_replies_pending_t *p) {
 }
 
 /* What pr_reply did, reply by reply. */
-static char *replies_result(const cg_replies_pending_t *p, struct json_object *ans) {
+static char *replies_result(const cg_replies_pending_t *p,
+                            struct json_object *ans,
+                            bool *complete) {
    struct json_object *results = json_object_object_get(ans, "results");
    const size_t n = json_object_is_type(results, json_type_array)
                         ? json_object_array_length(results)
@@ -478,11 +480,21 @@ static char *replies_result(const cg_replies_pending_t *p, struct json_object *a
    }
    strbuf_appendf(&sb, ":\n%s", strbuf_str(&lines));
    strbuf_free(&lines);
-   /* A reply not posted leaves the batch unfinished: a confirm stops there. */
-   return posted < p->count ? coding_agent_error_free(taken(&sb)) : taken(&sb);
+   /* A reply not posted leaves the batch unfinished (a confirm stops there); an
+    * error result only when none was, since one that posted did something. */
+   *complete = posted == p->count;
+   return posted == 0 ? coding_agent_error_free(taken(&sb)) : taken(&sb);
 }
 
-char *coding_github_confirm_reply(uint32_t id, int user_id, const turn_origin_t *origin) {
+char *coding_github_confirm_reply(uint32_t id,
+                                  int user_id,
+                                  const turn_origin_t *origin,
+                                  bool *complete) {
+   bool done_all = false;
+   if (complete == NULL) {
+      complete = &done_all;
+   }
+   *complete = false;
    cg_replies_pending_t *p = malloc(sizeof(*p));
    if (p == NULL) {
       return coding_agent_error("Out of memory.");
@@ -511,7 +523,7 @@ char *coding_github_confirm_reply(uint32_t id, int user_id, const turn_origin_t 
    }
    char *out = NULL;
    if (sent == CODING_GW_OK) {
-      out = replies_result(p, ans);
+      out = replies_result(p, ans, complete);
       free(err);
    } else if (sent == CODING_GW_FAILED) { /* the first try may have posted them */
       strbuf_t sb;

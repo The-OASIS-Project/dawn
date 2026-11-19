@@ -304,8 +304,12 @@ struct json_object *coding_github_call(int user_id,
 char *coding_github_reply(struct json_object *details, int user_id, const turn_origin_t *origin);
 
 /** confirm of staged reply batch @p id: posts the replies the preview showed and
- *  resolves their threads. */
-char *coding_github_confirm_reply(uint32_t id, int user_id, const turn_origin_t *origin);
+ *  resolves their threads.  An error result only when none was posted;
+ *  *@p complete (may be NULL) is false when any reply wasn't. */
+char *coding_github_confirm_reply(uint32_t id,
+                                  int user_id,
+                                  const turn_origin_t *origin,
+                                  bool *complete);
 
 /** request_review: a preview of asking Copilot to review a pull request again,
  *  refused while its review is pending or when nothing came after its last one. */

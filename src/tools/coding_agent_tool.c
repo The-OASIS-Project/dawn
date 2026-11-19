@@ -921,7 +921,9 @@ static int resolve_items(struct json_object *details,
 static char *confirm_one(const ca_confirm_item_t *it,
                          struct json_object *details,
                          int user_id,
-                         const turn_origin_t *origin) {
+                         const turn_origin_t *origin,
+                         bool *complete) {
+   *complete = true; /* only a reply batch can do part of its work */
    switch (it->kind) {
       case CA_CONFIRM_DELEGATE:
          return coding_delegate_confirm(it->id, user_id, origin);
@@ -932,7 +934,7 @@ static char *confirm_one(const ca_confirm_item_t *it,
       case CA_CONFIRM_PUBLISH:
          return coding_publish_confirm(it->id, user_id, origin);
       case CA_CONFIRM_REPLY:
-         return coding_github_confirm_reply(it->id, user_id, origin);
+         return coding_github_confirm_reply(it->id, user_id, origin, complete);
       case CA_CONFIRM_REVIEW:
          return coding_github_confirm_request_review(it->id, user_id, origin);
       case CA_CONFIRM_CLOSE:
@@ -942,7 +944,7 @@ static char *confirm_one(const ca_confirm_item_t *it,
    }
 }
 
-/* confirm: each named item in turn, stopping at the first that fails.  One
+/* confirm: each named item in turn, stopping at the first that fails or runs only in part.  One
  * item's result is its own; several say what ran, what failed and why, and
  * what still waits (an error result when the first failed: it may have partly run). */
 static char *handle_confirm(struct json_object *details, int user_id, const turn_origin_t *origin) {
@@ -952,22 +954,31 @@ static char *handle_confirm(struct json_object *details, int user_id, const turn
    if (n == 0) {
       return bad;
    }
+   bool complete = true;
    if (n == 1) {
-      return confirm_one(&items[0], details, user_id, origin);
+      return confirm_one(&items[0], details, user_id, origin, &complete);
    }
    strbuf_t sb;
    strbuf_init(&sb, 1024);
    int done = 0;
    for (; done < n; done++) {
-      char *r = confirm_one(&items[done], details, user_id, origin);
+      char *r = confirm_one(&items[done], details, user_id, origin, &complete);
       const bool failed = r == NULL || tool_result_is_error(r);
       const char *text = r == NULL ? "out of memory"
                          : failed  ? r + strlen(TOOL_RESULT_ERROR_MARK)
                                    : r;
       strbuf_appendf(&sb, "%s (id %u) %s: %s\n", kind_name(items[done].kind),
-                     (unsigned)items[done].id, failed ? "failed" : "done", text);
+                     (unsigned)items[done].id,
+                     failed      ? "failed"
+                     : !complete ? "done in part"
+                                 : "done",
+                     text);
       free(r);
       if (failed) {
+         break;
+      }
+      if (!complete) { /* it did something, then stopped: it counts as run */
+         done++;
          break;
       }
    }
