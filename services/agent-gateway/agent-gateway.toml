@@ -55,8 +55,20 @@ url = "http://127.0.0.1:9750/sse"
 name = "dawn"
 url = "https://github.com/The-OASIS-Project/dawn.git"
 base = "main"
-# Paths flagged to the user when a task changes them (not blocked): `**` any
-# folders, `*` within one.  Unset: .github/**, CLAUDE.md, AGENTS.md, .claude/**.
-protected = [".github/**", "CLAUDE.md", "AGENTS.md", ".claude/**",
-             "services/agent-gateway/**", "scripts/install*", "**/install.sh", "packaging/**",
-             "src/auth/**", "src/core/tool_call_policy.c", "src/tools/coding_agent_*"]
+# Files to check before publishing: when a task changes one, it's named to the
+# user before publishing, with its reason.  Never blocked.  Each entry is a path
+# pattern (`**` any folders, `*` within one), or { path = "...", why = "..." }.
+# Unset: .github/**, CLAUDE.md, AGENTS.md, .claude/**.
+check = [
+   { path = ".github/**", why = "CI, which runs with the repo's secrets" },
+   { path = "CLAUDE.md", why = "the agent's own instructions" },
+   { path = "AGENTS.md", why = "the agent's own instructions" },
+   { path = ".claude/**", why = "the agent's own instructions" },
+   { path = "services/agent-gateway/**", why = "the gateway that runs the agent" },
+   { path = "scripts/install*", why = "what installs DAWN on a machine" },
+   { path = "**/install.sh", why = "what installs DAWN on a machine" },
+   { path = "packaging/**", why = "what installs DAWN on a machine" },
+   { path = "src/auth/**", why = "who can log in and do what" },
+   { path = "src/core/tool_call_policy.c", why = "which tools a turn may call" },
+   { path = "src/tools/coding_agent_*", why = "how DAWN drives the coding agent" },
+]

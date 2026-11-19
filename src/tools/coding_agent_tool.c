@@ -522,19 +522,25 @@ static char *handle_status(struct json_object *details, int user_id) {
 
 /* ========== changes / file: the work, read from the gateway's mirror ========== */
 
-/* One changed file's line: its +/- counts (binary: none), then its path. */
+/* One changed file's line: its +/- counts (binary: none), then its path, and
+ * whether it's one to check before publishing (with its reason). */
 static void append_file(strbuf_t *sb, struct json_object *f) {
    struct json_object *added = NULL, *removed = NULL;
    json_object_object_get_ex(f, "added", &added);
    json_object_object_get_ex(f, "removed", &removed);
-   struct json_object *prot = json_object_object_get(f, "protected");
-   const char *mark = json_object_get_boolean(prot) ? "  (protected)" : "";
+   const char *why = coding_gateway_jstr(f, "why");
    if (json_object_is_type(added, json_type_int) && json_object_is_type(removed, json_type_int)) {
-      strbuf_appendf(sb, "  +%d -%d  %.*s%s\n", json_object_get_int(added),
-                     json_object_get_int(removed), CA_PATH_SHOWN, coding_gateway_jstr(f, "path"),
-                     mark);
+      strbuf_appendf(sb, "  +%d -%d  %.*s", json_object_get_int(added),
+                     json_object_get_int(removed), CA_PATH_SHOWN, coding_gateway_jstr(f, "path"));
    } else {
-      strbuf_appendf(sb, "  binary  %.*s%s\n", CA_PATH_SHOWN, coding_gateway_jstr(f, "path"), mark);
+      strbuf_appendf(sb, "  binary  %.*s", CA_PATH_SHOWN, coding_gateway_jstr(f, "path"));
+   }
+   if (!coding_file_check(f)) {
+      strbuf_append(sb, "\n");
+   } else if (coding_check_why_shown(why)) {
+      strbuf_appendf(sb, "  (to check before publishing: %s)\n", why);
+   } else {
+      strbuf_append(sb, "  (to check before publishing)\n");
    }
 }
 

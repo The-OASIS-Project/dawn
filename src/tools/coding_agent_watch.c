@@ -85,9 +85,11 @@ static const char *const k_step_fields[] = { "tool", "brief", "text", NULL };
 static const char *const k_request_fields[] = { "request_id",  "request_kind", "value", "tool",
                                                 "input",       "note",         "error", "decision",
                                                 "request_ids", "line",         NULL };
-static const char *const k_end_fields[] = { "summary",         "branch", "commits",  "diffstat",
-                                            "uncommitted",     "error",  "cost_usd", "protected",
-                                            "protected_count", NULL };
+/* protected / protected_count: an older gateway's names for to_check / to_check_count. */
+static const char *const k_end_fields[] = { "summary",   "branch",          "commits",
+                                            "diffstat",  "uncommitted",     "error",
+                                            "cost_usd",  "to_check",        "to_check_count",
+                                            "protected", "protected_count", NULL };
 static const char *const k_after_fields[] = { "pushed",      "pr_url",      "reason",
                                               "unpublished", "uncommitted", NULL };
 static const char *const k_scrubbed[] = { "brief", "text", "value", "input", NULL };

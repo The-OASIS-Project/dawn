@@ -358,8 +358,31 @@ static char *redact_runs(const char *in) {
    return out;
 }
 
-/* One field's text: a string, or a list of strings one per line; cut at
- * EVENT_AGENT_TEXT_CAP on a whole character. */
+/* @p sep (unless '\0') then @p str onto @p text, cut at EVENT_AGENT_TEXT_CAP on
+ * a whole character; false once the text is full. */
+static bool append_cut(char *text, size_t *used, char sep, const char *str) {
+   const size_t s = sep != '\0' ? 1 : 0;
+   size_t take = strlen(str);
+   if (*used + s + take > EVENT_AGENT_TEXT_CAP) {
+      take = *used + s < EVENT_AGENT_TEXT_CAP
+                 ? event_payload_utf8_floor(str, EVENT_AGENT_TEXT_CAP - *used - s)
+                 : 0;
+      if (take == 0) {
+         return false;
+      }
+   }
+   if (s) {
+      text[(*used)++] = sep;
+   }
+   memcpy(text + *used, str, take);
+   *used += take;
+   text[*used] = '\0';
+   return *used < EVENT_AGENT_TEXT_CAP;
+}
+
+/* One field's text: a string, or a list one per line of strings or of
+ * {path, why} objects (the path, then a tab and the why when there is one);
+ * cut at EVENT_AGENT_TEXT_CAP on a whole character. */
 static char *agent_field_text(struct json_object *v) {
    char *text = NULL;
    if (json_object_is_type(v, json_type_array)) {
@@ -367,27 +390,21 @@ static char *agent_field_text(struct json_object *v) {
       size_t used = 0;
       for (size_t j = 0; text != NULL && j < json_object_array_length(v); j++) {
          struct json_object *el = json_object_array_get_idx(v, j);
-         if (!json_object_is_type(el, json_type_string)) {
+         struct json_object *path = NULL, *why = NULL;
+         if (json_object_is_type(el, json_type_object)) {
+            path = json_object_object_get(el, "path");
+            why = json_object_object_get(el, "why");
+         } else {
+            path = el;
+         }
+         if (!json_object_is_type(path, json_type_string)) {
             continue;
          }
-         const char *str = json_object_get_string(el);
-         const size_t sep = used ? 1 : 0;
-         size_t take = strlen(str);
-         if (used + sep + take > EVENT_AGENT_TEXT_CAP) {
-            take = used + sep < EVENT_AGENT_TEXT_CAP
-                       ? event_payload_utf8_floor(str, EVENT_AGENT_TEXT_CAP - used - sep)
-                       : 0;
-            if (take == 0) {
-               break;
-            }
+         if (!append_cut(text, &used, used ? '\n' : '\0', json_object_get_string(path))) {
+            break;
          }
-         if (sep) {
-            text[used++] = '\n';
-         }
-         memcpy(text + used, str, take);
-         used += take;
-         text[used] = '\0';
-         if (used >= EVENT_AGENT_TEXT_CAP) {
+         if (json_object_is_type(why, json_type_string) && json_object_get_string_len(why) > 0 &&
+             !append_cut(text, &used, '\t', json_object_get_string(why))) {
             break;
          }
       }

@@ -594,18 +594,27 @@
       }
    }
 
-   /* Changed protected paths as the chat report shows them: only plainly
-    * path-shaped names, the rest counted (with the gateway's full count). */
-   function protectedPaths(p) {
-      const all = String(p.protected || '')
+   /* Changed files to check before publishing as the chat report shows them:
+    * only plainly path-shaped names, the rest counted (with the gateway's full
+    * count).  One per line, "path" or "path<TAB>why"; an older trail has them
+    * as protected. */
+   function checkPaths(p) {
+      const old = p.to_check == null;
+      const all = String((old ? p.protected : p.to_check) || '')
          .split('\n')
-         .filter(Boolean);
+         .filter(Boolean)
+         .map(function (line) {
+            const tab = line.lastIndexOf('\t');
+            return tab < 0
+               ? { path: line, why: '' }
+               : { path: line.slice(0, tab), why: line.slice(tab + 1) };
+         });
       const shown = all
          .filter(function (x) {
-            return PATH_OK.test(x);
+            return PATH_OK.test(x.path);
          })
          .slice(0, PATHS_SHOWN);
-      const total = Math.max(Number(p.protected_count) || 0, all.length);
+      const total = Math.max(Number(old ? p.protected_count : p.to_check_count) || 0, all.length);
       return { shown: shown, hidden: total - shown.length };
    }
 
@@ -640,15 +649,18 @@
          d.setAttribute('dir', 'auto');
          facts.appendChild(d);
       }
-      const paths = protectedPaths(p);
+      const paths = checkPaths(p);
       if (paths.shown.length || paths.hidden > 0) {
-         const prot = elem('div', 'coding-protected');
-         prot.appendChild(elem('span', 'coding-facts-label', 'Protected paths changed: '));
-         paths.shown.forEach(function (path) {
-            prot.appendChild(elem('span', 'coding-path', path));
+         const check = elem('div', 'coding-check');
+         check.appendChild(
+            elem('span', 'coding-facts-label', 'Files to check before publishing: ')
+         );
+         paths.shown.forEach(function (f) {
+            check.appendChild(elem('span', 'coding-path', f.path));
+            if (f.why) check.appendChild(elem('span', 'coding-muted', '(' + f.why + ') '));
          });
          if (paths.hidden > 0) {
-            prot.appendChild(
+            check.appendChild(
                elem(
                   'span',
                   'coding-muted',
@@ -656,7 +668,7 @@
                )
             );
          }
-         facts.appendChild(prot);
+         facts.appendChild(check);
       }
       if (p.cost_usd) {
          facts.appendChild(elem('div', 'coding-muted', 'Cost $' + Number(p.cost_usd).toFixed(2)));

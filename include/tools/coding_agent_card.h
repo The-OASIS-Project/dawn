@@ -116,8 +116,9 @@ struct json_object *coding_view_fetch(int user_id,
 /**
  * @brief The WebUI's publish preview of @p job: what a push would do, from the
  *        gateway, with the same checks as the tool's publish.  {head, repo,
- *        branch, base, commits, commits_more, files, files_total, protected:
- *        [path], history_only: [{path, protected}], workflows, pr_title, pr_body
+ *        branch, base, commits, commits_more, files, files_total, to_check:
+ *        [{path, why}] (files to check before publishing; why "" for none),
+ *        history_only: [{path, to_check, why?}], workflows, pr_title, pr_body
  *        (exactly what would go public), pr_body_sha256, pr_title_by_agent,
  *        pr_footer (what the gateway appends to the user's own description),
  *        mentions, closes,

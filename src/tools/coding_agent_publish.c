@@ -87,7 +87,7 @@ typedef struct {
    char label[CP_LABEL_MAX];      /* close: 'coding job #N ("name")' or 'task <id>' */
    int commits;                   /* publish: commits on the branch; close: unpublished ones */
    int files;
-   int protected_paths;
+   int check_paths;
    bool pr;
    bool gone; /* close: the gateway has no record of the task (its state was lost) */
    char body_sha[CODING_SHA256_LEN + 1];   /* publish: the description shown ("" if unknown) */
@@ -259,10 +259,7 @@ static char *agent_lines(struct json_object *changes,
       struct json_object *f = json_object_array_get_idx(files, i);
       char path[CP_LINE_MAX];
       str_excerpt_line(coding_gateway_jstr(f, "path"), CP_PATH_SHOWN, path, sizeof(path));
-      strbuf_appendf(&sb, "- %s%s\n", path,
-                     json_object_get_boolean(json_object_object_get(f, "protected"))
-                         ? " (protected)"
-                         : "");
+      strbuf_appendf(&sb, "- %s%s\n", path, coding_file_check(f) ? " (to check)" : "");
    }
    if (nf > CP_LINES_SHOWN) {
       strbuf_appendf(&sb, "(%zu more files)\n", nf - CP_LINES_SHOWN);
@@ -278,10 +275,7 @@ static char *agent_lines(struct json_object *changes,
       struct json_object *f = json_object_array_get_idx(hist, i);
       char path[CP_LINE_MAX];
       str_excerpt_line(coding_gateway_jstr(f, "path"), CP_PATH_SHOWN, path, sizeof(path));
-      strbuf_appendf(&sb, "- %s%s\n", path,
-                     json_object_get_boolean(json_object_object_get(f, "protected"))
-                         ? " (protected)"
-                         : "");
+      strbuf_appendf(&sb, "- %s%s\n", path, coding_file_check(f) ? " (to check)" : "");
    }
    if (nh > CP_LINES_SHOWN) {
       strbuf_appendf(&sb, "(%zu more)\n", nh - CP_LINES_SHOWN);
@@ -347,18 +341,35 @@ static char *github_description(const char *body, const char *footer) {
    return framed;
 }
 
-/* Protected paths a push makes public: in the final diff, and in commits only
- * (changed, then changed back: still in the branch's history). */
-static int count_protected(struct json_object *changes) {
+/* Files to check that a push makes public: in the final diff, and in commits
+ * only (changed, then changed back: still in the branch's history).  Counted;
+ * with @p sb, also named in DAWN's words ("`path` (why); ..."), the first few
+ * that are plainly paths. */
+static int check_paths(struct json_object *changes, strbuf_t *sb) {
    static const char *const k_lists[] = { "files", "history_only" };
-   int n = 0;
+   int n = 0, shown = 0;
    for (size_t l = 0; l < sizeof(k_lists) / sizeof(k_lists[0]); l++) {
       struct json_object *arr = json_object_object_get(changes, k_lists[l]);
       for (size_t i = 0;
            json_object_is_type(arr, json_type_array) && i < json_object_array_length(arr); i++) {
-         n += json_object_get_boolean(
-             json_object_object_get(json_object_array_get_idx(arr, i), "protected"));
+         struct json_object *f = json_object_array_get_idx(arr, i);
+         if (!coding_file_check(f)) {
+            continue;
+         }
+         n++;
+         const char *path = coding_gateway_jstr(f, "path");
+         if (sb != NULL && shown < CODING_CHECK_SHOWN && coding_check_path_shown(path)) {
+            strbuf_appendf(sb, "%s`%s`", shown ? "; " : "", path);
+            const char *why = coding_gateway_jstr(f, "why");
+            if (coding_check_why_shown(why)) {
+               strbuf_appendf(sb, " (%s)", why);
+            }
+            shown++;
+         }
       }
+   }
+   if (sb != NULL && n > shown) {
+      strbuf_appendf(sb, "%s%d %s", shown ? "; and " : "", n - shown, shown ? "more" : "not shown");
    }
    return n;
 }
@@ -366,7 +377,7 @@ static int count_protected(struct json_object *changes) {
 /* What publishing a job would do, as the gateway has it: the checks every way
  * of publishing makes, before any preview.  The caller frees it (plan_free). */
 typedef struct {
-   cp_pending_t want; /* job, name, repo, branch, base, head, commits, files, protected */
+   cp_pending_t want; /* job, name, repo, branch, base, head, commits, files, files to check */
    job_record_t rec;
    bool had_pr; /* an earlier publish opened a pull request */
    char pr_url[CP_URL_MAX];
@@ -557,7 +568,7 @@ static char *publish_plan(int user_id, int64_t job, bool pr, bool edit, cp_plan_
    safe_strscpy(want->name, out->rec.title);
    want->files = json_object_is_type(files, json_type_array) ? (int)json_object_array_length(files)
                                                              : 0;
-   want->protected_paths = count_protected(out->changes);
+   want->check_paths = check_paths(out->changes, NULL);
    const char *sha = coding_gateway_jstr(out->changes, "pr_body_sha256");
    if (pr && is_sha256(sha)) {
       safe_strscpy(want->body_sha, sha); /* the chat's yes binds the description too */
@@ -609,7 +620,7 @@ char *coding_publish_propose(struct json_object *details,
    const cp_pending_t want = plan.want;
    const bool again = plan.had_pr; /* new commits go to the PR it has (a new one if that ended) */
    const int nfiles = want.files;
-   const int nprot = want.protected_paths;
+   const int ncheck = want.check_paths;
    /* What a pull request would say: the title and description the agent wrote for
     * it (the gateway's, as it would send them), else its report.  Its words: in
     * the frame, never in DAWN's own sentence. */
@@ -653,6 +664,9 @@ char *coding_publish_propose(struct json_object *details,
    safe_strscpy(title, plan.rec.title);
    char pr_url_copy[CP_URL_MAX];
    safe_strscpy(pr_url_copy, plan.pr_url);
+   strbuf_t cn; /* the files to check, named */
+   strbuf_init(&cn, 256);
+   check_paths(plan.changes, &cn);
    plan_free(&plan);
    /* Read before this preview marks the turn (its own words don't count here). */
    const bool read_before = coding_agent_turn_read(origin);
@@ -661,6 +675,7 @@ char *coding_publish_propose(struct json_object *details,
    if (read_before && live(origin->session_id, CP_PENDING_PUBLISH)) {
       free(agent);
       free(github);
+      strbuf_free(&cn);
       return coding_agent_error("A publish is already waiting for the user's answer; it can't be "
                                 "replaced in a turn that read the coding agent's words.");
    }
@@ -681,6 +696,7 @@ char *coding_publish_propose(struct json_object *details,
    if (id == 0) {
       free(agent);
       free(github);
+      strbuf_free(&cn);
       return tool_pending_stage_refusal(rc, "publish");
    }
    const bool both = want.pr_title[0] && want.pr_desc[0];
@@ -705,9 +721,6 @@ char *coding_publish_propose(struct json_object *details,
                      (long long)job, title, want.branch, want.repo, want.head, count,
                      want.commits == 1 ? "" : "s", nfiles, nfiles == 1 ? "" : "s");
    }
-   if (!want.text_only && nprot > 0) {
-      strbuf_appendf(&sb, ", %d protected path%s among them", nprot, nprot == 1 ? "" : "s");
-   }
    if (want.text_only) {
       /* said above */
    } else if (edit_open) {
@@ -726,6 +739,10 @@ char *coding_publish_propose(struct json_object *details,
                      want.base);
    } else {
       strbuf_appendf(&sb, ") and open a pull request against %s.", want.base);
+   }
+   if (!want.text_only && ncheck > 0) {
+      strbuf_appendf(&sb, " %d file%s to check before publishing: %s.", ncheck,
+                     ncheck == 1 ? "" : "s", strbuf_len(&cn) ? strbuf_str(&cn) : "");
    }
    if (edit_open) {
       strbuf_appendf(&sb,
@@ -766,11 +783,12 @@ char *coding_publish_propose(struct json_object *details,
        " Read this to the user%s and ask them to confirm; if they say yes in their "
        "reply, call coding_agent with action 'confirm' and arguments "
        "{\"ids\": [%u]}. %s\n%s%s%s",
-       want.text_only ? "" : " (the protected paths too)", (unsigned)id,
+       want.text_only ? "" : " (the files to check too)", (unsigned)id,
        want.text_only ? "The new text:" : "The agent's commits and files, its own words:", agent,
        github ? "\n" : "", github ? github : "");
    free(agent);
    free(github);
+   strbuf_free(&cn);
    return strbuf_steal(&sb);
 }
 
@@ -1330,16 +1348,19 @@ struct json_object *coding_publish_preview(int user_id, int64_t job, char **err_
                           json_object_new_int(json_object_is_type(total, json_type_int)
                                                   ? json_object_get_int(total)
                                                   : w->files));
-   struct json_object *prot = json_object_new_array();
+   struct json_object *check = json_object_new_array();
    struct json_object *files = json_object_object_get(plan.changes, "files");
    for (size_t i = 0;
         json_object_is_type(files, json_type_array) && i < json_object_array_length(files); i++) {
       struct json_object *f = json_object_array_get_idx(files, i);
-      if (json_object_get_boolean(json_object_object_get(f, "protected"))) {
-         json_object_array_add(prot, json_object_new_string(coding_gateway_jstr(f, "path")));
+      if (coding_file_check(f)) {
+         struct json_object *c = json_object_new_object();
+         json_object_object_add(c, "path", json_object_new_string(coding_gateway_jstr(f, "path")));
+         json_object_object_add(c, "why", json_object_new_string(coding_gateway_jstr(f, "why")));
+         json_object_array_add(check, c);
       }
    }
-   json_object_object_add(o, "protected", prot);
+   json_object_object_add(o, "to_check", check);
    struct json_object *history = json_object_object_get(plan.changes, "history_only");
    json_object_object_add(o, "history_only",
                           json_object_is_type(history, json_type_array) ? json_object_get(history)
@@ -1486,10 +1507,10 @@ int coding_publish_describe(uint32_t id,
          } else {
             n = snprintf(out, out_len,
                          "publish coding job #%lld (\"%s\"): push %s of %s at %.12s (%d commit%s, "
-                         "%d file%s, %d protected)%s%s",
+                         "%d file%s, %d to check)%s%s",
                          (long long)p->job, p->name, p->branch, p->repo, p->head, p->commits,
                          p->commits == 1 ? "" : "s", p->files, p->files == 1 ? "" : "s",
-                         p->protected_paths,
+                         p->check_paths,
                          p->edit_open ? " to its open pull request "
                          : p->pr      ? " and open a pull request against "
                                       : ", no pull request",

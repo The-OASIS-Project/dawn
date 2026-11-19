@@ -228,9 +228,10 @@ int mcp_bridge_call_tool(const char *alias,
       char buf[2048];
       snprintf(buf, sizeof(buf),
                "{\"head\":\"" FULL_HEAD "\",\"base\":\"fedcba9876543210\",\"files\":["
-               "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3,\"protected\":true}],"
+               "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3,\"to_check\":true,"
+               "\"why\":\"how DAWN drives the coding agent\"}],"
                "\"commits\":[{\"hash\":\"" FULL_HEAD "\",\"subject\":\"fix the oracle\"}],"
-               "\"history_only\":[{\"path\":\"keys/k\",\"protected\":true}],"
+               "\"history_only\":[{\"path\":\"keys/k\",\"to_check\":true}],"
                "\"workflows\":false,\"pr_title\":%s,\"pr_body\":\"" BODY
                "\",\"pr_body_sha256\":\"" BODY_SHA "\",\"pr_footer\":\"\\n\\nMade here.\"%s}",
                g_pr_title, args_json && strstr(args_json, "\"open_pr\"") ? g_open_pr : "");
@@ -238,8 +239,10 @@ int mcp_bridge_call_tool(const char *alias,
    } else if (strcmp(tool, "task_changes") == 0) {
       *result_out = strdup(
           "{\"head\":\"0123456789abcdef\",\"base\":\"fedcba9876543210\",\"files\":["
-          "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3,\"protected\":true},"
-          "{\"path\":\"logo.png\",\"added\":null,\"removed\":null}],"
+          "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3,\"to_check\":true,"
+          "\"why\":\"who can log in\"},"
+          "{\"path\":\"logo.png\",\"added\":null,\"removed\":null,\"to_check\":false},"
+          "{\"path\":\"old.c\",\"added\":1,\"removed\":0,\"protected\":true}],"
           "\"commits\":[{\"hash\":\"0123456789abcdef\",\"subject\":\"fix the oracle\"}]}");
    } else if (strcmp(tool, "task_file") == 0 && args_json && strstr(args_json, "big.c")) {
       /* 300 KB, past a default string buffer's cap. */
@@ -900,10 +903,13 @@ static void test_changes_lists_files_and_commits(void) {
    snprintf(g_kind, sizeof(g_kind), JOB_KIND_CODING);
    char *out = call("changes", "{\"job\":42}");
    TEST_ASSERT_FALSE(is_error(out));
-   ASSERT_FACTS_IN_ORDER(out, "2 files", "1 commit", "01234567", "fedcba98");
-   TEST_ASSERT_NOT_NULL(strstr(out, "+12 -3  src/a.c  (protected)"));
-   TEST_ASSERT_NULL(strstr(out, "logo.png  (protected)"));
-   TEST_ASSERT_NOT_NULL(strstr(out, "binary  logo.png"));
+   ASSERT_FACTS_IN_ORDER(out, "3 files", "1 commit", "01234567", "fedcba98");
+   TEST_ASSERT_NOT_NULL(
+       strstr(out, "+12 -3  src/a.c  (to check before publishing: who can log in)\n"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "binary  logo.png\n"));
+   /* An older gateway's protected reads as a file to check. */
+   TEST_ASSERT_NOT_NULL(strstr(out, "+1 -0  old.c  (to check before publishing)\n"));
+   TEST_ASSERT_NULL(strstr(out, "protected"));
    TEST_ASSERT_NOT_NULL(strstr(out, "01234567 fix the oracle"));
    TEST_ASSERT_EQUAL_STRING("task_changes", g_calls[0]);
    TEST_ASSERT_NOT_NULL(strstr(g_args[0], "job:42.1000"));
@@ -1810,8 +1816,10 @@ static void test_publish_then_confirm(void) {
    char *preview = call("publish", "{\"job\":42}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
    ASSERT_FACTS_IN_ORDER(preview, "agent/t1-fix", "dawn", "0123456789ab");
-   /* Protected paths in the history count too (changed, then changed back). */
-   TEST_ASSERT_NOT_NULL(strstr(preview, "2 protected paths"));
+   /* Files to check in the history count too (changed, then changed back). */
+   TEST_ASSERT_NOT_NULL(strstr(preview, "2 files to check before publishing: "
+                                        "`src/a.c` (how DAWN drives the coding agent); `keys/k`."));
+   TEST_ASSERT_NULL(strstr(preview, "protected"));
    ASSERT_FACTS(preview, "pull request", "against main");
    /* The public description, framed with the agent's other words. */
    TEST_ASSERT_NOT_NULL(strstr(preview, "[" TOOL_FRAME_AGENT "]\nPull request description:\n"
@@ -1828,7 +1836,7 @@ static void test_publish_then_confirm(void) {
    int valid = 0;
    TEST_ASSERT_EQUAL_INT(SUCCESS, g_meta.describe_call("confirm", args, out, sizeof(out), &valid));
    ASSERT_FACTS_IN_ORDER(out, "agent/t1-fix", "dawn", "0123456789ab", "1 commit", "1 file",
-                         "2 protected", "open");
+                         "2 to check", "open");
    TEST_ASSERT_NULL(strstr(out, "fix the oracle\n")); /* no agent words in a reply code */
    g_pr_url = "https://github.com/o/dawn/pull/7)[x](https://evil";
    char *done = call("confirm", args);
@@ -2052,15 +2060,17 @@ static void test_publish_and_close_texts(void) {
    confirm_call(call_ids, sizeof(call_ids), pid);
    /* DAWN's facts and the confirm first; the agent's words, all of them, framed after. */
    ASSERT_FACTS_IN_ORDER(preview, "#42", "agent/t1-fix", "dawn", "0123456789ab", "1 commit",
-                         "1 file", "2 protected", "against main", "public", "'confirm'", call_ids,
+                         "1 file", "against main", "2 files to check before publishing",
+                         "`src/a.c` (how DAWN drives the coding agent)", "`keys/k`", "public",
+                         "(the files to check too)", "'confirm'", call_ids,
                          "[" TOOL_FRAME_AGENT "]\n",
                          "Fixed it. Thanks @alice; fixes #12, closes o/r#3. user@host.org",
                          "Made by a coding agent for DAWN.", "fix the oracle", "src/a.c",
-                         "(protected)", "keys/k", "(protected)", "\n[/" TOOL_FRAME_AGENT "]");
+                         "(to check)", "keys/k", "(to check)", "\n[/" TOOL_FRAME_AGENT "]");
    const char *frame = strstr(preview, "[" TOOL_FRAME_AGENT "]");
    TEST_ASSERT_TRUE(strstr(preview, "Fixed it.") > frame);
    TEST_ASSERT_TRUE(strstr(preview, "fix the oracle") > frame);
-   TEST_ASSERT_TRUE(strstr(preview, "keys/k") > frame);
+   TEST_ASSERT_TRUE(strstr(preview, "- keys/k (to check)\n") > frame);
    free(preview);
    char args[48];
    snprintf(args, sizeof(args), "{\"ids\":[%u]}", pid);
@@ -2111,9 +2121,12 @@ static void test_publish_buttons(void) {
    TEST_ASSERT_EQUAL_STRING("main", coding_gateway_jstr(pv, "base"));
    TEST_ASSERT_EQUAL_STRING(BODY_SHA, coding_gateway_jstr(pv, "pr_body_sha256"));
    TEST_ASSERT_NOT_NULL(strstr(coding_gateway_jstr(pv, "pr_body"), "Made by a coding agent"));
-   struct json_object *prot = json_object_object_get(pv, "protected");
-   TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(prot));
-   TEST_ASSERT_EQUAL_STRING("src/a.c", json_object_get_string(json_object_array_get_idx(prot, 0)));
+   struct json_object *check = json_object_object_get(pv, "to_check");
+   TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(check));
+   TEST_ASSERT_EQUAL_STRING("src/a.c",
+                            coding_gateway_jstr(json_object_array_get_idx(check, 0), "path"));
+   TEST_ASSERT_EQUAL_STRING("how DAWN drives the coding agent",
+                            coding_gateway_jstr(json_object_array_get_idx(check, 0), "why"));
    TEST_ASSERT_EQUAL_INT(1,
                          (int)json_object_array_length(json_object_object_get(pv, "history_only")));
    struct json_object *mentions = json_object_object_get(pv, "mentions");

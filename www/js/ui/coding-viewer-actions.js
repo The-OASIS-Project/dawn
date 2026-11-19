@@ -324,15 +324,16 @@
          if (refocus) focusFooter(from);
       }
 
-      function list(paths, protectedBadge) {
+      /* Paths, each with its reason in words, and its check badge (checkBadge). */
+      function list(paths, checkBadge) {
          const ul = elem('ul');
          paths.forEach(function (item) {
             const li = elem('li');
             const path = typeof item === 'string' ? item : String((item && item.path) || '');
             li.appendChild(h.shownPath('cv-name', path));
-            if (protectedBadge && item && item.protected) {
-               li.append(' ', elem('span', 'dawn-badge warning', 'Protected'));
-            }
+            if (checkBadge && h.isCheck(item)) li.append(' ', h.checkBadge(item));
+            if (item && item.why)
+               li.append(' ', elem('span', 'coding-muted', '(' + item.why + ')'));
             ul.appendChild(li);
          });
          return ul;
@@ -414,11 +415,11 @@
          fact(dl, 'Files', files + (total > files ? ' (' + (total - files) + ' more)' : ''));
          nodes.push(dl);
 
-         const prot = Array.isArray(v.protected) ? v.protected : [];
-         if (prot.length) {
+         const check = Array.isArray(v.to_check) ? v.to_check : [];
+         if (check.length) {
             const box = elem('section');
             box.dataset.tone = 'warning';
-            box.append(elem('h4', null, 'Protected paths'), list(prot, false));
+            box.append(elem('h4', null, 'Files to check before publishing'), list(check, false));
             nodes.push(box);
          }
          const hist = Array.isArray(v.history_only) ? v.history_only : [];
@@ -523,7 +524,9 @@
                plural(commits, 'commit') +
                ', ' +
                plural(total, 'file') +
-               (prot.length ? ', ' + plural(prot.length, 'protected path') : '') +
+               (check.length
+                  ? ', ' + plural(check.length, 'file') + ' to check before publishing'
+                  : '') +
                (preview.workflows ? '; changes CI workflows, can’t be published here' : '')
          );
       }

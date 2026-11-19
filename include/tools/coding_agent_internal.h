@@ -70,6 +70,43 @@ static inline bool coding_agent_has_text(const char *s) {
  *  working, or waiting on the user (a close stops it first). */
 bool coding_task_status_open(const char *status);
 
+/* Files to check before publishing: changed files matching the repo's `check`
+ * patterns at the gateway, each pattern with an optional reason.  Flagged to the
+ * user before publishing, never blocked. */
+
+/** Files to check named in DAWN's own words; the rest are counted. */
+#define CODING_CHECK_SHOWN 5
+/** The longest path and reason named there. */
+#define CODING_CHECK_PATH_MAX 120
+#define CODING_CHECK_WHY_MAX 120
+
+/** Whether @p path (named by the agent) is plainly a path DAWN can name in its
+ *  own words: short, and only letters, digits, '.', '_', '/', '-'. */
+static inline bool coding_check_path_shown(const char *path) {
+   const size_t n = path ? strlen(path) : 0;
+   return n > 0 && n <= CODING_CHECK_PATH_MAX &&
+          strspn(path, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-") == n;
+}
+
+/** Whether @p why (a reason from the gateway's settings) is shown: short and
+ *  printable. */
+static inline bool coding_check_why_shown(const char *why) {
+   const size_t n = why ? strlen(why) : 0;
+   for (size_t i = 0; i < n; i++) {
+      if ((unsigned char)why[i] < 0x20 || why[i] == 0x7f) {
+         return false;
+      }
+   }
+   return n > 0 && n <= CODING_CHECK_WHY_MAX;
+}
+
+/** Whether changed file @p f of a gateway changes listing is one to check (an
+ *  older gateway called it `protected`). */
+static inline bool coding_file_check(struct json_object *f) {
+   return json_object_get_boolean(json_object_object_get(f, "to_check")) ||
+          json_object_get_boolean(json_object_object_get(f, "protected"));
+}
+
 /** The gateway lists at most this many of a task's commits (its COMMITS_CAP). */
 #define CODING_COMMITS_LISTED 100
 

@@ -1445,39 +1445,64 @@ def test_store_upgrades_a_v1_database(tmp_path):
    assert s.task("t1")["pr_title"] is None and s.task("t1")["pr_head"] is None
 
 
-def test_protected_patterns():
-   from agent_gateway.repos import is_protected
-   pats = [".github/**", "CLAUDE.md", "**/install.sh", "scripts/install*",
-           "src/tools/coding_agent_*"]
+def test_check_patterns():
+   from agent_gateway.repos import check_why
+   pats = [{"path": ".github/**", "why": "CI"}, {"path": "CLAUDE.md", "why": ""},
+           {"path": "**/install.sh", "why": ""}, {"path": "scripts/install*", "why": ""},
+           {"path": "src/tools/coding_agent_*", "why": ""}]
    for p in (".github/workflows/ci.yml", "CLAUDE.md", "install.sh", "dawn_satellite/install.sh",
              "scripts/install.sh", "scripts/install-deps", "src/tools/coding_agent_tool.c"):
-      assert is_protected(p, pats), p
+      assert check_why(p, pats) is not None, p
    for p in ("docs/CLAUDE.md", "scripts/lib/install.txt", "src/tools/coding_agent/x.c",
              "github/x", "src/tools/coding_agent_x/y.c"):
-      assert not is_protected(p, pats), p
+      assert check_why(p, pats) is None, p
+   assert check_why(".github/x", pats) == "CI" and check_why("CLAUDE.md", pats) == ""
+   # The first matching pattern with a reason gives it; only reasonless ones: "".
+   both = [{"path": "src/**", "why": ""}, {"path": "src/auth/**", "why": "logins"}]
+   assert check_why("src/auth/a.c", both) == "logins" and check_why("src/x.c", both) == ""
+   from agent_gateway.repos import check_mark
+   assert check_mark(["a", "src/auth/b.c"], both) == {"to_check": True, "why": "logins"}
+   assert check_mark(["src/x.c"], both) == {"to_check": True}
+   assert check_mark(["docs/x"], both) == {"to_check": False}
    # A newline (or any control character) can't hide a path; it is flagged itself.
-   assert is_protected(".github/workflows/a\nb.yml", pats)
-   assert is_protected("docs/a\nb.md", pats)
+   assert check_why(".github/workflows/a\nb.yml", pats) == "a control character in its name"
+   assert check_why("docs/a\nb.md", pats) == "a control character in its name"
 
 
-def test_repo_protected_list_default_and_checked(tmp_path, monkeypatch):
+def test_repo_check_list_default_and_checked(tmp_path, monkeypatch, caplog):
    from agent_gateway import config
-   monkeypatch.setenv("AGENT_GATEWAY_TOKEN", "t" * 32)
    p = tmp_path / "g.toml"
-   p.write_text('[[repos]]\nname = "a"\nurl = "u"\n[[repos]]\nname = "b"\nurl = "u"\n'
-                'protected = ["x/**"]\n')
-   c = config.load(str(p))
-   assert c.repos["a"]["protected"] == config.DEFAULT_PROTECTED
-   assert c.repos["b"]["protected"] == ["x/**"]
-   monkeypatch.setenv("AGENT_GATEWAY_TOKEN", "t" * 32)
-   p.write_text('[[repos]]\nname = "a"\nurl = "u"\nprotected = "x"\n')
-   with pytest.raises(ValueError):
-      config.load(str(p))
-   for bad in ('"/CLAUDE.md"', '".github/"'):
+
+   def load(text):
       monkeypatch.setenv("AGENT_GATEWAY_TOKEN", "t" * 32)
-      p.write_text(f'[[repos]]\nname = "a"\nurl = "u"\nprotected = [{bad}]\n')
+      p.write_text('[[repos]]\nname = "a"\nurl = "u"\n' + text)
+      caplog.clear()
+      return config.load(str(p)).repos["a"]["check"]
+   assert load("") == config.DEFAULT_CHECK
+   assert config.DEFAULT_CHECK[0] == {"path": ".github/**",
+                                      "why": "CI, which runs with the repo's secrets"}
+   # A string has no reason; a table carries one.
+   assert load('check = ["x/**", { path = "y", why = "because" }]\n') == [
+      {"path": "x/**", "why": ""}, {"path": "y", "why": "because"}]
+   assert not caplog.records
+   # The old key still works, with a warning naming the new one.
+   assert load('protected = ["x/**"]\n') == [{"path": "x/**", "why": ""}]
+   assert len(caplog.records) == 1 and "now called check" in caplog.records[0].getMessage()
+   # Both set: check wins, with a warning.
+   assert load('check = ["y"]\nprotected = ["x/**"]\n') == [{"path": "y", "why": ""}]
+   assert len(caplog.records) == 1 and "both set" in caplog.records[0].getMessage()
+   # A long reason is cut, with a warning.
+   got = load(f'check = [{{ path = "y", why = "{"w" * 200}" }}]\n')
+   assert got == [{"path": "y", "why": "w" * config.WHY_CAP}] and len(caplog.records) == 1
+   # Control characters in a reason become spaces.
+   assert load('check = [{ path = "y", why = "a\\nb\\tc" }]\n') == [{"path": "y",
+                                                                     "why": "a b c"}]
+   for bad in ('check = "x"', 'check = ["/CLAUDE.md"]', 'check = [".github/"]',
+               'check = [{ why = "w" }]', 'check = [{ path = "y", reason = "w" }]',
+               'check = [{ path = "y", why = 3 }]', 'protected = "x"',
+               'protected = ["/x"]'):
       with pytest.raises(ValueError):
-         config.load(str(p))
+         load(bad + "\n")
 
 
 def test_mirror_clone_collect(tmp_path, service_umask):
@@ -1493,7 +1518,8 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    (home / "work").mkdir(parents=True)
    gitconfig = tmp_path / "gitconfig"
    gitconfig.write_text("")
-   repos = Repos({"r": {"url": str(src), "base": "main", "protected": ["g"]}},
+   repos = Repos({"r": {"url": str(src), "base": "main",
+                        "check": [{"path": "g", "why": "a reason"}]}},
                  str(tmp_path / "mirrors"),
                  str(home / "work"), [], str(home), str(gitconfig))
    wt = asyncio.run(repos.prepare("r", "main", "agent/aaaa0001-x", "aaaa0001"))
@@ -1516,7 +1542,7 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    out = asyncio.run(repos.collect("r", "aaaa0001", "agent/aaaa0001-x", "main"))
    assert [c.split(" ", 1)[1] for c in out["commits"]] == ["agent work"]
    assert "1 file changed" in out["diffstat"] and out["uncommitted"] == 1
-   assert out["protected"] == ["g"] and out["protected_count"] == 1
+   assert out["to_check"] == [{"path": "g", "why": "a reason"}] and out["to_check_count"] == 1
    assert git("-C", str(tmp_path / "mirrors/r.git"), "log", "-1", "--format=%s",
               "refs/agent/aaaa0001") == "agent work"
    from agent_gateway.github import GitError
@@ -1526,7 +1552,7 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    # The viewer reads the collected branch in the mirror.
    ch = asyncio.run(repos.changes("r", "aaaa0001", "main"))
    assert [f["path"] for f in ch["files"]] == ["g"] and ch["files"][0]["added"] == 1
-   assert ch["files"][0]["protected"] is True
+   assert ch["files"][0]["to_check"] is True and ch["files"][0]["why"] == "a reason"
    assert [c["subject"] for c in ch["commits"]] == ["agent work"]
    diff = asyncio.run(repos.file("r", "aaaa0001", "main", "g", "diff"))
    assert "+y" in diff["text"]
@@ -1568,7 +1594,7 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    asyncio.run(repos.collect("r", "aaaa0001", "agent/aaaa0001-x", "main"))
    assert asyncio.run(repos.file("r", "aaaa0001", "main", "lock.json", "new"))["too_large"]
    import agent_gateway.repos as repos_mod
-   cap, repos_mod.FILES_CAP = repos_mod.FILES_CAP, 1  # cut to one: the protected file stays
+   cap, repos_mod.FILES_CAP = repos_mod.FILES_CAP, 1  # cut to one: the file to check stays
    try:
       ch = asyncio.run(repos.changes("r", "aaaa0001", "main"))
    finally:
@@ -2179,7 +2205,7 @@ def test_read_tools_never_reach_hidden_directories():
 
 def test_changes_lists_paths_only_the_history_has(tmp_path, service_umask):
    """A push publishes every commit, so paths its commits touched that the net diff
-   doesn't show are listed (and checked against the protected patterns), and any CI
+   doesn't show are listed (and checked against the files to check), and any CI
    workflow path anywhere in the work is flagged."""
    src = tmp_path / "src"
    src.mkdir()
@@ -2192,7 +2218,8 @@ def test_changes_lists_paths_only_the_history_has(tmp_path, service_umask):
    (home / "work").mkdir(parents=True)
    gitconfig = tmp_path / "gitconfig"
    gitconfig.write_text("")
-   repos = Repos({"r": {"url": str(src), "base": "main", "protected": ["keys/**"]}},
+   repos = Repos({"r": {"url": str(src), "base": "main",
+                        "check": [{"path": "keys/**", "why": ""}]}},
                  str(tmp_path / "mirrors"), str(home / "work"), [], str(home), str(gitconfig))
    wt = asyncio.run(repos.prepare("r", "main", "agent/aaaa0002-x", "aaaa0002"))
    w = tmp_path / "home/work/aaaa0002"
@@ -2210,9 +2237,9 @@ def test_changes_lists_paths_only_the_history_has(tmp_path, service_umask):
    asyncio.run(repos.collect("r", "aaaa0002", "agent/aaaa0002-x", "main"))
    ch = asyncio.run(repos.changes("r", "aaaa0002", "main"))
    assert [f["path"] for f in ch["files"]] == ["f -> f2"]
-   assert ch["history_only"] == [{"path": "keys/k", "protected": True},  # protected first
-                                 {"path": "kept", "protected": False},
-                                 {"path": "scratch", "protected": False}]
+   assert ch["history_only"] == [{"path": "keys/k", "to_check": True},  # files to check first
+                                 {"path": "kept", "to_check": False},
+                                 {"path": "scratch", "to_check": False}]
    assert ch["workflows"] is False
    # A workflow added and taken out again still went up with the commits.
    (w / ".github/workflows").mkdir(parents=True)
@@ -2224,7 +2251,8 @@ def test_changes_lists_paths_only_the_history_has(tmp_path, service_umask):
    asyncio.run(repos.collect("r", "aaaa0002", "agent/aaaa0002-x", "main"))
    ch = asyncio.run(repos.changes("r", "aaaa0002", "main"))
    assert ch["workflows"] is True
-   assert {"path": ".github/workflows/ci.yml", "protected": True} in ch["history_only"]
+   assert {"path": ".github/workflows/ci.yml", "to_check": True,
+           "why": "CI, which runs with the repo's secrets"} in ch["history_only"]
 
 
 class Publishing(FakeRepos):

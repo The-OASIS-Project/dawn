@@ -778,7 +778,7 @@
    font-size: 0.75rem;
 }
 
-/* A protected path as written (case and all): not a .dawn-badge (uppercase). */
+/* A file to check before publishing, as written (case and all): not a .dawn-badge (uppercase). */
 .coding-path {
    display: inline-block;
    margin: 0 0.25rem 0.25rem 0;
