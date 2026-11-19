@@ -100,7 +100,7 @@ typedef struct {
  * @brief Session entry from list response.
  */
 typedef struct {
-   char token_prefix[9];
+   char token_prefix[ADMIN_SESSION_PREFIX_LEN + 1];
    char username[64];
    int64_t created_at;
    int64_t last_activity;
@@ -192,7 +192,8 @@ admin_resp_code_t admin_client_list_sessions(int fd, admin_session_callback_t ca
  * @param fd             Socket file descriptor.
  * @param admin_user     Admin username for authorization.
  * @param admin_password Admin password for authorization.
- * @param token_prefix   8-character token prefix to revoke.
+ * @param token_prefix   ADMIN_SESSION_PREFIX_LEN-character token prefix to revoke
+ *                       (as `session list` prints it).
  *
  * @return Response code from daemon.
  */

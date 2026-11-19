@@ -560,10 +560,11 @@ int auth_db_delete_session(const char *token);
  * @brief Delete a session by token prefix
  *
  * Finds and deletes the session matching the 16-character token prefix.
- * Returns AUTH_DB_NOT_FOUND if no matching session exists.
+ * Returns AUTH_DB_NOT_FOUND if no matching session exists, and
+ * AUTH_DB_DUPLICATE (deleting nothing) if more than one session shares it.
  *
  * @param prefix 16-character token prefix
- * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, or AUTH_DB_FAILURE
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND, AUTH_DB_DUPLICATE, or AUTH_DB_FAILURE
  */
 int auth_db_delete_session_by_prefix(const char *prefix);
 

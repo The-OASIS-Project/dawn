@@ -558,7 +558,7 @@ static int print_session_callback(const admin_session_entry_t *session, void *ct
    char last_active[32];
    format_relative_time(session->last_activity, last_active, sizeof(last_active));
 
-   printf("  %-10s %-16s %-18s %s\n", session->token_prefix, session->username,
+   printf("  %-16s %-16s %-18s %s\n", session->token_prefix, session->username,
           session->ip_address[0] ? session->ip_address : "(local)", last_active);
 
    pctx->count++;
@@ -572,8 +572,8 @@ static int cmd_session_list(void) {
    }
 
    printf("\nActive Sessions:\n");
-   printf("  %-10s %-16s %-18s %s\n", "Token", "User", "IP Address", "Last Active");
-   printf("  ---------- ---------------- ------------------ -----------\n");
+   printf("  %-16s %-16s %-18s %s\n", "Token", "User", "IP Address", "Last Active");
+   printf("  ---------------- ---------------- ------------------ -----------\n");
 
    session_list_print_ctx_t ctx = { .count = 0 };
    admin_resp_code_t resp = admin_client_list_sessions(fd, print_session_callback, &ctx);
@@ -591,6 +591,11 @@ static int cmd_session_list(void) {
 static int cmd_session_revoke(const char *token_or_user, int is_user_mode) {
    if (!token_or_user || strlen(token_or_user) == 0) {
       fprintf(stderr, "Error: Token prefix or username is required\n");
+      return 1;
+   }
+   if (!is_user_mode && strlen(token_or_user) != ADMIN_SESSION_PREFIX_LEN) {
+      fprintf(stderr, "Error: Token prefix must be the %d characters 'session list' shows\n",
+              ADMIN_SESSION_PREFIX_LEN);
       return 1;
    }
 

@@ -28,6 +28,7 @@
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -293,9 +294,11 @@ int auth_db_delete_session_by_prefix(const char *prefix) {
 
    AUTH_DB_LOCK_OR_FAIL();
 
-   /* Find full token matching prefix (use SUBSTR for exact matching, not LIKE)
+   /* Find full token matching prefix (use SUBSTR for exact matching, not LIKE).
+    * LIMIT 2 so a prefix shared by two logins is refused, never resolved to
+    * whichever row came first.
     * Note: SQL substr length must match AUTH_TOKEN_PREFIX_LEN (16) */
-   const char *find_sql = "SELECT token FROM sessions WHERE substr(token, 1, 16) = ? LIMIT 1";
+   const char *find_sql = "SELECT token FROM sessions WHERE substr(token, 1, 16) = ? LIMIT 2";
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(s_db.db, find_sql, -1, &stmt, NULL);
    if (rc != SQLITE_OK) {
@@ -315,12 +318,19 @@ int auth_db_delete_session_by_prefix(const char *prefix) {
       return AUTH_DB_NOT_FOUND;
    }
 
-   /* Get full token and delete it */
-   const char *full_token = (const char *)sqlite3_column_text(stmt, 0);
+   /* Copy the full token: the next step invalidates the column pointer. */
+   const char *col = (const char *)sqlite3_column_text(stmt, 0);
+   char *full_token = col ? strdup(col) : NULL;
+   rc = sqlite3_step(stmt);
+   sqlite3_finalize(stmt);
    if (!full_token) {
-      sqlite3_finalize(stmt);
       AUTH_DB_UNLOCK();
       return AUTH_DB_FAILURE;
+   }
+   if (rc == SQLITE_ROW) {
+      free(full_token);
+      AUTH_DB_UNLOCK();
+      return AUTH_DB_DUPLICATE;
    }
 
    /* Delete the session */
@@ -328,7 +338,7 @@ int auth_db_delete_session_by_prefix(const char *prefix) {
    sqlite3_bind_text(s_db.stmt_delete_session, 1, full_token, -1, SQLITE_TRANSIENT);
    rc = sqlite3_step(s_db.stmt_delete_session);
    sqlite3_reset(s_db.stmt_delete_session);
-   sqlite3_finalize(stmt);
+   free(full_token);
 
    AUTH_DB_UNLOCK();
 
