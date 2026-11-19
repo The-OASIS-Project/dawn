@@ -21,8 +21,8 @@
  * owner/repo or an HTTPS git URL).  'add' only stages the import and reads it
  * back; nothing is cloned or indexed until the user's reply confirms it
  * ('confirm_add'), which hands it to code_project_import() (clone + code-graph
- * index on the service's worker).  Link-local, delete and global imports stay
- * with the operator (WebUI / dawn-admin).
+ * index on the service's worker).  Linked local checkouts, delete and global
+ * imports stay with the operator (WebUI / dawn-admin).
  */
 
 #include "tools/code_project_tool.h"
@@ -191,12 +191,18 @@ static void name_from_repo(const char *repo, size_t n, char *out, size_t out_len
  * A GitHub repo in any form a person copies (owner/repo, github.com/owner/repo,
  * a web URL of any page under the repo, its HTTPS or SSH clone address) becomes
  * https://github.com/owner/repo; any other https URL is kept as given, for the
- * import's host allowlist to decide.  False when it names no repository. */
+ * import's host allowlist to decide.  A GitHub web URL under /tree/ also gives
+ * what follows it in @p tree ("main/src", "feature/x"): a branch, maybe with a
+ * folder after it, which only the remote's branches can tell apart.  False when
+ * it names no repository. */
 static bool cp_resolve_repo(const char *in,
                             char *url,
                             size_t url_len,
                             char *name,
-                            size_t name_len) {
+                            size_t name_len,
+                            char *tree,
+                            size_t tree_len) {
+   tree[0] = '\0';
    static const char *const gh_prefixes[] = {
       "https://github.com/",    "http://github.com/", "https://www.github.com/",
       "http://www.github.com/", "github.com/",        "www.github.com/",
@@ -253,6 +259,21 @@ static bool cp_resolve_repo(const char *in,
          return false;
       }
       name_from_repo(repo, rn, name, name_len);
+      static const char tree_seg[] = "/tree/";
+      if (!shorthand && strncmp(repo + rn, tree_seg, sizeof(tree_seg) - 1) == 0) {
+         const char *t = repo + rn + sizeof(tree_seg) - 1;
+         size_t tn = strcspn(t, "?#");
+         while (tn > 0 && t[tn - 1] == '/') {
+            tn--;
+         }
+         /* Only a branch's length of it matters: with @p tree one past the
+          * longest branch, a cut never ends exactly where a chosen branch does. */
+         if (tn >= tree_len) {
+            tn = tree_len - 1;
+         }
+         memcpy(tree, t, tn);
+         tree[tn] = '\0';
+      }
       return true;
    }
 
@@ -273,9 +294,9 @@ static bool cp_resolve_repo(const char *in,
    return true;
 }
 
-static void cp_branch_phrase(const char *branch, char *out, size_t out_len) {
+static void cp_branch_phrase(const char *branch, bool from_url, char *out, size_t out_len) {
    if (branch[0] != '\0') {
-      snprintf(out, out_len, "branch '%s'", branch);
+      snprintf(out, out_len, "branch '%s'%s", branch, from_url ? ", from the URL" : "");
    } else {
       snprintf(out, out_len, "its default branch");
    }
@@ -293,7 +314,8 @@ static char *cp_add_request(int64_t uid, const char *value, const turn_origin_t 
 
    char url[CODE_PROJECT_URL_MAX];
    char derived[CODE_PROJECT_NAME_MAX];
-   if (!cp_resolve_repo(given, url, sizeof(url), derived, sizeof(derived))) {
+   char tree[CODE_PROJECT_BRANCH_MAX + 1];
+   if (!cp_resolve_repo(given, url, sizeof(url), derived, sizeof(derived), tree, sizeof(tree))) {
       return strdup(TOOL_RESULT_ERROR_MARK "Give the repository in 'url' as owner/repo (a GitHub "
                                            "repository) or as its https:// git URL.");
    }
@@ -308,8 +330,22 @@ static char *cp_add_request(int64_t uid, const char *value, const turn_origin_t 
       return strdup(msg);
    }
    /* Asking the user to approve a clone that can't happen wastes their yes:
-    * a typo'd or private repository is caught here (the worker probes again). */
-   if (code_project_git_remote_probe(url) != SUCCESS) {
+    * a typo'd or private repository is caught here (the worker probes again).
+    * A /tree/ URL with no branch given names the branch to track; looking it up
+    * among the remote's branches proves the repository exists too. */
+   const bool from_url = branch[0] == '\0' && tree[0] != '\0';
+   const int found = from_url ? code_project_git_remote_branch_for_path(url, tree, branch,
+                                                                        sizeof(branch))
+                              : code_project_git_remote_probe(url);
+   if (found == CODE_GIT_NO_SUCH_BRANCH ||
+       (found == SUCCESS && from_url && code_project_git_branch_valid(branch) != SUCCESS)) {
+      snprintf(msg, sizeof(msg),
+               TOOL_RESULT_ERROR_MARK "No branch of %s matches '%s' from the URL. Ask the user "
+                                      "which branch to track and give it in 'branch'.",
+               url, tree);
+      return strdup(msg);
+   }
+   if (found != SUCCESS) {
       snprintf(msg, sizeof(msg),
                TOOL_RESULT_ERROR_MARK "No public repository was found at %s (or its host isn't "
                                       "reachable). Check the owner and repository name.",
@@ -333,8 +369,8 @@ static char *cp_add_request(int64_t uid, const char *value, const turn_origin_t 
       return tool_pending_stage_refusal(src, "code project import");
    }
 
-   char which[CODE_PROJECT_BRANCH_MAX + 16];
-   cp_branch_phrase(branch, which, sizeof(which));
+   char which[CODE_PROJECT_BRANCH_MAX + 32];
+   cp_branch_phrase(branch, from_url, which, sizeof(which));
    snprintf(msg, sizeof(msg),
             "Ready to add %s (%s) as the code project '%s': DAWN will clone it and index it into "
             "the code graph, visible to this user only. Nothing has been cloned yet. Ask the user "
@@ -376,15 +412,12 @@ static char *cp_confirm_add(int64_t uid, const char *value, const turn_origin_t 
    turn_origin_note_answered(session_get_command_context(), p.hdr.origin.turn_number);
 
    char msg[CP_MSG_MAX];
-   const char *why = code_project_import_refusal(uid, p.url, p.name, p.branch);
-   if (why != NULL) {
-      snprintf(msg, sizeof(msg), TOOL_RESULT_ERROR_MARK "Couldn't add '%s': %s", p.name, why);
-      return strdup(msg);
-   }
    int64_t id = 0;
-   if (code_project_import(uid, p.url, p.name, p.branch, false, &id) != SUCCESS) {
-      return strdup(TOOL_RESULT_ERROR_MARK "DAWN is busy with other code-project work right now. "
-                                           "Try adding it again in a few minutes.");
+   const char *why = NULL;
+   if (code_project_import(uid, p.url, p.name, p.branch, false, &id, &why) != SUCCESS) {
+      snprintf(msg, sizeof(msg), TOOL_RESULT_ERROR_MARK "Couldn't add '%s': %s", p.name,
+               why ? why : "the import was refused.");
+      return strdup(msg);
    }
    OLOG_INFO("code_project: user %lld added '%s' from %s", (long long)uid, p.name, p.url);
    snprintf(msg, sizeof(msg),
@@ -418,8 +451,8 @@ static int code_project_describe_call(const char *action,
    if (pending_slots_find(&s_pending_slots, &origin, tool_get_current_user_id(), CP_ADD_PENDING, id,
                           pending_slots_now(), &slot) == PENDING_FOUND) {
       const cp_add_pending_t *p = (const cp_add_pending_t *)slot;
-      char which[CODE_PROJECT_BRANCH_MAX + 16];
-      cp_branch_phrase(p->branch, which, sizeof(which));
+      char which[CODE_PROJECT_BRANCH_MAX + 32];
+      cp_branch_phrase(p->branch, false, which, sizeof(which));
       n = snprintf(out, out_len, "clone %s (%s) as the code project '%s' and index it", p->url,
                    which, p->name);
       *valid_for_sec = pending_slots_valid_for(&s_pending_slots, slot, pending_slots_now());
@@ -497,8 +530,9 @@ static const treg_param_t s_params[] = {
    },
    {
        .name = "branch",
-       .description = "Optional for add: the branch to track (default: the repository's "
-                      "default branch)",
+       .description = "Optional for add: the branch to track. Without it, a github.com "
+                      ".../tree/<branch> URL's branch is used, else the repository's default "
+                      "branch",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,

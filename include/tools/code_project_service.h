@@ -58,6 +58,8 @@ const char *code_project_import_refusal(int64_t requester_user_id,
  * @param branch            Branch to clone, or NULL/"" for the remote HEAD.
  * @param global            Make the project visible to all users.
  * @param project_id_out    On SUCCESS, the new project id.
+ * @param reason_out        Optional (may be NULL): on FAILURE, a static sentence
+ *                          for the user saying why; NULL on SUCCESS.
  * @return SUCCESS or FAILURE (refused by code_project_import_refusal(), or the
  *         job queue is full).
  */
@@ -66,7 +68,8 @@ int code_project_import(int64_t requester_user_id,
                         const char *desired_name,
                         const char *branch,
                         bool global,
-                        int64_t *project_id_out);
+                        int64_t *project_id_out,
+                        const char **reason_out);
 
 /**
  * @brief Link an existing local git checkout (no clone) and queue an index.

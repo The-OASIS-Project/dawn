@@ -32,7 +32,7 @@ what it is, how to set it up, and how to use it.
    source_root = "/var/lib/dawn/source"   # where imported repos are cloned
    import_user_required = "admin"          # "" = any user, "admin" = operator-only
    allowed_host_pattern = "([a-z0-9-]+\\.)?(github\\.com|gitlab\\.com|codeberg\\.org)"
-   # For link-local (section 4) only:
+   # For linked local checkouts (section 4) only:
    # allowed_local_roots = ["/home/you/code"]
    ```
    Restart the daemon. If cbm isn't connected, a clone will succeed but indexing
@@ -42,7 +42,7 @@ what it is, how to set it up, and how to use it.
 
 ## 2. Two ways to add a project
 
-| | **Import** (clone a remote) | **Link local** (existing checkout) |
+| | **Import** (clone a remote) | **Linked local checkout** (existing checkout) |
 |---|---|---|
 | Source | an HTTPS git URL | a path already on disk |
 | DAWN clones it? | yes, into `source_root/<name>` | no — reads your working tree in place |
@@ -73,9 +73,14 @@ the code-graph index in the background. If you change the subject first, ask aga
 Once the project is `ready`, ask Friday to make it active and ask about its code.
 
 - The project gets the repo's name (`socket.io` becomes `socket-io`) unless you
-  give one. Ask for a branch to track a branch other than the default.
+  give one.
+- The project tracks the repo's default branch, unless you name a branch or paste
+  a URL under `/tree/<branch>`. DAWN looks the branch up among the repo's own
+  branches, so `/tree/feature/x` tracks `feature/x` and `/tree/main/src` tracks
+  `main`. A branch you name wins over the URL's, and the read-back always says
+  which branch it will track.
 - A project added this way belongs to you and is never shared with other users.
-  Shared (global) projects and link-local stay in the WebUI and `dawn-admin`.
+  Shared (global) projects and linked local checkouts stay in the WebUI and `dawn-admin`.
 - With the default `import_user_required = "admin"`, only admins can add projects
   this way, the same rule as the WebUI.
 - Only a live conversation can add a project. A background job or scheduled task
@@ -126,10 +131,10 @@ tree** — only the registration is removed.
 
 ---
 
-## 4. Link-local: permissions & the cbm sandbox
+## 4. Linked local checkouts: permissions & the cbm sandbox
 
 Linking a local repo means **cbm reads its file contents**, and those contents reach
-the LLM. So link-local is admin-only, gated to `allowed_local_roots`, and needs two
+the LLM. So linking local checkouts is admin-only, gated to `allowed_local_roots`, and needs two
 things set up:
 
 1. **Config** — list the parent directories you'll link under. Set it in the WebUI

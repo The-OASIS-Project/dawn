@@ -621,15 +621,22 @@ int code_project_import(int64_t requester_user_id,
                         const char *desired_name,
                         const char *branch,
                         bool global,
-                        int64_t *project_id_out) {
+                        int64_t *project_id_out,
+                        const char **reason_out) {
    if (project_id_out != NULL) {
       *project_id_out = 0; /* no row exists until the worker confirms the repo */
+   }
+   if (reason_out != NULL) {
+      *reason_out = NULL;
    }
    const char *why = code_project_import_refusal(requester_user_id, source_url, desired_name,
                                                  branch);
    if (why != NULL) {
       OLOG_WARNING("code_project: import of '%s' rejected: %s", desired_name ? desired_name : "",
                    why);
+      if (reason_out != NULL) {
+         *reason_out = why;
+      }
       return FAILURE;
    }
    /* An import with no owning user (operator/CLI path, requester 0) must be
@@ -655,7 +662,13 @@ int code_project_import(int64_t requester_user_id,
    }
    job.user_id = requester_user_id;
    job.global = global;
-   return enqueue_job(&job);
+   if (enqueue_job(&job) != SUCCESS) {
+      if (reason_out != NULL) {
+         *reason_out = "DAWN is busy with other code-project work. Try again in a few minutes.";
+      }
+      return FAILURE;
+   }
+   return SUCCESS;
 }
 
 int code_project_link(int64_t requester_user_id,

@@ -39,11 +39,16 @@
 
 /* --- the import service ------------------------------------------------------ */
 
-static const char *g_refusal;         /* code_project_import_refusal's answer */
-static const char *g_confirm_refusal; /* its answer once a preview has been made */
+static const char *g_refusal;        /* code_project_import_refusal's answer (the preview) */
+static const char *g_import_refusal; /* code_project_import's refusal reason (the confirm) */
 static int g_nrefusal_checks;
 static bool g_repo_exists;
 static char g_probed[CODE_PROJECT_URL_MAX];
+static int g_nprobes;    /* code_project_git_remote_probe calls */
+static int g_nbranch_ls; /* code_project_git_remote_branch_for_path calls */
+static char g_tree[128]; /* the path it was asked about */
+/* The remote's branches. */
+static const char *const g_branches[] = { "main", "feature/x", "release/1.0", NULL };
 
 static int g_nimports;
 static char g_imp_url[CODE_PROJECT_URL_MAX];
@@ -57,7 +62,8 @@ const char *code_project_import_refusal(int64_t requester_user_id,
                                         const char *desired_name,
                                         const char *branch) {
    (void)requester_user_id, (void)source_url, (void)desired_name, (void)branch;
-   return g_nrefusal_checks++ == 0 ? g_refusal : g_confirm_refusal;
+   g_nrefusal_checks++;
+   return g_refusal;
 }
 
 int code_project_import(int64_t requester_user_id,
@@ -65,20 +71,56 @@ int code_project_import(int64_t requester_user_id,
                         const char *desired_name,
                         const char *branch,
                         bool global,
-                        int64_t *project_id_out) {
+                        int64_t *project_id_out,
+                        const char **reason_out) {
+   *project_id_out = 0;
+   if (reason_out) {
+      *reason_out = g_import_refusal;
+   }
+   if (g_import_refusal) {
+      return FAILURE;
+   }
    g_nimports++;
    g_imp_user = requester_user_id;
    snprintf(g_imp_url, sizeof(g_imp_url), "%s", source_url);
    snprintf(g_imp_name, sizeof(g_imp_name), "%s", desired_name);
    snprintf(g_imp_branch, sizeof(g_imp_branch), "%s", branch ? branch : "");
    g_imp_global = global;
-   *project_id_out = 0;
    return SUCCESS;
 }
 
 int code_project_git_remote_probe(const char *url) {
+   g_nprobes++;
    snprintf(g_probed, sizeof(g_probed), "%s", url);
    return g_repo_exists ? SUCCESS : FAILURE;
+}
+
+/* As the real one: the longest of g_branches the path is, or starts with. */
+int code_project_git_remote_branch_for_path(const char *url,
+                                            const char *path,
+                                            char *branch_out,
+                                            size_t branch_len) {
+   g_nbranch_ls++;
+   snprintf(g_probed, sizeof(g_probed), "%s", url);
+   snprintf(g_tree, sizeof(g_tree), "%s", path);
+   branch_out[0] = '\0';
+   if (!g_repo_exists) {
+      return FAILURE;
+   }
+   size_t best = 0;
+   for (int i = 0; g_branches[i]; i++) {
+      const size_t bl = strlen(g_branches[i]);
+      if (bl > best && bl < branch_len && strncmp(path, g_branches[i], bl) == 0 &&
+          (path[bl] == '\0' || path[bl] == '/')) {
+         snprintf(branch_out, branch_len, "%s", g_branches[i]);
+         best = bl;
+      }
+   }
+   return best ? SUCCESS : CODE_GIT_NO_SUCH_BRANCH;
+}
+
+int code_project_git_branch_valid(const char *branch) {
+   return branch && branch[0] ? SUCCESS : FAILURE;
 }
 
 /* --- the project DB (list / set_active / status are not under test) ---------- */
@@ -177,10 +219,13 @@ static char *confirm(unsigned id) {
 
 void setUp(void) {
    g_refusal = NULL;
-   g_confirm_refusal = NULL;
+   g_import_refusal = NULL;
    g_nrefusal_checks = 0;
    g_repo_exists = true;
    g_probed[0] = '\0';
+   g_nprobes = 0;
+   g_nbranch_ls = 0;
+   g_tree[0] = '\0';
    g_nimports = 0;
    g_imp_url[0] = g_imp_name[0] = g_imp_branch[0] = '\0';
    g_imp_user = 0;
@@ -348,13 +393,92 @@ static void test_a_missing_repo_is_never_staged(void) {
  * not imported. */
 static void test_confirm_rechecks_the_import(void) {
    const unsigned id = add_ok("::url::o/r");
-   g_confirm_refusal = "A code project with that name already exists.";
+   const int checks = g_nrefusal_checks;
+   g_import_refusal = "A code project with that name already exists.";
    g_turn++;
    char *r = confirm(id);
    TEST_ASSERT_TRUE(is_error(r));
-   TEST_ASSERT_NOT_NULL(strstr(r, "already exists"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "already exists")); /* the import's own reason */
    free(r);
    TEST_ASSERT_EQUAL_INT(0, g_nimports);
+   /* The confirm asks the import once; it doesn't check separately first. */
+   TEST_ASSERT_EQUAL_INT(checks, g_nrefusal_checks);
+}
+
+/* A /tree/ URL with no branch given tracks the branch it names: the longest
+ * of the remote's branches the path starts with, so a branch with a '/' and a
+ * folder under a branch both resolve.  The read-back names it. */
+static void test_tree_url_names_the_branch(void) {
+   static const struct {
+      const char *given;
+      const char *branch;
+   } cases[] = {
+      { "https://github.com/o/r/tree/feature/x", "feature/x" },
+      { "https://github.com/o/r/tree/main/src/lib/", "main" },
+      { "https://github.com/o/r/tree/release/1.0/docs?plain=1", "release/1.0" },
+      { "github.com/o/r/tree/main", "main" },
+   };
+   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      setUp();
+      char packed[160];
+      snprintf(packed, sizeof(packed), "::url::%s", cases[i].given);
+      char *preview = call("add", packed);
+      TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
+      char named[64];
+      snprintf(named, sizeof(named), "branch '%s', from the URL", cases[i].branch);
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(preview, named), preview);
+      const unsigned id = preview_id(preview);
+      free(preview);
+      TEST_ASSERT_EQUAL_STRING("https://github.com/o/r", g_probed);
+      TEST_ASSERT_EQUAL_INT(0, g_nprobes); /* the branch lookup proved it exists */
+      g_turn++;
+      free(confirm(id));
+      TEST_ASSERT_EQUAL_STRING_MESSAGE(cases[i].branch, g_imp_branch, cases[i].given);
+      TEST_ASSERT_EQUAL_STRING("https://github.com/o/r", g_imp_url);
+   }
+}
+
+/* An explicit branch wins over the URL's, and the remote isn't asked about it. */
+static void test_explicit_branch_beats_the_url(void) {
+   char *preview = call("add", "::url::https://github.com/o/r/tree/feature/x::branch::dev");
+   TEST_ASSERT_FALSE(is_error(preview));
+   TEST_ASSERT_NOT_NULL(strstr(preview, "(branch 'dev')"));
+   const unsigned id = preview_id(preview);
+   free(preview);
+   TEST_ASSERT_EQUAL_INT(0, g_nbranch_ls);
+   TEST_ASSERT_EQUAL_INT(1, g_nprobes);
+   g_turn++;
+   free(confirm(id));
+   TEST_ASSERT_EQUAL_STRING("dev", g_imp_branch);
+}
+
+/* A /tree/ path no branch matches is told, with nothing staged; an
+ * unreachable repo still reads as missing. */
+static void test_tree_url_without_a_matching_branch(void) {
+   char *r = call("add", "::url::https://github.com/o/r/tree/gone/src");
+   TEST_ASSERT_TRUE(is_error(r));
+   TEST_ASSERT_NOT_NULL(strstr(r, "'gone/src'"));
+   TEST_ASSERT_NOT_NULL(strstr(r, "'branch'"));
+   free(r);
+   g_repo_exists = false;
+   r = call("add", "::url::https://github.com/o/r/tree/main");
+   TEST_ASSERT_TRUE(is_error(r));
+   TEST_ASSERT_NOT_NULL(strstr(r, "No public repository"));
+   free(r);
+   g_turn++;
+   for (unsigned id = 1; id < 64; id++) {
+      free(confirm(id));
+   }
+   TEST_ASSERT_EQUAL_INT(0, g_nimports);
+}
+
+/* Other GitHub pages (issues, blob) aren't a branch: the default branch. */
+static void test_other_pages_take_the_default_branch(void) {
+   const unsigned id = add_ok("::url::https://github.com/o/r/issues/12");
+   TEST_ASSERT_EQUAL_INT(0, g_nbranch_ls);
+   g_turn++;
+   free(confirm(id));
+   TEST_ASSERT_EQUAL_STRING("", g_imp_branch);
 }
 
 /* Not from a live conversation (a job, an automated turn): neither stages
@@ -417,6 +541,10 @@ int main(void) {
    RUN_TEST(test_a_refused_import_is_never_staged);
    RUN_TEST(test_a_missing_repo_is_never_staged);
    RUN_TEST(test_confirm_rechecks_the_import);
+   RUN_TEST(test_tree_url_names_the_branch);
+   RUN_TEST(test_explicit_branch_beats_the_url);
+   RUN_TEST(test_tree_url_without_a_matching_branch);
+   RUN_TEST(test_other_pages_take_the_default_branch);
    RUN_TEST(test_needs_a_live_conversation);
    RUN_TEST(test_describe_confirm_add);
    RUN_TEST(test_kinds);

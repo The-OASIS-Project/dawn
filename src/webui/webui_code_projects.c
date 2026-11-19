@@ -169,7 +169,7 @@ void handle_code_projects_import(ws_connection_t *conn, json_object *payload) {
     * If the repo turns out not to exist, a code_project_import_failed event
     * toasts the user; if it exists, code_project_status_changed adds the row. */
    int64_t id = 0;
-   if (code_project_import(conn->auth_user_id, url, name, branch, global, &id) != SUCCESS) {
+   if (code_project_import(conn->auth_user_id, url, name, branch, global, &id, NULL) != SUCCESS) {
       send_action_result(conn, "code_projects_import_response", false,
                          "Import rejected (invalid name/URL, duplicate, or blocked host).");
       return;

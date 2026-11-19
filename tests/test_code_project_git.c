@@ -213,6 +213,35 @@ static void test_fetch_checkout_branch(void) {
    TEST_ASSERT_TRUE(path_exists(feat));
 }
 
+/* The branch a /tree/ path names: the longest remote branch the path is, or
+ * starts with at a '/'; none matching and an unreachable remote are told apart. */
+static void test_remote_branch_for_path(void) {
+   add_branch_commit(g_src, "dev", "DEV.md");
+   add_branch_commit(g_src, "release/1.0", "REL.md");
+   add_branch_commit(g_src, "release/1.0-rc", "RC.md");
+   char br[64];
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         code_project_git_remote_branch_for_path(g_src, "dev", br, sizeof(br)));
+   TEST_ASSERT_EQUAL_STRING("dev", br);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, code_project_git_remote_branch_for_path(g_src, "dev/src/lib", br,
+                                                                          sizeof(br)));
+   TEST_ASSERT_EQUAL_STRING("dev", br);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, code_project_git_remote_branch_for_path(g_src, "release/1.0/docs",
+                                                                          br, sizeof(br)));
+   TEST_ASSERT_EQUAL_STRING("release/1.0", br);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, code_project_git_remote_branch_for_path(g_src, "release/1.0-rc",
+                                                                          br, sizeof(br)));
+   TEST_ASSERT_EQUAL_STRING("release/1.0-rc", br);
+   /* "devel" is not under "dev": a match ends at a '/'. */
+   TEST_ASSERT_EQUAL_INT(CODE_GIT_NO_SUCH_BRANCH,
+                         code_project_git_remote_branch_for_path(g_src, "devel", br, sizeof(br)));
+   TEST_ASSERT_EQUAL_STRING("", br);
+   TEST_ASSERT_EQUAL_INT(CODE_GIT_NO_SUCH_BRANCH,
+                         code_project_git_remote_branch_for_path(g_src, "release", br, sizeof(br)));
+   TEST_ASSERT_EQUAL_INT(FAILURE, code_project_git_remote_branch_for_path(
+                                      "/nonexistent/definitely/not/a/repo", "dev", br, sizeof(br)));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_clone_success);
@@ -220,5 +249,6 @@ int main(void) {
    RUN_TEST(test_remove);
    RUN_TEST(test_open_validate);
    RUN_TEST(test_fetch_checkout_branch);
+   RUN_TEST(test_remote_branch_for_path);
    return UNITY_END();
 }
