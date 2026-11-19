@@ -49,7 +49,8 @@ int auth_db_mcp_revoke(int64_t user_id, const char *server_alias);
 int auth_db_mcp_check_access(int64_t user_id, const char *server_alias, bool *allowed_out);
 
 /**
- * @brief Look up a user's admin flag (used by the bridge dangerous-tool gate).
+ * @brief Look up a user's admin flag (used by the bridge dangerous-tool gate
+ *        and the code-project import gate).
  * @param is_admin_out Set on AUTH_DB_SUCCESS (false if the user does not exist).
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE.
  */

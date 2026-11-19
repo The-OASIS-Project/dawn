@@ -103,7 +103,7 @@ int handle_code_proj_import(int client_fd, const char *payload, uint16_t payload
    /* requester 0: operator import (imported_by recorded as NULL). The remote is
     * probed on the worker thread before a row is created, so no id is returned
     * here — the project appears in `list` once the repo is confirmed to exist. */
-   if (code_project_import(0, url, name, branch[0] ? branch : NULL, global, &id) != SUCCESS) {
+   if (code_project_import(0, url, name, branch[0] ? branch : NULL, global, &id, NULL) != SUCCESS) {
       return send_text_response(client_fd, ADMIN_RESP_FAILURE,
                                 "Import rejected (invalid name/URL, duplicate, or disabled)");
    }

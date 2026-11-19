@@ -39,6 +39,7 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_mcp.h"
 #include "config/dawn_config.h"
 #include "dawn_error.h"
 #include "logging.h"
@@ -578,17 +579,66 @@ void code_project_service_shutdown(void) {
    code_project_git_global_shutdown(); /* libgit2 refcount: once per process (sec-S6) */
 }
 
+/* See the header.  valid_url's SSRF guard (url_is_blocked) resolves the URL's
+ * host with getaddrinfo(), so this blocks on a DNS lookup for any hostname. */
+const char *code_project_import_refusal(int64_t requester_user_id,
+                                        const char *source_url,
+                                        const char *desired_name,
+                                        const char *branch) {
+   const dawn_config_t *cfg = config_get();
+   if (cfg == NULL || !cfg->code_projects.enabled) {
+      return "Code projects are turned off on this DAWN.";
+   }
+   /* import_user_required = "admin" gates a user's imports to admins. A requester
+    * of 0 is the operator (dawn-admin), who may always import. */
+   if (requester_user_id > 0 && strcmp(cfg->code_projects.import_user_required, "admin") == 0) {
+      bool is_admin = false;
+      if (auth_db_mcp_user_is_admin(requester_user_id, &is_admin) != AUTH_DB_SUCCESS || !is_admin) {
+         return "Adding code projects is restricted to administrators on this DAWN.";
+      }
+   }
+   if (!valid_name(desired_name)) {
+      return "That project name isn't usable: it must start with a letter or digit and use "
+             "only letters, digits, '-' and '_' (at most 63).";
+   }
+   if (!valid_url(source_url, cfg->code_projects.allowed_host_pattern)) {
+      return "Only HTTPS repository URLs on this DAWN's allowed git hosts can be added.";
+   }
+   /* A specified branch is interpolated into git refspecs — validate it (libgit2
+    * ref-name rules) rather than trust caller input. Empty/NULL = remote HEAD. */
+   if (branch != NULL && branch[0] != '\0' && code_project_git_branch_valid(branch) != SUCCESS) {
+      return "That branch name isn't valid.";
+   }
+   /* Fast-path duplicate check for immediate feedback; the worker's db_create
+    * UNIQUE(name) is the authoritative guard against a concurrent duplicate. */
+   code_project_t existing;
+   if (code_project_db_get_by_name(desired_name, &existing) == AUTH_DB_SUCCESS) {
+      return "A code project with that name already exists.";
+   }
+   return NULL;
+}
+
 int code_project_import(int64_t requester_user_id,
                         const char *source_url,
                         const char *desired_name,
                         const char *branch,
                         bool global,
-                        int64_t *project_id_out) {
+                        int64_t *project_id_out,
+                        const char **reason_out) {
    if (project_id_out != NULL) {
       *project_id_out = 0; /* no row exists until the worker confirms the repo */
    }
-   const dawn_config_t *cfg = config_get();
-   if (cfg == NULL || !cfg->code_projects.enabled) {
+   if (reason_out != NULL) {
+      *reason_out = NULL;
+   }
+   const char *why = code_project_import_refusal(requester_user_id, source_url, desired_name,
+                                                 branch);
+   if (why != NULL) {
+      OLOG_WARNING("code_project: import of '%s' rejected: %s", desired_name ? desired_name : "",
+                   why);
+      if (reason_out != NULL) {
+         *reason_out = why;
+      }
       return FAILURE;
    }
    /* An import with no owning user (operator/CLI path, requester 0) must be
@@ -599,20 +649,6 @@ int code_project_import(int64_t requester_user_id,
    if (requester_user_id <= 0) {
       global = true;
    }
-   if (!valid_name(desired_name)) {
-      OLOG_WARNING("code_project: invalid project name");
-      return FAILURE;
-   }
-   if (!valid_url(source_url, cfg->code_projects.allowed_host_pattern)) {
-      return FAILURE;
-   }
-   /* Fast-path duplicate check for immediate feedback; the worker's db_create
-    * UNIQUE(name) is the authoritative guard against a concurrent duplicate. */
-   code_project_t existing;
-   if (code_project_db_get_by_name(desired_name, &existing) == AUTH_DB_SUCCESS) {
-      OLOG_WARNING("code_project: duplicate name '%s'", desired_name);
-      return FAILURE;
-   }
 
    /* Defer the remote-existence probe + clone to the worker thread. The caller
     * here is the WebUI lws service thread, which carries live audio and must not
@@ -620,12 +656,6 @@ int code_project_import(int64_t requester_user_id,
     * the repo exists (so a typo'd URL leaves no phantom error row). */
    cp_job_t job;
    memset(&job, 0, sizeof(job));
-   /* A specified branch is interpolated into git refspecs — validate it (libgit2
-    * ref-name rules) rather than trust caller input. Empty/NULL = remote HEAD. */
-   if (branch != NULL && branch[0] != '\0' && code_project_git_branch_valid(branch) != SUCCESS) {
-      OLOG_WARNING("code_project: invalid branch name");
-      return FAILURE;
-   }
    job.op = CP_JOB_IMPORT;
    snprintf(job.source_url, sizeof(job.source_url), "%s", source_url);
    snprintf(job.name, sizeof(job.name), "%s", desired_name);
@@ -634,7 +664,13 @@ int code_project_import(int64_t requester_user_id,
    }
    job.user_id = requester_user_id;
    job.global = global;
-   return enqueue_job(&job);
+   if (enqueue_job(&job) != SUCCESS) {
+      if (reason_out != NULL) {
+         *reason_out = "DAWN is busy with other code-project work. Try again in a few minutes.";
+      }
+      return FAILURE;
+   }
+   return SUCCESS;
 }
 
 int code_project_link(int64_t requester_user_id,
