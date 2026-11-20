@@ -232,7 +232,18 @@ class TestSwitchToLocalMidTurn(SelectionCase):
     local_model = ""
     secrets = '[secrets]\nopenai_api_key = "sk-live-test"\n'
 
-    def test_the_rest_of_the_turn_names_no_cloud_model(self):
+    def test_2_reopened_it_reports_no_model(self):
+        # test_1 left it local with no model of its own: a restore must not send a
+        # placeholder back as a model name.
+        rows = self.inst.db("SELECT llm_type, model FROM conversations WHERE id = ?", (self.conv,))
+        self.assertEqual(rows, [("local", "")])
+        other = Client(WEBUI_PORT, ADMIN_USER, self.inst.password)
+        self.addCleanup(other.close)
+        settings = other.load_conversation(self.conv)["llm_settings"]
+        self.assertEqual(settings.get("llm_type"), "local", settings)
+        self.assertEqual(settings.get("model"), "", settings)
+
+    def test_1_the_rest_of_the_turn_names_no_cloud_model(self):
         self.cloud.script(tool_call("switch_llm", {"target": "local"}))
         self.local.script(text("Local now."))
         nonce, t = self.ask("Switch to local.")

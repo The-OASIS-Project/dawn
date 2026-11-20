@@ -884,7 +884,9 @@ static json_object *build_conv_llm_settings_json(const conversation_t *conv) {
                           conv->reasoning_effort, &row);
    llm_resolved_config_t r = { 0 };
    llm_resolve_config(&row, &r); /* refused: still what is selected */
-   const char *model = webui_effective_model_name(&r);
+   /* A local conversation's own model, or none (the server's own): never the
+    * display placeholder, which a restore would send back as a model name. */
+   const char *model = r.type == LLM_LOCAL ? r.model : webui_effective_model_name(&r);
 
    json_object *llm = json_object_new_object();
    json_object_object_add(llm, "follows_default",
