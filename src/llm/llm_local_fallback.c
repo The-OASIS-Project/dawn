@@ -24,6 +24,7 @@
 #include "llm/llm_local_fallback.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -75,14 +76,12 @@ char *llm_local_fallback_with_note(char *answer) {
    if (!answer || answer[0] == '\0') {
       return answer;
    }
-   const size_t note_len = strlen(LLM_LOCAL_FALLBACK_NOTE);
-   const size_t answer_len = strlen(answer);
-   char *noted = malloc(note_len + answer_len + 1);
+   const size_t size = strlen(LLM_LOCAL_FALLBACK_NOTE) + strlen(answer) + 1;
+   char *noted = malloc(size);
    if (!noted) {
       return answer;
    }
-   memcpy(noted, LLM_LOCAL_FALLBACK_NOTE, note_len);
-   memcpy(noted + note_len, answer, answer_len + 1);
+   snprintf(noted, size, "%s%s", LLM_LOCAL_FALLBACK_NOTE, answer);
    free(answer);
    return noted;
 }

@@ -924,10 +924,14 @@
     * so confirm the persist with a toast (the only visible success signal) and
     * re-fetch the authoritative list. */
    function handleSetChannelLlmResponse(payload) {
-      if (payload && payload.success && typeof DawnToast !== 'undefined') {
-         DawnToast.show('Channel settings updated', 'success');
+      if (typeof DawnToast !== 'undefined' && payload) {
+         if (payload.success) {
+            DawnToast.show('Channel settings updated', 'success');
+         } else {
+            DawnToast.show(payload.error || 'Channel settings not saved', 'error');
+         }
       }
-      requestList();
+      requestList(); // what's stored, either way
    }
 
    /* =============================================================================

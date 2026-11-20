@@ -360,9 +360,9 @@ void handle_get_config(ws_connection_t *conn) {
 /* [llm.cloud] provider: empty (not selected) or one of the providers config_validate
  * accepts. */
 static bool cloud_provider_setting_valid(const char *provider) {
-   return provider[0] == '\0' || strcmp(provider, "openai") == 0 ||
-          strcmp(provider, "claude") == 0 || strcmp(provider, "gemini") == 0 ||
-          strcmp(provider, "openrouter") == 0;
+   return provider != NULL && (provider[0] == '\0' || strcmp(provider, "openai") == 0 ||
+                               strcmp(provider, "claude") == 0 || strcmp(provider, "gemini") == 0 ||
+                               strcmp(provider, "openrouter") == 0);
 }
 
 /* The provider a set_config payload names, or NULL when it names none. */

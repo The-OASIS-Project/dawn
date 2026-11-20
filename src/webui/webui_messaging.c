@@ -308,6 +308,22 @@ void handle_reenable_channel(ws_connection_t *conn, struct json_object *payload)
  * conv_db_get / conv_db_update_llm_settings (both filter on user_id).
  * ============================================================================= */
 
+/* set_channel_llm_response: success, or the reason it wasn't saved (the panel
+ * shows it and reloads the channel's stored settings). */
+static void send_channel_llm_result(ws_connection_t *conn, int64_t conv_id, const char *error) {
+   struct json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("set_channel_llm_response"));
+   struct json_object *payload_out = json_object_new_object();
+   json_object_object_add(payload_out, "success", json_object_new_boolean(error == NULL));
+   json_object_object_add(payload_out, "conversation_id", json_object_new_int64(conv_id));
+   if (error) {
+      json_object_object_add(payload_out, "error", json_object_new_string(error));
+   }
+   json_object_object_add(response, "payload", payload_out);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
+
 /* Empty (inherit) or a member of the NULL-terminated allowlist. */
 static bool set_channel_llm_field_valid(const char *value, const char *const *allowed) {
    if (!value || value[0] == '\0') {
@@ -397,7 +413,7 @@ void handle_set_channel_llm(ws_connection_t *conn, struct json_object *payload) 
    char refused[LLM_SELECTION_REASON_MAX];
    if (cfg.type != LLM_UNDEFINED && llm_selection_problem(&cfg, refused, sizeof(refused)) != 0) {
       conv_free(&conv);
-      send_error_impl(conn->wsi, "INVALID_PARAM", refused);
+      send_channel_llm_result(conn, conv_id, refused);
       return;
    }
    /* tools_mode column is retired (dead) — pass empty. */
@@ -406,19 +422,11 @@ void handle_set_channel_llm(ws_connection_t *conn, struct json_object *payload) 
    conv_free(&conv);
 
    if (rc != AUTH_DB_SUCCESS) {
-      send_error_impl(conn->wsi, "SERVICE_ERROR", "Failed to update channel model");
+      send_channel_llm_result(conn, conv_id, "Failed to update channel model");
       return;
    }
    messaging_engine_apply_conv_llm(conv_id, &cfg); /* its next message runs on it */
-
-   struct json_object *response = json_object_new_object();
-   json_object_object_add(response, "type", json_object_new_string("set_channel_llm_response"));
-   struct json_object *payload_out = json_object_new_object();
-   json_object_object_add(payload_out, "success", json_object_new_boolean(1));
-   json_object_object_add(payload_out, "conversation_id", json_object_new_int64(conv_id));
-   json_object_object_add(response, "payload", payload_out);
-   send_json_response(conn, response);
-   json_object_put(response);
+   send_channel_llm_result(conn, conv_id, NULL);
 
    OLOG_INFO(
        "WebUI: user %d set LLM for messaging conversation %lld (type=%s provider=%s model=%s)",

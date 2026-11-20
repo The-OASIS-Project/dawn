@@ -1827,9 +1827,13 @@ bool session_llm_follows_default(session_t *session) {
    if (!session) {
       return true;
    }
-   session_llm_config_t cfg;
-   session_get_llm_config_raw(session, &cfg);
-   return cfg.type == LLM_UNDEFINED;
+   /* The session's own selection, never a running turn's (always concrete), so a
+    * conversation first saved during a turn isn't stamped with the default's
+    * values as if they were a pick. */
+   pthread_mutex_lock(&session->llm_config_mutex);
+   const bool follows = session->llm_config.type == LLM_UNDEFINED;
+   pthread_mutex_unlock(&session->llm_config_mutex);
+   return follows;
 }
 
 int session_turn_selection_problem(session_t *session, char *reason, size_t reason_len) {
