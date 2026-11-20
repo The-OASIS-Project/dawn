@@ -527,11 +527,32 @@ static int album_tracks(const music_search_filters_t *f,
    return SUCCESS;
 }
 
+/* Whether @p q scores at least @p min against some track's album name and artist */
+static bool names_album(const music_search_result_t *tracks,
+                        int count,
+                        const char *artist,
+                        const char *q,
+                        int min) {
+   char named[AUDIO_METADATA_STRING_MAX * 2 + 2];
+   for (int i = 0; i < count; i++) {
+      snprintf(named, sizeof(named), "%s %s", tracks[i].album,
+               artist && artist[0] ? artist : tracks[i].artist);
+      if (music_rank_field_quality(named, q) >= min) {
+         return true;
+      }
+   }
+   return false;
+}
+
 /*
- * Where an album starts for a query given with it: track 1 when there is none or
- * its words are all in the album's name and artist ("Abbey Road by The
- * Beatles"); else the track whose title it names best, a close one included
- * ("Here Come the Sun").  FAILURE when no title shares a word with it.
+ * Where albums start for a query given with them: track 1 when there is none or
+ * every word of it is in an album's name and artist ("Abbey Road by The
+ * Beatles"); else the track whose title holds all its words ("Here Come the
+ * Sun" starts "Here Comes the Sun"); else track 1 when a word of it is in an
+ * album's name or artist ("the deluxe Abbey Road").  Words with a ':'
+ * ("source:plex") aren't album or title words.  FAILURE when nothing matches
+ * ("Yesterday" on Abbey Road).  A title holds a query's words even when one is
+ * only part of a title word ("come" in "comes"), not when it's misspelled.
  */
 static int album_start(const music_search_result_t *tracks,
                        int count,
@@ -539,13 +560,7 @@ static int album_start(const music_search_result_t *tracks,
                        const char *artist,
                        int *start_out) {
    *start_out = 0;
-   if (!title || !title[0]) {
-      return SUCCESS;
-   }
-   char named[AUDIO_METADATA_STRING_MAX * 2 + 2];
-   snprintf(named, sizeof(named), "%s %s", tracks[0].album,
-            artist && artist[0] ? artist : tracks[0].artist);
-   if (music_rank_field_quality(named, title) >= MUSIC_RANK_FIELD_MIN) {
+   if (!title || !title[0] || names_album(tracks, count, artist, title, MUSIC_RANK_FIELD_MIN)) {
       return SUCCESS;
    }
    int best = 0;
@@ -556,7 +571,23 @@ static int album_start(const music_search_result_t *tracks,
          *start_out = i;
       }
    }
-   return best > 0 ? SUCCESS : FAILURE;
+   if (best > 0) {
+      return SUCCESS;
+   }
+   char words[MUSIC_PATH_MAX];
+   safe_strncpy(words, title, sizeof(words));
+   char *save = NULL;
+   bool plain = false;
+   for (char *w = strtok_r(words, " ,", &save); w; w = strtok_r(NULL, " ,", &save)) {
+      if (strchr(w, ':')) {
+         continue;
+      }
+      plain = true;
+      if (names_album(tracks, count, artist, w, 1)) {
+         return SUCCESS;
+      }
+   }
+   return plain ? FAILURE : SUCCESS;
 }
 
 /* play / enqueue album:'X': the whole album, replacing the queue (and
