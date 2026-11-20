@@ -938,6 +938,13 @@ int music_db_album_find(const char *album,
       }
       copies[albums].c.copies = 1;
       copies[albums].c.exact = want[0] && strcmp(copies[albums].name_key, want) == 0;
+      if (want[0] && !copies[albums].c.exact) {
+         /* "Greatest Hits - Tom Petty" asked for without an artist: the album's
+          * own artist comes off the name, as it does in the album's key */
+         char own[MUSIC_RANK_FOLD_MAX];
+         music_rank_album_key(album, copies[albums].c.artist, own, sizeof(own));
+         copies[albums].c.exact = strcmp(copies[albums].name_key, own) == 0;
+      }
       albums++;
    }
    if (albums > 1) {

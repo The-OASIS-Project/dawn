@@ -470,6 +470,9 @@ static void test_album_find_flat_folder(void) {
 
    TEST_ASSERT_EQUAL_INT(1, find_albums("Greatest Hits - Tom Petty", "Tom Petty", a, 4, NULL));
    TEST_ASSERT_TRUE(a[0].exact);
+   /* Asked for by its tag alone, without an artist */
+   TEST_ASSERT_EQUAL_INT(1, find_albums("Greatest Hits - Tom Petty", NULL, a, 4, NULL));
+   TEST_ASSERT_TRUE(a[0].exact);
 
    TEST_ASSERT_EQUAL_INT(1, find_albums("Damn The Torpedoes", NULL, a, 4, NULL));
    TEST_ASSERT_EQUAL_INT(2, a[0].track_count);
