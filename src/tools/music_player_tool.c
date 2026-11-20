@@ -548,20 +548,18 @@ static bool names_album(const music_search_result_t *tracks,
  * Where albums start for a query given with them: track 1 when there is none or
  * every word of it is in an album's name and artist ("Abbey Road by The
  * Beatles"); else the track whose title holds all its words ("Here Come the
- * Sun" starts "Here Comes the Sun"); else track 1 when a word of it is in an
- * album's name or artist ("the deluxe Abbey Road").  Words with a ':'
- * ("source:plex") aren't album or title words.  FAILURE when nothing matches
- * ("Yesterday" on Abbey Road).  A title holds a query's words even when one is
- * only part of a title word ("come" in "comes"), not when it's misspelled.
+ * Sun" starts "Here Comes the Sun"; a word may be part of a title word, but not
+ * misspelled).  False when a query names neither: the albums start at track 1,
+ * and the reply says so.
  */
-static int album_start(const music_search_result_t *tracks,
-                       int count,
-                       const char *title,
-                       const char *artist,
-                       int *start_out) {
+static bool album_start(const music_search_result_t *tracks,
+                        int count,
+                        const char *title,
+                        const char *artist,
+                        int *start_out) {
    *start_out = 0;
    if (!title || !title[0] || names_album(tracks, count, artist, title, MUSIC_RANK_FIELD_MIN)) {
-      return SUCCESS;
+      return true;
    }
    int best = 0;
    for (int i = 0; i < count; i++) {
@@ -571,23 +569,7 @@ static int album_start(const music_search_result_t *tracks,
          *start_out = i;
       }
    }
-   if (best > 0) {
-      return SUCCESS;
-   }
-   char words[MUSIC_PATH_MAX];
-   safe_strncpy(words, title, sizeof(words));
-   char *save = NULL;
-   bool plain = false;
-   for (char *w = strtok_r(words, " ,", &save); w; w = strtok_r(NULL, " ,", &save)) {
-      if (strchr(w, ':')) {
-         continue;
-      }
-      plain = true;
-      if (names_album(tracks, count, artist, w, 1)) {
-         return SUCCESS;
-      }
-   }
-   return plain ? FAILURE : SUCCESS;
+   return best > 0;
 }
 
 /* play / enqueue album:'X': the whole album, replacing the queue (and
@@ -624,24 +606,7 @@ static int album_to_queue(music_player_t *player,
    }
    strbuf_free(&reply);
    int start = 0;
-   if (album_start(tracks, count, title, f->artist, &start) != SUCCESS) {
-      /* A title the album doesn't have: say so rather than play track 1 */
-      if (result_out) {
-         char name[AUDIO_METADATA_STRING_MAX];
-         choice_text(tracks[0].album, name, sizeof(name));
-         strbuf_t sb;
-         strbuf_init(&sb, 256);
-         strbuf_appendf(&sb,
-                        TOOL_RESULT_ERROR_MARK "No track on the album '%s' matches '%s'. Nothing "
-                                               "changed.",
-                        name, title);
-         *result_out = strbuf_oom(&sb) ? strdup(TOOL_RESULT_ERROR_MARK "No track matched")
-                                       : strbuf_steal(&sb);
-         strbuf_free(&sb);
-      }
-      free(tracks);
-      return FAILURE;
-   }
+   bool matched = album_start(tracks, count, title, f->artist, &start);
 
    user_music_queue_t *uq = music_player_queue(player);
    char album[AUDIO_METADATA_STRING_MAX + 16];
@@ -678,11 +643,17 @@ static int album_to_queue(music_player_t *player,
    }
    music_open_result_t outcome = tool_start_track(player, first_path, start, for_model);
    if (result_out) {
-      char buf[AUDIO_METADATA_STRING_MAX + MUSIC_STRING_MAX + 200];
-      snprintf(buf, sizeof(buf), "Replaced queue with %s (%d track%s); #%d, %s, %s.", album, added,
-               added == 1 ? "" : "s", start + 1, first_title[0] ? first_title : "Unknown",
-               tool_outcome_phrase(outcome));
-      *result_out = result_with_footer(player, buf, for_model);
+      strbuf_t sb;
+      strbuf_init(&sb, 512);
+      strbuf_appendf(&sb, "Replaced queue with %s (%d track%s); #%d, %s, %s.", album, added,
+                     added == 1 ? "" : "s", start + 1, first_title[0] ? first_title : "Unknown",
+                     tool_outcome_phrase(outcome));
+      if (!matched) {
+         strbuf_appendf(&sb, " No track title matched '%s', so it starts at track 1.", title);
+      }
+      *result_out = strbuf_oom(&sb) ? strdup("Replaced queue")
+                                    : result_with_footer(player, sb.buf, for_model);
+      strbuf_free(&sb);
    }
    return tool_outcome_rc(outcome);
 }
