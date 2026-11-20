@@ -233,7 +233,7 @@ int mp3_decoder_seek(audio_decoder_t *dec, uint64_t sample_pos) {
  *
  * mpg123 provides strings as mpg123_string with separate data and size.
  */
-static void copy_mpg123_string(char *dst, size_t dst_size, mpg123_string *src) {
+static void copy_mpg123_string(char *dst, size_t dst_size, const mpg123_string *src) {
    if (!dst || dst_size == 0)
       return;
    if (!src || !src->p || src->fill == 0) {
@@ -557,6 +557,16 @@ static void mp3_normalize_genre(char *dst, size_t dst_size, mpg123_string *src) 
  *
  * @return Year, or 0 if none found
  */
+/* An ID3v2 text frame by id ("TPE2"), or NULL */
+static const mpg123_string *mp3_v2_text(const mpg123_id3v2 *v2, const char *id) {
+   for (size_t i = 0; v2 && v2->text && i < v2->texts; i++) {
+      if (memcmp(v2->text[i].id, id, 4) == 0 && v2->text[i].text.p && v2->text[i].text.fill > 0) {
+         return &v2->text[i].text;
+      }
+   }
+   return NULL;
+}
+
 static uint32_t mp3_extract_year_v2(mpg123_id3v2 *v2) {
    if (!v2 || !v2->text) {
       return 0;
@@ -639,6 +649,14 @@ int mp3_get_metadata(const char *path, audio_metadata_t *metadata) {
                mp3_normalize_genre(metadata->genre, AUDIO_GENRE_STRING_MAX, v2->genre);
             /* v2->year is NULL for ID3v2.4 (TDRC); scan raw text frames. */
             metadata->year = mp3_extract_year_v2(v2);
+            /* Album artist, track and disc ("3/12") have no mpg123 field */
+            const mpg123_string *t;
+            if ((t = mp3_v2_text(v2, "TPE2")) != NULL)
+               copy_mpg123_string(metadata->album_artist, AUDIO_METADATA_STRING_MAX, t);
+            if ((t = mp3_v2_text(v2, "TRCK")) != NULL)
+               metadata->track_no = audio_metadata_parse_number(t->p);
+            if ((t = mp3_v2_text(v2, "TPOS")) != NULL)
+               metadata->disc_no = audio_metadata_parse_number(t->p);
          }
 
          /* Fall back to ID3v1 for any missing fields.

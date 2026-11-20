@@ -26,6 +26,7 @@
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdbool.h>
+#include <time.h>
 
 #include "audio/music_db.h"
 
@@ -123,6 +124,32 @@ void music_db_populate_row(sqlite3_stmt *stmt, music_search_result_t *r);
  * @return SUCCESS or FAILURE
  */
 int music_db_register_functions(sqlite3 *db);
+
+/**
+ * @brief The album folder a local track's copy of its album is: the track's
+ *        folder, with a disc folder taken as the album's ("Album/Disc 2" and
+ *        "Album - Disc 2" are both "Album")
+ *
+ * @param out Receives the folder (NUL-terminated; empty with no '/')
+ * @param disc_out Receives the disc number the folder names, or 0
+ */
+void music_db_album_folder(const char *path, char *out, size_t cap, uint32_t *disc_out);
+
+/**
+ * @brief Insert or replace a local track's row from its tags (the scan's write)
+ *
+ * @param path  Full path of the file
+ * @param mtime Its modification time
+ * @param meta  Its tags
+ * @return SUCCESS or FAILURE. Caller holds g_music_db_mutex.
+ */
+int music_db_insert_track(const char *path, time_t mtime, const audio_metadata_t *meta);
+
+/** How many times the library has changed (music_db_library_changed()) */
+unsigned music_db_library_generation(void);
+
+/** Drop the cached album list. Caller holds g_music_db_mutex. */
+void music_db_album_cache_clear(void);
 
 #ifdef __cplusplus
 }

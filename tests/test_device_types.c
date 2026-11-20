@@ -192,6 +192,39 @@ static void test_match_music_play_value(void) {
    TEST_ASSERT_EQUAL_STRING("jazz", value);
 }
 
+/* "play the album X" is its own action, ahead of "play %value%" */
+static void test_match_music_play_album(void) {
+   const char *action = NULL;
+   char value[DEVICE_TYPE_MAX_VALUE] = { 0 };
+   bool ok = device_type_match_pattern(&DEVICE_TYPE_MUSIC, "play the album iron man", "music", NULL,
+                                       &action, value, sizeof(value));
+   TEST_ASSERT_TRUE(ok);
+   TEST_ASSERT_EQUAL_STRING("play_album", action);
+   TEST_ASSERT_EQUAL_STRING("iron man", value);
+
+   ok = device_type_match_pattern(&DEVICE_TYPE_MUSIC, "play album greatest hits", "music", NULL,
+                                  &action, value, sizeof(value));
+   TEST_ASSERT_TRUE(ok);
+   TEST_ASSERT_EQUAL_STRING("play_album", action);
+   TEST_ASSERT_EQUAL_STRING("greatest hits", value);
+
+   /* Commands around it keep their actions */
+   ok = device_type_match_pattern(&DEVICE_TYPE_MUSIC, "play next", "music", NULL, &action, value,
+                                  sizeof(value));
+   TEST_ASSERT_TRUE(ok);
+   TEST_ASSERT_EQUAL_STRING("next", action);
+   ok = device_type_match_pattern(&DEVICE_TYPE_MUSIC, "play albums by queen", "music", NULL,
+                                  &action, value, sizeof(value));
+   TEST_ASSERT_TRUE(ok);
+   TEST_ASSERT_EQUAL_STRING("play", action);
+
+   /* An album named in a plain "play X" stays a track search */
+   ok = device_type_match_pattern(&DEVICE_TYPE_MUSIC, "play greatest hits", "music", NULL, &action,
+                                  value, sizeof(value));
+   TEST_ASSERT_TRUE(ok);
+   TEST_ASSERT_EQUAL_STRING("play", action);
+}
+
 static void test_match_music_stop(void) {
    const char *action = NULL;
    char value[64] = "";
@@ -351,6 +384,7 @@ int main(void) {
    RUN_TEST(test_match_getter);
    RUN_TEST(test_match_music_next);
    RUN_TEST(test_match_music_play_value);
+   RUN_TEST(test_match_music_play_album);
    RUN_TEST(test_match_music_stop);
    RUN_TEST(test_match_trigger);
    RUN_TEST(test_match_trigger_with_please);

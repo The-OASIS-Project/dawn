@@ -1965,7 +1965,7 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
             ws_client_send_music_queue(m->ws, "list", NULL, -1);
          } else if (m->active_tab == MUSIC_TAB_LIBRARY && m->ws) {
             if (m->browse_type == MUSIC_BROWSE_NONE) {
-               ws_client_send_music_library(m->ws, "stats", NULL);
+               ws_client_send_music_library(m->ws, "stats", NULL, NULL);
             }
          }
       }
@@ -2172,7 +2172,7 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
             m->browse_type = MUSIC_BROWSE_NONE;
             m->scroll_offset = 0;
             if (m->ws)
-               ws_client_send_music_library(m->ws, "stats", NULL);
+               ws_client_send_music_library(m->ws, "stats", NULL, NULL);
             handled = true;
          }
 
@@ -2187,13 +2187,13 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
                if (x >= add_x) {
                   /* "+" tapped — add all tracks by this artist */
                   ws_client_send_music_queue_bulk(m->ws, "add_artist",
-                                                  m->browse_items[row_idx].name);
+                                                  m->browse_items[row_idx].name, NULL);
                   m->add_flash_row = row_idx;
                   m->add_flash_ms = SDL_GetTicks();
                } else {
                   /* Row tapped — drill into artist tracks */
                   ws_client_send_music_library(m->ws, "tracks_by_artist",
-                                               m->browse_items[row_idx].name);
+                                               m->browse_items[row_idx].name, NULL);
                   m->scroll_offset = 0;
                }
             } else if (m->browse_type == MUSIC_BROWSE_ALBUMS && row_idx >= 0 &&
@@ -2201,14 +2201,15 @@ bool ui_music_handle_tap(ui_music_t *m, int x, int y) {
                int add_x = m->panel_x + m->panel_w - 16 - ADD_BTN_SIZE;
                if (x >= add_x) {
                   /* "+" tapped — add all tracks from this album */
-                  ws_client_send_music_queue_bulk(m->ws, "add_album",
-                                                  m->browse_items[row_idx].name);
+                  ws_client_send_music_queue_bulk(m->ws, "add_album", m->browse_items[row_idx].name,
+                                                  m->browse_items[row_idx].artist);
                   m->add_flash_row = row_idx;
                   m->add_flash_ms = SDL_GetTicks();
                } else {
                   /* Row tapped — drill into album tracks */
                   ws_client_send_music_library(m->ws, "tracks_by_album",
-                                               m->browse_items[row_idx].name);
+                                               m->browse_items[row_idx].name,
+                                               m->browse_items[row_idx].artist);
                   m->scroll_offset = 0;
                }
             } else if ((m->browse_type == MUSIC_BROWSE_TRACKS ||

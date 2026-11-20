@@ -12,6 +12,18 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-11-20 — The music library is read again once
+
+**What changed.** DAWN now stores each track's album artist, track number and disc number, so
+it can play a whole album in order. The first library scan after the upgrade reads every local
+music file again, and the first Plex sync rewrites every Plex track.
+
+**What you need to do.** Nothing. On a large library the first scan takes longer than usual,
+with more disk activity; music plays meanwhile, and albums play in track order once the scan
+has finished.
+
+---
+
 ## 2026-11-20 — An API key is used only for the provider you selected
 
 **What changed.** For chat, DAWN no longer picks a cloud provider because its key is in

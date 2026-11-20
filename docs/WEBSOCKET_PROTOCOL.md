@@ -1574,6 +1574,10 @@ Control music playback.
     (index clamped into range); empty queue just re-echoes state
   - bare while **already playing** — re-echoes state (no-op)
 - Response: `music_state` (updated state)
+- `add_album` appends a whole album, in track order: `album_key` (from an `albums` browse)
+  plus `album` and `artist`, as the browse sent them. Keys change when the library is rescanned
+  or Plex syncs (each restart), so the server checks a key against `album` and otherwise looks
+  the album up by `album` and `artist`; a client may send those alone.
 
 #### `music_search`
 Search the music library.
@@ -1600,6 +1604,14 @@ Browse the music library (artists, albums, tracks).
 }
 ```
 Response: `music_library_response`
+
+Albums:
+- `type: "albums"` (with `offset`/`limit`) lists albums: an album artist plus an album name,
+  editions merged, with one entry for all its copies (formats, Plex). Each entry carries `key`
+  (a string id, valid until the next library rescan or Plex sync), `name`, `artist` and
+  `track_count`; `total_count` counts albums.
+- `type: "tracks_by_album"` returns an album's tracks in order (disc, track number), up to the
+  queue's size: `album_key`, or `album` (and optional `artist`) as for `add_album`.
 
 #### `music_queue`
 Manage the playback queue.

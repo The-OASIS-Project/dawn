@@ -321,6 +321,12 @@ static json_object *build_track_json(json_object *item) {
    json_object_object_add(track, "rating_key",
                           json_object_new_string(json_get_string(item, "ratingKey")));
 
+   /* Its album (one Plex album is one copy) and its place on it */
+   json_object_object_add(track, "album_key",
+                          json_object_new_string(json_get_string(item, "parentRatingKey")));
+   json_object_object_add(track, "track_no", json_object_new_int(json_get_int(item, "index")));
+   json_object_object_add(track, "disc_no", json_object_new_int(json_get_int(item, "parentIndex")));
+
    /* Store updatedAt timestamp (used as mtime for change detection in sync) */
    json_object_object_add(track, "updated_at",
                           json_object_new_int(json_get_int(item, "updatedAt")));

@@ -22,9 +22,13 @@
  */
 
 #include <string.h>
+#include <strings.h>
 
 #include "audio/audio_decoder.h"
 #include "utils/string_utils.h"
+
+/* Digits read from a track or disc number: real ones are small */
+#define AUDIO_METADATA_NUMBER_DIGITS 4
 
 void audio_metadata_append_genre(audio_metadata_t *metadata, const char *genre) {
    if (!metadata || !genre || !genre[0]) {
@@ -62,4 +66,74 @@ uint32_t audio_metadata_parse_year(const char *s) {
       }
    }
    return 0;
+}
+
+uint32_t audio_metadata_parse_number(const char *s) {
+   if (!s) {
+      return 0;
+   }
+   while (*s == ' ') {
+      s++;
+   }
+   uint32_t n = 0;
+   int digits = 0;
+   for (; *s >= '0' && *s <= '9' && digits < AUDIO_METADATA_NUMBER_DIGITS; s++, digits++) {
+      n = n * 10 + (uint32_t)(*s - '0');
+   }
+   return n;
+}
+
+void audio_metadata_take_vorbis_comment(audio_metadata_t *metadata, const char *entry, size_t len) {
+   if (!metadata || !entry || len == 0) {
+      return;
+   }
+   const char *eq = memchr(entry, '=', len);
+   if (!eq || eq == entry) {
+      return;
+   }
+   size_t key_len = (size_t)(eq - entry);
+   size_t value_len = len - key_len - 1;
+   if (value_len == 0) {
+      return;
+   }
+   char value[AUDIO_METADATA_STRING_MAX];
+   size_t copy = value_len < sizeof(value) - 1 ? value_len : sizeof(value) - 1;
+   memcpy(value, eq + 1, copy);
+   value[copy] = '\0';
+
+#define VORBIS_KEY(name) (key_len == sizeof(name) - 1 && strncasecmp(entry, name, key_len) == 0)
+   if (VORBIS_KEY("TITLE")) {
+      if (!metadata->title[0]) { /* a repeated tag: the first wins */
+         safe_strncpy(metadata->title, value, AUDIO_METADATA_STRING_MAX);
+      }
+   } else if (VORBIS_KEY("ARTIST")) {
+      if (!metadata->artist[0]) { /* a repeated tag: the first wins */
+         safe_strncpy(metadata->artist, value, AUDIO_METADATA_STRING_MAX);
+      }
+   } else if (VORBIS_KEY("ALBUM")) {
+      if (!metadata->album[0]) { /* a repeated tag: the first wins */
+         safe_strncpy(metadata->album, value, AUDIO_METADATA_STRING_MAX);
+      }
+   } else if (VORBIS_KEY("ALBUMARTIST") || VORBIS_KEY("ALBUM ARTIST") ||
+              VORBIS_KEY("ALBUM_ARTIST")) {
+      if (!metadata->album_artist[0]) { /* a repeated tag: the first wins */
+         safe_strncpy(metadata->album_artist, value, AUDIO_METADATA_STRING_MAX);
+      }
+   } else if (VORBIS_KEY("GENRE")) {
+      audio_metadata_append_genre(metadata, value);
+   } else if (VORBIS_KEY("DATE")) {
+      uint32_t year = audio_metadata_parse_year(value);
+      if (year) {
+         metadata->year = year; /* a full date wins over YEAR */
+      }
+   } else if (VORBIS_KEY("YEAR")) {
+      if (metadata->year == 0) {
+         metadata->year = audio_metadata_parse_year(value);
+      }
+   } else if (VORBIS_KEY("TRACKNUMBER")) {
+      metadata->track_no = audio_metadata_parse_number(value);
+   } else if (VORBIS_KEY("DISCNUMBER")) {
+      metadata->disc_no = audio_metadata_parse_number(value);
+   }
+#undef VORBIS_KEY
 }

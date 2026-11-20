@@ -26,10 +26,12 @@
 
 #include "audio/music_db.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -60,10 +62,16 @@
  * waits at most its busy timeout (5 s) */
 #define SCAN_YIELD_MS 200
 
+/** A disc number in a folder name ("Disc 2"): real ones are short */
+#define MUSIC_DB_DISC_DIGITS 3
+/** Characters searched back from the number for the disc word */
+#define MUSIC_DB_DISC_WORD_MAX 8
+
 /** Local-metadata extractor version. Bump when the local tag extraction changes
  *  what it stores so a one-time forced re-parse backfills existing rows. Stored
- *  in PRAGMA user_version. v1 = genre + year extraction (2026-09). */
-#define MUSIC_META_VERSION 1
+ *  in PRAGMA user_version. v1 = genre + year extraction (2026-09); v2 = album
+ *  artist, track and disc numbers (2026-10). */
+#define MUSIC_META_VERSION 2
 
 /* SQL statements */
 static const char *SQL_CREATE_TABLE = "CREATE TABLE IF NOT EXISTS music_metadata ("
@@ -83,8 +91,9 @@ static const char *SQL_CREATE_INDEX_TITLE =
 
 static const char *SQL_INSERT_OR_REPLACE =
     "INSERT OR REPLACE INTO music_metadata "
-    "(path, mtime, title, artist, album, duration_sec, genre, year) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+    "(path, mtime, title, artist, album, duration_sec, genre, year, album_id, album_artist, "
+    "track_no, disc_no) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
 static const char *SQL_SELECT_BY_PATH = "SELECT " MUSIC_ROW_COLS
                                         " FROM music_metadata WHERE path = ?";
@@ -125,26 +134,11 @@ static const char *SQL_LIST_ARTISTS_WITH_STATS =
     "ORDER BY artist COLLATE NOCASE "
     "LIMIT ? OFFSET ?";
 
-/* List albums with stats (track count, artist) - dedup applied before GROUP BY */
-static const char *SQL_LIST_ALBUMS_WITH_STATS = "SELECT album, "
-                                                "       COUNT(*) as track_count, "
-                                                "       MAX(artist) as artist "
-                                                "FROM music_metadata "
-                                                "WHERE album != '' " MUSIC_DEDUP_CLAUSE
-                                                "GROUP BY album "
-                                                "ORDER BY album COLLATE NOCASE "
-                                                "LIMIT ? OFFSET ?";
-
 /* Get tracks by artist (deduped) */
 static const char *SQL_GET_BY_ARTIST = "SELECT " MUSIC_ROW_COLS " FROM music_metadata "
                                        "WHERE artist = ? " MUSIC_DEDUP_CLAUSE
                                        "ORDER BY album COLLATE NOCASE, title COLLATE NOCASE "
                                        "LIMIT ?";
-
-/* Get tracks by album (deduped) */
-static const char *SQL_GET_BY_ALBUM = "SELECT " MUSIC_ROW_COLS " FROM music_metadata "
-                                      "WHERE album = ? " MUSIC_DEDUP_CLAUSE "ORDER BY path "
-                                      "LIMIT ?";
 
 /* =============================================================================
  * Module State
@@ -276,10 +270,107 @@ static time_t get_db_mtime(const char *path) {
    return mtime;
 }
 
-/**
- * @brief Insert or update a track in the database
- */
-static int insert_track(const char *path, time_t mtime, const audio_metadata_t *meta) {
+/* Bind an unsigned number, NULL when 0 (unknown) */
+static void bind_number(sqlite3_stmt *stmt, int index, uint32_t n) {
+   if (n) {
+      sqlite3_bind_int(stmt, index, (int)n);
+   } else {
+      sqlite3_bind_null(stmt, index);
+   }
+}
+
+/* Whether @p s starts, case-insensitively, with a disc word ("disc", "disk",
+ * "cd"); *len_out is its length */
+static bool disc_word(const char *s, size_t *len_out) {
+   static const char *const words[] = { "disc", "disk", "cd" };
+   for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+      size_t n = strlen(words[i]);
+      if (strncasecmp(s, words[i], n) == 0) {
+         *len_out = n;
+         return true;
+      }
+   }
+   return false;
+}
+
+/* The disc number a folder name ends with ("Disc 2", "CD1", "Album - Disc 2",
+ * "Album [Disk 2]", "Album (CD 1)"); *keep_out is how much of the name is the
+ * album's. 0 when it names no disc. */
+static uint32_t folder_disc(const char *name, size_t len, size_t *keep_out) {
+   size_t end = len;
+   if (end > 0 && (name[end - 1] == ')' || name[end - 1] == ']')) {
+      end--;
+   }
+   size_t digits_end = end;
+   while (end > 0 && name[end - 1] >= '0' && name[end - 1] <= '9') {
+      end--;
+   }
+   if (end == digits_end || digits_end - end > MUSIC_DB_DISC_DIGITS) {
+      return 0;
+   }
+   size_t digits = end;
+   while (end > 0 && (name[end - 1] == ' ' || name[end - 1] == '_' || name[end - 1] == '.' ||
+                      name[end - 1] == '-')) {
+      end--;
+   }
+   /* The disc word, as a whole word */
+   for (size_t w = end; w-- > 0;) {
+      size_t wlen = 0;
+      if (disc_word(name + w, &wlen) && w + wlen == end &&
+          (w == 0 || !isalnum((unsigned char)name[w - 1]))) {
+         size_t keep = w;
+         while (keep > 0 &&
+                (name[keep - 1] == ' ' || name[keep - 1] == '-' || name[keep - 1] == '(' ||
+                 name[keep - 1] == '[' || name[keep - 1] == '_')) {
+            keep--;
+         }
+         *keep_out = keep;
+         uint32_t n = 0;
+         for (size_t i = digits; i < digits_end; i++) {
+            n = n * 10 + (uint32_t)(name[i] - '0');
+         }
+         return n;
+      }
+      if (end - w > MUSIC_DB_DISC_WORD_MAX) {
+         break;
+      }
+   }
+   return 0;
+}
+
+void music_db_album_folder(const char *path, char *out, size_t cap, uint32_t *disc_out) {
+   *disc_out = 0;
+   if (cap == 0) {
+      return;
+   }
+   out[0] = '\0';
+   const char *slash = path ? strrchr(path, '/') : NULL;
+   if (!slash) {
+      return;
+   }
+   size_t dir_len = (size_t)(slash - path);
+   const char *last = path;
+   for (const char *p = path; p < slash; p++) {
+      if (*p == '/') {
+         last = p + 1;
+      }
+   }
+   size_t name_len = (size_t)(slash - last);
+   size_t keep = 0;
+   uint32_t disc = folder_disc(last, name_len, &keep);
+   if (disc) {
+      *disc_out = disc;
+      /* A whole "Disc 2" folder is its parent's; "Album - Disc 2" is "Album" */
+      dir_len = keep ? (size_t)(last - path) + keep : (last > path ? (size_t)(last - path) - 1 : 0);
+   }
+   if (dir_len >= cap) {
+      dir_len = cap - 1;
+   }
+   memcpy(out, path, dir_len);
+   out[dir_len] = '\0';
+}
+
+int music_db_insert_track(const char *path, time_t mtime, const audio_metadata_t *meta) {
    sqlite3_stmt *stmt = NULL;
    int rc;
 
@@ -302,6 +393,15 @@ static int insert_track(const char *path, time_t mtime, const audio_metadata_t *
    } else {
       sqlite3_bind_null(stmt, 8);
    }
+   /* Its album copy: the folder; a disc the folder names wins over the tag */
+   char album_id[MUSIC_DB_PATH_MAX];
+   uint32_t folder_disc_no = 0;
+   music_db_album_folder(path, album_id, sizeof(album_id), &folder_disc_no);
+   sqlite3_bind_text(stmt, 9, album_id[0] ? album_id : NULL, -1, SQLITE_STATIC);
+   sqlite3_bind_text(stmt, 10, meta->album_artist[0] ? meta->album_artist : NULL, -1,
+                     SQLITE_STATIC);
+   bind_number(stmt, 11, meta->track_no);
+   bind_number(stmt, 12, folder_disc_no ? folder_disc_no : meta->disc_no);
 
    rc = sqlite3_step(stmt);
    sqlite3_finalize(stmt);
@@ -310,7 +410,7 @@ static int insert_track(const char *path, time_t mtime, const audio_metadata_t *
       OLOG_ERROR("Failed to insert track: %s", sqlite3_errmsg(g_music_db));
       return FAILURE;
    }
-
+   music_db_library_changed();
    return SUCCESS;
 }
 
@@ -473,14 +573,14 @@ static void scan_directory_recursive(const char *dir_path,
             /* New file - parse and insert */
             audio_metadata_t meta = { 0 };
             audio_decoder_get_metadata(full_path, &meta);
-            if (insert_track(full_path, file_mtime, &meta) == 0) {
+            if (music_db_insert_track(full_path, file_mtime, &meta) == 0) {
                stats->files_added++;
             }
          } else if (file_mtime > db_mtime) {
             /* File changed - reparse and update */
             audio_metadata_t meta = { 0 };
             audio_decoder_get_metadata(full_path, &meta);
-            if (insert_track(full_path, file_mtime, &meta) == 0) {
+            if (music_db_insert_track(full_path, file_mtime, &meta) == 0) {
                stats->files_updated++;
             }
          } else {
@@ -502,6 +602,36 @@ static void scan_directory_recursive(const char *dir_path,
 /* =============================================================================
  * Public API Implementation
  * ============================================================================= */
+
+/* Local rows' album copies from their paths (g_music_db_mutex held, in the
+ * caller's transaction), so album play works while the re-scan that fills
+ * track numbers and album-artist tags runs */
+static void fill_album_folders(void) {
+   sqlite3_stmt *sel = NULL;
+   sqlite3_stmt *upd = NULL;
+   if (sqlite3_prepare_v2(
+           g_music_db, "SELECT id, path FROM music_metadata WHERE source = ? AND album_id IS NULL",
+           -1, &sel, NULL) != SQLITE_OK ||
+       sqlite3_prepare_v2(g_music_db, "UPDATE music_metadata SET album_id = ? WHERE id = ?", -1,
+                          &upd, NULL) != SQLITE_OK) {
+      OLOG_ERROR("Music database: can't fill album folders: %s", sqlite3_errmsg(g_music_db));
+      sqlite3_finalize(sel);
+      return;
+   }
+   sqlite3_bind_int(sel, 1, MUSIC_SOURCE_LOCAL);
+   while (sqlite3_step(sel) == SQLITE_ROW) {
+      char folder[MUSIC_DB_PATH_MAX];
+      uint32_t disc = 0;
+      music_db_album_folder((const char *)sqlite3_column_text(sel, 1), folder, sizeof(folder),
+                            &disc);
+      sqlite3_bind_text(upd, 1, folder[0] ? folder : NULL, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64(upd, 2, sqlite3_column_int64(sel, 0));
+      sqlite3_step(upd);
+      sqlite3_reset(upd);
+   }
+   sqlite3_finalize(sel);
+   sqlite3_finalize(upd);
+}
 
 int music_db_init(const char *db_path) {
    pthread_mutex_lock(&g_music_db_mutex);
@@ -568,6 +698,11 @@ int music_db_init(const char *db_path) {
          "ALTER TABLE music_metadata ADD COLUMN rating_key TEXT",
          "ALTER TABLE music_metadata ADD COLUMN sync_gen INTEGER DEFAULT 0",
          "ALTER TABLE music_metadata ADD COLUMN year INTEGER",
+         /* An album copy: a local album folder, or plex:<parentRatingKey> */
+         "ALTER TABLE music_metadata ADD COLUMN album_id TEXT",
+         "ALTER TABLE music_metadata ADD COLUMN album_artist TEXT",
+         "ALTER TABLE music_metadata ADD COLUMN track_no INTEGER",
+         "ALTER TABLE music_metadata ADD COLUMN disc_no INTEGER",
       };
       for (int i = 0; i < (int)(sizeof(migrations) / sizeof(migrations[0])); i++) {
          char *err = NULL;
@@ -585,6 +720,7 @@ int music_db_init(const char *db_path) {
    exec_sql("CREATE INDEX IF NOT EXISTS idx_music_genre ON music_metadata(genre)");
    exec_sql("CREATE INDEX IF NOT EXISTS idx_music_rating_key ON music_metadata(rating_key)");
    exec_sql("CREATE INDEX IF NOT EXISTS idx_music_year ON music_metadata(year)");
+   exec_sql("CREATE INDEX IF NOT EXISTS idx_music_album_id ON music_metadata(album_id)");
 
    /* Composite index for dedup subquery — single B-tree seek for NOT EXISTS check.
     * COLLATE NOCASE must match the dedup clause collation for index to be used. */
@@ -620,7 +756,7 @@ int music_db_init(const char *db_path) {
       }
       if (db_version < MUSIC_META_VERSION) {
          OLOG_INFO("Music metadata version %d < %d — forcing local re-scan to backfill "
-                   "genre/year (first scan will be slow)",
+                   "tags (first scan will be slow)",
                    db_version, MUSIC_META_VERSION);
          char update_sql[96];
          snprintf(update_sql, sizeof(update_sql),
@@ -631,6 +767,7 @@ int music_db_init(const char *db_path) {
           * between them can't leave the version bumped with rows un-reset. */
          exec_sql("BEGIN");
          exec_sql(update_sql);
+         fill_album_folders();
          exec_sql(pragma);
          exec_sql("COMMIT");
       }
@@ -651,9 +788,22 @@ void music_db_cleanup(void) {
       g_music_db = NULL;
    }
    g_music_db_initialized = false;
+   music_db_album_cache_clear();
+   music_db_library_changed(); /* a browse in flight mustn't keep its list */
 
    pthread_mutex_unlock(&g_music_db_mutex);
    OLOG_INFO("Music database closed");
+}
+
+/* Bumped by every write to music_metadata; the album list cache compares it */
+static atomic_uint s_library_generation;
+
+void music_db_library_changed(void) {
+   atomic_fetch_add(&s_library_generation, 1);
+}
+
+unsigned music_db_library_generation(void) {
+   return atomic_load(&s_library_generation);
 }
 
 bool music_db_is_initialized(void) {
@@ -740,6 +890,7 @@ int music_db_scan(const char *music_dir, music_db_scan_stats_t *stats) {
                "AND path NOT IN (SELECT path FROM seen_paths)",
                MUSIC_SOURCE_LOCAL);
       exec_sql(delete_sql);
+      music_db_library_changed();
    }
    if (seen.count > 0 && !seen.incomplete) {
       exec_sql("DROP TABLE IF EXISTS seen_paths");
@@ -783,8 +934,11 @@ int music_db_remove_source(music_source_t source, int *removed_out) {
       rc = sqlite3_step(stmt);
    }
    sqlite3_finalize(stmt);
-   if (rc == SQLITE_DONE && removed_out) {
-      *removed_out = sqlite3_changes(g_music_db);
+   if (rc == SQLITE_DONE) {
+      music_db_library_changed();
+      if (removed_out) {
+         *removed_out = sqlite3_changes(g_music_db);
+      }
    }
    if (rc != SQLITE_DONE) {
       /* Read the message before another thread's statement replaces it */
@@ -1067,59 +1221,6 @@ int music_db_list_artists_with_stats(music_artist_info_t *artists,
    return SUCCESS;
 }
 
-int music_db_list_albums_with_stats(music_album_info_t *albums,
-                                    int max_albums,
-                                    int offset,
-                                    int *count_out) {
-   if (!albums || max_albums <= 0 || !count_out) {
-      return FAILURE;
-   }
-   *count_out = 0;
-   if (offset < 0)
-      offset = 0;
-
-   pthread_mutex_lock(&g_music_db_mutex);
-
-   if (!g_music_db_initialized) {
-      pthread_mutex_unlock(&g_music_db_mutex);
-      return FAILURE;
-   }
-
-   sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(g_music_db, SQL_LIST_ALBUMS_WITH_STATS, -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("music_db_list_albums_with_stats: prepare failed: %s", sqlite3_errmsg(g_music_db));
-      pthread_mutex_unlock(&g_music_db_mutex);
-      return FAILURE;
-   }
-
-   sqlite3_bind_int(stmt, 1, max_albums);
-   sqlite3_bind_int(stmt, 2, offset);
-
-   int count = 0;
-   while (sqlite3_step(stmt) == SQLITE_ROW && count < max_albums) {
-      const char *name = (const char *)sqlite3_column_text(stmt, 0);
-      if (name) {
-         memset(&albums[count], 0, sizeof(albums[count])); /* by-artist-only fields = 0 */
-         safe_strncpy(albums[count].name, name, AUDIO_METADATA_STRING_MAX);
-         albums[count].track_count = sqlite3_column_int(stmt, 1);
-         const char *artist = (const char *)sqlite3_column_text(stmt, 2);
-         if (artist) {
-            safe_strncpy(albums[count].artist, artist, AUDIO_METADATA_STRING_MAX);
-         } else {
-            albums[count].artist[0] = '\0';
-         }
-         count++;
-      }
-   }
-
-   sqlite3_finalize(stmt);
-   pthread_mutex_unlock(&g_music_db_mutex);
-
-   *count_out = count;
-   return SUCCESS;
-}
-
 int music_db_get_by_artist(const char *artist,
                            music_search_result_t *results,
                            int max_results,
@@ -1145,46 +1246,6 @@ int music_db_get_by_artist(const char *artist,
    }
 
    sqlite3_bind_text(stmt, 1, artist, -1, SQLITE_STATIC);
-   sqlite3_bind_int(stmt, 2, max_results);
-
-   int count = 0;
-   while (sqlite3_step(stmt) == SQLITE_ROW && count < max_results) {
-      music_db_populate_row(stmt, &results[count]);
-      count++;
-   }
-
-   sqlite3_finalize(stmt);
-   pthread_mutex_unlock(&g_music_db_mutex);
-
-   *count_out = count;
-   return SUCCESS;
-}
-
-int music_db_get_by_album(const char *album,
-                          music_search_result_t *results,
-                          int max_results,
-                          int *count_out) {
-   if (!album || !results || max_results <= 0 || !count_out) {
-      return FAILURE;
-   }
-   *count_out = 0;
-
-   pthread_mutex_lock(&g_music_db_mutex);
-
-   if (!g_music_db_initialized) {
-      pthread_mutex_unlock(&g_music_db_mutex);
-      return FAILURE;
-   }
-
-   sqlite3_stmt *stmt = NULL;
-   int rc = sqlite3_prepare_v2(g_music_db, SQL_GET_BY_ALBUM, -1, &stmt, NULL);
-   if (rc != SQLITE_OK) {
-      OLOG_ERROR("music_db_get_by_album: prepare failed: %s", sqlite3_errmsg(g_music_db));
-      pthread_mutex_unlock(&g_music_db_mutex);
-      return FAILURE;
-   }
-
-   sqlite3_bind_text(stmt, 1, album, -1, SQLITE_STATIC);
    sqlite3_bind_int(stmt, 2, max_results);
 
    int count = 0;
