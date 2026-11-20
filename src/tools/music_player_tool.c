@@ -49,7 +49,7 @@
 #define MUSIC_TOOL_DISPLAY_MAX (MUSIC_STRING_MAX * 2)
 
 /** Albums listed when album: matches several */
-#define MUSIC_TOOL_ALBUM_CHOICES 6
+#define MUSIC_TOOL_ALBUM_CHOICES 10
 
 /** How long an LLM tool call waits for its track to open: past the Plex
  *  connect timeout, so "unreachable" and "won't open" are answered truthfully,
