@@ -835,6 +835,10 @@ static int read_copies(const char *album,
       a->c.last_track = sqlite3_column_int(st, 5);
       copy_col(st, 6, a->c.artist, sizeof(a->c.artist));
       music_rank_album_key(a->c.name, a->c.artist, a->name_key, sizeof(a->name_key));
+      if (!a->name_key[0] && a->c.name[0]) {
+         /* A name of punctuation only ("+", "÷") folds to nothing: keep its text */
+         snprintf(a->name_key, sizeof(a->name_key), "\x01%s", a->c.name);
+      }
       artist_key(a->c.artist, a->artist_key, sizeof(a->artist_key));
    }
    sqlite3_finalize(st);

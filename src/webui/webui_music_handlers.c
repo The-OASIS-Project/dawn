@@ -46,11 +46,11 @@
 
 /*
  * The tracks of the album a request names, in order.  With a name (and the
- * artist the albums browse sent), the album of that name and artist: the one
- * album_key names when it still is one of them (keys change when the library is
+ * artist the albums browse sent), an album of exactly that name: the one
+ * album_key names when it still is one (keys change when the library is
  * rescanned or Plex syncs), else the one whose album artist is the artist sent,
- * else the largest named exactly, else the first found.  A request with only a
- * key uses it as it is.
+ * else the largest.  None when no album has that name any more.  A request with
+ * only a key, or a name of punctuation only (no words to look up), uses the key.
  */
 static void requested_album_tracks(struct json_object *payload,
                                    music_search_result_t *tracks,
@@ -63,39 +63,50 @@ static void requested_album_tracks(struct json_object *payload,
                                                                       : NULL;
    const char *artist = json_object_object_get_ex(payload, "artist", &o) ? json_object_get_string(o)
                                                                          : NULL;
+   char name_key[MUSIC_RANK_FOLD_MAX] = "";
+   if (name) {
+      music_rank_album_key(name, NULL, name_key, sizeof(name_key));
+   }
    int64_t id = key > 0 ? key : 0;
-   if (name && name[0]) {
+   if (name_key[0]) {
       music_album_choice_t c[WEBUI_MUSIC_ALBUM_NAME_CHOICES];
       int n = 0;
       if (music_db_album_find(name, artist, c, WEBUI_MUSIC_ALBUM_NAME_CHOICES, 0, &n, NULL) !=
               SUCCESS ||
-          n == 0) {
+          n == 0 || !c[0].exact) {
          return;
       }
       char want[MUSIC_RANK_FOLD_MAX] = "";
       if (artist && artist[0]) {
          music_rank_fold(artist, want, sizeof(want));
       }
-      int best = 0;
+      /* Exact names sort first: only those are the album asked for */
+      int exact = 1;
+      while (exact < n && c[exact].exact) {
+         exact++;
+      }
       int pick = -1;
-      for (int i = 0; i < n && pick < 0; i++) {
+      for (int i = 0; i < exact && pick < 0; i++) {
          if (key > 0 && c[i].id == key) {
             pick = i;
          }
       }
-      for (int i = 0; i < n && pick < 0 && want[0]; i++) {
+      for (int i = 0; i < exact && pick < 0 && want[0]; i++) {
          char got[MUSIC_RANK_FOLD_MAX];
          music_rank_fold(c[i].artist, got, sizeof(got));
          if (strcmp(got, want) == 0) {
             pick = i;
          }
       }
-      for (int i = 1; i < n && c[i].exact; i++) {
-         if (c[i].track_count > c[best].track_count) {
-            best = i;
+      if (pick < 0) {
+         pick = 0;
+         for (int i = 1; i < exact; i++) {
+            if (c[i].track_count > c[pick].track_count) {
+               pick = i;
+            }
          }
       }
-      id = c[pick >= 0 ? pick : best].id;
+      id = c[pick].id;
    }
    if (id <= 0 || music_db_album_tracks(id, tracks, max, count_out) != SUCCESS) {
       *count_out = 0;
