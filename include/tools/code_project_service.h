@@ -33,6 +33,22 @@ int code_project_service_init(void);
 void code_project_service_shutdown(void);
 
 /**
+ * @brief Why code_project_import() would refuse these arguments, checked as it
+ *        checks them: the feature enabled, [code_projects] import_user_required
+ *        (a requester of 0 is the operator, never refused by it), the name
+ *        charset, the URL (HTTPS, SSRF guard, host allowlist), the branch, and a
+ *        duplicate name.  Blocks on a DNS lookup: the SSRF guard (valid_url ->
+ *        url_is_blocked) resolves the URL's host with getaddrinfo() unless it
+ *        is a literal IP.  It makes no other network call.
+ *
+ * @return NULL when it would be accepted, else a static sentence for the user.
+ */
+const char *code_project_import_refusal(int64_t requester_user_id,
+                                        const char *source_url,
+                                        const char *desired_name,
+                                        const char *branch);
+
+/**
  * @brief Validate + record a new import, then queue clone + index asynchronously.
  *
  * Returns as soon as the DB row is created (status "cloning"); progress is
@@ -44,14 +60,18 @@ void code_project_service_shutdown(void);
  * @param branch            Branch to clone, or NULL/"" for the remote HEAD.
  * @param global            Make the project visible to all users.
  * @param project_id_out    On SUCCESS, the new project id.
- * @return SUCCESS or FAILURE (invalid input, duplicate name, or disabled).
+ * @param reason_out        Optional (may be NULL): on FAILURE, a static sentence
+ *                          for the user saying why; NULL on SUCCESS.
+ * @return SUCCESS or FAILURE (refused by code_project_import_refusal(), or the
+ *         job queue is full).
  */
 int code_project_import(int64_t requester_user_id,
                         const char *source_url,
                         const char *desired_name,
                         const char *branch,
                         bool global,
-                        int64_t *project_id_out);
+                        int64_t *project_id_out,
+                        const char **reason_out);
 
 /**
  * @brief Link an existing local git checkout (no clone) and queue an index.

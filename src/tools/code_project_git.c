@@ -174,7 +174,10 @@ void code_project_git_global_init(void) {
  * validated host can't bounce us to an internal target. Returns SUCCESS when the
  * remote is reachable and advertises refs, FAILURE for not-found / unreachable /
  * auth-required (Phase 1 is public repos). */
-int code_project_git_remote_probe(const char *url) {
+/* Connect to @p url for fetch, redirects off (see code_project_git_remote_probe).
+ * On SUCCESS the caller disconnects and frees *out. */
+static int remote_connect(const char *url, git_remote **out) {
+   *out = NULL;
    if (url == NULL || url[0] == '\0') {
       return FAILURE;
    }
@@ -185,12 +188,58 @@ int code_project_git_remote_probe(const char *url) {
    git_remote_connect_options opts;
    git_remote_connect_options_init(&opts, GIT_REMOTE_CONNECT_OPTIONS_VERSION);
    opts.follow_redirects = GIT_REMOTE_REDIRECT_NONE;
-   int rc = git_remote_connect_ext(remote, GIT_DIRECTION_FETCH, &opts);
-   if (rc == 0) {
-      git_remote_disconnect(remote);
+   if (git_remote_connect_ext(remote, GIT_DIRECTION_FETCH, &opts) != 0) {
+      git_remote_free(remote);
+      return FAILURE;
    }
+   *out = remote;
+   return SUCCESS;
+}
+
+int code_project_git_remote_probe(const char *url) {
+   git_remote *remote = NULL;
+   if (remote_connect(url, &remote) != SUCCESS) {
+      return FAILURE;
+   }
+   git_remote_disconnect(remote);
    git_remote_free(remote);
-   return (rc == 0) ? SUCCESS : FAILURE;
+   return SUCCESS;
+}
+
+int code_project_git_remote_branch_for_path(const char *url,
+                                            const char *path,
+                                            char *branch_out,
+                                            size_t branch_len) {
+   if (branch_out == NULL || branch_len == 0 || path == NULL) {
+      return FAILURE;
+   }
+   branch_out[0] = '\0';
+   git_remote *remote = NULL;
+   if (remote_connect(url, &remote) != SUCCESS) {
+      return FAILURE;
+   }
+   const git_remote_head **heads = NULL;
+   size_t n = 0;
+   size_t best = 0;
+   if (git_remote_ls(&heads, &n, remote) == 0) {
+      static const char prefix[] = "refs/heads/";
+      for (size_t i = 0; i < n; i++) {
+         if (strncmp(heads[i]->name, prefix, sizeof(prefix) - 1) != 0) {
+            continue;
+         }
+         const char *b = heads[i]->name + sizeof(prefix) - 1;
+         const size_t bl = strlen(b);
+         /* The longest branch that is the path, or the path's leading segments. */
+         if (bl > best && bl < branch_len && strncmp(path, b, bl) == 0 &&
+             (path[bl] == '\0' || path[bl] == '/')) {
+            memcpy(branch_out, b, bl + 1);
+            best = bl;
+         }
+      }
+   }
+   git_remote_disconnect(remote);
+   git_remote_free(remote);
+   return best > 0 ? SUCCESS : CODE_GIT_NO_SUCH_BRANCH;
 }
 
 void code_project_git_global_shutdown(void) {

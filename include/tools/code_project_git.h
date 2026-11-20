@@ -132,4 +132,27 @@ void code_project_git_global_shutdown(void);
  */
 int code_project_git_remote_probe(const char *url);
 
+/** code_project_git_remote_branch_for_path(): the remote has no branch that
+ *  the path names. */
+#define CODE_GIT_NO_SUCH_BRANCH 2
+
+/**
+ * @brief The remote branch a repository web path names, as GitHub writes
+ *        /tree/<branch>/<dir>: the longest branch that is @p path or a
+ *        '/'-separated prefix of it ("release/1.0/docs" -> "release/1.0").
+ *        Connects as code_project_git_remote_probe() does, so SUCCESS also
+ *        means the repository exists.
+ *
+ * @param url        Clone URL (already validated by the caller).
+ * @param path       The part after /tree/, without a leading or trailing '/'.
+ * @param branch_out Receives the branch on SUCCESS ("" otherwise).
+ * @param branch_len Size of @p branch_out; a longer branch is never chosen.
+ * @return SUCCESS; FAILURE when the remote isn't reachable (as the probe);
+ *         CODE_GIT_NO_SUCH_BRANCH when no branch matches.
+ */
+int code_project_git_remote_branch_for_path(const char *url,
+                                            const char *path,
+                                            char *branch_out,
+                                            size_t branch_len);
+
 #endif /* CODE_PROJECT_GIT_H */

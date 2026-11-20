@@ -190,6 +190,18 @@ pending_slot_t *pending_slots_live(const pending_slots_t *slots,
                                    int kind,
                                    time_t now);
 
+/** Whether session @p current's @p user_id has a live item @p item_id staged,
+ *  and of which kind: for a confirm naming items by id alone.  The caller holds
+ *  the table's mutex.
+ *
+ * @param kind_out Receives the item's kind (non-NULL); set only when it returns true */
+bool pending_slots_kind_of(const pending_slots_t *slots,
+                           const turn_origin_t *current,
+                           int user_id,
+                           uint32_t item_id,
+                           time_t now,
+                           int *kind_out);
+
 /** Seconds @p slot has left before the table's TTL expires it, at @p now. */
 int pending_slots_valid_for(const pending_slots_t *slots, const pending_slot_t *slot, time_t now);
 

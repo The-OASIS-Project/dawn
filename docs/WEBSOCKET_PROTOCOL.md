@@ -2292,8 +2292,9 @@ through the assistant: "follow up on job 1977: ...").
 #### `coding_view_response`
 `ok` with `result`, the gateway's answer as is, or `error`. For `changes`: `head`,
 `base`, `task_id` (the job's branch is `refs/agent/<task_id>` in the gateway's
-mirror), `files` ({`path`, `added`, `removed`, `protected`}; `added`/`removed` null
-for a binary file; protected first, at most 2000) with `files_total`, and `commits`
+mirror), `files` ({`path`, `added`, `removed`, `to_check`, `why`}; `added`/`removed` null
+for a binary file; `to_check` true for a file to check before publishing, with its pattern's
+`why` when it has one; those first, at most 2000) with `files_total`, and `commits`
 ({`hash`, `subject`, `merge`}, at most 100, always the whole job's), `base_name` (the
 base branch), `scope` (as applied: `all`, `since_push` or the full hash),
 `scope_commits` (hashes it covers), `scope_merge` (a merge commit's scope) with
@@ -2315,7 +2316,8 @@ this is where the user checks the work before publishing it.
 #### `coding_publish_preview_response`
 `ok` with `preview`, or `error`. `preview`: `head` (full hash), `repo`, `branch`,
 `base`, `commits` (count listed) with `commits_more` (true: 100 or more), `files` (count
-listed) with `files_total`, `protected` (paths), `history_only` ({`path`, `protected`}:
+listed) with `files_total`, `to_check` ({`path`, `why`}: files to check before publishing,
+`why` empty for none), `history_only` ({`path`, `to_check`, `why?`}, the gateway's as it is:
 paths changed by the job's commits but not in its final diff, public in the branch's
 history), `workflows` (true: the work changes `.github/workflows`, which the gateway's
 token can't push; offer no Publish), `pr_title` (the title the agent wrote when
@@ -2333,7 +2335,7 @@ agent's: show them as text, with invisible and direction-changing characters vis
       "preview": {
          "head": "4f1c…", "repo": "owner/repo", "branch": "agent/42-fix", "base": "main",
          "commits": 2, "commits_more": false, "files": 3, "files_total": 3,
-         "protected": [], "history_only": [ { "path": "notes.txt", "protected": false } ],
+         "to_check": [], "history_only": [ { "path": "notes.txt", "to_check": false } ],
          "workflows": false, "pr_title": "Fix the parser", "pr_title_by_agent": true, "pr_body": "…", "pr_body_sha256": "9a0b…",
          "mentions": [], "closes": [ "#41" ]
       }
@@ -2390,8 +2392,10 @@ A coding job's conversation carries `agent_step` (`gw`: `tool` with `tool`, `bri
 `pushed`, `pr_url`; `merged` with `pr_url`, `unpublished` (newer commits not
 published); `closed` with `reason`: `user` or `merged`) and `agent_end` (`gw`:
 `completed`, `failed`, `cancelled`, with `summary`, `branch`, `commits`, `diffstat`,
-`uncommitted`, `protected`, `protected_count`, `error`, `cost_usd`; lists arrive
-joined by newlines). All of it is the agent's text except `line`: render it as text
+`uncommitted`, `to_check` with `to_check_count` (files to check before publishing, one per
+line: the path, then a tab and the reason when there is one; `protected` and
+`protected_count` from an older gateway), `error`, `cost_usd`; lists arrive joined by
+newlines). All of it is the agent's text except `line`: render it as text
 only (show `pr_url` only in GitHub's form, `https://github.com/<o>/<r>/pull/<n>`).
 
 #### `job_action_response`

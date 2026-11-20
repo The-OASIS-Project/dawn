@@ -182,7 +182,7 @@ static void append_blockers(strbuf_t *sb, struct json_object *ans) {
    if (strcmp(copilot, "requested") == 0) {
       strbuf_append(&b, "Copilot's review is requested. ");
    } else if (strcmp(copilot, "reviewed_head") == 0) {
-      strbuf_append(&b, "Copilot reviewed the current head. ");
+      strbuf_append(&b, "Copilot reviewed the current head: no new commits since. ");
    } else if (strcmp(copilot, "reviewed_earlier") == 0) {
       strbuf_append(&b, "Copilot reviewed an earlier commit. ");
    }
@@ -307,7 +307,9 @@ static void append_thread(strbuf_t *sb, struct json_object *t) {
       strbuf_appendf(sb, ":%s", line);
    }
    strbuf_appendf(sb, "%s%s", jbool(t, "outdated") ? " (outdated)" : "",
-                  jbool(t, "resolved") ? " (resolved)" : "");
+                  jbool(t, "resolved_by_copilot") ? " (resolved by Copilot)"
+                  : jbool(t, "resolved")          ? " (resolved)"
+                                                  : "");
    const char *repeat = coding_gateway_jstr(t, "repeat_of");
    if (repeat[0] != '\0') {
       strbuf_appendf(sb, " (repeats comment_id %s, already answered)", repeat);
@@ -326,8 +328,8 @@ static void append_thread(strbuf_t *sb, struct json_object *t) {
    }
 }
 
-/* Copilot's latest review, and whether the review loop is done: a re-review
- * whose threads only repeat ones already answered has nothing new to fix. */
+/* Copilot's latest review, and whether it found anything new: a re-review whose
+ * threads only repeat ones already answered likely has nothing new to fix. */
 static void append_copilot_round(strbuf_t *sb, struct json_object *round) {
    if (!json_object_is_type(round, json_type_object)) {
       return;
@@ -340,8 +342,8 @@ static void append_copilot_round(strbuf_t *sb, struct json_object *round) {
                   CG_HASH_SHOWN, coding_gateway_jstr(round, "commit"), threads,
                   threads == 1 ? "" : "s", fresh, coding_gateway_jstr(round, "repeats"));
    if (jbool(round, "rereview") && fresh == 0) {
-      strbuf_append(sb, "Copilot has nothing meaningfully new: the review loop is done and the "
-                        "pull request is ready for the user's review. Don't ask Copilot again.\n");
+      strbuf_append(sb, "Copilot's re-review found nothing new: likely ready for the user's "
+                        "review.\n");
    }
 }
 

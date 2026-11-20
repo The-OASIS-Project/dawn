@@ -347,9 +347,10 @@ def build(runner, cfg) -> MCPServer:
    @tool
    async def pr_threads(dawn_user_id: int, ref: str | None = None, repo: str | None = None,
                         client_ref: str | None = None, all: bool = False) -> dict:
-      """A pull request's unresolved review threads (all: resolved ones too), each keyed
-      by comment_id (its first comment's id; n is for display; repeat_of: it says again
-      what an answered thread said), copilot_round (Copilot's latest review), its
+      """A pull request's unresolved review threads (all: resolved ones too, with
+      resolved_by_copilot when Copilot resolved one), each keyed by comment_id (its
+      first comment's id; n is for display; repeat_of: it says again what an answered
+      thread said), copilot_round (Copilot's latest review), its
       reviews with a body and its newest conversation comments.  The pull request is
       named as for pr_status; pr, configured_repo and job as there."""
       owner, name, number = pull_request(dawn_user_id, ref, repo, client_ref)
@@ -386,11 +387,12 @@ def build(runner, cfg) -> MCPServer:
                                repo: str | None = None, client_ref: str | None = None,
                                check: bool = False) -> dict:
       """Ask Copilot to review a pull request again (DAWN calls this only after the
-      user confirmed); with check, only whether it may be asked.  Refused while its
-      review is pending, when its re-review found nothing new, and when no commit
-      came after its last review (merges, of the base, don't count; with check,
-      answered as no_new_commits instead).  Answers pr, head_sha, copilot_round,
-      new_commits and requested; configured_repo and job as for pr_status."""
+      user confirmed); with check, only what it would see.  Refused while its review
+      is pending and when the pull request isn't open.  Answers pr, head_sha,
+      copilot_round (its new and repeats: a re-review with no new thread only repeats
+      answered ones), new_commits since its last review (merges of the base don't
+      count; 0: likely nothing new to review) and requested; configured_repo and job
+      as for pr_status."""
       owner, name, number = pull_request(dawn_user_id, ref, repo, client_ref)
       res = await review.request_review(store, github_token(), owner, name, number, check)
       return {**res, **pr_context(dawn_user_id, owner, name, number)}

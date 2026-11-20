@@ -12,7 +12,7 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
-## 2026-11-19 — An API key is used only for the provider you selected
+## 2026-11-20 — An API key is used only for the provider you selected
 
 **What changed.** For chat, DAWN no longer picks a cloud provider because its key is in
 `secrets.toml`, and never moves a conversation to another vendor. The provider is the one
@@ -54,6 +54,26 @@ conversation was switched to. (A setting that names a provider for its own job, 
   Settings → Language Model → Fall Back to the Local LLM (`[llm] local_fallback = true`).
 - If you set `[llm.cloud] endpoint` (a proxy, Azure), make sure `[llm.cloud] provider` is set
   to the provider it serves.
+
+---
+
+## 2026-11-19 — Agent gateway: `protected` is now `check`
+
+**What changed.** A repo's `protected` list in the agent gateway's config is now called
+`check`: files to check before publishing. Nothing was ever blocked; a task that changes one
+has it named to you before publishing. Each entry can now carry a reason, which Friday says
+with the path: `{ path = "src/auth/**", why = "who can log in and do what" }`. A plain string
+still works, with no reason.
+
+**What you need to do.** First re-run the gateway's installer, so the gateway runs the new
+code: `cd services/agent-gateway && sudo UV=$(command -v uv) ./install.sh`. A restart alone
+keeps the old code, which refuses a `check` key and fails at load.
+
+Then, optionally, in `/usr/local/etc/agent-gateway/agent-gateway.toml` (the installer keeps
+your copy) rename `protected = [...]` to `check = [...]` under each `[[repos]]` and
+`sudo systemctl restart agent-gateway`. That only silences a warning the gateway logs at every
+start: the old key still works. Reasons are optional; the shipped
+`services/agent-gateway/agent-gateway.toml` has them for the dawn repo.
 
 ---
 

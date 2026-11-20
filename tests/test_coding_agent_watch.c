@@ -485,6 +485,29 @@ static void test_update_events(void) {
    TEST_ASSERT_EQUAL_INT(0, g_events);
 }
 
+/* A completed end's files to check go onto the job's trail, one per line: the
+ * path, then a tab and its reason when it has one. */
+static void test_end_keeps_files_to_check(void) {
+   struct json_object *e = event("completed", "job:42.1000", 5);
+   struct json_object *data = json_object_object_get(e, "data");
+   struct json_object *check = json_object_new_array();
+   struct json_object *c = json_object_new_object();
+   json_object_object_add(c, "path", json_object_new_string("src/a.c"));
+   json_object_object_add(c, "why", json_object_new_string("a reason"));
+   json_object_array_add(check, c);
+   c = json_object_new_object();
+   json_object_object_add(c, "path", json_object_new_string("CLAUDE.md"));
+   json_object_array_add(check, c);
+   json_object_object_add(data, "to_check", check);
+   json_object_object_add(data, "to_check_count", json_object_new_int(2));
+   coding_watch_apply(e);
+   json_object_put(e);
+   TEST_ASSERT_EQUAL_STRING(CONV_EVENT_AGENT_END, g_last_kind);
+   TEST_ASSERT_NOT_NULL_MESSAGE(
+       strstr(g_last_payload, "\"to_check\":\"src\\/a.c\\ta reason\\nCLAUDE.md\""), g_last_payload);
+   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(g_last_payload, "\"to_check_count\":2"), g_last_payload);
+}
+
 /* A replayed end of an earlier run (the job was revised since): the job stays
  * as it is, whether the revision still runs or has ended too. */
 static void test_stale_end_of_a_revised_job(void) {
@@ -685,6 +708,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_steps_go_into_the_job);
    RUN_TEST(test_ends);
+   RUN_TEST(test_end_keeps_files_to_check);
    RUN_TEST(test_dawn_asks_with_a_viewer);
    RUN_TEST(test_ended_job_takes_nothing_and_its_task_is_stopped);
    RUN_TEST(test_after_the_end);

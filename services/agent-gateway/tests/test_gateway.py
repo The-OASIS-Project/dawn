@@ -33,6 +33,18 @@ from agent_gateway.repos import Repos
 from agent_gateway.runner import NO_BACKGROUND_TOOLS, PR_FOOTER, Runner
 
 
+def in_order(text, *facts):
+   """Each fact is in @text, after the one before it: a rendered text checked by
+   its facts, so the words around them can change."""
+   at = 0
+   for f in facts:
+      at = text.find(f, at)
+      if at < 0:
+         return False
+      at += len(f)
+   return True
+
+
 def test_policy(tmp_path):
    wt = str(tmp_path)
    assert policy.decide("Bash", {"command": "make; echo $?"}, wt, []).allow
@@ -770,7 +782,7 @@ def test_revise_merging_the_base(store, tmp_path):
    assert r.revise_feedback("t1")["merge"] == {"merged": "c0ffee001122",
                                                 "base_head": "feedface00112233"}
    note = r.resumed[0][1]
-   assert "merged main (feedface0011) into this branch (now at c0ffee001122)" in note
+   assert in_order(note, "merged main", "feedface0011", "c0ffee001122")
    assert not r.base_out_of_date(store.task("t1"))       # the run doesn't sync again
    del r.running["t1"]
    asyncio.run(r.revise("t1", 1, "merge main", None, "job:1", merge_base=True))
@@ -902,7 +914,7 @@ def test_publish_sends_the_users_own_title_and_description(store, monkeypatch):
                                                  "head": head}))
    monkeypatch.setattr(rmod, "read_pull_request",
                        lambda url, token: {"state": "closed", "merged_at": "2026-11-01"})
-   with pytest.raises(ValueError, match="merged, and there is nothing new"):
+   with pytest.raises(ValueError, match="merged.*nothing new"):
       asyncio.run(r.publish("t1", 1, True, None, head, None, "Other", None))
    # Its state unreadable: the push may join it, so its text isn't sent as used.
    store.update_task("t1", published='{"pr_url": "https://github.com/o/r/pull/9", "head": "old"}')
@@ -1044,7 +1056,7 @@ def test_publish_refuses_an_edit_of_a_pull_request_merged_since_shown(store, mon
    r.repos = Pushes()
    add_task(store)
    published_with_pr(store, head="1111111111111111")
-   with pytest.raises(ValueError, match="merged or closed since it was shown; publish again"):
+   with pytest.raises(ValueError, match="merged or closed.*publish again"):
       asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890", None, "Mine", None, None,
                             True))
    assert r.repos.pushes == [] and gh.patches == []
@@ -1059,7 +1071,7 @@ def test_publish_refuses_to_replace_a_description_that_changed(store, monkeypatc
    add_task(store)
    published_with_pr(store, head="1111111111111111")
    for shown in (rmod.body_sha256("agent text"), None):
-      with pytest.raises(ValueError, match="description changed since it was shown; look again"):
+      with pytest.raises(ValueError, match="description changed.*look again"):
          asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890", None, None, "Mine",
                                shown))
    assert r.repos.pushes == [] and gh.patches == []
@@ -1433,39 +1445,64 @@ def test_store_upgrades_a_v1_database(tmp_path):
    assert s.task("t1")["pr_title"] is None and s.task("t1")["pr_head"] is None
 
 
-def test_protected_patterns():
-   from agent_gateway.repos import is_protected
-   pats = [".github/**", "CLAUDE.md", "**/install.sh", "scripts/install*",
-           "src/tools/coding_agent_*"]
+def test_check_patterns():
+   from agent_gateway.repos import check_why
+   pats = [{"path": ".github/**", "why": "CI"}, {"path": "CLAUDE.md", "why": ""},
+           {"path": "**/install.sh", "why": ""}, {"path": "scripts/install*", "why": ""},
+           {"path": "src/tools/coding_agent_*", "why": ""}]
    for p in (".github/workflows/ci.yml", "CLAUDE.md", "install.sh", "dawn_satellite/install.sh",
              "scripts/install.sh", "scripts/install-deps", "src/tools/coding_agent_tool.c"):
-      assert is_protected(p, pats), p
+      assert check_why(p, pats) is not None, p
    for p in ("docs/CLAUDE.md", "scripts/lib/install.txt", "src/tools/coding_agent/x.c",
              "github/x", "src/tools/coding_agent_x/y.c"):
-      assert not is_protected(p, pats), p
+      assert check_why(p, pats) is None, p
+   assert check_why(".github/x", pats) == "CI" and check_why("CLAUDE.md", pats) == ""
+   # The first matching pattern with a reason gives it; only reasonless ones: "".
+   both = [{"path": "src/**", "why": ""}, {"path": "src/auth/**", "why": "logins"}]
+   assert check_why("src/auth/a.c", both) == "logins" and check_why("src/x.c", both) == ""
+   from agent_gateway.repos import check_mark
+   assert check_mark(["a", "src/auth/b.c"], both) == {"to_check": True, "why": "logins"}
+   assert check_mark(["src/x.c"], both) == {"to_check": True}
+   assert check_mark(["docs/x"], both) == {"to_check": False}
    # A newline (or any control character) can't hide a path; it is flagged itself.
-   assert is_protected(".github/workflows/a\nb.yml", pats)
-   assert is_protected("docs/a\nb.md", pats)
+   assert check_why(".github/workflows/a\nb.yml", pats) == "a control character in its name"
+   assert check_why("docs/a\nb.md", pats) == "a control character in its name"
 
 
-def test_repo_protected_list_default_and_checked(tmp_path, monkeypatch):
+def test_repo_check_list_default_and_checked(tmp_path, monkeypatch, caplog):
    from agent_gateway import config
-   monkeypatch.setenv("AGENT_GATEWAY_TOKEN", "t" * 32)
    p = tmp_path / "g.toml"
-   p.write_text('[[repos]]\nname = "a"\nurl = "u"\n[[repos]]\nname = "b"\nurl = "u"\n'
-                'protected = ["x/**"]\n')
-   c = config.load(str(p))
-   assert c.repos["a"]["protected"] == config.DEFAULT_PROTECTED
-   assert c.repos["b"]["protected"] == ["x/**"]
-   monkeypatch.setenv("AGENT_GATEWAY_TOKEN", "t" * 32)
-   p.write_text('[[repos]]\nname = "a"\nurl = "u"\nprotected = "x"\n')
-   with pytest.raises(ValueError):
-      config.load(str(p))
-   for bad in ('"/CLAUDE.md"', '".github/"'):
+
+   def load(text):
       monkeypatch.setenv("AGENT_GATEWAY_TOKEN", "t" * 32)
-      p.write_text(f'[[repos]]\nname = "a"\nurl = "u"\nprotected = [{bad}]\n')
+      p.write_text('[[repos]]\nname = "a"\nurl = "u"\n' + text)
+      caplog.clear()
+      return config.load(str(p)).repos["a"]["check"]
+   assert load("") == config.DEFAULT_CHECK
+   assert config.DEFAULT_CHECK[0] == {"path": ".github/**",
+                                      "why": "CI, which runs with the repo's secrets"}
+   # A string has no reason; a table carries one.
+   assert load('check = ["x/**", { path = "y", why = "because" }]\n') == [
+      {"path": "x/**", "why": ""}, {"path": "y", "why": "because"}]
+   assert not caplog.records
+   # The old key still works, with a warning naming the new one.
+   assert load('protected = ["x/**"]\n') == [{"path": "x/**", "why": ""}]
+   assert len(caplog.records) == 1 and "now called check" in caplog.records[0].getMessage()
+   # Both set: check wins, with a warning.
+   assert load('check = ["y"]\nprotected = ["x/**"]\n') == [{"path": "y", "why": ""}]
+   assert len(caplog.records) == 1 and "both set" in caplog.records[0].getMessage()
+   # A long reason is cut, with a warning.
+   got = load(f'check = [{{ path = "y", why = "{"w" * 200}" }}]\n')
+   assert got == [{"path": "y", "why": "w" * config.WHY_CAP}] and len(caplog.records) == 1
+   # Control characters in a reason become spaces.
+   assert load('check = [{ path = "y", why = "a\\nb\\tc" }]\n') == [{"path": "y",
+                                                                     "why": "a b c"}]
+   for bad in ('check = "x"', 'check = ["/CLAUDE.md"]', 'check = [".github/"]',
+               'check = [{ why = "w" }]', 'check = [{ path = "y", reason = "w" }]',
+               'check = [{ path = "y", why = 3 }]', 'protected = "x"',
+               'protected = ["/x"]'):
       with pytest.raises(ValueError):
-         config.load(str(p))
+         load(bad + "\n")
 
 
 def test_mirror_clone_collect(tmp_path, service_umask):
@@ -1481,7 +1518,8 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    (home / "work").mkdir(parents=True)
    gitconfig = tmp_path / "gitconfig"
    gitconfig.write_text("")
-   repos = Repos({"r": {"url": str(src), "base": "main", "protected": ["g"]}},
+   repos = Repos({"r": {"url": str(src), "base": "main",
+                        "check": [{"path": "g", "why": "a reason"}]}},
                  str(tmp_path / "mirrors"),
                  str(home / "work"), [], str(home), str(gitconfig))
    wt = asyncio.run(repos.prepare("r", "main", "agent/aaaa0001-x", "aaaa0001"))
@@ -1504,7 +1542,7 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    out = asyncio.run(repos.collect("r", "aaaa0001", "agent/aaaa0001-x", "main"))
    assert [c.split(" ", 1)[1] for c in out["commits"]] == ["agent work"]
    assert "1 file changed" in out["diffstat"] and out["uncommitted"] == 1
-   assert out["protected"] == ["g"] and out["protected_count"] == 1
+   assert out["to_check"] == [{"path": "g", "why": "a reason"}] and out["to_check_count"] == 1
    assert git("-C", str(tmp_path / "mirrors/r.git"), "log", "-1", "--format=%s",
               "refs/agent/aaaa0001") == "agent work"
    from agent_gateway.github import GitError
@@ -1514,7 +1552,7 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    # The viewer reads the collected branch in the mirror.
    ch = asyncio.run(repos.changes("r", "aaaa0001", "main"))
    assert [f["path"] for f in ch["files"]] == ["g"] and ch["files"][0]["added"] == 1
-   assert ch["files"][0]["protected"] is True
+   assert ch["files"][0]["to_check"] is True and ch["files"][0]["why"] == "a reason"
    assert [c["subject"] for c in ch["commits"]] == ["agent work"]
    diff = asyncio.run(repos.file("r", "aaaa0001", "main", "g", "diff"))
    assert "+y" in diff["text"]
@@ -1556,7 +1594,7 @@ def test_mirror_clone_collect(tmp_path, service_umask):
    asyncio.run(repos.collect("r", "aaaa0001", "agent/aaaa0001-x", "main"))
    assert asyncio.run(repos.file("r", "aaaa0001", "main", "lock.json", "new"))["too_large"]
    import agent_gateway.repos as repos_mod
-   cap, repos_mod.FILES_CAP = repos_mod.FILES_CAP, 1  # cut to one: the protected file stays
+   cap, repos_mod.FILES_CAP = repos_mod.FILES_CAP, 1  # cut to one: the file to check stays
    try:
       ch = asyncio.run(repos.changes("r", "aaaa0001", "main"))
    finally:
@@ -1889,9 +1927,9 @@ def test_follow_up_run_updates_the_base_first(store, monkeypatch):
    store.update_task("t1", published='{"pushed": "o/r:b"}')   # published: merge, not rebase
    store.add_event("t1", "revised", revise_ref="b", budget_added=0)
    asyncio.run(r.run("t1", "more"))
-   assert "already pushed: to bring in the new base, merge it" in asked[-1]
+   assert in_order(asked[-1], "already pushed", "merge")
    assert asked[0] == "first" and asked[1] == "the answer"
-   assert asked[2].startswith("(Before this run the gateway updated origin/main to feedface0011.)")
+   assert in_order(asked[2], "origin/main", "feedface0011", "rebase onto main")  # before it
    assert asked[2].endswith("rebase onto main")
 
 
@@ -2036,6 +2074,24 @@ def test_canary_needs_positive_refusals():
                   for w in canary.REFUSED["no loopback"])
 
 
+def test_canary_checks_the_sandbox_placeholders():
+   from agent_gateway import canary
+   from agent_gateway.repos import SANDBOX_PLACEHOLDERS
+   asked = canary.section(canary.prompt(9760, "/tmp/x"), 8)
+   assert all(p.lower() in asked for p in SANDBOX_PLACEHOLDERS)
+   assert canary.section(canary.prompt(9760, "/tmp/x"), 7).strip() == "cat /tmp/x"
+   held = "8) the loop\nPLACEHOLDERS CHECKED\n"
+   assert canary.placeholders_writable(canary.section(held, 8)) == []
+   leaked = "7) cat\nNo such file\n8) the loop\nWRITABLE: .bashrc\nWRITABLE: .claude/skills\n" \
+            "PLACEHOLDERS CHECKED\n"
+   assert canary.placeholders_writable(canary.section(leaked, 8)) == [".bashrc", ".claude/skills"]
+   assert canary.placeholders_writable(canary.section("8) not run\n", 8)) is None  # inconclusive
+   assert canary.placeholders_writable(canary.section(leaked, 7)) is None
+   # The command copied as the header, with no output: the loop never ran.
+   copied = f"8) {canary.placeholder_probe()}\n9) next\n"
+   assert canary.placeholders_writable(canary.section(copied, 8)) is None
+
+
 def test_every_run_carries_the_whole_floor():
    from agent_gateway.runner import floor_settings
    s = json.loads(floor_settings("/var/lib/dawn-agent", "/var/lib/dawn-agent/work",
@@ -2149,7 +2205,7 @@ def test_read_tools_never_reach_hidden_directories():
 
 def test_changes_lists_paths_only_the_history_has(tmp_path, service_umask):
    """A push publishes every commit, so paths its commits touched that the net diff
-   doesn't show are listed (and checked against the protected patterns), and any CI
+   doesn't show are listed (and checked against the files to check), and any CI
    workflow path anywhere in the work is flagged."""
    src = tmp_path / "src"
    src.mkdir()
@@ -2162,7 +2218,8 @@ def test_changes_lists_paths_only_the_history_has(tmp_path, service_umask):
    (home / "work").mkdir(parents=True)
    gitconfig = tmp_path / "gitconfig"
    gitconfig.write_text("")
-   repos = Repos({"r": {"url": str(src), "base": "main", "protected": ["keys/**"]}},
+   repos = Repos({"r": {"url": str(src), "base": "main",
+                        "check": [{"path": "keys/**", "why": ""}]}},
                  str(tmp_path / "mirrors"), str(home / "work"), [], str(home), str(gitconfig))
    wt = asyncio.run(repos.prepare("r", "main", "agent/aaaa0002-x", "aaaa0002"))
    w = tmp_path / "home/work/aaaa0002"
@@ -2180,9 +2237,9 @@ def test_changes_lists_paths_only_the_history_has(tmp_path, service_umask):
    asyncio.run(repos.collect("r", "aaaa0002", "agent/aaaa0002-x", "main"))
    ch = asyncio.run(repos.changes("r", "aaaa0002", "main"))
    assert [f["path"] for f in ch["files"]] == ["f -> f2"]
-   assert ch["history_only"] == [{"path": "keys/k", "protected": True},  # protected first
-                                 {"path": "kept", "protected": False},
-                                 {"path": "scratch", "protected": False}]
+   assert ch["history_only"] == [{"path": "keys/k", "to_check": True},  # files to check first
+                                 {"path": "kept", "to_check": False},
+                                 {"path": "scratch", "to_check": False}]
    assert ch["workflows"] is False
    # A workflow added and taken out again still went up with the commits.
    (w / ".github/workflows").mkdir(parents=True)
@@ -2194,7 +2251,8 @@ def test_changes_lists_paths_only_the_history_has(tmp_path, service_umask):
    asyncio.run(repos.collect("r", "aaaa0002", "agent/aaaa0002-x", "main"))
    ch = asyncio.run(repos.changes("r", "aaaa0002", "main"))
    assert ch["workflows"] is True
-   assert {"path": ".github/workflows/ci.yml", "protected": True} in ch["history_only"]
+   assert {"path": ".github/workflows/ci.yml", "to_check": True,
+           "why": "CI, which runs with the repo's secrets"} in ch["history_only"]
 
 
 class Publishing(FakeRepos):
@@ -2252,7 +2310,7 @@ def test_publish_without_a_body_hash_still_publishes(store):
    add_task(store)
    store.update_task("t1", status=st.COMPLETED, summary="Done.")
    asyncio.run(r.publish("t1", 1, True, None, "abcdef1234567890"))
-   assert r.repos.sent == "Done.\n\nMade by a coding agent for DAWN."
+   assert r.repos.sent == "Done." + PR_FOOTER
 
 
 class GitHub:
@@ -2347,7 +2405,7 @@ def test_parse_pr_reads_the_title_and_description():
    from agent_gateway.runner import parse_pr
    assert parse_pr("TITLE: Fix the parser\n\nIt fixed it.\n\n## Changes\n- a") == (
       "Fix the parser", "It fixed it.\n\n## Changes\n- a")
-   assert parse_pr("Here you go:\nTITLE: x\n\nbody") is None    # anything before: refused
+   assert parse_pr("Here you go:\nTITLE: x\n\nbody") == ("x", "body")  # a preamble is left out
    assert parse_pr("TITLE: only a title") is None
    assert parse_pr("TITLE:   \n\nbody") is None
    assert len(parse_pr("TITLE: " + "x" * 300 + "\n\nbody")[0]) == 120
@@ -2534,3 +2592,19 @@ def test_merge_scope_lists_a_conflict_kept_to_the_branchs_side(tmp_path, service
    merge = mirror("rev-parse", "refs/agent/aaaa0001")
    ch = changes(merge[:10], None, {out["base_head"]: merge_report(out)})
    assert [(f["path"], f["added"], f["removed"]) for f in ch["files"]] == [("f", 0, 0)]
+
+
+def test_parse_pr_finds_the_title_past_a_preamble_and_a_fence():
+   from agent_gateway.runner import parse_pr
+   assert parse_pr("TITLE: Fix it\n\nBody.") == ("Fix it", "Body.")
+   assert parse_pr("Here's the pull request:\n\nTITLE: Fix it\n\nBody.") == ("Fix it", "Body.")
+   assert parse_pr("```markdown\nTITLE: Fix it\n\nBody.\n```") == ("Fix it", "Body.")
+   # A fence inside the description stays.
+   assert parse_pr("TITLE: Fix it\n\n```c\nx();\n```") == ("Fix it", "```c\nx();\n```")
+   # Unclosed wrapping, a body ending in a block: the block stays whole.
+   assert parse_pr("```markdown\nTITLE: x\n\nbody\n```c\nx();\n```") == (
+      "x", "body\n```c\nx();\n```")
+   assert parse_pr("TITLE: x\n\nbody\n```") == ("x", "body")  # a lone closing fence
+   assert parse_pr("TITLE: x\n\nbody\nTITLE: y") == ("x", "body\nTITLE: y")  # first wins
+   assert parse_pr("no title here") is None
+   assert parse_pr("TITLE: only a title") is None

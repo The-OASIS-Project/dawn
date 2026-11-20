@@ -299,6 +299,33 @@ static void test_session_prefix_exists(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, auth_db_session_prefix_exists("", &exists));
 }
 
+/* A 16-character prefix (what `dawn-admin session list` prints) revokes that
+ * login alone; a prefix two logins share revokes neither. */
+static void test_delete_session_by_prefix(void) {
+   int user_id = create_and_get_id("sess_byprefix", "hash", false);
+   auth_db_create_session(user_id, "revokeA_01234567_tail_one", NULL, NULL, false);
+   auth_db_create_session(user_id, "revokeB_01234567_tail_one", NULL, NULL, false);
+   auth_db_create_session(user_id, "sharedP_01234567_tail_one", NULL, NULL, false);
+   auth_db_create_session(user_id, "sharedP_01234567_tail_two", NULL, NULL, false);
+
+   auth_session_t session;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_delete_session_by_prefix("revokeA_01234567"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND,
+                         auth_db_get_session("revokeA_01234567_tail_one", &session));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         auth_db_get_session("revokeB_01234567_tail_one", &session));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, auth_db_delete_session_by_prefix("revokeA_01234567"));
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_DUPLICATE, auth_db_delete_session_by_prefix("sharedP_01234567"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         auth_db_get_session("sharedP_01234567_tail_one", &session));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         auth_db_get_session("sharedP_01234567_tail_two", &session));
+
+   /* The old 8-character form is refused outright, never matched loosely. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, auth_db_delete_session_by_prefix("revokeB_"));
+}
+
 static void test_delete_user_sessions(void) {
    int user_id = create_and_get_id("multi_sess", "hash", false);
    auth_db_create_session(user_id, "token_ms1_1234567890", NULL, NULL, false);
@@ -1649,6 +1676,7 @@ int main(void) {
    RUN_TEST(test_expired_session);
    RUN_TEST(test_delete_user_sessions);
    RUN_TEST(test_session_prefix_exists);
+   RUN_TEST(test_delete_session_by_prefix);
    RUN_TEST(test_update_password_ends_logins);
 
    /* Conversations */
