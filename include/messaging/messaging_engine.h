@@ -30,6 +30,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "llm/llm_interface.h"
 #include "messaging/messaging_driver.h"
 
 #ifdef __cplusplus
@@ -357,6 +358,21 @@ bool messaging_engine_sms_is_code_reply(const char *sender_e164, const char *bod
  *         that name), MESSAGING_FAILURE.
  */
 int messaging_engine_reset_by_name(int user_id, const char *channel_name);
+
+/**
+ * @brief Reset a channel's forever-conversation by its id, as /new does: the
+ *        next message starts a new conversation.  Called from the channel's own
+ *        running turn, it takes effect when that turn ends.
+ * @return MESSAGING_SUCCESS / MESSAGING_UNKNOWN_CHANNEL / MESSAGING_FAILURE.
+ */
+int messaging_engine_reset_channel(int user_id, int64_t channel_id);
+
+/**
+ * @brief Give a channel's live session the LLM settings just stored for its
+ *        conversation (a channel's session lives for the daemon's uptime, so it
+ *        would otherwise keep the old ones).  No-op when it has none.
+ */
+void messaging_engine_apply_conv_llm(int64_t conversation_id, const session_llm_config_t *cfg);
 
 /**
  * @brief Unlink (soft-delete) a channel by display_name for a user.

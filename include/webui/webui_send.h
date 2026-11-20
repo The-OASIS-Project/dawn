@@ -223,6 +223,21 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata);
 void webui_sentence_audio_fanout_callback(const char *sentence, void *userdata);
 
 /**
+ * @brief Tell the user a turn was refused because its LLM can't run.
+ *
+ * Sends an LLM_NOT_SELECTED error frame with @p reason (from
+ * session_turn_selection_problem()) and, when @p speak is given, speaks it
+ * through that sentence callback and closes the audio stream.
+ *
+ * @param speak     The turn's sentence callback (userdata = @p session), or NULL
+ * @param use_opus  The audio format of the turn's stream (with @p speak)
+ */
+void webui_send_turn_refusal(session_t *session,
+                             const char *reason,
+                             session_sentence_callback speak,
+                             bool use_opus);
+
+/**
  * @brief Arm-time check: does a NON-origin speaker-capable viewer of @conv_id exist?
  *
  * The text worker arms TTS synthesis when the origin's own TTS is on OR this returns

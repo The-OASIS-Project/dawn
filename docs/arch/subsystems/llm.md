@@ -311,8 +311,8 @@ Claude-configured extraction runs on direct Claude even while the main chat is o
 Other specifics: OpenRouter never routes to `/v1/responses`
 (`should_dispatch_to_responses_api` skips `openrouter.ai`); requests carry optional
 `HTTP-Referer` + `X-Title` attribution headers; a `provider="openrouter"` config with no key
-falls back to auto-detect, and a keyed aux purpose with no key **errors honestly** rather
-than silently switching providers; and `get_context_size()` best-effort-strips the `vendor/`
+is refused with the reason, as any selected provider without its key is, and an aux purpose
+with no key **errors honestly** rather than silently switching providers; and `get_context_size()` best-effort-strips the `vendor/`
 prefix to reuse the known context-window tables, else a conservative 128K default.
 
 > **History:** OpenRouter was originally a `[llm.cloud] use_openrouter` gateway *toggle* that

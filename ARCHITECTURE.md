@@ -166,7 +166,7 @@ Layer 1 (Core infrastructure) — deps: Layer 0
 │                               device, prepare, act) and the frame its result goes in when it is someone
 │                               else's text, checked at registration and at build time
 ├── src/core/ primitives        Command routing/execution, worker pool, wake word, time parsing, utterance
-│                               dedup, reply codes, text-input dispatch, prompt sections, input queue
+│                               dedup, reply codes, prompt sections, input queue
 ├── src/core/dawn_events.c      The local voice surface's events on MQTT dawn/events, published from the voice
 │                               loop and the TTS thread (no DAWN lock is held across a publish)
 ├── src/core/tz.c               Clock times in a named zone (libical), never the process's TZ.  tz_lookup only
@@ -196,8 +196,9 @@ Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 │                               include it from Layer 2 up
 ├── src/llm/                    Providers, streaming, tool loop, turn blocks, compaction core, tool-result views;
 │                               llm_third_party.c frames an email's or a page's text as someone else's
-├── src/core/ services          Session unit (below), focus framework (src/core/focus/), prompt prefix
-│                               (prefix_*), embeddings, crypto store, scheduler, tool-result store, OTA, images
+├── src/core/ services          Session unit (below), text-input dispatch, focus framework (src/core/focus/),
+│                               prompt prefix (prefix_*), embeddings, crypto store, scheduler, tool-result
+│                               store, OTA, images
 ├── src/core/conv_post.c        Every row written into a conversation from outside a turn (a job's report, a channel
 │                               message DAWN sent) goes through conv_post_unprompted(), through the lease
 ├── src/core/tool_call_policy.c Who may make a tool call: the caller's kind of turn (user, unverified sender,
@@ -327,6 +328,7 @@ depends on, so every build runs them, and they fail the build when broken:
 | `messaging_send_funnel_check` | `check_messaging_send_funnel.sh` | Every messaging driver send goes through `messaging_deliver` (per-provider formatting and escaping) |
 | `tool_action_kinds_check` | `check_tool_action_kinds.sh` | Every tool's action-kinds table names its own actions, and each prepare names a listed confirm |
 | `llm_blocks_confined_check` | `check_llm_blocks_confined.sh` | Stored turn blocks (`messages.llm_blocks`) are read only to rebuild an LLM request |
+| `llm_selection_resolved_check` | `check_llm_selection_resolved.sh` | A session's LLM settings are read resolved (`session_get_llm_config`); only the writers that store them back read them raw |
 | `message_kind_confined_check` | `check_message_kind_confined.sh` | Request-context rows (a `messages.kind`) are never shown, searched, counted or extracted |
 | `user_removal_marked_check` | `check_user_removal_marked.sh` | A delete a user makes is marked as their removal, so it is withdrawn from conversations |
 | `blob_marker_sync_check` | `check_blob_marker_sync.sh` | The chat-attachment blob marker agrees across its producer, parser and orphan sweep |
@@ -575,6 +577,10 @@ Global daemon locks (src/dawn.c):
   llm_mutex              — LLM worker thread ↔ main thread buffer transfer
   tts_mutex              — TTS engine (Piper) serialization
   conversation_mutex     — conversation history list
+  g_config_rwlock        — the live dawn.toml settings.  Readers include the LLM-settings getters
+                           (session_get_llm_config, llm_resolve_config, llm_selection_problem),
+                           taken with no session lock held; a writer (a settings save) never calls
+                           into session LLM state
 
 Per-session locks (src/core/session_manager.c):
   session->history_mutex    — session conversation history
@@ -587,6 +593,11 @@ Per-session locks (src/core/session_manager.c):
    copy under the lock; the order is session_manager_rwlock, ref_mutex, fd_mutex, then one of these)
 
 Per-module locks (scoped to a single subsystem):
+  g_config_rwlock (src/config/)                   — the live dawn.toml settings.  Readers copy what they need and
+                                                    release (llm_default_selection's snapshot).  A settings save holds
+                                                    it for write across config_write_toml(), which takes
+                                                    tool_registry::s_registry_mutex, so it comes BEFORE that mutex;
+                                                    never take it while holding the registry mutex
   auth_db mutex (src/auth/auth_db_core.c)         — SQLite serialization
   tool_registry::s_registry_mutex                 — tool lookup table
   embedding_engine::s_embed_mutex                 — embed provider serialization
@@ -596,6 +607,9 @@ Per-module locks (scoped to a single subsystem):
   utterance_dedup::s_mutex (utterance_dedup.c)    — cross-device dedup slots (leaf)
   attention::s_mutex (src/core/attention/attention_core.c) — SAGE watch cache + event queue + metrics (leaf)
   turn_queue::s_turn_queue_mutex (src/core/turn_queue.c)   — per-session turn-serialization queue (LEAF; never held across the spawn/free closures)
+  messaging_engine::s_session_slots_mutex (src/messaging/messaging_engine_session.c) — the channels' live sessions; a session's
+                                                                     ref_mutex is taken under it only to retain or release one, and its
+                                                                     LLM settings are set after it is released
   focus_source::s_registry_mutex (src/core/focus/focus_source.c) — the retrieval-adapter registry (LEAF: held only to
                                                                      register or clear an adapter; adapters register once at
                                                                      startup, so a turn's focus_compose reads the registry

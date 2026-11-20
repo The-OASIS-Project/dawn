@@ -454,7 +454,7 @@ session's *resolved/actual* LLM state (not just config defaults):
 }
 ```
 - `thinking_mode` / `reasoning_effort`: the session's current reasoning settings (same
-  vocabulary as `set_llm_runtime`). This is the only place a fresh connection learns
+  vocabulary as `set_session_llm`). This is the only place a fresh connection learns
   them — `llm_state_update` is only pushed on a `switch_llm` tool call.
 
 #### `set_config`
@@ -530,21 +530,6 @@ Response: `list_llm_models_response`
 
 ### LLM Runtime Control
 
-#### `set_llm_runtime`
-Switch LLM type/provider globally. **Admin only.** Affects all clients.
-```json
-{
-   "type": "set_llm_runtime",
-   "payload": {
-      "type": "cloud",
-      "provider": "claude"
-   }
-}
-```
-- `type`: `"local"` or `"cloud"`
-- `provider`: `"openai"`, `"claude"`, or `"gemini"`
-- Response: `set_llm_runtime_response`
-
 #### `set_session_llm`
 Configure LLM settings for this session only (does not affect other clients).
 ```json
@@ -560,7 +545,25 @@ Configure LLM settings for this session only (does not affect other clients).
 }
 ```
 - All fields are optional, only provided fields are changed
-- `type`: `"local"`, `"cloud"`, or `"reset"` (revert to defaults)
+- Send a pick as one message: `type`, `provider` (for cloud) and `model` together
+- `type`: `"local"`, `"cloud"`, or `"reset"`: no selection of its own, so the session
+  follows the dawn.toml default (resolved at each turn) with the default reasoning; other
+  fields in the same message apply over it.  `"cloud"` without `provider` means the
+  session's cloud provider, else the one dawn.toml names
+- `provider`: `"openai"`, `"claude"`, `"gemini"`, `"openrouter"`; `"local"` means local;
+  `"none"` (what the server sends for a local selection) names none.  A changed provider
+  clears the model (its default), so one vendor's model never goes to another
+- `model` alone (no `type` or `provider`) moves the session to cloud only when a dawn.toml
+  cloud model list names it exactly; otherwise it stays where it is
+- A pick that can't run (its provider has no API key, an unknown provider) is refused:
+  `success` false, `error` the reason, nothing stored, and the payload carries the session's
+  current settings to resync from.  A restore (`from_restore`) or a `"reset"` is checked at
+  its next turn
+- `from_restore`: true when the client replays a loaded conversation's settings; the server
+  then doesn't save them back to the active conversation
+- The response, `llm_runtime` in `get_config_response` and a loaded conversation's
+  `llm_settings` carry `follows_default` (true: no selection of its own; the values shown
+  are the default's). A client restores such a conversation with `"reset"`.
 - `thinking_mode`: `"disabled"`, `"auto"`, or `"enabled"`
 - `reasoning_effort`: `"low"`, `"medium"`, or `"high"`
 - `type: "local"` with no `model` clears a model the session carried over from a cloud
@@ -573,8 +576,9 @@ Configure LLM settings for this session only (does not affect other clients).
   active conversation (a loaded conversation's own settings, or a model the client
   detected rather than the user picked).
 - `conversation_id`: optional; the conversation the change was made in (`0`: one not
-  saved yet). When it isn't the connection's active conversation, the settings apply to
-  the session but are not saved, as with `from_restore`.
+  saved yet). When it isn't the connection's active conversation, nothing in the request is
+  applied or saved (the session now carries that conversation's settings): the reply is
+  `success` false with the current settings.
 - Response: `set_session_llm_response`
 
 #### `get_system_prompt`
@@ -998,19 +1002,25 @@ Update context token counts for a conversation in the database.
 No response (fire-and-forget).
 
 #### `lock_conversation_llm`
-Lock a conversation to a specific LLM provider/model.
+Store a new conversation's LLM settings with its first message (only while it has none).
 ```json
 {
    "type": "lock_conversation_llm",
    "payload": {
       "conversation_id": 42,
-      "llm_type": "cloud",
-      "llm_provider": "claude",
-      "llm_model": "claude-sonnet-4-5"
+      "llm_settings": {
+         "llm_type": "cloud",
+         "cloud_provider": "claude",
+         "model": "claude-sonnet-4-5",
+         "thinking_mode": "enabled",
+         "reasoning_effort": "medium"
+      }
    }
 }
 ```
-Response: `lock_conversation_llm_response`
+- Empty `llm_type`, `cloud_provider` and `model`: the conversation has no selection of
+  its own and follows the default (`follows_default`); only its reasoning is stored.
+- Response: `lock_conversation_llm_response`
 
 #### `continue_conversation`
 Continue a conversation after context compaction (create new DB entry linked to old).
@@ -2294,8 +2304,9 @@ through the assistant: "follow up on job 1977: ...").
 #### `coding_view_response`
 `ok` with `result`, the gateway's answer as is, or `error`. For `changes`: `head`,
 `base`, `task_id` (the job's branch is `refs/agent/<task_id>` in the gateway's
-mirror), `files` ({`path`, `added`, `removed`, `protected`}; `added`/`removed` null
-for a binary file; protected first, at most 2000) with `files_total`, and `commits`
+mirror), `files` ({`path`, `added`, `removed`, `to_check`, `why`}; `added`/`removed` null
+for a binary file; `to_check` true for a file to check before publishing, with its pattern's
+`why` when it has one; those first, at most 2000) with `files_total`, and `commits`
 ({`hash`, `subject`, `merge`}, at most 100, always the whole job's), `base_name` (the
 base branch), `scope` (as applied: `all`, `since_push` or the full hash),
 `scope_commits` (hashes it covers), `scope_merge` (a merge commit's scope) with
@@ -2317,7 +2328,8 @@ this is where the user checks the work before publishing it.
 #### `coding_publish_preview_response`
 `ok` with `preview`, or `error`. `preview`: `head` (full hash), `repo`, `branch`,
 `base`, `commits` (count listed) with `commits_more` (true: 100 or more), `files` (count
-listed) with `files_total`, `protected` (paths), `history_only` ({`path`, `protected`}:
+listed) with `files_total`, `to_check` ({`path`, `why`}: files to check before publishing,
+`why` empty for none), `history_only` ({`path`, `to_check`, `why?`}, the gateway's as it is:
 paths changed by the job's commits but not in its final diff, public in the branch's
 history), `workflows` (true: the work changes `.github/workflows`, which the gateway's
 token can't push; offer no Publish), `pr_title` (the title the agent wrote when
@@ -2335,7 +2347,7 @@ agent's: show them as text, with invisible and direction-changing characters vis
       "preview": {
          "head": "4f1c…", "repo": "owner/repo", "branch": "agent/42-fix", "base": "main",
          "commits": 2, "commits_more": false, "files": 3, "files_total": 3,
-         "protected": [], "history_only": [ { "path": "notes.txt", "protected": false } ],
+         "to_check": [], "history_only": [ { "path": "notes.txt", "to_check": false } ],
          "workflows": false, "pr_title": "Fix the parser", "pr_title_by_agent": true, "pr_body": "…", "pr_body_sha256": "9a0b…",
          "mentions": [], "closes": [ "#41" ]
       }
@@ -2392,8 +2404,10 @@ A coding job's conversation carries `agent_step` (`gw`: `tool` with `tool`, `bri
 `pushed`, `pr_url`; `merged` with `pr_url`, `unpublished` (newer commits not
 published); `closed` with `reason`: `user` or `merged`) and `agent_end` (`gw`:
 `completed`, `failed`, `cancelled`, with `summary`, `branch`, `commits`, `diffstat`,
-`uncommitted`, `protected`, `protected_count`, `error`, `cost_usd`; lists arrive
-joined by newlines). All of it is the agent's text except `line`: render it as text
+`uncommitted`, `to_check` with `to_check_count` (files to check before publishing, one per
+line: the path, then a tab and the reason when there is one; `protected` and
+`protected_count` from an older gateway), `error`, `cost_usd`; lists arrive joined by
+newlines). All of it is the agent's text except `line`: render it as text
 only (show `pr_url` only in GitHub's form, `https://github.com/<o>/<r>/pull/<n>`).
 
 #### `job_action_response`
@@ -2917,12 +2931,20 @@ Proactive LLM configuration update (sent when session config changes).
       "type": "cloud",
       "provider": "claude",
       "model": "claude-sonnet-4-5",
+      "follows_default": false,
       "openai_available": true,
       "claude_available": true,
-      "gemini_available": false
+      "gemini_available": false,
+      "openrouter_available": false
    }
 }
 ```
+- `follows_default`: true when the conversation has no model of its own (it follows the
+  dawn.toml default); a client offers "Use the default" only when it is false, sending
+  `set_session_llm` `{"type": "reset"}` without `from_restore`, which saves the
+  conversation as following the default
+- `*_available`: whether that provider has an API key, for showing which can be picked
+  (a provider without one is listed as "(no API key)"); never a choice made for the user
 
 ---
 
@@ -3322,7 +3344,6 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `list_interfaces` | `list_interfaces_response` |
 | `list_llm_models` | `list_llm_models_response` |
 | `restart` | `restart_response` |
-| `set_llm_runtime` | `set_llm_runtime_response` |
 | `set_session_llm` | `set_session_llm_response` |
 | `get_system_prompt` | `system_prompt_response` |
 | `get_tools_config` | `get_tools_config_response` |

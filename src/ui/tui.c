@@ -42,6 +42,7 @@
 #include "git_sha.h"
 #include "input_queue.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "logging.h"
 #include "ui/metrics.h"
 #include "utils/string_utils.h"
@@ -1247,14 +1248,16 @@ int tui_handle_input(void) {
          session_llm_config_t config;
          session_get_llm_config(local_session, &config);
          if (config.type != LLM_CLOUD) {
-            config.type = LLM_CLOUD;
-            if (session_set_llm_config(local_session, &config) == 0) {
+            /* The cloud provider dawn.toml names, checked now. */
+            llm_selection_set_target(&config, LLM_CLOUD, CLOUD_PROVIDER_NONE);
+            char reason[LLM_SELECTION_REASON_MAX];
+            if (llm_selection_problem(&config, reason, sizeof(reason)) != 0) {
+               metrics_log_activity("Not switched to Cloud LLM: %s", reason);
+            } else if (session_set_llm_config(local_session, &config) == 0) {
                llm_resolved_config_t resolved;
                llm_resolve_config(&config, &resolved);
                metrics_log_activity("Switched to Cloud LLM (%s)",
                                     resolved.model ? resolved.model : "unknown");
-            } else {
-               metrics_log_activity("Failed to switch to Cloud LLM (no API key)");
             }
          }
          break;

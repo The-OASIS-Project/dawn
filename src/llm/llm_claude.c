@@ -522,7 +522,7 @@ static int claude_single_shot_once(struct json_object *conversation_history,
    }
 
    if (!llm_check_connection(base_url, 4)) {
-      llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+      llm_set_last_error(LLM_ERR_UNREACHABLE);
       OLOG_ERROR("Pre-flight connection check failed (cloud unreachable)");
       return 1;
    }
@@ -571,7 +571,7 @@ static int claude_single_shot_once(struct json_object *conversation_history,
    curl_buffer_init(&streaming_ctx.raw_response);
 
    /* Retry loop: attempt CURL request up to 2 times on transient connection failures */
-   int max_attempts = 2;
+   int max_attempts = llm_provider_errors_quiet() ? 1 : 2;
    for (int attempt = 0; attempt < max_attempts; attempt++) {
       curl_handle = curl_easy_init();
       if (!curl_handle) {
@@ -600,7 +600,9 @@ static int claude_single_shot_once(struct json_object *conversation_history,
       // This allows long responses to complete while still catching hung connections.
       curl_easy_setopt(curl_handle, CURLOPT_LOW_SPEED_LIMIT, 1L);
       curl_easy_setopt(curl_handle, CURLOPT_LOW_SPEED_TIME, 60L);
-      curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT_MS, LLM_CONNECT_TIMEOUT_MS);
+      curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT_MS,
+                       llm_provider_errors_quiet() ? LLM_FALLBACK_CONNECT_TIMEOUT_MS
+                                                   : LLM_CONNECT_TIMEOUT_MS);
 
       // No hard timeout for streaming - rely on low-speed detection instead.
       // The llm_timeout_ms config is only used for non-streaming requests.
@@ -650,8 +652,10 @@ static int claude_single_shot_once(struct json_object *conversation_history,
          } else {
             OLOG_ERROR("CURL failed: %s", curl_easy_strerror(res));
          }
+         llm_note_curl_failure(curl_handle, res);
 #ifdef ENABLE_WEBUI
-         if (!stopped) {
+         if (!stopped &&
+             !(llm_provider_errors_quiet() && llm_error_is_transient(llm_last_error()))) {
             session_t *session = session_get_command_context();
             if (session && session->type == SESSION_TYPE_WEBUI) {
                const char *error_code = (res == CURLE_OPERATION_TIMEDOUT) ? "LLM_TIMEOUT"
@@ -691,7 +695,8 @@ static int claude_single_shot_once(struct json_object *conversation_history,
       }
 #ifdef ENABLE_WEBUI
       session_t *session = session_get_command_context();
-      if (!retrying && session && session->type == SESSION_TYPE_WEBUI) {
+      if (!retrying && session && session->type == SESSION_TYPE_WEBUI &&
+          !(llm_provider_errors_quiet() && llm_error_is_transient(llm_last_error()))) {
          const char *error_msg = parse_claude_error_message(streaming_ctx.raw_response.data,
                                                             http_code);
          webui_send_error(session, "LLM_ERROR", error_msg);

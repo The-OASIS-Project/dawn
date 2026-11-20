@@ -36,7 +36,7 @@
 
 #include "auth/auth_db.h"
 #include "auth/auth_db_messages.h"
-#include "core/job_dispatch.h" /* job_provider_from_default */
+#include "core/job_dispatch.h" /* job_selection_load, job_provider_for */
 #include "core/job_manager.h"
 #include "core/job_report.h"
 #include "core/session_manager.h"
@@ -122,7 +122,18 @@ static void research_deliver_to_parent(int64_t job_conv, int user_id, const char
 
 static void research_worker_run(research_work_t *work) {
    session_t *s = NULL;
-   int rc = job_manager_begin(work->user_id, work->conv_id, job_provider_from_default(), &s);
+   /* The LLM stored when the run was spawned. */
+   session_llm_config_t llm;
+   if (job_selection_load(work->conv_id, work->user_id, &llm) != AUTH_DB_SUCCESS) {
+      time_t now = time(NULL);
+      research_mark_run_terminal(work->conv_id, "failed", "failed", now);
+      job_manager_set_terminal(work->conv_id, work->user_id, "failed",
+                               "couldn't read the run's model", now, 0);
+      job_manager_mark_dirty();
+      OLOG_WARNING("research_worker: could not read conv %lld's model", (long long)work->conv_id);
+      return;
+   }
+   int rc = job_manager_begin(work->user_id, work->conv_id, job_provider_for(&llm), &s);
    if (rc != JOB_MGR_OK) {
       /* The tool checks caps before creating the row, but guard the race. */
       const char *err = (rc == JOB_MGR_CAP_GLOBAL || rc == JOB_MGR_CAP_PROVIDER ||
@@ -153,6 +164,7 @@ static void research_worker_run(research_work_t *work) {
       job_manager_end(s);
       return;
    }
+   session_set_llm_config(s, &llm);
    /* queued -> running is a state change WITHIN the active set (no count change),
     * but without it a watcher's row reads 'queued' with started_at 0 for the whole
     * runtime and an elapsed timer renders 1970.  Single-owner from here on. */

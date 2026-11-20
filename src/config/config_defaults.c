@@ -115,12 +115,13 @@ void config_set_defaults(dawn_config_t *config) {
 
    /* LLM */
    safe_strscpy(config->llm.type, "cloud");
-   config->llm.max_tokens = 16384; /* Universally-safe ceiling (= GPT-4o max output); a streamed
-                                      reply that reasons gets more by its effort
-                                      (llm_reply_max_tokens) */
+   config->llm.local_fallback = false; /* opt-in: a local LLM the user set up */
+   config->llm.max_tokens = 16384;     /* Universally-safe ceiling (= GPT-4o max output); a streamed
+                                          reply that reasons gets more by its effort
+                                          (llm_reply_max_tokens) */
 
    /* LLM Cloud */
-   config->llm.cloud.provider[0] = '\0'; /* Empty = auto-detect from available API keys */
+   config->llm.cloud.provider[0] = '\0'; /* Empty = not selected: the local LLM */
    config->llm.cloud.endpoint[0] = '\0'; /* Empty = use default */
    config->llm.cloud.vision_enabled = true;
    config->llm.cloud.use_openrouter = false; /* Direct providers by default */
@@ -150,7 +151,7 @@ void config_set_defaults(dawn_config_t *config) {
    /* Default Gemini model list (first entry is default) */
    config->llm.cloud.gemini_models_count = 2;
    safe_strscpy(config->llm.cloud.gemini_models[0],
-                LLM_DEFAULT_GEMINI_MODEL); /* gemini-3.7-flash */
+                LLM_DEFAULT_GEMINI_MODEL); /* gemini-3.8-flash */
    safe_strscpy(config->llm.cloud.gemini_models[1], "gemini-3.1-pro-preview");
    config->llm.cloud.gemini_default_model_idx = 0;
 
@@ -171,7 +172,7 @@ void config_set_defaults(dawn_config_t *config) {
    safe_strscpy(config->llm.cloud.openrouter_models[7], "openai/gpt-5.5");
    safe_strscpy(config->llm.cloud.openrouter_models[8], "openai/gpt-5.4-mini");
    safe_strscpy(config->llm.cloud.openrouter_models[9], "openai/gpt-5.4-nano");
-   safe_strscpy(config->llm.cloud.openrouter_models[10], "google/gemini-3.7-flash");
+   safe_strscpy(config->llm.cloud.openrouter_models[10], "google/gemini-3.8-flash");
    safe_strscpy(config->llm.cloud.openrouter_models[11], "google/gemini-3.1-pro-preview");
    config->llm.cloud.openrouter_default_model_idx = 0;
 

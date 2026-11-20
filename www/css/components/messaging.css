@@ -291,6 +291,7 @@
    .channel-verify-input,
    .channel-provider-select,
    .channel-llm-field select,
+   .channel-llm-default-btn,
    #channel-generate-code-btn,
    #refresh-channels-btn {
       min-height: 44px;

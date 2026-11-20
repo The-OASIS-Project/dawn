@@ -33,8 +33,12 @@
 #include "dawn_error.h"
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
+#ifdef ENABLE_WEBUI
+#include "messaging/messaging_engine.h"
+#endif
 
 /* ========== Forward Declarations ========== */
 
@@ -47,32 +51,31 @@ typedef struct {
    llm_type_t type;           /* LLM type to set */
    cloud_provider_t provider; /* Cloud provider (NONE for local) */
    const char *label;         /* Human-readable label for messages */
-   const char *fail_hint;     /* Extra hint on failure (NULL for none) */
 } llm_target_entry_t;
 
 static const llm_target_entry_t llm_targets[] = {
    /* Local targets */
-   { "local", LLM_LOCAL, CLOUD_PROVIDER_NONE, "local LLM", NULL },
-   { "llama", LLM_LOCAL, CLOUD_PROVIDER_NONE, "local LLM", NULL },
-   /* Cloud (keep current provider) */
-   { "cloud", LLM_CLOUD, CLOUD_PROVIDER_NONE, "cloud LLM", "API key not configured." },
+   { "local", LLM_LOCAL, CLOUD_PROVIDER_NONE, "local LLM" },
+   { "llama", LLM_LOCAL, CLOUD_PROVIDER_NONE, "local LLM" },
+   /* Cloud: the session's cloud provider, else the one dawn.toml names */
+   { "cloud", LLM_CLOUD, CLOUD_PROVIDER_NONE, "cloud LLM" },
    /* OpenAI variants */
-   { "openai", LLM_CLOUD, CLOUD_PROVIDER_OPENAI, "OpenAI", "API key not configured." },
-   { "gpt", LLM_CLOUD, CLOUD_PROVIDER_OPENAI, "OpenAI", "API key not configured." },
-   { "chatgpt", LLM_CLOUD, CLOUD_PROVIDER_OPENAI, "OpenAI", "API key not configured." },
-   { "chat gpt", LLM_CLOUD, CLOUD_PROVIDER_OPENAI, "OpenAI", "API key not configured." },
-   { "open ai", LLM_CLOUD, CLOUD_PROVIDER_OPENAI, "OpenAI", "API key not configured." },
+   { "openai", LLM_CLOUD, CLOUD_PROVIDER_OPENAI, "OpenAI" },
+   { "gpt", LLM_CLOUD, CLOUD_PROVIDER_OPENAI, "OpenAI" },
+   { "chatgpt", LLM_CLOUD, CLOUD_PROVIDER_OPENAI, "OpenAI" },
+   { "chat gpt", LLM_CLOUD, CLOUD_PROVIDER_OPENAI, "OpenAI" },
+   { "open ai", LLM_CLOUD, CLOUD_PROVIDER_OPENAI, "OpenAI" },
    /* Claude variants */
-   { "claude", LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "Claude", "API key not configured." },
-   { "clawed", LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "Claude", "API key not configured." },
-   { "claud", LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "Claude", "API key not configured." },
-   { "cloud ai", LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "Claude", "API key not configured." },
+   { "claude", LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "Claude" },
+   { "clawed", LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "Claude" },
+   { "claud", LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "Claude" },
+   { "cloud ai", LLM_CLOUD, CLOUD_PROVIDER_CLAUDE, "Claude" },
    /* Gemini variants */
-   { "gemini", LLM_CLOUD, CLOUD_PROVIDER_GEMINI, "Gemini", "API key not configured." },
-   { "jiminy", LLM_CLOUD, CLOUD_PROVIDER_GEMINI, "Gemini", "API key not configured." },
+   { "gemini", LLM_CLOUD, CLOUD_PROVIDER_GEMINI, "Gemini" },
+   { "jiminy", LLM_CLOUD, CLOUD_PROVIDER_GEMINI, "Gemini" },
    /* OpenRouter */
-   { "openrouter", LLM_CLOUD, CLOUD_PROVIDER_OPENROUTER, "OpenRouter", "API key not configured." },
-   { "open router", LLM_CLOUD, CLOUD_PROVIDER_OPENROUTER, "OpenRouter", "API key not configured." },
+   { "openrouter", LLM_CLOUD, CLOUD_PROVIDER_OPENROUTER, "OpenRouter" },
+   { "open router", LLM_CLOUD, CLOUD_PROVIDER_OPENROUTER, "OpenRouter" },
 };
 
 /* ========== Parameter Definitions ========== */
@@ -84,8 +87,8 @@ static const treg_param_t switch_llm_params[] = {
        .type = TOOL_PARAM_TYPE_ENUM,
        .required = true,
        .maps_to = TOOL_MAPS_TO_ACTION,
-       .enum_values = { "local", "cloud", "openai", "claude", "gemini" },
-       .enum_count = 5,
+       .enum_values = { "local", "cloud", "openai", "claude", "gemini", "openrouter" },
+       .enum_count = 6,
    },
 };
 
@@ -145,8 +148,8 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
    }
 
    if (!target || target[0] == '\0') {
-      return strdup("No LLM target specified. Use 'local', 'cloud', 'openai', 'claude', or "
-                    "'gemini'.");
+      return strdup("No LLM target specified. Use 'local', 'cloud', 'openai', 'claude', "
+                    "'gemini' or 'openrouter'.");
    }
 
    const llm_target_entry_t *entry = find_target(target);
@@ -156,7 +159,7 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
          snprintf(result, 128,
                   TOOL_RESULT_ERROR_MARK
                   "Unknown LLM target '%.32s'. Use 'local', 'cloud', 'openai', 'claude', "
-                  "or 'gemini'.",
+                  "'gemini' or 'openrouter'.",
                   target);
       }
       return result;
@@ -172,13 +175,12 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
       return strdup(TOOL_RESULT_ERROR_MARK "No active session available for LLM switch.");
    }
 
-   /* Inside a turn, the switch lasts beyond it only when the user asked for it:
-    * a background or job turn acting on untrusted content (a fetched page, a
-    * job's result) changes this reply's model and nothing else, and never moves
-    * it from the local model to a cloud one.  Nor does a
-    * switch that would move a private conversation from the local model to a
-    * cloud one.  Outside a turn (an MQTT command) it is the session's setting,
-    * as before: with no turn running to pin the history, the next turn's own
+   /* Inside a turn, the switch lasts beyond it only when the user asked for it,
+    * as a pick in the WebUI does: a background or job turn acting on untrusted
+    * content (a fetched page, a job's result) changes this reply's model and
+    * nothing else, and never to a cloud provider the conversation isn't already
+    * on.  Outside a turn (an MQTT command) it is the session's setting, as
+    * before: with no turn running to pin the history, the next turn's own
     * context management fits the history to the new model. */
    const bool in_turn = session_turn_is_caller(session);
    if (!in_turn && session_turn_active(session)) {
@@ -195,19 +197,29 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
       conv_id = session_turn_conversation(session);
    }
    const bool user_asked = !in_turn || session_turn_user_originated(session);
-   if (!user_asked && type_before == LLM_LOCAL && entry->type == LLM_CLOUD) {
-      /* Not even for this reply: the turn would send its whole history, which
-       * the user kept on the local model, to a cloud provider because of
-       * content the turn read. */
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Switching from the local model to a cloud one needs the user to ask for it.");
-   }
-   bool lasting = user_asked;
+   const bool lasting = user_asked;
    const int owner = session_effective_user_id(session); /* whose conversations */
-   if (lasting && in_turn && conv_id > 0 && type_before == LLM_LOCAL && entry->type == LLM_CLOUD) {
-      bool is_private = true;
-      lasting = owner > 0 && conv_db_is_private(conv_id, owner, &is_private) == AUTH_DB_SUCCESS &&
-                !is_private;
+
+   /* The selection asked for: "cloud" is the session's cloud provider, else the one
+    * dawn.toml names.  Checked now: a provider without its key is refused with
+    * the reason and nothing changes. */
+   session_llm_config_t target_cfg = config;
+   llm_selection_set_target(&target_cfg, entry->type, entry->provider);
+   target_cfg.model[0] = '\0'; /* the provider's default model */
+   if (!user_asked && target_cfg.type == LLM_CLOUD &&
+       (type_before != LLM_CLOUD || target_cfg.cloud_provider != config.cloud_provider)) {
+      /* Not even for this reply: the turn would send its whole history to a
+       * cloud provider the user didn't pick, because of content the turn read. */
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Switching to another cloud provider needs the user to ask for it.");
+   }
+   char reason[LLM_SELECTION_REASON_MAX];
+   if (llm_selection_problem(&target_cfg, reason, sizeof(reason)) != 0) {
+      char *result = malloc(LLM_SELECTION_REASON_MAX + 32);
+      if (result) {
+         snprintf(result, LLM_SELECTION_REASON_MAX + 32, TOOL_RESULT_ERROR_MARK "%s", reason);
+      }
+      return result;
    }
 
    /* The switch takes effect with the next message: its seam fits the history
@@ -219,19 +231,14 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
 
    OLOG_INFO("Setting AI to %s via switch_llm tool%s.", entry->label,
              lasting ? "" : " (this reply only)");
-   config.type = entry->type;
-   if (entry->provider != CLOUD_PROVIDER_NONE) {
-      config.cloud_provider = entry->provider;
-   }
-   config.model[0] = '\0'; /* Clear model to use provider default */
+   config = target_cfg;
 
    const int set_rc = lasting ? session_set_llm_config(session, &config)
                               : session_set_turn_llm_config(session, &config);
    if (set_rc != SUCCESS) {
       char *result = malloc(128);
       if (result) {
-         snprintf(result, 128, TOOL_RESULT_ERROR_MARK "Failed to switch to %s.%s%s", entry->label,
-                  entry->fail_hint ? " " : "", entry->fail_hint ? entry->fail_hint : "");
+         snprintf(result, 128, TOOL_RESULT_ERROR_MARK "Failed to switch to %s.", entry->label);
       }
       return result;
    }
@@ -240,8 +247,7 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
     * belongs to, so it holds whenever that conversation is used again (opened
     * in the WebUI, a later message on its channel, a session recreated after
     * idle or a restart), and for a turn on a conversation the user isn't
-    * viewing.  Re-read the applied config first (session_set_llm_config may
-    * fall back on a missing key) and write the FULL config, because
+    * viewing.  Re-read the applied config and write the FULL config, because
     * conv_db_update_llm_settings overwrites all columns (no keep-current):
     * passing the current thinking_mode / reasoning_effort keeps the thinking
     * settings switch_llm doesn't touch. */
@@ -258,6 +264,10 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
                                             applied.thinking_mode, applied.reasoning_effort);
       if (prc == AUTH_DB_SUCCESS) {
          saved = true;
+#ifdef ENABLE_WEBUI
+         /* A messaging channel's conversation: its live session too (as saved). */
+         messaging_engine_apply_conv_llm(conv_id, &applied);
+#endif
       } else {
          /* This session keeps the switch, but the conversation reverts the next
           * time it is loaded.  Log it. */

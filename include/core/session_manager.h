@@ -1879,11 +1879,13 @@ char *session_llm_call_with_tts_no_add(session_t *session,
 /**
  * @brief Set per-session LLM configuration
  *
- * Validates that requested provider has API key before applying.
+ * Stored as given: whether it can run (its provider's key) is checked per turn
+ * (session_turn_selection_problem()).  An unset selection (LLM_UNDEFINED) keeps
+ * following the default; the running turn's own copy is resolved.
  *
  * @param session Session to configure
  * @param config LLM configuration to apply
- * @return 0 on success, 1 if requested provider lacks API key
+ * @return 0 on success, 1 on a NULL argument
  *
  * @locks session->llm_config_mutex
  */
@@ -1894,25 +1896,65 @@ int session_set_llm_config(session_t *session, const session_llm_config_t *confi
  *
  * For a change the turn makes that must not outlive it (switch_llm on a
  * background turn, or a switch the conversation doesn't keep): the session's
- * settings, and so later turns, are untouched.  Same provider validation and
- * fallback as session_set_llm_config().
+ * settings, and so later turns, are untouched.
  *
- * @return 0 on success; 1 if no provider is usable or the caller isn't the
- *         running turn (its thread or a tool thread carrying its token)
+ * @return 0 on success; 1 if the caller isn't the running turn (its thread or a
+ *         tool thread carrying its token)
  *
  * @locks session->llm_config_mutex
  */
 int session_set_turn_llm_config(session_t *session, const session_llm_config_t *config);
 
 /**
- * @brief Get session's current LLM configuration
+ * @brief Get session's current LLM configuration, resolved
+ *
+ * The settings this thread's turn runs on (the running turn's own, else the
+ * session's), with an unset selection (LLM_UNDEFINED) replaced by
+ * the default one (llm_selection_resolve()).  What a turn, a status display or a
+ * check should read.
  *
  * @param session Session to query
  * @param config Output: copy of session's LLM config
  *
- * @locks session->llm_config_mutex
+ * @locks session->llm_config_mutex, then g_config_rwlock (not held together)
  */
 void session_get_llm_config(session_t *session, session_llm_config_t *config);
+
+/**
+ * @brief Whether the session has no LLM selection of its own (it follows the
+ *        dawn.toml default), so what is stored for it stores none either
+ *
+ * True for NULL.  @locks session->llm_config_mutex
+ */
+bool session_llm_follows_default(session_t *session);
+
+/**
+ * @brief The same settings as session_get_llm_config(), not resolved
+ *
+ * For a read-modify-write that stores the result back: an unset selection stays
+ * unset, so it keeps following the default.  A change that names a type, provider
+ * or model resolves it first (llm_selection_resolve()).
+ *
+ * @locks session->llm_config_mutex
+ */
+void session_get_llm_config_raw(session_t *session, session_llm_config_t *config);
+
+/**
+ * @brief Whether the LLM this turn would run on can run, and if not, why.
+ *
+ * Checks the config session_get_llm_config() returns on this thread (the running
+ * turn's, once its conversation is bound) with llm_selection_problem().  A surface
+ * that doesn't go through core_text_input_dispatch() calls it before saving the
+ * user's message; the dispatch's callers get the sentence in opts->refusal.
+ *
+ * @param session    Session to check
+ * @param[out] reason The sentence for the user (may be NULL)
+ * @param reason_len Size of @p reason
+ * @return 0 when it can run, 1 when it can't
+ *
+ * @locks session->llm_config_mutex, then g_config_rwlock (read), not nested
+ */
+int session_turn_selection_problem(session_t *session, char *reason, size_t reason_len);
 
 
 // =============================================================================
@@ -2067,15 +2109,6 @@ uint64_t session_turn_token(void);
 
 /** @brief Set this thread's turn token (0 clears).  See session_turn_token(). */
 void session_set_turn_token(uint64_t token);
-
-/**
- * @brief Pin the LLM settings session_get_llm_config() returns on this thread
- *
- * For work that outlives the turn it serves (async compaction): the turn's
- * settings, captured while it ran, keep applying after it ends.  @p config must
- * stay valid until cleared.  Pass NULL to clear.
- */
-void session_set_llm_config_override(const session_t *session, const session_llm_config_t *config);
 
 /* =============================================================================
  * Command Context Scope Guard (GCC/Clang cleanup attribute)

@@ -119,9 +119,6 @@ void session_get_llm_config(session_t *session, session_llm_config_t *config) {
 void session_set_command_context(session_t *session) {
    (void)session;
 }
-void session_set_llm_config_override(const session_t *session, const session_llm_config_t *c) {
-   (void)session, (void)c;
-}
 int llm_is_interrupt_requested(void) {
    return 0;
 }

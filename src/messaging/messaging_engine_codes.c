@@ -162,7 +162,8 @@ bool engine_take_reply_code(const inbound_item_t *item, tool_redeemed_t *out) {
 
 char *engine_run_reply_code(const inbound_item_t *item,
                             struct session *session,
-                            tool_redeemed_t *taken) {
+                            tool_redeemed_t *taken,
+                            bool tell_user) {
    tool_result_t *result = calloc(1, sizeof(*result));
    if (!result) {
       free(taken->args);
@@ -197,7 +198,7 @@ char *engine_run_reply_code(const inbound_item_t *item,
    }
    const bool ran = result->success && !result->is_error;
    const size_t len = 512 + (safe_description ? strlen(safe_description) : 0) + outcome_len;
-   char *envelope = malloc(len);
+   char *envelope = tell_user ? NULL : malloc(len);
    if (envelope) {
       snprintf(envelope, len,
                AUTOMATED_EVENT_CODE_APPROVED

@@ -98,6 +98,7 @@
 #include "llm/llm_context.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_rate_limit.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_tool_loop.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
@@ -1302,8 +1303,6 @@ void display_help(int argc, char *argv[]) {
    printf("  --dump-settings        Print all settings with env vars and sources, then exit.\n");
    printf("  --audio-backend TYPE   Audio backend: auto (default), alsa, or pulse.\n");
    printf("  --server               Server mode: no local audio, WebUI + satellites only.\n");
-   printf("  -m, --llm TYPE         Set default LLM type (cloud or local).\n");
-   printf("  -P, --cloud-provider PROVIDER    Set cloud provider (openai or claude).\n");
    printf(
        "  -A, --asr-engine ENGINE          Set ASR engine (vosk or whisper, default: whisper).\n");
    printf("  -W, --whisper-model MODEL        Whisper model size (tiny, base, small, default: "
@@ -1383,9 +1382,10 @@ void *llm_worker_thread(void *arg) {
    session_llm_config_t session_config;
    session_get_llm_config(local_session, &session_config);
 
-   // Resolve to final config (merges session override with global)
+   /* Resolve to final config.  The main loop checked it before starting this
+    * worker; one that can't run now (its key removed meanwhile) is not sent. */
    llm_resolved_config_t resolved_config;
-   llm_resolve_config(&session_config, &resolved_config);
+   const bool can_run = llm_resolve_config(&session_config, &resolved_config) == 0;
 
    // Set command context so tool callbacks (e.g., switch_llm) use local session's config
    // Uses scope guard to ensure cleanup even on early returns
@@ -1395,7 +1395,8 @@ void *llm_worker_thread(void *arg) {
    // The turn's own history, referenced for the call (other threads' writes to
    // it wait for the turn to end).
    // Vision is handled by native tool calling - viewing tool captures image internally
-   struct json_object *history = interrupted ? NULL : session_get_turn_history(local_session);
+   struct json_object *history = interrupted || !can_run ? NULL
+                                                         : session_get_turn_history(local_session);
    char *response = history
                         ? llm_chat_completion_streaming_tts_with_config(history, request_text,
                                                                         dawn_tts_sentence_callback,
@@ -1555,19 +1556,17 @@ int main(int argc, char *argv[]) {
       { "logfile", required_argument, NULL, 'l' },
       { "playback", required_argument, NULL, 'd' },
       { "help", no_argument, NULL, 'h' },
-      { "llm-only", no_argument, NULL, 'L' },                 // LLM handles everything
-      { "llm-commands", no_argument, NULL, 'C' },             // Commands first, then LLM
-      { "commands-only", no_argument, NULL, 'D' },            // Direct commands only (explicit)
-      { "llm", required_argument, NULL, 'm' },                // Set default LLM type (local/cloud)
-      { "cloud-provider", required_argument, NULL, 'P' },     // Cloud provider (openai/claude)
-      { "asr-engine", required_argument, NULL, 'A' },         // ASR engine (vosk/whisper)
-      { "whisper-model", required_argument, NULL, 'W' },      // Whisper model (tiny/base/small)
-      { "whisper-path", required_argument, NULL, 'w' },       // Whisper models directory
-      { "music-dir", required_argument, NULL, 'M' },          // Music directory (absolute path)
-      { "mic-record", optional_argument, NULL, 'r' },         // Record mic input for debugging
-      { "asr-record", optional_argument, NULL, 'a' },         // Record ASR pre/post normalization
-      { "no-bargein", no_argument, NULL, 'B' },               // Disable barge-in during TTS
-      { "summarize-backend", required_argument, NULL, 256 },  // Search summarizer backend
+      { "llm-only", no_argument, NULL, 'L' },                   // LLM handles everything
+      { "llm-commands", no_argument, NULL, 'C' },               // Commands first, then LLM
+      { "commands-only", no_argument, NULL, 'D' },              // Direct commands only (explicit)
+      { "asr-engine", required_argument, NULL, 'A' },           // ASR engine (vosk/whisper)
+      { "whisper-model", required_argument, NULL, 'W' },        // Whisper model (tiny/base/small)
+      { "whisper-path", required_argument, NULL, 'w' },         // Whisper models directory
+      { "music-dir", required_argument, NULL, 'M' },            // Music directory (absolute path)
+      { "mic-record", optional_argument, NULL, 'r' },           // Record mic input for debugging
+      { "asr-record", optional_argument, NULL, 'a' },           // Record ASR pre/post normalization
+      { "no-bargein", no_argument, NULL, 'B' },                 // Disable barge-in during TTS
+      { "summarize-backend", required_argument, NULL, 256 },    // Search summarizer backend
       { "summarize-threshold", required_argument, NULL, 257 },  // Search summarizer threshold
       { "config", required_argument, NULL, 258 },               // Config file path
       { "dump-config", no_argument, NULL, 259 },                // Dump effective config and exit
@@ -1584,8 +1583,6 @@ int main(int argc, char *argv[]) {
       { 0, 0, 0, 0 }
    };
    int option_index = 0;
-   const char *cloud_provider_override = NULL;
-   llm_type_t llm_type_override = LLM_UNDEFINED;
    asr_engine_type_t asr_engine =
        ASR_ENGINE_WHISPER;              // Default: Whisper base (best performance + accuracy)
    const char *asr_model_path = NULL;   // Will be set based on engine
@@ -1647,7 +1644,7 @@ int main(int argc, char *argv[]) {
    atexit(curl_global_cleanup);
 
    /* Short options; -R (AEC) and -T/-t (TUI) exist only when built in. */
-   static const char short_options[] = "c:d:hl:LCDm:P:A:W:w:M:r::a::"
+   static const char short_options[] = "c:d:hl:LCDA:W:w:M:r::a::"
 #ifdef ENABLE_AEC
                                        "R::"
 #endif
@@ -1684,21 +1681,6 @@ int main(int argc, char *argv[]) {
             command_processing_mode = CMD_MODE_DIRECT_ONLY;
             cli_overrides |= CLI_OVERRIDE_COMMAND_MODE;
             OLOG_INFO("Direct commands only mode enabled (CLI override)");
-            break;
-         case 'm':
-            if (strcasecmp(optarg, "cloud") == 0) {
-               llm_type_override = LLM_CLOUD;
-               OLOG_INFO("Using cloud LLM by default");
-            } else if (strcasecmp(optarg, "local") == 0) {
-               llm_type_override = LLM_LOCAL;
-               OLOG_INFO("Using local LLM by default");
-            } else {
-               OLOG_ERROR("Unknown LLM type: %s. Using auto-detection.", optarg);
-            }
-            break;
-         case 'P':
-            cloud_provider_override = optarg;
-            OLOG_INFO("Cloud provider override: %s", cloud_provider_override);
             break;
          case 'W':
             whisper_model = optarg;
@@ -2006,15 +1988,6 @@ int main(int argc, char *argv[]) {
       OLOG_INFO("Search summarizer target ratio from config: %.2f", summarizer_config.target_ratio);
    }
 
-   // Apply CLI LLM type override to g_config (needed for validation)
-   if (llm_type_override == LLM_LOCAL) {
-      safe_strscpy(g_config.llm.type, "local");
-      OLOG_INFO("LLM type set to 'local' (CLI override)");
-   } else if (llm_type_override == LLM_CLOUD) {
-      safe_strscpy(g_config.llm.type, "cloud");
-      OLOG_INFO("LLM type set to 'cloud' (CLI override)");
-   }
-
    // Step 5: Handle --dump-config (print effective config and exit)
    if (dump_config) {
       config_dump(&g_config);
@@ -2037,31 +2010,6 @@ int main(int argc, char *argv[]) {
 
    // Step 6a: A stored copy of a built-in persona would hide the current one
    llm_persona_drop_builtin_copy();
-
-   // Step 6b: Check cloud LLM API key availability (graceful fallback to local)
-   if (strcmp(g_config.llm.type, "cloud") == 0) {
-      int has_api_key = 0;
-      const char *provider = g_config.llm.cloud.provider;
-
-      if (strcmp(provider, "openai") == 0) {
-         has_api_key = llm_has_openai_key();
-      } else if (strcmp(provider, "claude") == 0) {
-         has_api_key = llm_has_claude_key();
-      } else if (strcmp(provider, "gemini") == 0) {
-         has_api_key = llm_has_gemini_key();
-      } else if (strcmp(provider, "openrouter") == 0) {
-         has_api_key = llm_has_openrouter_key();
-      }
-
-      if (!has_api_key) {
-         OLOG_WARNING("Cloud LLM provider '%s' requires API key in secrets.toml - falling back to "
-                      "local LLM",
-                      provider);
-         safe_strscpy(g_config.llm.type, "local");
-         // Also update the runtime override so llm_init uses local
-         llm_type_override = LLM_LOCAL;
-      }
-   }
 
    // Step 7: Initialize wake words from config (must be after config is finalized)
    init_wake_words();
@@ -2204,31 +2152,22 @@ int main(int argc, char *argv[]) {
 
    // Initialize LLM system early - must happen before prompt is built
    // so llm_tools_enabled() returns correct value for native tool calling
-   llm_init(cloud_provider_override);
+   llm_init();
+   if (auth_db_ready) {
+      /* Once: conversations stored on the default follow it from now on. */
+      llm_selection_t def;
+      llm_default_selection(&def);
+      int unpinned = 0;
+      if (conv_db_unpin_default_llm(def.type == LLM_LOCAL ? "local" : "cloud",
+                                    cloud_provider_to_string(def.provider), def.model,
+                                    &unpinned) == AUTH_DB_SUCCESS &&
+          unpinned > 0) {
+         OLOG_INFO("Conversations now following the default LLM: %d", unpinned);
+      }
+   }
 
    // Initialize context management (token tracking, auto-summarization)
    llm_context_init();
-
-   /* The LLM type, before anything can run a turn; it's announced once TTS is
-    * up: CLI override > config file > auto-detect. */
-   llm_type_t boot_llm_type = LLM_LOCAL;
-   if (llm_type_override != LLM_UNDEFINED) {
-      boot_llm_type = llm_type_override;
-   } else if (strcmp(g_config.llm.type, "cloud") == 0) {
-      boot_llm_type = LLM_CLOUD;
-   } else if (strcmp(g_config.llm.type, "local") == 0) {
-      boot_llm_type = LLM_LOCAL;
-   } else if (llm_check_connection(strcmp(g_config.llm.cloud.provider, "openrouter") == 0
-                                       ? "https://openrouter.ai"
-                                       : "https://api.openai.com",
-                                   4)) {
-      boot_llm_type = LLM_CLOUD;
-   }
-   /* Cloud without its API key stays unset: run on local until the announce
-    * below says why. */
-   if (llm_set_type_quiet(boot_llm_type) != 0) {
-      llm_set_type_quiet(LLM_LOCAL);
-   }
 
    // Force early initialization of system instructions before any threads start.
    // This ensures thread-safe access since the buffers are built once and cached.
@@ -2684,8 +2623,8 @@ mqtt_disabled:
    // Initialize search summarizer
    search_summarizer_init(&summarizer_config);
 
-   /* The LLM type was set at startup; now that TTS is up, say it. */
-   llm_set_type(boot_llm_type);
+   /* Now that TTS is up, say which LLM the default is, or why it can't run. */
+   llm_announce_selection();
 
    /* Initialize worker pool for WebUI/satellite audio processing */
 #ifdef ENABLE_WEBUI
@@ -4133,6 +4072,26 @@ mqtt_disabled:
                      /* This turn only (this thread holds the turn begun with
                       * the user message): later turns keep their setting. */
                      session_set_turn_llm_config(local_session, &trigger_config);
+                  }
+
+                  /* An LLM that can't run: the question comes back out and the
+                   * reason is spoken (direct commands above still ran). */
+                  char refusal[LLM_SELECTION_REASON_MAX];
+                  if (session_turn_selection_problem(local_session, refusal, sizeof(refusal)) !=
+                      0) {
+                     OLOG_WARNING("Voice command refused: %s", refusal);
+                     (void)session_rollback_turn(local_session);
+                     end_local_turn();
+                     free(command_text);
+                     command_text = NULL;
+                     text_to_speech(refusal);
+
+                     silenceNextState = DAWN_STATE_WAKEWORD_LISTEN;
+                     recState = DAWN_STATE_SILENCE;
+                     reset_for_new_utterance(vad_ctx, asr_ctx, chunk_mgr, &silence_duration,
+                                             &speech_duration, &recording_duration,
+                                             &preroll_write_pos, &preroll_valid_bytes);
+                     break;  // Exit DAWN_STATE_PROCESS_COMMAND case
                   }
 
                   /* The turn is carried by the worker thread (its token): it

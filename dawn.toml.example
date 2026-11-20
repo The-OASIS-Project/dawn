@@ -199,6 +199,15 @@
                                   # models.toml: reasoning counts toward it. A cloud reply's
                                   # ceiling is also held to the room left in the model's window.
                                   # Env: DAWN_LLM_MAX_TOKENS
+# local_fallback = false          # true: when the cloud provider can't be reached (or keeps
+                                  # failing with 429/5xx), an interactive turn (voice, chat,
+                                  # satellite, message; not background jobs) is
+                                  # answered by [llm.local] instead, and the first such reply says
+                                  # so; the cloud is tried again after a minute, then less often
+                                  # (up to 10 min) while it stays down. Only for a local LLM you run.
+                                  # An http:// endpoint on another machine carries the whole
+                                  # conversation unencrypted, and anyone who can cut this machine's
+                                  # internet can make DAWN use it: prefer https or 127.0.0.1.
 # compact_soft_threshold = 0.60   # Async background compaction trigger
 # compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)
 # compact_use_session = true      # Use session's LLM for compaction. Set false to compact with a
@@ -215,9 +224,13 @@
                                   # Env: DAWN_LLM_RATE_LIMIT_RPM
 
 [llm.cloud]
-# provider = "openai"             # "openai", "claude", "gemini", or "openrouter"
+# provider = ""                   # "openai", "claude", "gemini", or "openrouter": the one whose
+                                  # key is used.  Empty = not selected: the local LLM answers,
+                                  # whatever keys secrets.toml holds (a key never selects one).
                                   # Env: DAWN_LLM_CLOUD_PROVIDER
-# endpoint = ""                   # Custom endpoint (empty = default provider URL)
+# endpoint = ""                   # Custom endpoint for the provider above (empty = its default
+                                  # URL). Only that provider uses it: a conversation on another
+                                  # provider keeps its own URL, so no key goes to the wrong host.
                                   # Env: DAWN_LLM_CLOUD_ENDPOINT
 # vision_enabled = true           # Cloud models typically support vision/images
                                   # Env: DAWN_LLM_CLOUD_VISION_ENABLED
@@ -247,11 +260,11 @@
 # openai_default_model_idx = 0
 # claude_models = ["claude-haiku-5-5", "claude-haiku-4-5", "claude-sonnet-5-5", "claude-opus-5-5"]
 # claude_default_model_idx = 0
-# gemini_models = ["gemini-3.7-flash", "gemini-3.1-pro-preview"]
+# gemini_models = ["gemini-3.8-flash", "gemini-3.1-pro-preview"]
 # gemini_default_model_idx = 0
 # OpenRouter favorites (used when provider = "openrouter"). IDs are "vendor/model".
 # These are the curated shortlist shown in the header model switcher.
-# openrouter_models = ["anthropic/claude-haiku-5.5", "anthropic/claude-haiku-4.5", "anthropic/claude-sonnet-5.5", "anthropic/claude-opus-5.5", "openai/gpt-5.6-luna", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.5", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "google/gemini-3.7-flash", "google/gemini-3.1-pro-preview"]
+# openrouter_models = ["anthropic/claude-haiku-5.5", "anthropic/claude-haiku-4.5", "anthropic/claude-sonnet-5.5", "anthropic/claude-opus-5.5", "openai/gpt-5.6-luna", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.5", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "google/gemini-3.8-flash", "google/gemini-3.1-pro-preview"]
 # openrouter_default_model_idx = 0   # anthropic/claude-haiku-5.5
                                   # Verify slugs against https://openrouter.ai/models
 

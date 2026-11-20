@@ -1002,7 +1002,7 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
    CURLcode res = CURLE_OK;
    char full_url[2048 + 32];
 
-   const int max_attempts = 2;
+   const int max_attempts = llm_provider_errors_quiet() ? 1 : 2;
    for (int attempt = 0; attempt < max_attempts; attempt++) {
       curl = curl_easy_init();
       if (!curl) {
@@ -1027,7 +1027,9 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
       curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, llm_curl_progress_callback);
       curl_easy_setopt(curl, CURLOPT_XFERINFODATA, NULL);
-      curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, LLM_CONNECT_TIMEOUT_MS);
+      curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
+                       llm_provider_errors_quiet() ? LLM_FALLBACK_CONNECT_TIMEOUT_MS
+                                                   : LLM_CONNECT_TIMEOUT_MS);
       {
          int eff_to = llm_get_effective_timeout_ms();
          long lspt = 60L;
@@ -1074,8 +1076,9 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       } else {
          OLOG_ERROR("Responses: curl_easy_perform failed: %s", curl_easy_strerror(res));
       }
+      llm_note_curl_failure(curl, res);
 #ifdef ENABLE_WEBUI
-      if (!stopped) {
+      if (!stopped && !(llm_provider_errors_quiet() && llm_error_is_transient(llm_last_error()))) {
          session_t *s = session_get_command_context();
          if (s && s->type == SESSION_TYPE_WEBUI) {
             const char *err_code = (res == CURLE_OPERATION_TIMEDOUT) ? "LLM_TIMEOUT" : "LLM_ERROR";
@@ -1103,7 +1106,8 @@ int llm_openai_responses_streaming_single_shot(struct json_object *conversation_
       }
 #ifdef ENABLE_WEBUI
       session_t *s = session_get_command_context();
-      if (s && s->type == SESSION_TYPE_WEBUI) {
+      if (s && s->type == SESSION_TYPE_WEBUI &&
+          !(llm_provider_errors_quiet() && llm_error_is_transient(llm_last_error()))) {
          webui_send_error(s, "LLM_ERROR", err_msg);
       }
 #endif

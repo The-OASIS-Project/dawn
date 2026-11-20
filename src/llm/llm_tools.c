@@ -2202,17 +2202,8 @@ bool llm_tools_enabled(const llm_resolved_config_t *config) {
       return true;
    }
 
-   /* No config provided - this happens during prompt building.
-    * If mode is "native" and tools are initialized, we should use
-    * the minimal prompt. The actual LLM type check happens at call time. */
-   llm_type_t type = llm_get_type();
-   if (type == LLM_LOCAL || type == LLM_CLOUD) {
-      return true;
-   }
-
-   /* LLM type not yet set (LLM_NONE during early init) - but config says
-    * native tools are enabled and tools are initialized, so return true
-    * to build the minimal prompt. Runtime calls will have proper type. */
+   /* No config provided (prompt building): native tools are on and initialized,
+    * whatever LLM the call ends up on. */
    return true;
 }
 

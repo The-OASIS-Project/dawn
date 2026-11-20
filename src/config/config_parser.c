@@ -765,6 +765,7 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
 
    static const char *const known_keys[] = { "type",
                                              "max_tokens",
+                                             "local_fallback",
                                              "summarize_threshold",
                                              "compact_soft_threshold",
                                              "compact_hard_threshold",
@@ -784,6 +785,7 @@ static void parse_llm(toml_table_t *table, llm_config_t *config) {
 
    PARSE_STRING(table, "type", config->type);
    PARSE_INT(table, "max_tokens", config->max_tokens);
+   PARSE_BOOL(table, "local_fallback", config->local_fallback);
    bool has_summarize = false;
    {
       toml_datum_t st = toml_double_in(table, "summarize_threshold");

@@ -184,8 +184,8 @@ timezone = "America/New_York"
 type = "cloud"
 
 [llm.cloud]
-# provider is auto-detected from available API keys (Claude > OpenAI > Gemini)
-# Uncomment to override: provider = "claude"  # or "openai", "gemini"
+# the provider your key is for (a key alone selects nothing; none selected = the local LLM)
+provider = "claude"  # or "openai", "gemini", "openrouter"
 model = "claude-sonnet-4-20250514"
 
 [asr]
@@ -278,10 +278,10 @@ See `docs/GETTING_STARTED_SERVER.md` for the full setup guide.
 - Boot greeting, AEC, VAD, music player skipped in server mode
 - Hardcoded `/home/jetson/` paths replaced with `$HOME`-based paths (fail-closed when unset)
 
-**LLM provider auto-detection:**
-- Cloud provider auto-detected from available API keys (Claude > OpenAI > Gemini)
-- Graceful fallback when configured provider unavailable
+**LLM provider selection:**
 - Default config no longer hardcodes OpenAI as cloud provider
+- (Auto-detection from the available keys was removed later: the provider is the one
+  `dawn.toml` names, and with none DAWN uses the local LLM. See UPGRADING.md.)
 
 **Additional fixes:**
 - Fresh-install DB schema includes all tables (memory, calendar, contacts, email, etc.)

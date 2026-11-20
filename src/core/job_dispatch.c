@@ -27,13 +27,44 @@
 #include "auth/auth_db_messages.h"
 #include "core/session_manager.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "logging.h"
 
-job_provider_class_t job_provider_from_default(void) {
-   session_llm_config_t defcfg;
-   memset(&defcfg, 0, sizeof(defcfg));
-   llm_get_default_config(&defcfg);
-   return (defcfg.type == LLM_LOCAL) ? JOB_PROVIDER_LOCAL : JOB_PROVIDER_CLOUD;
+void job_selection_of_spawner(session_llm_config_t *out) {
+   session_t *ctx = session_get_command_context();
+   if (ctx != NULL) {
+      session_get_llm_config(ctx, out);
+      return;
+   }
+   llm_get_default_config(out);
+   llm_selection_resolve(out);
+}
+
+void job_selection_columns(const session_llm_config_t *cfg, conv_llm_columns_t *out) {
+   const bool local = (cfg->type == LLM_LOCAL);
+   out->llm_type = local ? "local" : "cloud";
+   out->cloud_provider = local ? "" : cloud_provider_to_string(cfg->cloud_provider);
+   out->model = cfg->model;
+   out->thinking_mode = cfg->thinking_mode;
+   out->reasoning_effort = cfg->reasoning_effort;
+}
+
+int job_selection_load(int64_t conv_id, int user_id, session_llm_config_t *out) {
+   conversation_t conv;
+   int rc = conv_db_get(conv_id, user_id, &conv);
+   if (rc != AUTH_DB_SUCCESS) {
+      return rc;
+   }
+   llm_selection_from_row(conv.llm_type, conv.cloud_provider, conv.model, conv.thinking_mode,
+                          conv.reasoning_effort, out);
+   conv_free(&conv);
+   return AUTH_DB_SUCCESS;
+}
+
+job_provider_class_t job_provider_for(const session_llm_config_t *cfg) {
+   session_llm_config_t resolved = *cfg;
+   llm_selection_resolve(&resolved);
+   return (resolved.type == LLM_LOCAL) ? JOB_PROVIDER_LOCAL : JOB_PROVIDER_CLOUD;
 }
 
 void job_disposition_signals(session_t *s,

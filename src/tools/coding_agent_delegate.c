@@ -17,7 +17,7 @@
  * the project author(s).
  *
  * Starting a coding task: delegate stages the task and returns a preview,
- * and the user's yes (confirm_delegate) creates the coding job and starts
+ * and the user's yes (confirm, naming its id) creates the coding job and starts
  * its task at the gateway.
  */
 
@@ -95,6 +95,18 @@ bool coding_delegate_live(uint32_t session_id) {
                      NULL;
    pthread_mutex_unlock(&s_pending_mutex);
    return live;
+}
+
+ca_confirm_kind_t coding_delegate_staged(uint32_t id, const turn_origin_t *origin, int user_id) {
+   int kind = 0;
+   pthread_mutex_lock(&s_pending_mutex);
+   const bool found = pending_slots_kind_of(&s_pending_slots, origin, user_id, id,
+                                            pending_slots_now(), &kind);
+   pthread_mutex_unlock(&s_pending_mutex);
+   if (!found) {
+      return CA_CONFIRM_NONE;
+   }
+   return kind == CA_PENDING_REVISE ? CA_CONFIRM_REVISE : CA_CONFIRM_DELEGATE;
 }
 
 /* ========== delegate: a preview, then the user's yes ========== */
@@ -227,8 +239,9 @@ char *coding_delegate_propose(struct json_object *details,
       return coding_agent_error(msg);
    }
    /* A proposal may follow reading the agent's reports: it starts nothing, and
-    * its confirm needs the user's yes in a turn that read none.  But it may not
-    * replace one the user has already seen: their yes would land on the new one. */
+    * its confirm needs the user's yes.  But in a turn that read the agent's
+    * words it may not replace one the user has already seen: their yes would
+    * land on the new one. */
    if (coding_agent_turn_read(origin) && coding_delegate_live(origin->session_id)) {
       return coding_agent_error("A task is already waiting for the user's answer; it can't be "
                                 "replaced in a turn that read the coding agent's report. Ask "
@@ -291,8 +304,8 @@ char *coding_delegate_propose(struct json_object *details,
    }
    strbuf_appendf(&sb,
                   ":\n%s\nRead it to the user and ask them to confirm; if they say yes in their "
-                  "reply, call coding_agent with action 'confirm_delegate' and arguments "
-                  "{\"id\": %u} (this one only).",
+                  "reply, call coding_agent with action 'confirm' and arguments "
+                  "{\"ids\": [%u]}.",
                   task, (unsigned)id);
    return strbuf_steal(&sb);
 }
@@ -335,18 +348,7 @@ static int start_task(int user_id,
    return rc;
 }
 
-char *coding_delegate_confirm(struct json_object *details,
-                              int user_id,
-                              const turn_origin_t *origin) {
-   const uint32_t id = coding_agent_details_id(details);
-   if (id == 0) {
-      return tool_pending_missing_id("coding task");
-   }
-   /* Not in a turn that read the agent's report: a yes there could be its words. */
-   if (coding_agent_turn_read(origin)) {
-      return coding_agent_error("This turn read the coding agent's report, so the task can't be "
-                                "confirmed in it. Ask the user again.");
-   }
+char *coding_delegate_confirm(uint32_t id, int user_id, const turn_origin_t *origin) {
    ca_pending_t p;
    turn_origin_rc_t orc = TURN_ORIGIN_OK;
    pthread_mutex_lock(&s_pending_mutex);
@@ -360,11 +362,16 @@ char *coding_delegate_confirm(struct json_object *details,
    /* Answered: the job's requests may be asked about on DAWN's own. */
    turn_origin_note_answered(session_get_command_context(), p.hdr.origin.turn_number);
 
-   /* The job row first: the gateway's task is named after it. */
+   /* The job row first: the gateway's task is named after it.  Its report turn
+    * runs on the LLM of the turn that confirmed it. */
    const char *title = p.name;
+   session_llm_config_t llm;
+   job_selection_of_spawner(&llm);
+   conv_llm_columns_t llm_cols;
+   job_selection_columns(&llm, &llm_cols);
    int64_t conv_id = 0;
    if (conv_db_create_job_ex(user_id, title, p.parent_conv, "detached", "notify", NULL, 1, p.task,
-                             job_spawn_origin_string(), &conv_id) != AUTH_DB_SUCCESS) {
+                             job_spawn_origin_string(), &llm_cols, &conv_id) != AUTH_DB_SUCCESS) {
       return coding_agent_error("Couldn't create the coding job.");
    }
    if (conv_db_job_set_kind(conv_id, JOB_KIND_CODING) != AUTH_DB_SUCCESS) {
@@ -437,13 +444,10 @@ char *coding_delegate_confirm(struct json_object *details,
    return strbuf_steal(&sb);
 }
 
-/* What confirm_delegate, waiting for the user's reply code, starts: the whole
- * task, or a refusal when it can't be shown whole in the text asking for the
- * code. */
-int coding_delegate_describe(const char *value, char *out, size_t out_len, int *valid_for_sec) {
-   struct json_object *details = tool_parse_details(value, true);
-   const uint32_t id = coding_agent_details_id(details);
-   json_object_put(details);
+/* What a confirm of task @p id, waiting for the user's reply code, starts: the
+ * whole task, or a refusal when it can't be shown whole in the text asking for
+ * the code. */
+int coding_delegate_describe(uint32_t id, char *out, size_t out_len, int *valid_for_sec) {
    turn_origin_t origin;
    int n = -1;
    snprintf(out, out_len, "that coding task isn't waiting any more; propose it again");
@@ -576,8 +580,8 @@ char *coding_revise_propose(struct json_object *details,
    }
    strbuf_appendf(&sb,
                   "Read it to the user and ask them to confirm; if they say yes in their "
-                  "reply, call coding_agent with action 'confirm_revise' and arguments "
-                  "{\"id\": %u} (this one only).",
+                  "reply, call coding_agent with action 'confirm' and arguments "
+                  "{\"ids\": [%u]}.",
                   (unsigned)id);
    return strbuf_steal(&sb);
 }
@@ -738,15 +742,7 @@ static ca_task_state_t task_state(int user_id, int64_t job) {
    return state;
 }
 
-char *coding_revise_confirm(struct json_object *details, int user_id, const turn_origin_t *origin) {
-   const uint32_t id = coding_agent_details_id(details);
-   if (id == 0) {
-      return tool_pending_missing_id("follow-up");
-   }
-   if (coding_agent_turn_read(origin)) {
-      return coding_agent_error("This turn read the coding agent's report, so the follow-up can't "
-                                "be confirmed in it. Ask the user again.");
-   }
+char *coding_revise_confirm(uint32_t id, int user_id, const turn_origin_t *origin) {
    ca_pending_t p;
    turn_origin_rc_t orc = TURN_ORIGIN_OK;
    pthread_mutex_lock(&s_pending_mutex);
@@ -847,11 +843,8 @@ char *coding_revise_confirm(struct json_object *details, int user_id, const turn
    return strbuf_steal(&sb);
 }
 
-/* What confirm_revise, waiting for the user's reply code, sends. */
-int coding_revise_describe(const char *value, char *out, size_t out_len, int *valid_for_sec) {
-   struct json_object *details = tool_parse_details(value, true);
-   const uint32_t id = coding_agent_details_id(details);
-   json_object_put(details);
+/* What a confirm of follow-up @p id, waiting for the user's reply code, sends. */
+int coding_revise_describe(uint32_t id, char *out, size_t out_len, int *valid_for_sec) {
    turn_origin_t origin;
    int n = -1;
    snprintf(out, out_len, "that follow-up isn't waiting any more; propose it again");

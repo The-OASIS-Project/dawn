@@ -299,6 +299,33 @@ static void test_session_prefix_exists(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, auth_db_session_prefix_exists("", &exists));
 }
 
+/* A 16-character prefix (what `dawn-admin session list` prints) revokes that
+ * login alone; a prefix two logins share revokes neither. */
+static void test_delete_session_by_prefix(void) {
+   int user_id = create_and_get_id("sess_byprefix", "hash", false);
+   auth_db_create_session(user_id, "revokeA_01234567_tail_one", NULL, NULL, false);
+   auth_db_create_session(user_id, "revokeB_01234567_tail_one", NULL, NULL, false);
+   auth_db_create_session(user_id, "sharedP_01234567_tail_one", NULL, NULL, false);
+   auth_db_create_session(user_id, "sharedP_01234567_tail_two", NULL, NULL, false);
+
+   auth_session_t session;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_delete_session_by_prefix("revokeA_01234567"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND,
+                         auth_db_get_session("revokeA_01234567_tail_one", &session));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         auth_db_get_session("revokeB_01234567_tail_one", &session));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, auth_db_delete_session_by_prefix("revokeA_01234567"));
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_DUPLICATE, auth_db_delete_session_by_prefix("sharedP_01234567"));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         auth_db_get_session("sharedP_01234567_tail_one", &session));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         auth_db_get_session("sharedP_01234567_tail_two", &session));
+
+   /* The old 8-character form is refused outright, never matched loosely. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_INVALID, auth_db_delete_session_by_prefix("revokeB_"));
+}
+
 static void test_delete_user_sessions(void) {
    int user_id = create_and_get_id("multi_sess", "hash", false);
    auth_db_create_session(user_id, "token_ms1_1234567890", NULL, NULL, false);
@@ -340,6 +367,50 @@ static void test_create_conversation_private(void) {
    TEST_ASSERT_TRUE(is_private);
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_is_private(pub, user_id, &is_private));
    TEST_ASSERT_FALSE(is_private);
+}
+
+/* Rows stored on the default follow it from now on, once; others keep theirs. */
+static void test_unpin_default_llm_rows(void) {
+   int user_id = create_and_get_id("unpin_user", "hash", false);
+   int64_t on_default = 0, other = 0, local = 0;
+   conv_db_create(user_id, "a", &on_default);
+   conv_db_create(user_id, "b", &other);
+   conv_db_create(user_id, "c", &local);
+   conv_db_update_llm_settings(on_default, user_id, "cloud", "claude", "claude-x", "", "enabled",
+                               "low");
+   conv_db_update_llm_settings(other, user_id, "cloud", "openai", "gpt-5", "", "", "");
+   conv_db_update_llm_settings(local, user_id, "local", "none", "qwen", "", "", "");
+   int64_t channel = 0;
+   conv_db_create_with_origin(user_id, "d", "messaging:telegram", &channel);
+   conv_db_update_llm_settings(channel, user_id, "cloud", "claude", "claude-x", "", "", "");
+
+   int changed = -1;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         conv_db_unpin_default_llm("cloud", "claude", "claude-x", &changed));
+   TEST_ASSERT_EQUAL_INT(1, changed);
+   conversation_t c;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get(on_default, user_id, &c));
+   TEST_ASSERT_EQUAL_STRING("", c.llm_type);
+   TEST_ASSERT_EQUAL_STRING("", c.model);
+   TEST_ASSERT_EQUAL_STRING("enabled", c.thinking_mode); /* reasoning kept */
+   conv_free(&c);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get(other, user_id, &c));
+   TEST_ASSERT_EQUAL_STRING("openai", c.cloud_provider);
+   conv_free(&c);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get(channel, user_id, &c));
+   TEST_ASSERT_EQUAL_STRING("claude", c.cloud_provider); /* a channel's pick stays */
+   conv_free(&c);
+
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get(local, user_id, &c));
+   TEST_ASSERT_EQUAL_STRING("local", c.llm_type); /* a local row stays local */
+   conv_free(&c);
+
+   /* Once only: a later default doesn't unpin anything. */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_unpin_default_llm("local", "none", "", &changed));
+   TEST_ASSERT_EQUAL_INT(0, changed);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get(local, user_id, &c));
+   TEST_ASSERT_EQUAL_STRING("local", c.llm_type);
+   conv_free(&c);
 }
 
 static void test_get_conversation(void) {
@@ -1587,6 +1658,7 @@ int main(void) {
 
    /* Users */
    RUN_TEST(test_create_user);
+   RUN_TEST(test_unpin_default_llm_rows);
    RUN_TEST(test_get_user_by_name);
    RUN_TEST(test_get_user_not_found);
    RUN_TEST(test_create_duplicate_user);
@@ -1604,6 +1676,7 @@ int main(void) {
    RUN_TEST(test_expired_session);
    RUN_TEST(test_delete_user_sessions);
    RUN_TEST(test_session_prefix_exists);
+   RUN_TEST(test_delete_session_by_prefix);
    RUN_TEST(test_update_password_ends_logins);
 
    /* Conversations */

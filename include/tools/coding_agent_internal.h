@@ -59,12 +59,53 @@ static inline bool coding_agent_has_text(const char *s) {
  *  a longer one is refused, never cut. */
 #define CA_DESCRIBE_ROOM (TOOL_CALL_CHALLENGE_DESC_MAX - 48)
 
+/** A macro's value as a string literal. */
+#define CA_STR_(x) #x
+#define CA_STR(x) CA_STR_(x)
+
 /** Room for a repo's name at the gateway. */
 #define CODING_AGENT_REPO_MAX 64
 
 /** Whether a gateway task with @p status is still open: waiting its turn,
  *  working, or waiting on the user (a close stops it first). */
 bool coding_task_status_open(const char *status);
+
+/* Files to check before publishing: changed files matching the repo's `check`
+ * patterns at the gateway, each pattern with an optional reason.  Flagged to the
+ * user before publishing, never blocked. */
+
+/** Files to check named in DAWN's own words; the rest are counted. */
+#define CODING_CHECK_SHOWN 5
+/** The longest path and reason named there. */
+#define CODING_CHECK_PATH_MAX 120
+#define CODING_CHECK_WHY_MAX (80 * 4) /* the gateway's 80 characters, in UTF-8 bytes */
+
+/** Whether @p path (named by the agent) is plainly a path DAWN can name in its
+ *  own words: short, and only letters, digits, '.', '_', '/', '-'. */
+static inline bool coding_check_path_shown(const char *path) {
+   const size_t n = path ? strlen(path) : 0;
+   return n > 0 && n <= CODING_CHECK_PATH_MAX &&
+          strspn(path, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-") == n;
+}
+
+/** Whether @p why (a reason from the gateway's settings) is shown: short and
+ *  printable. */
+static inline bool coding_check_why_shown(const char *why) {
+   const size_t n = why ? strlen(why) : 0;
+   for (size_t i = 0; i < n; i++) {
+      if ((unsigned char)why[i] < 0x20 || why[i] == 0x7f) {
+         return false;
+      }
+   }
+   return n > 0 && n <= CODING_CHECK_WHY_MAX;
+}
+
+/** Whether changed file @p f of a gateway changes listing is one to check (an
+ *  older gateway called it `protected`). */
+static inline bool coding_file_check(struct json_object *f) {
+   return json_object_get_boolean(json_object_object_get(f, "to_check")) ||
+          json_object_get_boolean(json_object_object_get(f, "protected"));
+}
 
 /** The gateway lists at most this many of a task's commits (its COMMITS_CAP). */
 #define CODING_COMMITS_LISTED 100
@@ -76,8 +117,8 @@ bool coding_agent_repo_name_ok(const char *repo);
 /** coding_agent_error() of @p text, which it frees ("Failed." when NULL). */
 char *coding_agent_error_free(char *text);
 
-/** Note that the current turn returned the agent's words (a delegate or a
- *  confirm in it would rest on them). */
+/** Note that the current turn returned the agent's words: a preview the user
+ *  has seen is never replaced in it. */
 void coding_agent_mark_read(void);
 
 /** A report posted as message @p msg_id of @p conv_id carries a take on the
@@ -109,8 +150,18 @@ char *coding_agent_check_job(int64_t job, int user_id, job_record_t *rec);
  *  caller's; coding_gateway_call takes it). */
 struct json_object *coding_agent_job_args(int64_t job);
 
-/** The pending id a confirm names ({"id": N}); 0 when none or out of range. */
-uint32_t coding_agent_details_id(struct json_object *details);
+/** What a staged item is, for confirm: its kind, in the order a confirm of
+ *  several carries them out (the work first, close last). */
+typedef enum {
+   CA_CONFIRM_NONE = 0,
+   CA_CONFIRM_DELEGATE,
+   CA_CONFIRM_REVISE,
+   CA_CONFIRM_APPROVE,
+   CA_CONFIRM_PUBLISH,
+   CA_CONFIRM_REPLY,
+   CA_CONFIRM_REVIEW,
+   CA_CONFIRM_CLOSE,
+} ca_confirm_kind_t;
 
 /** End a job the user hears about in this reply (no completion notice too). */
 void coding_agent_end_quietly(int64_t conv_id, int user_id, const char *status, const char *why);
@@ -127,16 +178,18 @@ char *coding_delegate_propose(struct json_object *details,
                               int64_t parent_conv,
                               const turn_origin_t *origin);
 
-/** confirm_delegate: create the coding job and start its task. */
-char *coding_delegate_confirm(struct json_object *details,
-                              int user_id,
-                              const turn_origin_t *origin);
+/** confirm of staged task @p id: create the coding job and start its task. */
+char *coding_delegate_confirm(uint32_t id, int user_id, const turn_origin_t *origin);
 
 /** Whether session @p session_id has a delegate or revise preview waiting for its yes. */
 bool coding_delegate_live(uint32_t session_id);
 
-/** describe_call for confirm_delegate (tool_metadata_t.describe_call). */
-int coding_delegate_describe(const char *value, char *out, size_t out_len, int *valid_for_sec);
+/** What a confirm of staged task @p id starts, for a reply code. */
+int coding_delegate_describe(uint32_t id, char *out, size_t out_len, int *valid_for_sec);
+
+/** The kind of item @p id when it is a delegate or revise this session's
+ *  @p user_id staged (CA_CONFIRM_NONE otherwise). */
+ca_confirm_kind_t coding_delegate_staged(uint32_t id, const turn_origin_t *origin, int user_id);
 
 /** revise: stage more work for a finished job and return the preview the user confirms. */
 char *coding_revise_propose(struct json_object *details,
@@ -144,33 +197,33 @@ char *coding_revise_propose(struct json_object *details,
                             int64_t parent_conv,
                             const turn_origin_t *origin);
 
-/** confirm_revise: reopen the job and send its task the follow-up. */
-char *coding_revise_confirm(struct json_object *details, int user_id, const turn_origin_t *origin);
+/** confirm of staged revise @p id: reopen the job and send its task the follow-up. */
+char *coding_revise_confirm(uint32_t id, int user_id, const turn_origin_t *origin);
 
-/** describe_call for confirm_revise. */
-int coding_revise_describe(const char *value, char *out, size_t out_len, int *valid_for_sec);
+/** What a confirm of staged revise @p id sends, for a reply code. */
+int coding_revise_describe(uint32_t id, char *out, size_t out_len, int *valid_for_sec);
 
 /* ========== publish and close (coding_agent_publish.c) ========== */
 
 /** publish: a preview of pushing a finished job's branch (and its pull request). */
 char *coding_publish_propose(struct json_object *details, int user_id, const turn_origin_t *origin);
 
-/** confirm_publish: pushes the commit the preview showed. */
-char *coding_publish_confirm(struct json_object *details, int user_id, const turn_origin_t *origin);
+/** confirm of staged publish @p id: pushes the commit the preview showed. */
+char *coding_publish_confirm(uint32_t id, int user_id, const turn_origin_t *origin);
 
 /** close: drops a finished job's work at once when nothing would be lost, else
  *  stages a preview of what would be. */
 char *coding_close(struct json_object *details, int user_id, const turn_origin_t *origin);
 
-/** confirm_close: drops it, only while the branch is at the commit shown. */
-char *coding_close_confirm(struct json_object *details, int user_id, const turn_origin_t *origin);
+/** confirm of staged close @p id: drops it, only while the branch is at the commit shown. */
+char *coding_close_confirm(uint32_t id, int user_id, const turn_origin_t *origin);
 
-/** What confirm_publish (or confirm_close, @p close) sends, for a reply code. */
-int coding_publish_describe(const char *value,
-                            bool close,
-                            char *out,
-                            size_t out_len,
-                            int *valid_for_sec);
+/** What a confirm of staged publish (or close, @p close) @p id does, for a reply code. */
+int coding_publish_describe(uint32_t id, bool close, char *out, size_t out_len, int *valid_for_sec);
+
+/** The kind of item @p id when it is a publish or close this session's
+ *  @p user_id staged (CA_CONFIRM_NONE otherwise). */
+ca_confirm_kind_t coding_publish_staged(uint32_t id, const turn_origin_t *origin, int user_id);
 
 /** Whether @p url is a pull request's address as GitHub gives it. */
 bool coding_publish_pr_url_ok(const char *url);
@@ -182,13 +235,23 @@ char *coding_requests_approve(struct json_object *details,
                               int user_id,
                               const turn_origin_t *origin);
 
-/** confirm_approve: allow it, for that task only, if it is still open. */
-char *coding_requests_confirm_approve(struct json_object *details,
+/** confirm of staged approval @p id: allow it, in the scope shown (or, for DAWN's
+ *  own question, the one {scope} in @p details names), if it is still open. */
+char *coding_requests_confirm_approve(uint32_t id,
+                                      struct json_object *details,
                                       int user_id,
                                       const turn_origin_t *origin);
 
-/** describe_call for confirm_approve (tool_metadata_t.describe_call). */
-int coding_requests_describe(const char *value, char *out, size_t out_len, int *valid_for_sec);
+/** What a confirm of staged approval @p id allows ({scope} in @p details), for a reply code. */
+int coding_requests_describe(struct json_object *details,
+                             uint32_t id,
+                             char *out,
+                             size_t out_len,
+                             int *valid_for_sec);
+
+/** CA_CONFIRM_APPROVE when item @p id is an approval staged in this session
+ *  for @p user_id (CA_CONFIRM_NONE otherwise). */
+ca_confirm_kind_t coding_requests_staged(uint32_t id, const turn_origin_t *origin, int user_id);
 
 /** deny: decline the host or tool a job waits on.  One step, no confirm and
  *  no turn check, on purpose: declining reaches no further. */
@@ -268,21 +331,22 @@ struct json_object *coding_github_call(int user_id,
 
 /* ---- coding_agent_github_post.c ---- */
 
-/** Replies one confirm_reply posts (the gateway's REPLIES_CAP), and a reply's
+/** Replies one confirm of a reply batch posts (the gateway's REPLIES_CAP), and a reply's
  *  text before its signature, in bytes. */
 #define CODING_GITHUB_REPLIES_MAX 20
 #define CODING_GITHUB_REPLY_BODY_MAX 1000
-#define CODING_GITHUB_STR_(x) #x
-#define CODING_GITHUB_STR(x) CODING_GITHUB_STR_(x)
 
 /** reply: a preview of replies on a pull request's review threads (each
  *  {comment_id, body}), resolving them unless resolve is false. */
 char *coding_github_reply(struct json_object *details, int user_id, const turn_origin_t *origin);
 
-/** confirm_reply: posts the replies the preview showed and resolves their threads. */
-char *coding_github_confirm_reply(struct json_object *details,
+/** confirm of staged reply batch @p id: posts the replies the preview showed and
+ *  resolves their threads.  An error result only when none was posted;
+ *  *@p complete (may be NULL) is false when any reply wasn't. */
+char *coding_github_confirm_reply(uint32_t id,
                                   int user_id,
-                                  const turn_origin_t *origin);
+                                  const turn_origin_t *origin,
+                                  bool *complete);
 
 /** request_review: a preview of asking Copilot to review a pull request again,
  *  refused while its review is pending or when nothing came after its last one. */
@@ -290,18 +354,16 @@ char *coding_github_request_review(struct json_object *details,
                                    int user_id,
                                    const turn_origin_t *origin);
 
-/** confirm_request_review: asks Copilot. */
-char *coding_github_confirm_request_review(struct json_object *details,
-                                           int user_id,
-                                           const turn_origin_t *origin);
+/** confirm of staged Copilot request @p id: asks Copilot. */
+char *coding_github_confirm_request_review(uint32_t id, int user_id, const turn_origin_t *origin);
 
-/** What confirm_reply (or confirm_request_review, @p review) carries out, for a
- *  reply code. */
-int coding_github_describe(const char *value,
-                           bool review,
-                           char *out,
-                           size_t out_len,
-                           int *valid_for_sec);
+/** What a confirm of staged replies (or Copilot request, @p review) @p id carries
+ *  out, for a reply code. */
+int coding_github_describe(uint32_t id, bool review, char *out, size_t out_len, int *valid_for_sec);
+
+/** The kind of item @p id when it is a reply batch or Copilot request this
+ *  session's @p user_id staged (CA_CONFIRM_NONE otherwise). */
+ca_confirm_kind_t coding_github_staged(uint32_t id, const turn_origin_t *origin, int user_id);
 
 #ifdef __cplusplus
 }

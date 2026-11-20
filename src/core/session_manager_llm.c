@@ -131,7 +131,7 @@ typedef struct {
    const char *llm_input;
    llm_resolved_config_t resolved_config;
    char model_buf[LLM_MODEL_NAME_MAX]; /* Buffer for model name (outlives stack) */
-   char endpoint_buf[128];             /* Buffer for endpoint (outlives stack) */
+   char endpoint_buf[CONFIG_PATH_MAX]; /* Buffer for endpoint (outlives stack) */
 } llm_call_ctx_t;
 
 /* A private copy of the reply's blocks for the writer that saves it
@@ -235,6 +235,19 @@ static int llm_call_prepare(session_t *session,
     * chunk is parsed, before the idle frame fires in llm_call_finalize. */
    llm_context_reset_turn_cache(session->session_id);
 
+   /* The LLM this turn runs on, resolved before the question is added: a config
+    * that can't run (no provider, or no key for the selected one) adds nothing.
+    * Surfaces check first (session_turn_selection_problem); this is the backstop. */
+   llm_set_last_error(LLM_ERR_NONE);
+   session_llm_config_t session_config = { 0 }; /* Zero-init for safety */
+   session_get_llm_config(session, &session_config);
+   if (llm_resolve_config(&session_config, &ctx->resolved_config) != 0) {
+      OLOG_ERROR("Session %u: the selected LLM can't run (type=%d, provider=%d)",
+                 session->session_id, session_config.type, session_config.cloud_provider);
+      llm_set_last_error(LLM_ERR_NOT_SELECTED);
+      return 3;
+   }
+
    // Add user message to history (unless caller already did)
    if (!skip_add_message) {
       session_add_turn_message(session, "user", user_text);
@@ -259,17 +272,6 @@ static int llm_call_prepare(session_t *session,
    if (session->cancel_requested) {
       OLOG_INFO("Session %u cancelled before LLM call", session->session_id);
       return 2;
-   }
-
-   // Get and resolve LLM config
-   session_llm_config_t session_config = { 0 }; /* Zero-init for safety */
-   session_get_llm_config(session, &session_config);
-
-   int resolve_rc = llm_resolve_config(&session_config, &ctx->resolved_config);
-   if (resolve_rc != 0) {
-      OLOG_ERROR("Session %u: Failed to resolve LLM config (type=%d, provider=%d)",
-                 session->session_id, session_config.type, session_config.cloud_provider);
-      return 3;
    }
 
    /* Copy model/endpoint to ctx buffers (resolved pointers may point to stack) */
@@ -355,7 +357,7 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
             reason = "complete";
          } else if (user_stop) {
             reason = "stopped"; /* promises a save only with a reply kept */
-         } else if (post_call_error == LLM_ERR_TRANSIENT_NETWORK) {
+         } else if (llm_error_is_transient(post_call_error)) {
             reason = "transient_error";
          } else {
             reason = "error";
@@ -442,7 +444,7 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
    }
 
    if (!response) {
-      if (post_call_error == LLM_ERR_TRANSIENT_NETWORK) {
+      if (llm_error_is_transient(post_call_error)) {
          OLOG_ERROR("Session %u: LLM call failed (transient network error, retries exhausted)",
                     session->session_id);
       } else {

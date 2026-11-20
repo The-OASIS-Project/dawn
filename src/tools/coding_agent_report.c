@@ -27,6 +27,7 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,9 +53,9 @@
 #define CR_KIND_MAX 16                     /* a gateway end: completed, failed, cancelled */
 #define CR_LINE_MAX (CONV_TITLE_MAX + 256) /* a fixed line: the title plus DAWN's words */
 #define CR_REPORT_MAX (16 * 1024)          /* the agent's words put to the take */
-#define CR_FACTS_MAX 1024    /* DAWN's facts line: branch, protected, checks, uncommitted, cost */
-#define CR_PROTECTED_SHOWN 5 /* protected paths named in it; the rest counted */
-#define CR_PATH_MAX 120      /* a protected path named in it */
+/* DAWN's facts: branch, files to check (each named with its reason), checks, uncommitted, cost */
+#define CR_FACTS_MAX \
+   (1024 + CODING_CHECK_SHOWN * (CODING_CHECK_PATH_MAX + CODING_CHECK_WHY_MAX + 8))
 #define CR_STOP_WAIT_MS 5000 /* stop's wait for report-backs in flight */
 #define CR_STOP_POLL_MS 50
 
@@ -169,32 +170,39 @@ static void facts(char *out, size_t len, struct json_object *data) {
          strbuf_append(&sb, " Nothing was left uncommitted.");
       }
    }
-   /* Paths the agent named: shown only when plainly a path (DAWN's own words). */
-   struct json_object *prot = json_object_object_get(data, "protected");
-   const size_t listed = json_object_is_type(prot, json_type_array) ? json_object_array_length(prot)
-                                                                    : 0;
+   /* Files to check before publishing, the paths as the agent named them: shown
+    * only when plainly a path (DAWN's own words), each with its pattern's reason
+    * from the gateway's settings.  An older gateway sent protected: [path]. */
+   const bool old = json_object_object_get(data, "to_check") == NULL;
+   struct json_object *chk = json_object_object_get(data, old ? "protected" : "to_check");
+   const size_t listed = json_object_is_type(chk, json_type_array) ? json_object_array_length(chk)
+                                                                   : 0;
    /* The gateway names at most a few; its count is the whole. */
-   struct json_object *jcount = json_object_object_get(data, "protected_count");
+   struct json_object *jcount = json_object_object_get(data,
+                                                       old ? "protected_count" : "to_check_count");
    const int64_t counted = json_object_is_type(jcount, json_type_int)
                                ? json_object_get_int64(jcount)
                                : 0;
    const size_t np = counted > (int64_t)listed ? (size_t)counted : listed;
    if (np > 0) {
-      strbuf_appendf(&sb, " It changed %zu protected path%s (named by the agent)", np,
-                     np == 1 ? "" : "s");
+      strbuf_appendf(&sb, " It changed %zu file%s to check before publishing (named by the agent)",
+                     np, np == 1 ? "" : "s");
       size_t shown = 0;
-      for (size_t i = 0; i < listed && shown < CR_PROTECTED_SHOWN; i++) {
-         const char *p = json_object_get_string(json_object_array_get_idx(prot, i));
-         const size_t pl = p ? strlen(p) : 0;
-         if (pl > 0 && pl <= CR_PATH_MAX &&
-             strspn(p, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-") ==
-                 pl) {
-            strbuf_appendf(&sb, "%s`%s`", shown == 0 ? ": " : ", ", p);
+      for (size_t i = 0; i < listed && shown < CODING_CHECK_SHOWN; i++) {
+         struct json_object *e = json_object_array_get_idx(chk, i);
+         const bool obj = json_object_is_type(e, json_type_object);
+         const char *p = obj ? coding_gateway_jstr(e, "path") : json_object_get_string(e);
+         const char *why = obj ? coding_gateway_jstr(e, "why") : "";
+         if (coding_check_path_shown(p)) {
+            strbuf_appendf(&sb, "%s`%s`", shown == 0 ? ": " : "; ", p);
+            if (coding_check_why_shown(why)) {
+               strbuf_appendf(&sb, " (%s)", why);
+            }
             shown++;
          }
       }
       if (np > shown) {
-         strbuf_appendf(&sb, "%s%zu %s", shown ? " and " : ": ", np - shown,
+         strbuf_appendf(&sb, "%s%zu %s", shown ? "; and " : ": ", np - shown,
                         shown ? "more" : "not shown");
       }
       strbuf_append(&sb, ".");
@@ -239,12 +247,15 @@ static char *write_take(const cr_work_t *w, const job_record_t *rec) {
       return NULL; /* no report, or one the filter flags */
    }
    session_t *s = NULL;
-   /* DAWN's side call, not the user's job: it doesn't count against their cap. */
-   if (job_manager_begin_ex(w->user_id, w->job, job_provider_from_default(), false, &s) !=
-       JOB_MGR_OK) {
+   /* On the job's LLM (stored when it was delegated); DAWN's side call, not the
+    * user's job: it doesn't count against their cap. */
+   session_llm_config_t llm;
+   if (job_selection_load(w->job, w->user_id, &llm) != AUTH_DB_SUCCESS ||
+       job_manager_begin_ex(w->user_id, w->job, job_provider_for(&llm), false, &s) != JOB_MGR_OK) {
       free(framed);
       return NULL;
    }
+   session_set_llm_config(s, &llm);
    atomic_store(&s->stream_conversation_id, 0); /* nothing streams into the job's own panel */
    int slot = -1;
    pthread_mutex_lock(&s_take_mutex);

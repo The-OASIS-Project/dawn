@@ -35,6 +35,7 @@
 #include <string.h>
 
 #include "auth/auth_db.h"
+#include "llm/llm_selection.h"
 #include "logging.h"
 #include "messaging/messaging_engine.h"
 #include "webui/webui_internal.h"
@@ -302,11 +303,26 @@ void handle_reenable_channel(ws_connection_t *conn, struct json_object *payload)
  *                     thinking_mode, reasoning_effort } → { success }
  *
  * Writes the channel's forever-conversation row (the same conversations.llm_*
- * columns the WebUI per-conversation control uses).  Applies on the channel's
- * NEXT messaging session (daemon picks it up at session (re)creation), or in
- * chat immediately via the switch_llm tool.  Ownership is enforced by
+ * columns the WebUI per-conversation control uses) and its live session, so the
+ * channel's next message runs on it.  A pick that can't run is refused.  Ownership is enforced by
  * conv_db_get / conv_db_update_llm_settings (both filter on user_id).
  * ============================================================================= */
+
+/* set_channel_llm_response: success, or the reason it wasn't saved (the panel
+ * shows it and reloads the channel's stored settings). */
+static void send_channel_llm_result(ws_connection_t *conn, int64_t conv_id, const char *error) {
+   struct json_object *response = json_object_new_object();
+   json_object_object_add(response, "type", json_object_new_string("set_channel_llm_response"));
+   struct json_object *payload_out = json_object_new_object();
+   json_object_object_add(payload_out, "success", json_object_new_boolean(error == NULL));
+   json_object_object_add(payload_out, "conversation_id", json_object_new_int64(conv_id));
+   if (error) {
+      json_object_object_add(payload_out, "error", json_object_new_string(error));
+   }
+   json_object_object_add(response, "payload", payload_out);
+   send_json_response(conn, response);
+   json_object_put(response);
+}
 
 /* Empty (inherit) or a member of the NULL-terminated allowlist. */
 static bool set_channel_llm_field_valid(const char *value, const char *const *allowed) {
@@ -368,11 +384,11 @@ void handle_set_channel_llm(ws_connection_t *conn, struct json_object *payload) 
        !set_channel_llm_field_valid(cloud_provider,
                                     (const char *[]){ "openai", "claude", "anthropic", "gemini",
                                                       "openrouter", NULL }) ||
-       !set_channel_llm_field_valid(thinking_mode,
-                                    (const char *[]){ "disabled", "enabled", "auto", NULL }) ||
+       !set_channel_llm_field_valid(thinking_mode, (const char *[]){ "disabled", "adaptive",
+                                                                     "enabled", "auto", NULL }) ||
        !set_channel_llm_field_valid(reasoning_effort,
                                     (const char *[]){ "none", "minimal", "low", "medium", "high",
-                                                      "xhigh", NULL })) {
+                                                      "xhigh", "max", NULL })) {
       send_error_impl(conn->wsi, "INVALID_PARAM", "Invalid LLM setting value");
       return;
    }
@@ -390,24 +406,27 @@ void handle_set_channel_llm(ws_connection_t *conn, struct json_object *payload) 
       send_error_impl(conn->wsi, "INVALID_PARAM", "Not a messaging conversation");
       return;
    }
+   /* A pick is checked now: one that can't run (a provider without its key) is
+    * refused with the reason and nothing is stored.  Empty: follow the default. */
+   session_llm_config_t cfg;
+   llm_selection_from_row(llm_type, cloud_provider, model, thinking_mode, reasoning_effort, &cfg);
+   char refused[LLM_SELECTION_REASON_MAX];
+   if (cfg.type != LLM_UNDEFINED && llm_selection_problem(&cfg, refused, sizeof(refused)) != 0) {
+      conv_free(&conv);
+      send_channel_llm_result(conn, conv_id, refused);
+      return;
+   }
    /* tools_mode column is retired (dead) — pass empty. */
    int rc = conv_db_update_llm_settings(conv_id, conn->auth_user_id, llm_type, cloud_provider,
                                         model, "", thinking_mode, reasoning_effort);
    conv_free(&conv);
 
    if (rc != AUTH_DB_SUCCESS) {
-      send_error_impl(conn->wsi, "SERVICE_ERROR", "Failed to update channel model");
+      send_channel_llm_result(conn, conv_id, "Failed to update channel model");
       return;
    }
-
-   struct json_object *response = json_object_new_object();
-   json_object_object_add(response, "type", json_object_new_string("set_channel_llm_response"));
-   struct json_object *payload_out = json_object_new_object();
-   json_object_object_add(payload_out, "success", json_object_new_boolean(1));
-   json_object_object_add(payload_out, "conversation_id", json_object_new_int64(conv_id));
-   json_object_object_add(response, "payload", payload_out);
-   send_json_response(conn, response);
-   json_object_put(response);
+   messaging_engine_apply_conv_llm(conv_id, &cfg); /* its next message runs on it */
+   send_channel_llm_result(conn, conv_id, NULL);
 
    OLOG_INFO(
        "WebUI: user %d set LLM for messaging conversation %lld (type=%s provider=%s model=%s)",

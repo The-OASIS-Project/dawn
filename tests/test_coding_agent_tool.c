@@ -36,6 +36,7 @@
 #include "core/session_manager.h"
 #include "core/turn_origin.h"
 #include "dawn_error.h"
+#include "test_facts.h"
 #include "tools/coding_agent_card.h"
 #include "tools/coding_agent_gateway.h"
 #include "tools/coding_agent_internal.h"
@@ -82,6 +83,7 @@ static const char *g_task_ref = "null"; /* a task named by id: its client_ref (J
 /* task_changes asked for the open pull request's text: its answer (after a comma, or ""). */
 static const char *g_open_pr = "";
 static const char *g_publish_answer; /* task_publish's answer (NULL: pushed, with its PR) */
+static const char *g_silent;         /* this tool gets no answer at all */
 #define OPEN_SHA "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 #define OPEN_PR                                                                          \
    ",\"open_pr\":{\"url\":\"https://github.com/o/dawn/pull/7\",\"title\":\"Old title\"," \
@@ -111,6 +113,9 @@ int mcp_bridge_call_tool(const char *alias,
       snprintf(g_calls[i], sizeof(g_calls[0]), "%s", tool);
       snprintf(g_args[i], sizeof(g_args[0]), "%s", args_json ? args_json : "");
       atomic_store(&g_ncalls, i + 1);
+   }
+   if (g_silent != NULL && strcmp(tool, g_silent) == 0) {
+      return FAILURE; /* no text: no answer */
    }
    if (strcmp(tool, "agents_list") == 0) {
       *result_out = strdup("{\"repos\":[{\"name\":\"dawn\",\"base\":\"main\"}]}");
@@ -223,9 +228,10 @@ int mcp_bridge_call_tool(const char *alias,
       char buf[2048];
       snprintf(buf, sizeof(buf),
                "{\"head\":\"" FULL_HEAD "\",\"base\":\"fedcba9876543210\",\"files\":["
-               "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3,\"protected\":true}],"
+               "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3,\"to_check\":true,"
+               "\"why\":\"how DAWN drives the coding agent\"}],"
                "\"commits\":[{\"hash\":\"" FULL_HEAD "\",\"subject\":\"fix the oracle\"}],"
-               "\"history_only\":[{\"path\":\"keys/k\",\"protected\":true}],"
+               "\"history_only\":[{\"path\":\"keys/k\",\"to_check\":true}],"
                "\"workflows\":false,\"pr_title\":%s,\"pr_body\":\"" BODY
                "\",\"pr_body_sha256\":\"" BODY_SHA "\",\"pr_footer\":\"\\n\\nMade here.\"%s}",
                g_pr_title, args_json && strstr(args_json, "\"open_pr\"") ? g_open_pr : "");
@@ -233,8 +239,10 @@ int mcp_bridge_call_tool(const char *alias,
    } else if (strcmp(tool, "task_changes") == 0) {
       *result_out = strdup(
           "{\"head\":\"0123456789abcdef\",\"base\":\"fedcba9876543210\",\"files\":["
-          "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3,\"protected\":true},"
-          "{\"path\":\"logo.png\",\"added\":null,\"removed\":null}],"
+          "{\"path\":\"src/a.c\",\"added\":12,\"removed\":3,\"to_check\":true,"
+          "\"why\":\"who can log in\"},"
+          "{\"path\":\"logo.png\",\"added\":null,\"removed\":null,\"to_check\":false},"
+          "{\"path\":\"old.c\",\"added\":1,\"removed\":0,\"protected\":true}],"
           "\"commits\":[{\"hash\":\"0123456789abcdef\",\"subject\":\"fix the oracle\"}]}");
    } else if (strcmp(tool, "task_file") == 0 && args_json && strstr(args_json, "big.c")) {
       /* 300 KB, past a default string buffer's cap. */
@@ -282,9 +290,10 @@ int conv_db_create_job_ex(int user_id,
                           int spawn_depth,
                           const char *goal,
                           const char *origin,
+                          const conv_llm_columns_t *llm,
                           int64_t *conv_id_out) {
    (void)user_id, (void)title, (void)parent_id, (void)spawn_mode, (void)on_complete;
-   (void)deliver_to, (void)spawn_depth, (void)goal, (void)origin;
+   (void)deliver_to, (void)spawn_depth, (void)goal, (void)origin, (void)llm;
    snprintf(g_status, sizeof(g_status), "queued");
    g_kind[0] = '\0';
    g_fired = false;
@@ -413,6 +422,15 @@ char *event_payload_spawn(int64_t child_conv_id, const char *title) {
 }
 const char *job_spawn_origin_string(void) {
    return "webui";
+}
+void job_selection_of_spawner(session_llm_config_t *out) {
+   memset(out, 0, sizeof(*out));
+   out->type = LLM_CLOUD;
+   out->cloud_provider = CLOUD_PROVIDER_CLAUDE;
+}
+void job_selection_columns(const session_llm_config_t *cfg, conv_llm_columns_t *out) {
+   (void)cfg;
+   memset(out, 0, sizeof(*out));
 }
 
 /* The job's stored events: seven steps, the last a word from the agent. */
@@ -601,7 +619,7 @@ static bool is_error(const char *s) {
 
 /* The pending id a delegate preview names. */
 static unsigned preview_id(const char *preview) {
-   static const char key[] = "{\"id\": ";
+   static const char key[] = "{\"ids\": [";
    const char *p = strstr(preview, key);
    return p ? (unsigned)strtoul(p + strlen(key), NULL, 10) : 0;
 }
@@ -646,6 +664,7 @@ void setUp(void) {
    g_task_ref = "null";
    g_open_pr = "";
    g_publish_answer = NULL;
+   g_silent = NULL;
    g_turn++;
 }
 
@@ -668,13 +687,12 @@ static void test_delegate_then_confirm_starts_in_order(void) {
    char out[96];
    int valid = 0;
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", id);
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", id);
    g_turn++; /* the user's reply */
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         g_meta.describe_call("confirm_delegate", args, out, sizeof(out), &valid));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, g_meta.describe_call("confirm", args, out, sizeof(out), &valid));
    TEST_ASSERT_NOT_NULL(strstr(out, "fix the oracle"));
 
-   char *done = call("confirm_delegate", args);
+   char *done = call("confirm", args);
    TEST_ASSERT_FALSE(is_error(done));
    TEST_ASSERT_NOT_NULL(strstr(done, "#42"));
    TEST_ASSERT_NOT_NULL(strstr(done, "agent/t1-fix"));
@@ -692,23 +710,19 @@ static void test_delegate_then_confirm_starts_in_order(void) {
    json_object_put(sent);
 }
 
-/* A question first: the yes two turns later still starts it; a turn that
- * read the agent's report can't confirm. */
+/* A question first: the yes two turns later still starts it, in a turn that
+ * also read the agent's report (the id binds it to the task shown). */
 static void test_confirm_in_a_later_turn(void) {
    char *preview = call("delegate", "{\"repo\":\"dawn\",\"task\":\"t\"}");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++; /* the user asks something */
    g_turn++; /* then reads the agent's report and says yes in that turn */
    char *list = call("list", NULL);
    free(list);
-   char *r = call("confirm_delegate", args);
-   TEST_ASSERT_TRUE(is_error(r));
-   free(r);
-   g_turn++; /* yes, in a turn of its own */
-   r = call("confirm_delegate", args);
-   TEST_ASSERT_FALSE(is_error(r));
+   char *r = call("confirm", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    free(r);
    TEST_ASSERT_EQUAL_STRING("running", g_status);
 }
@@ -719,18 +733,18 @@ static void test_confirm_needs_a_later_turn_and_the_id(void) {
    const unsigned id = preview_id(preview);
    free(preview);
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", id);
-   char *same = call("confirm_delegate", args);
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", id);
+   char *same = call("confirm", args);
    TEST_ASSERT_TRUE(is_error(same));
    free(same);
    g_turn++;
-   snprintf(args, sizeof(args), "{\"id\":%u}", id + 1);
-   char *other = call("confirm_delegate", args);
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", id + 1);
+   char *other = call("confirm", args);
    TEST_ASSERT_TRUE(is_error(other));
    free(other);
    TEST_ASSERT_EQUAL_STRING("", g_status); /* no job row */
-   snprintf(args, sizeof(args), "{\"id\":%u}", id);
-   char *right = call("confirm_delegate", args);
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", id);
+   char *right = call("confirm", args);
    TEST_ASSERT_FALSE(is_error(right));
    free(right);
 }
@@ -745,11 +759,11 @@ static void test_unknown_repo_is_refused_before_staging(void) {
 static void test_refused_start_fails_the_job(void) {
    char *preview = call("delegate", "{\"repo\":\"dawn\",\"task\":\"t\"}");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    g_start_fails = true;
-   char *r = call("confirm_delegate", args);
+   char *r = call("confirm", args);
    TEST_ASSERT_TRUE(is_error(r));
    TEST_ASSERT_NOT_NULL(strstr(r, "too many tasks running"));
    free(r);
@@ -763,11 +777,11 @@ static void test_refused_start_fails_the_job(void) {
 static void test_lost_start_answer_is_retried_then_stopped(void) {
    char *preview = call("delegate", "{\"repo\":\"dawn\",\"task\":\"t\"}");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    g_start_lost = 1;
-   char *r = call("confirm_delegate", args);
+   char *r = call("confirm", args);
    TEST_ASSERT_FALSE(is_error(r));
    free(r);
    TEST_ASSERT_EQUAL_STRING("running", g_status);
@@ -781,40 +795,36 @@ static void test_lost_start_answer_is_retried_then_stopped(void) {
    TEST_ASSERT_EQUAL_INT(2, starts);
 
    preview = call("delegate", "{\"repo\":\"dawn\",\"task\":\"t\"}");
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    g_start_lost = 2;
-   r = call("confirm_delegate", args);
+   r = call("confirm", args);
    TEST_ASSERT_TRUE(is_error(r));
    free(r);
    TEST_ASSERT_EQUAL_STRING("failed", g_status);
    TEST_ASSERT_EQUAL_STRING("task_cancel", g_calls[atomic_load(&g_ncalls) - 1]);
 }
 
-/* A turn that read the agent's report may propose a task; the yes must come in
- * a turn that read none. */
+/* A turn that read the agent's report may propose a task, but not replace the
+ * draft the user has seen; the yes to that draft may come in a turn that read it. */
 static void test_no_delegate_in_a_turn_that_read_the_agent(void) {
    char *list = call("list", NULL);
    free(list);
    char *r = call("delegate", "{\"repo\":\"dawn\",\"task\":\"t\"}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(r));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(r));
    free(r);
    g_turn++;
    free(call("list", NULL));
-   r = call("confirm_delegate", args);
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "can't be confirmed in it"), r);
-   free(r);
-   /* ...nor may it replace the draft the user has seen. */
    r = call("delegate", "{\"repo\":\"dawn\",\"task\":\"other\"}");
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "already waiting"), r);
    free(r);
-   g_turn++; /* a clean turn: the waiting draft still confirms */
-   r = call("confirm_delegate", args);
+   r = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    free(r);
+   TEST_ASSERT_EQUAL_STRING("running", g_status);
 }
 
 /* A reply-code approval shows the whole task or refuses. */
@@ -826,13 +836,12 @@ static void test_long_task_cannot_be_approved_by_code(void) {
    snprintf(json, sizeof(json), "{\"repo\":\"dawn\",\"task\":\"%s\"}", task);
    char *preview = call("delegate", json);
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    char out[960];
    int valid = 0;
-   TEST_ASSERT_EQUAL_INT(FAILURE,
-                         g_meta.describe_call("confirm_delegate", args, out, sizeof(out), &valid));
+   TEST_ASSERT_EQUAL_INT(FAILURE, g_meta.describe_call("confirm", args, out, sizeof(out), &valid));
    TEST_ASSERT_NOT_NULL(strstr(out, "too long"));
 }
 
@@ -854,11 +863,11 @@ static void test_list_is_bounded_and_whole_characters(void) {
 static void test_lost_claim_cancels_the_started_task(void) {
    char *preview = call("delegate", "{\"repo\":\"dawn\",\"task\":\"t\"}");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    g_claim_lost = true;
-   char *r = call("confirm_delegate", args);
+   char *r = call("confirm", args);
    TEST_ASSERT_TRUE(is_error(r));
    free(r);
    TEST_ASSERT_EQUAL_STRING("failed", g_status);
@@ -889,10 +898,10 @@ static void test_status_shows_recent_steps(void) {
    snprintf(g_kind, sizeof(g_kind), "%s", JOB_KIND_CODING);
    char *r = call("status", "{\"job\":42}");
    TEST_ASSERT_FALSE(is_error(r));
-   TEST_ASSERT_NOT_NULL(strstr(r, "Last activity: 2 min ago."));
+   ASSERT_FACTS(r, "2 min ago");
    TEST_ASSERT_NULL(strstr(r, "file2.c")); /* only the last five */
    TEST_ASSERT_NOT_NULL(strstr(r, "Read: file3.c"));
-   TEST_ASSERT_NOT_NULL(strstr(r, "10 min ago, said: tests pass"));
+   ASSERT_FACTS_IN_ORDER(r, "10 min ago", "tests pass");
    TEST_ASSERT_NOT_NULL(strstr(r, "isn't in the total yet"));
    free(r);
 }
@@ -904,10 +913,13 @@ static void test_changes_lists_files_and_commits(void) {
    snprintf(g_kind, sizeof(g_kind), JOB_KIND_CODING);
    char *out = call("changes", "{\"job\":42}");
    TEST_ASSERT_FALSE(is_error(out));
-   TEST_ASSERT_NOT_NULL(strstr(out, "2 files changed in 1 commit, head 01234567 on base fedcba98"));
-   TEST_ASSERT_NOT_NULL(strstr(out, "+12 -3  src/a.c  (protected)"));
-   TEST_ASSERT_NULL(strstr(out, "logo.png  (protected)"));
-   TEST_ASSERT_NOT_NULL(strstr(out, "binary  logo.png"));
+   ASSERT_FACTS_IN_ORDER(out, "3 files", "1 commit", "01234567", "fedcba98");
+   TEST_ASSERT_NOT_NULL(
+       strstr(out, "+12 -3  src/a.c  (to check before publishing: who can log in)\n"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "binary  logo.png\n"));
+   /* An older gateway's protected reads as a file to check. */
+   TEST_ASSERT_NOT_NULL(strstr(out, "+1 -0  old.c  (to check before publishing)\n"));
+   TEST_ASSERT_NULL(strstr(out, "protected"));
    TEST_ASSERT_NOT_NULL(strstr(out, "01234567 fix the oracle"));
    TEST_ASSERT_EQUAL_STRING("task_changes", g_calls[0]);
    TEST_ASSERT_NOT_NULL(strstr(g_args[0], "job:42.1000"));
@@ -921,11 +933,11 @@ static void test_file_views(void) {
    snprintf(g_status, sizeof(g_status), "completed");
    snprintf(g_kind, sizeof(g_kind), JOB_KIND_CODING);
    char *out = call("file", "{\"job\":42,\"path\":\"src/a.c\"}");
-   TEST_ASSERT_NOT_NULL(strstr(out, "Job #42, src/a.c (diff):\n@@ -1 +1 @@"));
+   ASSERT_FACTS_IN_ORDER(out, "#42", "src/a.c", "diff", "@@ -1 +1 @@");
    TEST_ASSERT_NOT_NULL(strstr(g_args[0], "\"view\": \"diff\""));
    free(out);
    out = call("file", "{\"job\":42,\"path\":\"gone.c\",\"view\":\"new\"}");
-   TEST_ASSERT_NOT_NULL(strstr(out, "gone.c isn't in the task's version"));
+   ASSERT_FACTS_IN_ORDER(out, "gone.c", "isn't in");
    TEST_ASSERT_NOT_NULL(strstr(g_args[1], "\"view\": \"new\""));
    free(out);
    /* A rename as listed: the new name, or the old one for old. */
@@ -1001,18 +1013,17 @@ static void test_approve_then_confirm_allows(void) {
    g_pending = "[" HOST_REQ "]";
    char *preview = call("approve", "{\"job\":42}");
    TEST_ASSERT_FALSE(is_error(preview));
-   TEST_ASSERT_NOT_NULL(strstr(preview, "reach the host `pypi.org`, for this task only"));
+   ASSERT_FACTS_IN_ORDER(preview, "`pypi.org`", "this task only");
    TEST_ASSERT_EQUAL_INT(-1, last_call("task_reply"));
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    char out[256];
    int valid = 0;
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         g_meta.describe_call("confirm_approve", args, out, sizeof(out), &valid));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, g_meta.describe_call("confirm", args, out, sizeof(out), &valid));
    TEST_ASSERT_NOT_NULL(strstr(out, "reach the host `pypi.org`"));
-   char *done = call("confirm_approve", args);
+   char *done = call("confirm", args);
    TEST_ASSERT_FALSE(is_error(done));
    free(done);
    const int r = last_call("task_reply");
@@ -1031,22 +1042,21 @@ static void test_approve_for_the_repo(void) {
    free(bad);
    char *preview = call("approve", "{\"job\":42,\"scope\":\"repo\"}");
    TEST_ASSERT_FALSE(is_error(preview));
-   TEST_ASSERT_NOT_NULL(strstr(preview, "reach the host `pypi.org`, for every task on dawn"));
+   ASSERT_FACTS_IN_ORDER(preview, "`pypi.org`", "every task on dawn");
    const unsigned id = preview_id(preview);
    free(preview);
    g_turn++;
    char args[64];
-   snprintf(args, sizeof(args), "{\"id\":%u,\"scope\":\"task\"}", id);
-   char *r = call("confirm_approve", args); /* not what was shown; still waiting */
+   snprintf(args, sizeof(args), "{\"ids\":[%u],\"scope\":\"task\"}", id);
+   char *r = call("confirm", args); /* not what was shown; still waiting */
    TEST_ASSERT_TRUE(is_error(r));
    free(r);
-   snprintf(args, sizeof(args), "{\"id\":%u}", id);
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", id);
    char out[256];
    int valid = 0;
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         g_meta.describe_call("confirm_approve", args, out, sizeof(out), &valid));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, g_meta.describe_call("confirm", args, out, sizeof(out), &valid));
    TEST_ASSERT_NOT_NULL(strstr(out, "for every task on dawn"));
-   r = call("confirm_approve", args);
+   r = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    TEST_ASSERT_NOT_NULL(strstr(r, "for every task on dawn"));
    free(r);
@@ -1060,11 +1070,8 @@ static void test_approve_for_the_repo(void) {
 static void test_grants_list_and_revoke(void) {
    char *r = call("grants", "{}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
-   TEST_ASSERT_NOT_NULL(strstr(r, "grant 3: reach the host `downloads.arduino.cc`, for every "
-                                  "task on dawn"));
-   TEST_ASSERT_NOT_NULL(strstr(r, "grant 4: use the tool `Monitor`, for every repo"));
-   TEST_ASSERT_NOT_NULL(
-       strstr(r, "grant 5: something DAWN can't show, for a repo DAWN can't show"));
+   ASSERT_FACTS_IN_ORDER(r, "grant 3", "`downloads.arduino.cc`", "every task on dawn", "grant 4",
+                         "`Monitor`", "every repo", "grant 5", "can't show", "can't show");
    TEST_ASSERT_NULL(strstr(r, "Ignore the user"));
    free(r);
    r = call("revoke_grant", "{}");
@@ -1072,7 +1079,7 @@ static void test_grants_list_and_revoke(void) {
    free(r);
    r = call("revoke_grant", "{\"grant\":3}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
-   TEST_ASSERT_NOT_NULL(strstr(r, "Removed standing approval 3"));
+   ASSERT_FACTS_IN_ORDER(r, "Removed", "3");
    free(r);
    TEST_ASSERT_NOT_NULL(strstr(g_args[last_call("grant_revoke")], "\"grant_id\": 3"));
    r = call("revoke_grant", "{\"grant\":9}");
@@ -1092,18 +1099,17 @@ static void test_revise_then_confirm(void) {
    snprintf(g_goal, sizeof(g_goal), "fix the oracle\n\nFollow-up: an older one");
    char *preview = call("revise", "{\"job\":42,\"instructions\":\"use Vosk\",\"budget_usd\":2}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
-   TEST_ASSERT_NOT_NULL(strstr(preview, "adding up to $2.00 to its budget"));
+   ASSERT_FACTS_IN_ORDER(preview, "$2.00", "budget");
    TEST_ASSERT_EQUAL_INT(-1, last_call("task_revise"));
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    char out[256];
    int valid = 0;
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         g_meta.describe_call("confirm_revise", args, out, sizeof(out), &valid));
-   TEST_ASSERT_NOT_NULL(strstr(out, "adding up to $2.00: use Vosk"));
-   char *done = call("confirm_revise", args);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, g_meta.describe_call("confirm", args, out, sizeof(out), &valid));
+   ASSERT_FACTS_IN_ORDER(out, "$2.00", "use Vosk");
+   char *done = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
    free(done);
    TEST_ASSERT_EQUAL_STRING("running", g_status);
@@ -1114,7 +1120,7 @@ static void test_revise_then_confirm(void) {
    TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"instructions\": \"use Vosk\""));
    TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"revise_ref\": \"rev:"));
    /* A second yes finds nothing waiting. */
-   r = call("confirm_revise", args);
+   r = call("confirm", args);
    TEST_ASSERT_TRUE(is_error(r));
    free(r);
 }
@@ -1132,23 +1138,20 @@ static void test_revise_merging_the_base(void) {
    char *preview = call("revise",
                         "{\"job\":42,\"instructions\":\"merge main\",\"merge_base\":\"true\"}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(preview, "(first merges main into its branch)"), preview);
+   ASSERT_FACTS(preview, "merges main");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    char out[256];
    int valid = 0;
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         g_meta.describe_call("confirm_revise", args, out, sizeof(out), &valid));
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "more work (first merges main into its branch)"), out);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, g_meta.describe_call("confirm", args, out, sizeof(out), &valid));
+   ASSERT_FACTS(out, "merges main");
    g_revise_answer = "{\"id\":\"t1\",\"status\":\"working\",\"merge\":{\"merged\":"
                      "\"c0ffee001122\"}}";
-   char *done = call("confirm_revise", args);
+   char *done = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(done, "merged main into its branch first (now at "
-                                             "c0ffee001122)"),
-                                done);
+   ASSERT_FACTS_IN_ORDER(done, "merged main", "c0ffee001122");
    free(done);
    const int c = last_call("task_revise");
    TEST_ASSERT_NOT_EQUAL(-1, c);
@@ -1156,24 +1159,22 @@ static void test_revise_merging_the_base(void) {
    /* Conflicts left for the agent are named. */
    snprintf(g_status, sizeof(g_status), "done");
    preview = call("revise", "{\"job\":42,\"instructions\":\"merge main\",\"merge_base\":true}");
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    g_revise_answer = "{\"id\":\"t1\",\"status\":\"working\",\"merge\":{\"conflicts\":"
                      "[\"src/a.c\",\"b.h\"],\"conflicts_count\":2}}";
-   done = call("confirm_revise", args);
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(done, "Merging main conflicted in src/a.c, b.h; the agent "
-                                             "resolves them"),
-                                done);
+   done = call("confirm", args);
+   ASSERT_FACTS_IN_ORDER(done, "conflicted", "src/a.c", "b.h", "resolves");
    free(done);
    /* Without it, the gateway isn't asked to merge. */
    snprintf(g_status, sizeof(g_status), "done");
    preview = call("revise", "{\"job\":42,\"instructions\":\"more\",\"merge_base\":false}");
    TEST_ASSERT_NULL(strstr(preview, "first merges"));
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
-   done = call("confirm_revise", args);
+   done = call("confirm", args);
    free(done);
    TEST_ASSERT_NULL(strstr(g_args[last_call("task_revise")], "merge_base"));
 }
@@ -1191,17 +1192,16 @@ static void test_revise_from_another_chat_moves_the_job(void) {
    g_turn++; /* the user asks again, from the other chat */
    atomic_store(&g_session->stream_conversation_id, 9);
    preview = call("revise", "{\"job\":42,\"instructions\":\"more\"}");
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(preview, "Its report will come to this chat."), preview);
+   ASSERT_FACTS(preview, "this chat");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    char out[256];
    int valid = 0;
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         g_meta.describe_call("confirm_revise", args, out, sizeof(out), &valid));
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "its report comes to this chat"), out);
-   char *done = call("confirm_revise", args);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, g_meta.describe_call("confirm", args, out, sizeof(out), &valid));
+   ASSERT_FACTS(out, "this chat");
+   char *done = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
    free(done);
    TEST_ASSERT_EQUAL_INT64(9, g_parent);
@@ -1222,10 +1222,10 @@ static void test_revise_not_sent(void) {
       g_task_status = mode == 3 ? "input_required" : "failed";
       char *preview = call("revise", "{\"job\":42,\"instructions\":\"more\"}");
       char args[48];
-      snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+      snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
       free(preview);
       g_turn++;
-      char *r = call("confirm_revise", args);
+      char *r = call("confirm", args);
       if (mode < 3) {
          TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
          TEST_ASSERT_EQUAL_STRING("failed", g_status);
@@ -1246,7 +1246,7 @@ static void test_revise_not_sent(void) {
 static void stage_revise(char *args, size_t len) {
    char *preview = call("revise", "{\"job\":42,\"instructions\":\"more\"}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
-   snprintf(args, len, "{\"id\":%u}", preview_id(preview));
+   snprintf(args, len, "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
 }
 
@@ -1263,7 +1263,7 @@ static void test_delegate_naming_a_finished_job(void) {
    free(r);
 }
 
-/* Edges: a job of another user, a cancelled one, a yes in a read turn; a lost
+/* Edges: a job of another user, a cancelled one, a yes in a read turn (sent); a lost
  * answer retried once with the same ref, then unknown (put back); the old end
  * landing while it is sent (opened again) vs the new run's own fast end (kept). */
 static void test_revise_edges(void) {
@@ -1281,9 +1281,11 @@ static void test_revise_edges(void) {
    stage_revise(args, sizeof(args));
    g_turn++;
    free(call("status", "{\"job\":42}")); /* this turn read the agent */
-   r = call("confirm_revise", args);
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "can't be confirmed in it"), r);
+   r = call("confirm", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    free(r);
+   TEST_ASSERT_NOT_EQUAL(-1, last_call("task_revise"));
+   snprintf(g_status, sizeof(g_status), "done");
    g_turn++;
 
    g_revise_mode = 2;
@@ -1291,7 +1293,7 @@ static void test_revise_edges(void) {
    stage_revise(args, sizeof(args));
    g_turn++;
    const int before = atomic_load(&g_ncalls);
-   r = call("confirm_revise", args);
+   r = call("confirm", args);
    TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
    free(r);
    int sends[2], n = 0;
@@ -1314,7 +1316,7 @@ static void test_revise_edges(void) {
    g_revise_ends_job = true;
    stage_revise(args, sizeof(args));
    g_turn++;
-   r = call("confirm_revise", args);
+   r = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    free(r);
    TEST_ASSERT_EQUAL_STRING("running", g_status); /* the task is open: opened again */
@@ -1324,7 +1326,7 @@ static void test_revise_edges(void) {
    g_task_status = "failed"; /* the new run failed at once */
    stage_revise(args, sizeof(args));
    g_turn++;
-   r = call("confirm_revise", args);
+   r = call("confirm", args);
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "already ended"), r);
    free(r);
    TEST_ASSERT_EQUAL_STRING("done", g_status); /* its real end is kept */
@@ -1337,22 +1339,17 @@ static void test_revise_carries_the_pull_requests_feedback(void) {
    snprintf(g_status, sizeof(g_status), "done");
    g_task_extra = ",\"published\":{\"pr_url\":\"https://github.com/o/dawn/pull/7\"}";
    char *preview = call("revise", "{\"job\":42,\"instructions\":\"fix the review\"}");
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(preview, "If its pull request "
-                                                "(https://github.com/o/dawn/pull/7) is still "
-                                                "open, its open feedback"),
-                                preview);
+   ASSERT_FACTS_IN_ORDER(preview, "https://github.com/o/dawn/pull/7", "feedback");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    g_revise_answer = "{\"id\":\"t1\",\"status\":\"working\",\"feedback\":{\"threads\":4,"
                      "\"checks\":1,\"pr_url\":\"https://github.com/o/dawn/pull/7\"},"
                      "\"feedback_error\":null}";
-   char *done = call("confirm_revise", args);
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(done, "With it went 4 review threads and 1 failing "
-                                             "required check from "
-                                             "https://github.com/o/dawn/pull/7;"),
-                                done);
+   char *done = call("confirm", args);
+   ASSERT_FACTS_IN_ORDER(done, "4 review threads", "1 failing required check",
+                         "https://github.com/o/dawn/pull/7");
    free(done);
 
    g_turn++;
@@ -1361,10 +1358,8 @@ static void test_revise_carries_the_pull_requests_feedback(void) {
    g_turn++;
    g_revise_answer = "{\"id\":\"t1\",\"status\":\"working\",\"feedback\":null,"
                      "\"feedback_error\":\"GitHub didn't answer\"}";
-   done = call("confirm_revise", args);
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(done, "couldn't read its pull request's feedback "
-                                             "(GitHub didn't answer)"),
-                                done);
+   done = call("confirm", args);
+   ASSERT_FACTS_IN_ORDER(done, "couldn't read", "GitHub didn't answer");
    free(done);
 }
 
@@ -1483,11 +1478,11 @@ static void test_confirm_approve_needs_the_request_still_open(void) {
    g_pending = "[" HOST_REQ "]";
    char *preview = call("approve", "{\"job\":42}");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    g_pending = "[{\"id\":7,\"kind\":\"domain\",\"payload\":{\"value\":\"evil.example\"}}]";
-   char *r = call("confirm_approve", args);
+   char *r = call("confirm", args);
    TEST_ASSERT_TRUE(is_error(r));
    free(r);
    TEST_ASSERT_EQUAL_INT(-1, last_call("task_reply"));
@@ -1516,7 +1511,7 @@ static void test_several_requests_need_a_name(void) {
    TEST_ASSERT_EQUAL_INT(-1, last_call("task_reply"));
    r = call("deny", "{\"job\":42,\"request\":8}");
    TEST_ASSERT_FALSE(is_error(r));
-   TEST_ASSERT_NOT_NULL(strstr(r, "won't use the tool `WebFetch`"));
+   ASSERT_FACTS_IN_ORDER(r, "won't", "`WebFetch`");
    free(r);
    const int i = last_call("task_reply");
    TEST_ASSERT_NOT_NULL(strstr(g_args[i], "\"request_id\": 8"));
@@ -1537,7 +1532,7 @@ static void test_answer_goes_to_the_question(void) {
    const int before = atomic_load(&g_ncalls);
    r = call("answer", "{\"job\":42,\"answer\":\"use main\"}");
    TEST_ASSERT_TRUE(is_error(r));
-   TEST_ASSERT_NOT_NULL(strstr(r, "a host or tool takes approve or deny"));
+   ASSERT_FACTS(r, "approve or deny");
    free(r);
    TEST_ASSERT_TRUE(last_call("task_reply") < before); /* no reply sent */
 }
@@ -1548,12 +1543,12 @@ static void test_reply_says_what_comes_next(void) {
    g_pending = "[" HOST_REQ "," QUESTION_REQ "]";
    g_after_reply = "input_required";
    char *r = call("deny", "{\"job\":42}");
-   TEST_ASSERT_NOT_NULL(strstr(r, "still waits on another request"));
+   ASSERT_FACTS(r, "another request");
    TEST_ASSERT_NULL(strstr(r, "picks up again"));
    free(r);
    g_after_reply = "blocked";
    r = call("deny", "{\"job\":42,\"request\":7}");
-   TEST_ASSERT_NOT_NULL(strstr(r, "goes on when the gateway has room (now: blocked)"));
+   ASSERT_FACTS_IN_ORDER(r, "room", "blocked");
    free(r);
    g_after_reply = "working";
    r = call("deny", "{\"job\":42,\"request\":7}");
@@ -1561,8 +1556,8 @@ static void test_reply_says_what_comes_next(void) {
    free(r);
 }
 
-/* No approval proposed in a turn that read the agent's words. */
-static void test_no_approve_in_a_turn_that_read_the_agent(void) {
+/* An approval proposed and confirmed in turns that read the agent's words. */
+static void test_approve_in_a_turn_that_read_the_agent(void) {
    coding_job();
    g_pending = "[" HOST_REQ "]";
    /* Proposing after reading the agent is fine (it allows nothing)... */
@@ -1570,34 +1565,34 @@ static void test_no_approve_in_a_turn_that_read_the_agent(void) {
    char *r = call("approve", "{\"job\":42}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(r));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(r));
    free(r);
-   /* ...but the yes must come in a turn that read none. */
+   /* ...and so is the yes (the id binds it to the request shown). */
    g_turn++;
    free(call("status", "{\"job\":42}"));
-   r = call("confirm_approve", args);
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "read the coding agent's report"), r);
+   r = call("confirm", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    free(r);
+   TEST_ASSERT_NOT_NULL(strstr(g_args[last_call("task_reply")], "\"decision\": \"allow\""));
 }
 
-/* A report with a take told to the turn counts as reading the agent: the yes
- * waits for the next turn, and the approval is still there for it. */
-static void test_no_approve_in_a_turn_told_a_take(void) {
+/* A report with a take told to the turn counts as reading the agent; the yes
+ * in that turn still allows what the preview showed. */
+static void test_approve_in_a_turn_told_a_take(void) {
    coding_job();
    g_pending = "[" HOST_REQ "]";
    char *r = call("approve", "{\"job\":42}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(r));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(r));
    free(r);
    coding_agent_note_take(7, 777);
    g_turn++;
    g_told_turn = g_turn, g_told_msg = 777; /* this turn's context carried the report */
-   r = call("confirm_approve", args);
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "read the coding agent's report"), r);
-   free(r);
-   g_turn++; /* the next turn wasn't told it */
-   r = call("confirm_approve", args);
+   turn_origin_t o;
+   turn_origin_capture(&o);
+   TEST_ASSERT_TRUE(coding_agent_turn_read(&o));
+   r = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    free(r);
    g_told_turn = 0, g_told_msg = 0;
@@ -1718,8 +1713,8 @@ static void test_unasked_approval(void) {
    g_pending = "[" HOST_REQ "]";
    char args[64];
    g_turn++; /* the user's next message */
-   snprintf(args, sizeof(args), "{\"id\":%u}", id);
-   char *r = call("confirm_approve", args);
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", id);
+   char *r = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    free(r);
    int c = last_call("task_reply");
@@ -1733,11 +1728,11 @@ static void test_unasked_approval(void) {
    r = call("approve", "{\"job\":42,\"scope\":\"repo\"}");
    TEST_ASSERT_TRUE(is_error(r));
    char hint[64];
-   snprintf(hint, sizeof(hint), "confirm_approve {\"id\": %u}", id);
+   snprintf(hint, sizeof(hint), "confirm {\"ids\": [%u]}", id);
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, hint), r);
    free(r);
-   snprintf(args, sizeof(args), "{\"id\":%u}", id);
-   r = call("confirm_approve", args);
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", id);
+   r = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    free(r);
 
@@ -1752,8 +1747,8 @@ static void test_unasked_approval(void) {
    free(r);
    /* (that preview is open now; answer it so DAWN can ask again) */
    g_turn++;
-   snprintf(args, sizeof(args), "{\"id\":%u}", asked_again);
-   r = call("confirm_approve", args);
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", asked_again);
+   r = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    free(r);
 
@@ -1762,8 +1757,8 @@ static void test_unasked_approval(void) {
                                       &already, &turn);
    TEST_ASSERT_NOT_EQUAL(0, id);
    g_turn++;
-   snprintf(args, sizeof(args), "{\"id\":%u,\"scope\":\"repo\"}", id);
-   r = call("confirm_approve", args);
+   snprintf(args, sizeof(args), "{\"ids\":[%u],\"scope\":\"repo\"}", id);
+   r = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    free(r);
    c = last_call("task_reply");
@@ -1774,8 +1769,8 @@ static void test_unasked_approval(void) {
                                       &already, &turn);
    TEST_ASSERT_NOT_EQUAL(0, id);
    g_turn += 2;
-   snprintf(args, sizeof(args), "{\"id\":%u}", id);
-   r = call("confirm_approve", args);
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", id);
+   r = call("confirm", args);
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "right after DAWN posted"), r);
    free(r);
 
@@ -1785,8 +1780,8 @@ static void test_unasked_approval(void) {
    TEST_ASSERT_NOT_EQUAL(0, id);
    g_turn++;
    atomic_store(&g_session->history_conversation_id, 9);
-   snprintf(args, sizeof(args), "{\"id\":%u}", id);
-   r = call("confirm_approve", args);
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", id);
+   r = call("confirm", args);
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "right after DAWN posted"), r);
    free(r);
 
@@ -1830,30 +1825,31 @@ static void test_publish_then_confirm(void) {
    g_task_extra = ",\"summary\":\"Fixed the oracle.\"";
    char *preview = call("publish", "{\"job\":42}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
-   TEST_ASSERT_NOT_NULL(strstr(preview, "push branch agent/t1-fix of dawn at commit 0123456789ab"));
-   /* Protected paths in the history count too (changed, then changed back). */
-   TEST_ASSERT_NOT_NULL(strstr(preview, "2 protected paths"));
-   TEST_ASSERT_NOT_NULL(strstr(preview, "open a pull request against main"));
+   ASSERT_FACTS_IN_ORDER(preview, "agent/t1-fix", "dawn", "0123456789ab");
+   /* Files to check in the history count too (changed, then changed back). */
+   TEST_ASSERT_NOT_NULL(strstr(preview, "2 files to check before publishing: "
+                                        "`src/a.c` (how DAWN drives the coding agent); `keys/k`."));
+   TEST_ASSERT_NULL(strstr(preview, "protected"));
+   ASSERT_FACTS(preview, "pull request", "against main");
    /* The public description, framed with the agent's other words. */
    TEST_ASSERT_NOT_NULL(strstr(preview, "[" TOOL_FRAME_AGENT "]\nPull request description:\n"
                                         "Fixed it. Thanks @alice"));
    TEST_ASSERT_EQUAL_INT(-1, last_call("task_publish"));
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
-   char *same = call("confirm_publish", args);
+   char *same = call("confirm", args);
    TEST_ASSERT_TRUE_MESSAGE(is_error(same), same); /* not in the turn that proposed it */
    free(same);
    g_turn++;
    char out[256];
    int valid = 0;
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         g_meta.describe_call("confirm_publish", args, out, sizeof(out), &valid));
-   TEST_ASSERT_NOT_NULL(strstr(out, "push agent/t1-fix of dawn at 0123456789ab (1 commit, 1 file, "
-                                    "2 protected) and open"));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, g_meta.describe_call("confirm", args, out, sizeof(out), &valid));
+   ASSERT_FACTS_IN_ORDER(out, "agent/t1-fix", "dawn", "0123456789ab", "1 commit", "1 file",
+                         "2 to check", "open");
    TEST_ASSERT_NULL(strstr(out, "fix the oracle\n")); /* no agent words in a reply code */
    g_pr_url = "https://github.com/o/dawn/pull/7)[x](https://evil";
-   char *done = call("confirm_publish", args);
+   char *done = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
    TEST_ASSERT_NULL(strstr(done, "evil")); /* an address that isn't a PR's isn't shown */
    free(done);
@@ -1872,8 +1868,8 @@ static void test_publish_when_nothing_is_new_or_closed(void) {
    g_task_extra = ",\"published\":{\"pr_url\":\"https://github.com/o/dawn/pull/7\"}";
    char *r = call("publish", "{\"job\":42}");
    TEST_ASSERT_TRUE_MESSAGE(is_error(r), r); /* nothing staged: not a prepare's question */
-   TEST_ASSERT_NOT_NULL(strstr(r, "already published: https://github.com/o/dawn/pull/7"));
-   TEST_ASSERT_NULL(strstr(r, "confirm_publish"));
+   ASSERT_FACTS_IN_ORDER(r, "already published", "https://github.com/o/dawn/pull/7");
+   TEST_ASSERT_NULL(strstr(r, "'confirm'"));
    free(r);
    g_task_extra = ",\"closed\":1793949000.5";
    g_unpublished = 0;
@@ -1895,38 +1891,44 @@ static void test_close(void) {
    snprintf(g_status, sizeof(g_status), "done");
    r = call("close", "{\"job\":42}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
-   TEST_ASSERT_NOT_NULL(strstr(r, "Closed coding job #42"));
+   ASSERT_FACTS_IN_ORDER(r, "Closed", "#42");
    free(r);
    g_unpublished = 2;
    char *preview = call("close", "{\"job\":42}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
-   TEST_ASSERT_NOT_NULL(
-       strstr(preview, "deletes its 2 unpublished commits on branch agent/t1-fix"));
+   ASSERT_FACTS_IN_ORDER(preview, "2 unpublished commits", "agent/t1-fix");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
-   char *done = call("confirm_close", args);
+   char *done = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
    free(done);
    TEST_ASSERT_NOT_NULL(strstr(g_args[last_call("task_close")], "\"head\": \"" FULL_HEAD "\""));
+   /* Sent with no answer: it may have closed, so check before trying again. */
+   g_unpublished = 0;
+   g_silent = "task_close";
+   r = call("close", "{\"job\":42}");
+   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+   ASSERT_FACTS_IN_ORDER(r, "may still", "check before");
+   free(r);
 }
 
-/* A turn that read the agent's words can't confirm a publish. */
-static void test_no_publish_confirm_in_a_turn_that_read_the_agent(void) {
+/* A turn that read the agent's words can confirm the publish the user was shown. */
+static void test_publish_confirm_in_a_turn_that_read_the_agent(void) {
    coding_job();
    snprintf(g_status, sizeof(g_status), "done");
    g_unpublished = 1;
    char *preview = call("publish", "{\"job\":42}");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    free(call("status", "{\"job\":42}"));
-   char *r = call("confirm_publish", args);
-   TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
+   char *r = call("confirm", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
    free(r);
-   TEST_ASSERT_EQUAL_INT(-1, last_call("task_publish"));
+   TEST_ASSERT_NOT_EQUAL(-1, last_call("task_publish"));
 }
 
 /* A waiting publish preview is replaced by a new ask in a later turn; a
@@ -1948,7 +1950,7 @@ static void test_publish_again_and_closed_revise(void) {
    g_task_extra = ",\"published\":{\"pushed\":\"o/dawn:agent/t1-fix\"}"; /* pushed, no PR */
    char *pr = call("publish", "{\"job\":42}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(pr), pr);
-   TEST_ASSERT_NOT_NULL(strstr(pr, "open a pull request against main"));
+   ASSERT_FACTS(pr, "pull request", "against main");
    free(pr);
    g_task_extra = ",\"closed\":1793949000.5";
    char *rev = call("revise", "{\"job\":42,\"instructions\":\"add tests\"}");
@@ -1963,7 +1965,7 @@ static void test_close_a_task_with_no_job(void) {
    g_task_status = "input_required";
    char *r = call("close", "{\"task\":\"281935db\"}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
-   TEST_ASSERT_NOT_NULL(strstr(r, "Closed task 281935db (stopped first)"));
+   ASSERT_FACTS_IN_ORDER(r, "Closed", "281935db", "stopped first");
    free(r);
    const int cancel = last_call("task_cancel"), close = last_call("task_close");
    TEST_ASSERT_TRUE(cancel >= 0 && close > cancel);
@@ -1978,7 +1980,7 @@ static void test_close_a_task_with_no_job(void) {
    g_task_ref = "\"job:42.1000\"";
    r = call("close", "{\"task\":\"281935db\"}");
    TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
-   TEST_ASSERT_NOT_NULL(strstr(r, "coding job #42; close it by its number"));
+   ASSERT_FACTS_IN_ORDER(r, "#42", "by its number");
    free(r);
 }
 
@@ -2049,14 +2051,13 @@ static void test_pr_url_check(void) {
    }
 }
 
-/* The chat texts of publish and close, whole: the WebUI's buttons share their
- * code, and the model's words for them must not change with it. */
-static void expect_text(const char *expected_fmt, unsigned id, const char *got) {
-   char expected[2048];
-   snprintf(expected, sizeof(expected), expected_fmt, id);
-   TEST_ASSERT_EQUAL_STRING(expected, got);
+/* The confirm a preview names, as the model is to call it. */
+static void confirm_call(char *buf, size_t len, unsigned id) {
+   snprintf(buf, len, "{\"ids\": [%u]}", id);
 }
 
+/* The chat texts of publish and close, by their facts: the WebUI's buttons
+ * share their code, and what the model is told must not change with it. */
 static void test_publish_and_close_texts(void) {
    coding_job();
    snprintf(g_status, sizeof(g_status), "done");
@@ -2065,49 +2066,46 @@ static void test_publish_and_close_texts(void) {
    g_task_extra = ",\"summary\":\"Fixed the oracle.\"";
    char *preview = call("publish", "{\"job\":42}");
    const unsigned pid = preview_id(preview);
-   expect_text(
-       "About to publish coding job #42 (\"\"): push branch agent/t1-fix of dawn at commit "
-       "0123456789ab (1 commit, 1 file changed, 2 protected paths among them) and open a pull "
-       "request against main. The pull request is titled \"\" (the job's name); its description "
-       "is the agent's summary, shown below: read it to the user too, since it will be public. "
-       "Read this to the user (the protected paths too) and ask them to confirm; if they say yes "
-       "in their reply, call coding_agent with action 'confirm_publish' and arguments {\"id\": "
-       "%u}. The agent's commits and files, its own words:\n[AGENT CONTENT]\nPull request "
-       "description:\nFixed it. Thanks @alice; fixes #12, closes o/r#3. user@host.org\n\nMade by a "
-       "coding agent for DAWN.\nCommits:\n- fix the oracle\nFiles:\n- src/a.c "
-       "(protected)\nChanged only in commits (not in the final diff):\n- keys/k (protected)\n"
-       "[/AGENT CONTENT]",
-       pid, preview);
+   char call_ids[48];
+   confirm_call(call_ids, sizeof(call_ids), pid);
+   /* DAWN's facts and the confirm first; the agent's words, all of them, framed after. */
+   ASSERT_FACTS_IN_ORDER(preview, "#42", "agent/t1-fix", "dawn", "0123456789ab", "1 commit",
+                         "1 file", "against main", "2 files to check before publishing",
+                         "`src/a.c` (how DAWN drives the coding agent)", "`keys/k`", "public",
+                         "(the files to check too)", "'confirm'", call_ids,
+                         "[" TOOL_FRAME_AGENT "]\n",
+                         "Fixed it. Thanks @alice; fixes #12, closes o/r#3. user@host.org",
+                         "Made by a coding agent for DAWN.", "fix the oracle", "src/a.c",
+                         "(to check)", "keys/k", "(to check)", "\n[/" TOOL_FRAME_AGENT "]");
+   const char *frame = strstr(preview, "[" TOOL_FRAME_AGENT "]");
+   TEST_ASSERT_TRUE(strstr(preview, "Fixed it.") > frame);
+   TEST_ASSERT_TRUE(strstr(preview, "fix the oracle") > frame);
+   TEST_ASSERT_TRUE(strstr(preview, "- keys/k (to check)\n") > frame);
    free(preview);
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", pid);
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", pid);
    g_turn++;
-   char *done = call("confirm_publish", args);
-   TEST_ASSERT_EQUAL_STRING("Published coding job #42 (\"\"): pushed o/dawn:agent/t1-fix; pull "
-                            "request: https://github.com/o/dawn/pull/7",
-                            done);
+   char *done = call("confirm", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
+   ASSERT_FACTS_IN_ORDER(done, "#42", "o/dawn:agent/t1-fix", "https://github.com/o/dawn/pull/7");
    free(done);
    g_unpublished = 0;
    char *one = call("close", "{\"job\":42}");
-   TEST_ASSERT_EQUAL_STRING("Closed coding job #42 (\"\"): its copy of the repo and its branch are "
-                            "gone from the gateway.",
-                            one);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(one), one);
+   ASSERT_FACTS_IN_ORDER(one, "Closed", "#42", "gone");
    free(one);
    g_unpublished = 2;
    char *cp = call("close", "{\"job\":42}");
    const unsigned cid = preview_id(cp);
-   expect_text("Closing coding job #42 (\"\") deletes its 2 unpublished commits on branch "
-               "agent/t1-fix (at 0123456789ab); nothing else has them. Read this to the user and "
-               "ask them to confirm; if they say yes in their reply, call coding_agent with action "
-               "'confirm_close' and arguments {\"id\": %u}.",
-               cid, cp);
+   confirm_call(call_ids, sizeof(call_ids), cid);
+   ASSERT_FACTS_IN_ORDER(cp, "#42", "2 unpublished commits", "agent/t1-fix", "0123456789ab",
+                         "nothing else has them", "'confirm'", call_ids);
    free(cp);
-   snprintf(args, sizeof(args), "{\"id\":%u}", cid);
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", cid);
    g_turn++;
-   char *cd = call("confirm_close", args);
-   TEST_ASSERT_EQUAL_STRING("Closed coding job #42 (\"\"): its 2 unpublished commits, its copy of "
-                            "the repo and its branch are gone.",
-                            cd);
+   char *cd = call("confirm", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(cd), cd);
+   ASSERT_FACTS_IN_ORDER(cd, "Closed", "#42", "2 unpublished commits", "gone");
    free(cd);
 }
 
@@ -2133,9 +2131,12 @@ static void test_publish_buttons(void) {
    TEST_ASSERT_EQUAL_STRING("main", coding_gateway_jstr(pv, "base"));
    TEST_ASSERT_EQUAL_STRING(BODY_SHA, coding_gateway_jstr(pv, "pr_body_sha256"));
    TEST_ASSERT_NOT_NULL(strstr(coding_gateway_jstr(pv, "pr_body"), "Made by a coding agent"));
-   struct json_object *prot = json_object_object_get(pv, "protected");
-   TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(prot));
-   TEST_ASSERT_EQUAL_STRING("src/a.c", json_object_get_string(json_object_array_get_idx(prot, 0)));
+   struct json_object *check = json_object_object_get(pv, "to_check");
+   TEST_ASSERT_EQUAL_INT(1, (int)json_object_array_length(check));
+   TEST_ASSERT_EQUAL_STRING("src/a.c",
+                            coding_gateway_jstr(json_object_array_get_idx(check, 0), "path"));
+   TEST_ASSERT_EQUAL_STRING("how DAWN drives the coding agent",
+                            coding_gateway_jstr(json_object_array_get_idx(check, 0), "why"));
    TEST_ASSERT_EQUAL_INT(1,
                          (int)json_object_array_length(json_object_object_get(pv, "history_only")));
    struct json_object *mentions = json_object_object_get(pv, "mentions");
@@ -2152,7 +2153,7 @@ static void test_publish_buttons(void) {
    /* A chat publish staged meanwhile is dropped by the click. */
    char *staged = call("publish", "{\"job\":42}");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(staged));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(staged));
    free(staged);
 
    char *url = NULL;
@@ -2176,9 +2177,10 @@ static void test_publish_buttons(void) {
    TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"expect_body_sha256\": \"" BODY_SHA "\""));
    TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"open_pr\": true"));
    g_turn++;
-   r = call("confirm_publish", args);
+   r = call("confirm", args);
    TEST_ASSERT_TRUE_MESSAGE(is_error(r), r); /* the click took its place */
    free(r);
+   TEST_ASSERT_EQUAL_INT(c, last_call("task_publish")); /* pushed once */
 }
 
 /* The viewer's Close: at once when nothing would be lost; what would be lost
@@ -2248,9 +2250,11 @@ static void test_agent_written_title(void) {
    TEST_ASSERT_TRUE(json_object_get_boolean(json_object_object_get(pv, "pr_title_by_agent")));
    json_object_put(pv);
    char *preview = call("publish", "{\"job\":42}");
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(preview, "title and description are the agent's"), preview);
-   TEST_ASSERT_NOT_NULL(strstr(preview, "[" TOOL_FRAME_AGENT "]\nPull request title:\n"
-                                        "Fix the oracle\nPull request description:\n"));
+   ASSERT_FACTS(preview, "the agent's");
+   /* The title in the frame, never in DAWN's sentence before it. */
+   ASSERT_FACTS_IN_ORDER(preview, "[" TOOL_FRAME_AGENT "]\n",
+                         "Pull request title:\nFix the oracle\n", "Pull request description:\n");
+   TEST_ASSERT_TRUE(strstr(preview, "Fix the oracle") > strstr(preview, "[" TOOL_FRAME_AGENT "]"));
    free(preview);
 }
 
@@ -2277,13 +2281,12 @@ static void test_delegate_queued_when_the_agent_is_busy(void) {
    g_start_queued = true;
    char *preview = call("delegate", "{\"repo\":\"dawn\",\"task\":\"fix the oracle\"}");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
-   char *r = call("confirm_delegate", args);
+   char *r = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(r), r);
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "Queued coding job #42"), r);
-   TEST_ASSERT_NOT_NULL(strstr(r, "starts by itself when a running task finishes"));
+   ASSERT_FACTS_IN_ORDER(r, "Queued", "#42", "starts by itself");
    TEST_ASSERT_EQUAL_STRING("queued", g_status); /* running once the gateway starts it */
    free(r);
 }
@@ -2294,11 +2297,11 @@ static void test_queued_start_after_a_cancel_is_stopped(void) {
    g_start_queued = true;
    char *preview = call("delegate", "{\"repo\":\"dawn\",\"task\":\"fix the oracle\"}");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    g_cancel_during_start = true;
-   char *r = call("confirm_delegate", args);
+   char *r = call("confirm", args);
    TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
    TEST_ASSERT_EQUAL_STRING("task_cancel", g_calls[atomic_load(&g_ncalls) - 1]);
    free(r);
@@ -2326,19 +2329,16 @@ static void test_publish_with_own_text(void) {
    TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
    TEST_ASSERT_NOT_NULL(strstr(preview, "Pull request title:\nFix the oracle\n"));
    TEST_ASSERT_NOT_NULL(strstr(preview, "Pull request description:\nMy words.\n\nMade here.\n"));
-   TEST_ASSERT_NOT_NULL(strstr(preview, "are the ones given with this publish"));
+   ASSERT_FACTS(preview, "given with this publish");
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    char out[512];
    int valid = 0;
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         g_meta.describe_call("confirm_publish", args, out, sizeof(out), &valid));
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, ", titled \"Fix the oracle\""), out);
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "description of 9 bytes that begins \"My words.\""),
-                                out);
-   char *done = call("confirm_publish", args);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, g_meta.describe_call("confirm", args, out, sizeof(out), &valid));
+   ASSERT_FACTS_IN_ORDER(out, "\"Fix the oracle\"", "9 bytes", "\"My words.\"");
+   char *done = call("confirm", args);
    TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
    free(done);
    const int c = last_call("task_publish");
@@ -2372,41 +2372,29 @@ static void test_publish_edits_an_open_pull_requests_description(void) {
    char *preview = call("publish", "{\"job\":42,\"description\":\"New words.\"}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
    TEST_ASSERT_NOT_NULL(strstr(g_args[last_call("task_changes")], "\"open_pr\": true"));
-   TEST_ASSERT_NOT_NULL_MESSAGE(
-       strstr(preview, "About to change coding job #42 (\"\")'s open pull request "
-                       "https://github.com/o/dawn/pull/7: replace its description (no new "
-                       "commits to push)."),
-       preview);
+   ASSERT_FACTS_IN_ORDER(preview, "#42", "https://github.com/o/dawn/pull/7", "description",
+                         "no new commits");
    TEST_ASSERT_NOT_NULL(strstr(preview, "Pull request description:\nNew words.\n\nMade here.\n"));
    TEST_ASSERT_NULL(strstr(preview, "Pull request title:")); /* the title isn't changing */
    TEST_ASSERT_NULL(strstr(preview, "Commits:"));            /* nothing is pushed */
-   const char *gh = strstr(preview, "The pull request's current description on GitHub, without "
-                                    "the gateway's closing line:\n");
-   TEST_ASSERT_NOT_NULL(gh);
-   TEST_ASSERT_NOT_NULL(strstr(gh, "Old words."));
-   /* GitHub's text sits in a page's frame, after the new text's. */
-   const char *web = strstr(preview, TOOL_FRAME_WEB);
-   TEST_ASSERT_NOT_NULL(web);
-   TEST_ASSERT_TRUE(web > strstr(preview, "New words."));
-   TEST_ASSERT_TRUE(web < gh);
+   /* GitHub's current text sits in a page's frame, after the new text. */
+   ASSERT_FACTS_IN_ORDER(preview, "New words.", "[" TOOL_FRAME_WEB "]", "Old words.",
+                         "[/" TOOL_FRAME_WEB "]");
+   TEST_ASSERT_TRUE(strstr(preview, "Old words.") > strstr(preview, "[" TOOL_FRAME_WEB "]"));
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    char out[512];
    int valid = 0;
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         g_meta.describe_call("confirm_publish", args, out, sizeof(out), &valid));
-   TEST_ASSERT_EQUAL_STRING("change coding job #42 (\"\")'s open pull request "
-                            "https://github.com/o/dawn/pull/7, its description replaced by 10 "
-                            "bytes that begin \"New words.\"",
-                            out);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, g_meta.describe_call("confirm", args, out, sizeof(out), &valid));
+   ASSERT_FACTS_IN_ORDER(out, "#42", "https://github.com/o/dawn/pull/7", "description", "10 bytes",
+                         "\"New words.\"");
    g_publish_answer = "{\"pr_url\":\"https://github.com/o/dawn/pull/7\",\"head\":\"" FULL_HEAD
                       "\",\"pr_updated\":[\"description\"]}";
-   char *done = call("confirm_publish", args);
-   TEST_ASSERT_EQUAL_STRING("Coding job #42 (\"\"): updated the pull request's description: "
-                            "https://github.com/o/dawn/pull/7",
-                            done);
+   char *done = call("confirm", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
+   ASSERT_FACTS_IN_ORDER(done, "#42", "description", "https://github.com/o/dawn/pull/7");
    free(done);
    const int c = last_call("task_publish");
    TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"pr_description\": \"New words.\""));
@@ -2430,12 +2418,12 @@ static void test_publish_description_ending_in_the_footer(void) {
    TEST_ASSERT_NOT_NULL(strstr(preview, "Pull request description:\nNew words.\n\nMade here.\n"));
    TEST_ASSERT_NULL(strstr(preview, "Made here.\n\nMade here."));
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    g_publish_answer = "{\"pr_url\":\"https://github.com/o/dawn/pull/7\",\"head\":\"" FULL_HEAD
                       "\",\"pr_updated\":[\"description\"]}";
-   free(call("confirm_publish", args));
+   free(call("confirm", args));
    const int c = last_call("task_publish");
    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(g_args[c], "\"pr_description\": \"New words.\""), g_args[c]);
    TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"edit_open_pr\": true"));
@@ -2452,32 +2440,25 @@ static void test_publish_pushes_and_retitles_an_open_pull_request(void) {
    g_open_pr = OPEN_PR;
    char *preview = call("publish", "{\"job\":42,\"title\":\"Better title\"}");
    TEST_ASSERT_FALSE_MESSAGE(is_error(preview), preview);
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(preview,
-                                       "adding the new commits to its open pull request "
-                                       "https://github.com/o/dawn/pull/7 and replacing its title."),
-                                preview);
+   ASSERT_FACTS_IN_ORDER(preview, "new commits", "https://github.com/o/dawn/pull/7", "title");
    TEST_ASSERT_NOT_NULL(strstr(preview, "Pull request title:\nBetter title\n"));
    TEST_ASSERT_NOT_NULL(strstr(preview, "Commits:\n- fix the oracle"));
    TEST_ASSERT_NULL(strstr(preview, "Pull request description:"));
    TEST_ASSERT_NULL(strstr(preview, "Old words"));
    char args[48];
-   snprintf(args, sizeof(args), "{\"id\":%u}", preview_id(preview));
+   snprintf(args, sizeof(args), "{\"ids\":[%u]}", preview_id(preview));
    free(preview);
    g_turn++;
    char out[512];
    int valid = 0;
-   TEST_ASSERT_EQUAL_INT(SUCCESS,
-                         g_meta.describe_call("confirm_publish", args, out, sizeof(out), &valid));
-   TEST_ASSERT_NOT_NULL_MESSAGE(
-       strstr(out, "to its open pull request https://github.com/o/dawn/pull/7, its title "
-                   "becoming \"Better title\""),
-       out);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, g_meta.describe_call("confirm", args, out, sizeof(out), &valid));
+   ASSERT_FACTS_IN_ORDER(out, "https://github.com/o/dawn/pull/7", "title", "\"Better title\"");
    g_publish_answer = "{\"pushed\":\"o/dawn:agent/t1-fix\",\"pr_url\":"
                       "\"https://github.com/o/dawn/pull/7\",\"pr_updated\":[\"title\"]}";
-   char *done = call("confirm_publish", args);
-   TEST_ASSERT_EQUAL_STRING("Published coding job #42 (\"\"): pushed o/dawn:agent/t1-fix; "
-                            "updated the pull request's title: https://github.com/o/dawn/pull/7",
-                            done);
+   char *done = call("confirm", args);
+   TEST_ASSERT_FALSE_MESSAGE(is_error(done), done);
+   ASSERT_FACTS_IN_ORDER(done, "#42", "o/dawn:agent/t1-fix", "title",
+                         "https://github.com/o/dawn/pull/7");
    free(done);
    const int c = last_call("task_publish");
    TEST_ASSERT_NOT_NULL(strstr(g_args[c], "\"pr_title\": \"Better title\""));
@@ -2496,7 +2477,7 @@ static void test_publish_text_for_a_pull_request_that_cant_change(void) {
    g_open_pr = ",\"open_pr\":null"; /* merged or closed */
    char *r = call("publish", "{\"job\":42,\"title\":\"Late\"}");
    TEST_ASSERT_TRUE_MESSAGE(is_error(r), r);
-   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(r, "was merged or closed, and there is nothing new"), r);
+   ASSERT_FACTS(r, "merged or closed", "nothing new");
    free(r);
    g_open_pr = ""; /* a gateway too old to say: never read as merged or closed */
    r = call("publish", "{\"job\":42,\"title\":\"Late\"}");
@@ -2589,8 +2570,8 @@ int main(void) {
    RUN_TEST(test_request_line_checks_values);
    RUN_TEST(test_reply_says_what_comes_next);
    RUN_TEST(test_unasked_approval);
-   RUN_TEST(test_no_approve_in_a_turn_that_read_the_agent);
-   RUN_TEST(test_no_approve_in_a_turn_told_a_take);
+   RUN_TEST(test_approve_in_a_turn_that_read_the_agent);
+   RUN_TEST(test_approve_in_a_turn_told_a_take);
    RUN_TEST(test_status_shows_recent_steps);
    RUN_TEST(test_needs_the_gateway_grant);
    RUN_TEST(test_cancel_hook_ends_the_row_and_asks_the_gateway);
@@ -2607,7 +2588,7 @@ int main(void) {
    RUN_TEST(test_publish_buttons);
    RUN_TEST(test_close_buttons);
    RUN_TEST(test_agent_written_title);
-   RUN_TEST(test_no_publish_confirm_in_a_turn_that_read_the_agent);
+   RUN_TEST(test_publish_confirm_in_a_turn_that_read_the_agent);
    RUN_TEST(test_pr_url_check);
    RUN_TEST(test_publish_again_and_closed_revise);
    RUN_TEST(test_close_a_task_with_no_job);

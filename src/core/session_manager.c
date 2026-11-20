@@ -47,6 +47,7 @@
 #include "llm/llm_command_parser.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
 #include "logging.h"
@@ -102,11 +103,8 @@ __attribute__((weak)) void webui_send_purge_session(const session_t *s) {
  */
 static __thread session_t *tl_command_context = NULL;
 
-/* The running turn this thread works for (see session_turn_token()), and LLM
- * settings pinned for work that outlives its turn. */
+/* The running turn this thread works for (see session_turn_token()). */
 static __thread uint64_t tl_turn_token = 0;
-static __thread const session_t *tl_llm_override_session = NULL;
-static __thread const session_llm_config_t *tl_llm_override = NULL;
 
 // =============================================================================
 // Internal Helper Functions
@@ -1746,40 +1744,6 @@ static int dispatch_prompt(session_t *session,
 // Per-Session LLM Configuration
 // =============================================================================
 
-/* @p config, or a copy in @p fallback with a cloud provider that has an API key
- * when @p config's doesn't; NULL when no cloud provider has one. */
-static const session_llm_config_t *usable_llm_config(const session_t *session,
-                                                     const session_llm_config_t *config,
-                                                     session_llm_config_t *fallback) {
-   if (config->type != LLM_CLOUD) {
-      return config;
-   }
-   bool has_key = false;
-   if (config->cloud_provider == CLOUD_PROVIDER_OPENAI)
-      has_key = llm_has_openai_key();
-   else if (config->cloud_provider == CLOUD_PROVIDER_CLAUDE)
-      has_key = llm_has_claude_key();
-   else if (config->cloud_provider == CLOUD_PROVIDER_GEMINI)
-      has_key = llm_has_gemini_key();
-   else if (config->cloud_provider == CLOUD_PROVIDER_OPENROUTER)
-      has_key = llm_has_openrouter_key();
-   if (has_key) {
-      return config;
-   }
-
-   cloud_provider_t alt = llm_detect_available_provider();
-   if (alt == CLOUD_PROVIDER_NONE) {
-      OLOG_WARNING("Session %u: No cloud provider has an API key configured", session->session_id);
-      return NULL;
-   }
-   OLOG_INFO("Session %u: %s provider unavailable, falling back to %s", session->session_id,
-             cloud_provider_to_string(config->cloud_provider), cloud_provider_to_string(alt));
-   memcpy(fallback, config, sizeof(session_llm_config_t));
-   fallback->cloud_provider = alt;
-   fallback->model[0] = '\0'; /* Clear model — let resolver pick default for new provider */
-   return fallback;
-}
-
 /* Caller holds llm_config_mutex.  True for the running turn's own code: its
  * thread and the tool threads carrying its token. */
 static bool is_turn_caller_locked(const session_t *session) {
@@ -1790,20 +1754,18 @@ int session_set_llm_config(session_t *session, const session_llm_config_t *confi
    if (!session || !config) {
       return 1;
    }
-   session_llm_config_t fallback_config;
-   config = usable_llm_config(session, config, &fallback_config);
-   if (!config) {
-      return 1;
-   }
 
    /* A turn changing its own settings (switch_llm): the turn's settings change;
     * the session's only when the turn runs on the session's live history, i.e.
     * on the conversation being viewed. */
    const bool on_own_copy = session_turn_on_own_history(session);
+   /* A turn runs on a concrete selection; the session's may stay unset. */
+   session_llm_config_t turn_cfg = *config;
+   llm_selection_resolve(&turn_cfg); /* takes g_config_rwlock: outside the session's mutex */
    pthread_mutex_lock(&session->llm_config_mutex);
    const bool turn_caller = is_turn_caller_locked(session);
    if (turn_caller) {
-      memcpy(&session->turn_llm_config, config, sizeof(session_llm_config_t));
+      session->turn_llm_config = turn_cfg;
    }
    if (!turn_caller || !on_own_copy) {
       memcpy(&session->llm_config, config, sizeof(session_llm_config_t));
@@ -1820,15 +1782,12 @@ int session_set_turn_llm_config(session_t *session, const session_llm_config_t *
    if (!session || !config) {
       return 1;
    }
-   session_llm_config_t fallback_config;
-   config = usable_llm_config(session, config, &fallback_config);
-   if (!config) {
-      return 1;
-   }
+   session_llm_config_t turn_cfg = *config;
+   llm_selection_resolve(&turn_cfg); /* outside the session's mutex */
    pthread_mutex_lock(&session->llm_config_mutex);
    const bool turn_caller = is_turn_caller_locked(session);
    if (turn_caller) {
-      memcpy(&session->turn_llm_config, config, sizeof(session_llm_config_t));
+      session->turn_llm_config = turn_cfg;
    }
    pthread_mutex_unlock(&session->llm_config_mutex);
    if (!turn_caller) {
@@ -1845,11 +1804,15 @@ void session_get_llm_config(session_t *session, session_llm_config_t *config) {
    if (!session || !config) {
       return;
    }
+   session_get_llm_config_raw(session, config);
+   llm_selection_resolve(config); /* takes g_config_rwlock: outside the session's mutex */
+}
 
-   if (tl_llm_override && tl_llm_override_session == session) {
-      memcpy(config, tl_llm_override, sizeof(session_llm_config_t));
+void session_get_llm_config_raw(session_t *session, session_llm_config_t *config) {
+   if (!session || !config) {
       return;
    }
+
    pthread_mutex_lock(&session->llm_config_mutex);
    if (session->turn_llm_config_set && tl_turn_token != 0 && tl_turn_token == session->turn_gen) {
       /* Part of the running turn: its own settings (see session_t.turn_llm_config). */
@@ -1858,6 +1821,25 @@ void session_get_llm_config(session_t *session, session_llm_config_t *config) {
       memcpy(config, &session->llm_config, sizeof(session_llm_config_t));
    }
    pthread_mutex_unlock(&session->llm_config_mutex);
+}
+
+bool session_llm_follows_default(session_t *session) {
+   if (!session) {
+      return true;
+   }
+   /* The session's own selection, never a running turn's (always concrete), so a
+    * conversation first saved during a turn isn't stamped with the default's
+    * values as if they were a pick. */
+   pthread_mutex_lock(&session->llm_config_mutex);
+   const bool follows = session->llm_config.type == LLM_UNDEFINED;
+   pthread_mutex_unlock(&session->llm_config_mutex);
+   return follows;
+}
+
+int session_turn_selection_problem(session_t *session, char *reason, size_t reason_len) {
+   session_llm_config_t cfg;
+   session_get_llm_config(session, &cfg);
+   return llm_selection_problem(session ? &cfg : NULL, reason, reason_len);
 }
 
 // =============================================================================
@@ -1943,10 +1925,6 @@ void session_set_turn_token(uint64_t token) {
    tl_turn_token = token;
 }
 
-void session_set_llm_config_override(const session_t *session, const session_llm_config_t *config) {
-   tl_llm_override_session = config ? session : NULL;
-   tl_llm_override = session ? config : NULL;
-}
 
 // =============================================================================
 // Per-Session Metrics

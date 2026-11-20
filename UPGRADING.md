@@ -12,7 +12,7 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
-## 2026-11-19 — The music library is read again once
+## 2026-11-20 — The music library is read again once
 
 **What changed.** DAWN now stores each track's album artist, track number and disc number, so
 it can play a whole album in order. The first library scan after the upgrade reads every local
@@ -21,6 +21,71 @@ music file again, and the first Plex sync rewrites every Plex track.
 **What you need to do.** Nothing. On a large library the first scan takes longer than usual,
 with more disk activity; music plays meanwhile, and albums play in track order once the scan
 has finished.
+
+---
+
+## 2026-11-20 — An API key is used only for the provider you selected
+
+**What changed.** For chat, DAWN no longer picks a cloud provider because its key is in
+`secrets.toml`, and never moves a conversation to another vendor. The provider is the one
+`[llm.cloud] provider` names (Settings → Language Model → Cloud Provider), or the one a
+conversation was switched to. (A setting that names a provider for its own job, such as
+`[memory] extraction_provider` or `[llm] compact_provider`, uses that provider's key, as before.)
+
+- With no provider set, or one set without its key, DAWN started on the local LLM, and still
+  does when none is set. But a conversation switched to the cloud (the WebUI picker, "switch to
+  cloud"), or one stored as cloud, ran on the first provider that had a key (Claude, then
+  OpenAI, Gemini, OpenRouter). Now it uses the provider that was selected, or is refused.
+- A selected provider with no key is now refused, and the reply says why ("OpenAI is selected,
+  but it has no API key"), instead of quietly running elsewhere. Many `dawn.toml` files say
+  `provider = "openai"` without anyone choosing it: older Settings pages wrote it on every save.
+- Conversations you never picked a model for now follow the default when you change it. On the
+  first start, if the default is a cloud provider, a stored conversation on exactly that provider
+  and default model is marked that way; local conversations, messaging channels and
+  conversations on another model keep their setting. This runs once: if the default is local at
+  that start, nothing is changed.
+- A model switch you ask for ("switch to the cloud") now lasts and is saved with the
+  conversation, as a pick in the model picker does, in a private conversation too. Before, a
+  switch from the local model to the cloud in a private conversation applied to that reply only.
+  "Use default model" (under Mode in the picker, and in Settings → My channels for a channel)
+  returns a conversation to following the default.
+- The `-m`/`--llm` and `-P`/`--cloud-provider` command-line options are removed, and DAWN won't
+  start with them.
+- The cloud-to-local fallback is now the setting `[llm] local_fallback`, off by default. It had
+  stopped working for chat turns anyway.
+- `[llm.cloud] endpoint` is now used for chat turns too, but only for the provider
+  `[llm.cloud] provider` names; with no provider set, it is ignored.
+
+**What you need to do.**
+- Check Settings → Language Model → Cloud Provider: pick the provider whose key you have, or
+  "Not selected" to stay on the local LLM. If you run only a local LLM, you can also set
+  `[llm] type = "local"`.
+- Remove `-m`/`-P` from any launch line, script or service file; set the same thing in
+  `dawn.toml` or Settings.
+- If you relied on DAWN answering from your local LLM when the cloud is down, turn on
+  Settings → Language Model → Fall Back to the Local LLM (`[llm] local_fallback = true`).
+- If you set `[llm.cloud] endpoint` (a proxy, Azure), make sure `[llm.cloud] provider` is set
+  to the provider it serves.
+
+---
+
+## 2026-11-19 — Agent gateway: `protected` is now `check`
+
+**What changed.** A repo's `protected` list in the agent gateway's config is now called
+`check`: files to check before publishing. Nothing was ever blocked; a task that changes one
+has it named to you before publishing. Each entry can now carry a reason, which Friday says
+with the path: `{ path = "src/auth/**", why = "who can log in and do what" }`. A plain string
+still works, with no reason.
+
+**What you need to do.** First re-run the gateway's installer, so the gateway runs the new
+code: `cd services/agent-gateway && sudo UV=$(command -v uv) ./install.sh`. A restart alone
+keeps the old code, which refuses a `check` key and fails at load.
+
+Then, optionally, in `/usr/local/etc/agent-gateway/agent-gateway.toml` (the installer keeps
+your copy) rename `protected = [...]` to `check = [...]` under each `[[repos]]` and
+`sudo systemctl restart agent-gateway`. That only silences a warning the gateway logs at every
+start: the old key still works. Reasons are optional; the shipped
+`services/agent-gateway/agent-gateway.toml` has them for the dawn repo.
 
 ---
 

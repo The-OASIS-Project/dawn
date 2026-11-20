@@ -205,17 +205,30 @@
    /* Per-channel LLM controls.  The model itself is changed in chat via the
     * switch-model tool (shown read-only here); reasoning is editable and persists
     * to this channel's conversation. */
+   const PROVIDER_NAMES = {
+      openai: 'OpenAI',
+      claude: 'Claude',
+      anthropic: 'Claude',
+      gemini: 'Gemini',
+      openrouter: 'OpenRouter',
+   };
+
    function renderLlmControls(ch) {
       // Legacy rows may store "auto"; show it as "On".
       const think = ch.thinking_mode === 'auto' ? 'enabled' : ch.thinking_mode || '';
       const effort = ch.reasoning_effort || '';
-      // Show the explicit model if set, else resolve what "Default" inherits.
+      // What the channel runs on: the default, or its own pick (a provider with
+      // no model of its own runs that provider's default model).
+      const resolved = resolveDefaultModel(ch);
+      const own = !!ch.llm_type;
       let modelLabel;
-      if (ch.model) {
-         modelLabel = ch.model;
+      if (!own) {
+         modelLabel = resolved ? 'Follows the default (' + resolved + ')' : 'Follows the default';
+      } else if (ch.llm_type === 'local') {
+         modelLabel = 'Local' + (ch.model || resolved ? ' (' + (ch.model || resolved) + ')' : '');
       } else {
-         const resolved = resolveDefaultModel(ch);
-         modelLabel = resolved ? 'Default (' + resolved + ')' : 'Default (global LLM)';
+         const provider = PROVIDER_NAMES[(ch.cloud_provider || '').toLowerCase()] || 'Cloud';
+         modelLabel = provider + ' (' + (ch.model || resolved || 'its default model') + ')';
       }
 
       // "Default" = inherit the global setting; show its resolved value when known.
@@ -244,6 +257,15 @@
          '<span class="channel-llm-model" title="Change the model in chat via the switch-model tool">Model: ' +
          escapeHtml(modelLabel) +
          '</span>' +
+         (own
+            ? '<button type="button" class="btn btn-secondary btn-small channel-llm-default-btn" ' +
+              'data-id="' +
+              ch.id +
+              '" title="This channel has its own model. Follow the default instead." ' +
+              'aria-label="' +
+              escapeAttr('Use default model for ' + (ch.display_name || 'this channel')) +
+              '">Use default model</button>'
+            : '') +
          '<label class="channel-llm-field">Reasoning ' +
          '<select class="channel-llm-thinking" data-id="' +
          ch.id +
@@ -683,6 +705,17 @@
          });
       });
 
+      document.querySelectorAll('.channel-llm-default-btn').forEach((btn) => {
+         btn.addEventListener('click', function () {
+            const ch = channels.find((c) => c.id === parseInt(this.dataset.id, 10));
+            // No pick of its own: it follows the default (its reasoning kept)
+            if (ch) {
+               this.disabled = true; // the reply's re-render replaces it
+               requestSetChannelLlm({ ...ch, llm_type: '', cloud_provider: '', model: '' }, {});
+            }
+         });
+      });
+
       document.querySelectorAll('.channel-llm-effort').forEach((sel) => {
          sel.addEventListener('change', function () {
             const ch = channels.find((c) => c.id === parseInt(this.dataset.id, 10));
@@ -891,10 +924,14 @@
     * so confirm the persist with a toast (the only visible success signal) and
     * re-fetch the authoritative list. */
    function handleSetChannelLlmResponse(payload) {
-      if (payload && payload.success && typeof DawnToast !== 'undefined') {
-         DawnToast.show('Channel settings updated', 'success');
+      if (typeof DawnToast !== 'undefined' && payload) {
+         if (payload.success) {
+            DawnToast.show('Channel settings updated', 'success');
+         } else {
+            DawnToast.show(payload.error || 'Channel settings not saved', 'error');
+         }
       }
-      requestList();
+      requestList(); // what's stored, either way
    }
 
    /* =============================================================================

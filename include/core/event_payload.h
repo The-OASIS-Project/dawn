@@ -149,7 +149,8 @@ struct json_object;
  *
  * Copies only @p fields (NULL-terminated) from @p data: numbers and lists of
  * numbers as they are, strings cut at EVENT_AGENT_TEXT_CAP bytes on a whole
- * character, lists of strings one per line.  In @p scrubbed fields (may be
+ * character, lists of strings one per line (a {path, why} object as its path,
+ * then a tab and its why when it has one).  In @p scrubbed fields (may be
  * NULL), runs that look like credentials become EVENT_REDACTED_MARKER.  The
  * text is the agent's (outside text): consumers render it as text, never
  * markup or instructions.
