@@ -32,6 +32,11 @@ conversation was switched to. (A setting that names a provider for its own job, 
   and default model is marked that way; local conversations, messaging channels and
   conversations on another model keep their setting. This runs once: if the default is local at
   that start, nothing is changed.
+- A model switch you ask for ("switch to the cloud") now lasts and is saved with the
+  conversation, as a pick in the model picker does, in a private conversation too. Before, a
+  switch from the local model to the cloud in a private conversation applied to that reply only.
+  "Use default model" (under Mode in the picker, and in Settings → My channels for a channel)
+  returns a conversation to following the default.
 - The `-m`/`--llm` and `-P`/`--cloud-provider` command-line options are removed, and DAWN won't
   start with them.
 - The cloud-to-local fallback is now the setting `[llm] local_fallback`, off by default. It had

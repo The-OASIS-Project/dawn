@@ -386,11 +386,11 @@ static bool resolve_provider_switch(llm_tool_loop_params_t *params) {
       return false; /* Can't resolve config, stay on current provider */
    }
 
-   /* Copy model to params-owned buffer (resolved ptr may dangle after return) */
-   if (current_config.model && current_config.model[0] != '\0') {
-      safe_strscpy(params->model_storage, current_config.model);
-      params->model = params->model_storage;
-   }
+   /* The selection's model, empty included (its provider's default, such as a
+    * local server's own), never the previous provider's name.  Copied: the
+    * resolved pointer may dangle after return. */
+   safe_strscpy(params->model_storage, current_config.model ? current_config.model : "");
+   params->model = params->model_storage;
 
    /* Determine new provider type and format */
    llm_single_shot_fn new_fn = params->provider_fn;

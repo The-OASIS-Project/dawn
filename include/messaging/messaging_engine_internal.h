@@ -273,11 +273,6 @@ int64_t resolve_channel_conversation_id(channel_ref_t *ref,
                                         const char *provider,
                                         const char *provider_address,
                                         bool *gone);
-/**
- * @brief Reset a channel's forever-conversation (see messaging_engine_reset_by_name).
- * @return MESSAGING_SUCCESS / MESSAGING_UNKNOWN_CHANNEL / MESSAGING_FAILURE.
- */
-int messaging_engine_reset_channel(int user_id, int64_t channel_id);
 int clear_channel_conversation_id(int64_t channel_id);
 /** Whether an SMS channel had an exchange within the active window. */
 bool sms_within_active_window(const channel_ref_t *ref);

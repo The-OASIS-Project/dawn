@@ -36,6 +36,9 @@
 #include "llm/llm_selection.h"
 #include "logging.h"
 #include "tools/tool_registry.h"
+#ifdef ENABLE_WEBUI
+#include "messaging/messaging_engine.h"
+#endif
 
 /* ========== Forward Declarations ========== */
 
@@ -172,14 +175,12 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
       return strdup(TOOL_RESULT_ERROR_MARK "No active session available for LLM switch.");
    }
 
-   /* Inside a turn, the switch lasts beyond it only when the user asked for it:
-    * a background or job turn acting on untrusted content (a fetched page, a
-    * job's result) changes this reply's model and nothing else, and never to a
-    * cloud provider the conversation isn't already on.  A switch the user asks
-    * for that would move a private conversation from the local model to a cloud
-    * one applies to this reply only.  Outside a turn (an MQTT command) it is the
-    * session's setting,
-    * as before: with no turn running to pin the history, the next turn's own
+   /* Inside a turn, the switch lasts beyond it only when the user asked for it,
+    * as a pick in the WebUI does: a background or job turn acting on untrusted
+    * content (a fetched page, a job's result) changes this reply's model and
+    * nothing else, and never to a cloud provider the conversation isn't already
+    * on.  Outside a turn (an MQTT command) it is the session's setting, as
+    * before: with no turn running to pin the history, the next turn's own
     * context management fits the history to the new model. */
    const bool in_turn = session_turn_is_caller(session);
    if (!in_turn && session_turn_active(session)) {
@@ -196,13 +197,8 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
       conv_id = session_turn_conversation(session);
    }
    const bool user_asked = !in_turn || session_turn_user_originated(session);
-   bool lasting = user_asked;
+   const bool lasting = user_asked;
    const int owner = session_effective_user_id(session); /* whose conversations */
-   if (lasting && in_turn && conv_id > 0 && type_before == LLM_LOCAL && entry->type == LLM_CLOUD) {
-      bool is_private = true;
-      lasting = owner > 0 && conv_db_is_private(conv_id, owner, &is_private) == AUTH_DB_SUCCESS &&
-                !is_private;
-   }
 
    /* The selection asked for: "cloud" is the session's cloud provider, else the one
     * dawn.toml names.  Checked now: a provider without its key is refused with
@@ -268,6 +264,10 @@ static char *switch_llm_tool_callback(const char *action, char *value, int *shou
                                             applied.thinking_mode, applied.reasoning_effort);
       if (prc == AUTH_DB_SUCCESS) {
          saved = true;
+#ifdef ENABLE_WEBUI
+         /* A messaging channel's conversation: its live session too (as saved). */
+         messaging_engine_apply_conv_llm(conv_id, &applied);
+#endif
       } else {
          /* This session keeps the switch, but the conversation reverts the next
           * time it is loaded.  Log it. */

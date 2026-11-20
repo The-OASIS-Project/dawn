@@ -47,13 +47,13 @@ class El {
       this.title = '';
       this.textContent = '';
       this.listeners = {};
+      const classes = new Set();
       this.classList = {
-         add() {},
-         remove() {},
-         toggle() {},
-         contains() {
-            return false;
-         },
+         add: (c) => classes.add(c),
+         remove: (c) => classes.delete(c),
+         toggle: (c, on) =>
+            (on === undefined ? !classes.has(c) : on) ? classes.add(c) : classes.delete(c),
+         contains: (c) => classes.has(c),
       };
       this.style = {};
       this.dataset = {};
@@ -95,6 +95,7 @@ class El {
       if (this.parent) this.parent.children = this.parent.children.filter((x) => x !== this);
    }
    setAttribute() {}
+   focus() {}
    removeAttribute() {}
    addEventListener(t, f) {
       (this.listeners[t] = this.listeners[t] || []).push(f);
@@ -133,6 +134,7 @@ for (const id of [
    'privacy-toggle',
    'provider-hint',
    'model-hint',
+   'llm-follow-default',
 ])
    els[id] = new El(id.endsWith('select') ? 'select' : 'div', id);
 for (const v of ['local', 'cloud']) {
@@ -359,5 +361,21 @@ console.log('13', show());
 assert.strictEqual(ps.value, 'gemini');
 assert.strictEqual(els['provider-hint'].textContent, 'No API key');
 assert.notStrictEqual(els['llm-model-select'].value, 'qwen3-4b'); // not the old session's
+
+// 14. "Use the default" shows only while the conversation has its own model, and
+// sends a saved reset that keeps the reasoning.
+const follow = els['llm-follow-default'];
+L.updateLlmControls({ ...keyed, provider: 'claude', follows_default: true });
+assert.ok(follow.classList.contains('hidden'));
+L.updateLlmControls({ ...keyed, provider: 'claude', follows_default: false });
+assert.ok(!follow.classList.contains('hidden'));
+sent.length = 0;
+follow.dispatch('click');
+const reset = plain(sent.filter((m) => m.type === 'set_session_llm').map((m) => m.payload));
+assert.strictEqual(reset.length, 1);
+assert.strictEqual(reset[0].type, 'reset');
+assert.strictEqual(reset[0].from_restore, undefined); // saved with the conversation
+assert.ok('thinking_mode' in reset[0] && 'reasoning_effort' in reset[0]);
+assert.ok(follow.classList.contains('hidden'));
 
 console.log('ALL OK');

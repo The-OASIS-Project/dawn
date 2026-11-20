@@ -576,8 +576,9 @@ Configure LLM settings for this session only (does not affect other clients).
   active conversation (a loaded conversation's own settings, or a model the client
   detected rather than the user picked).
 - `conversation_id`: optional; the conversation the change was made in (`0`: one not
-  saved yet). When it isn't the connection's active conversation, the settings apply to
-  the session but are not saved, as with `from_restore`.
+  saved yet). When it isn't the connection's active conversation, nothing in the request is
+  applied or saved (the session now carries that conversation's settings): the reply is
+  `success` false with the current settings.
 - Response: `set_session_llm_response`
 
 #### `get_system_prompt`
@@ -2914,6 +2915,7 @@ Proactive LLM configuration update (sent when session config changes).
       "type": "cloud",
       "provider": "claude",
       "model": "claude-sonnet-4-5",
+      "follows_default": false,
       "openai_available": true,
       "claude_available": true,
       "gemini_available": false,
@@ -2921,6 +2923,10 @@ Proactive LLM configuration update (sent when session config changes).
    }
 }
 ```
+- `follows_default`: true when the conversation has no model of its own (it follows the
+  dawn.toml default); a client offers "Use the default" only when it is false, sending
+  `set_session_llm` `{"type": "reset"}` without `from_restore`, which saves the
+  conversation as following the default
 - `*_available`: whether that provider has an API key, for showing which can be picked
   (a provider without one is listed as "(no API key)"); never a choice made for the user
 

@@ -232,6 +232,15 @@
       return typeof DawnWS !== 'undefined' && DawnWS.isConnected();
    }
 
+   /** "Use the default" shows only while the conversation has a model of its own. */
+   function updateFollowDefaultControl() {
+      const btn = document.getElementById('llm-follow-default');
+      if (!btn) return;
+      const pinned = llmRuntimeState.follows_default === false;
+      btn.classList.toggle('hidden', !pinned);
+      btn.disabled = !pinned;
+   }
+
    function initLlmControls() {
       const typeSelect = document.getElementById('llm-type-select');
       const providerSelect = document.getElementById('llm-provider-select');
@@ -260,6 +269,21 @@
                // Populate cloud models and send the pick to the session
                updateModelDropdownForCloud(true);
             }
+         });
+      }
+
+      const followDefault = document.getElementById('llm-follow-default');
+      if (followDefault) {
+         followDefault.addEventListener('click', () => {
+            // Saved: the conversation follows the default from now on (its reasoning kept)
+            llmRuntimeState.follows_default = true;
+            updateFollowDefaultControl();
+            document.getElementById('llm-type-select')?.focus(); // it hid itself
+            setSessionLlm({
+               type: 'reset',
+               thinking_mode: conversationLlmState.thinking_mode,
+               reasoning_effort: conversationLlmState.reasoning_effort,
+            });
          });
       }
 
@@ -674,6 +698,7 @@
       // reset fires BEFORE clear_session, and without the flag it would silently
       // overwrite the locked settings of the conversation the user just left.
       llmRuntimeState.follows_default = true; /* the server's reply confirms it */
+      updateFollowDefaultControl();
       setSessionLlm({
          type: 'reset',
          thinking_mode: sessionReset.thinking_mode,
@@ -711,6 +736,7 @@
          // reset, never pin the default's values onto it.
          const sessionPayload = {};
          llmRuntimeState.follows_default = !!settings.follows_default;
+         updateFollowDefaultControl();
          if (settings.follows_default) {
             sessionPayload.type = 'reset';
          } else {
@@ -1150,6 +1176,7 @@
    function updateLlmControls(runtime) {
       llmRuntimeState = { ...llmRuntimeState, ...runtime };
       if (typeof DawnVision !== 'undefined') DawnVision.setLlmType(llmRuntimeState.type);
+      updateFollowDefaultControl();
 
       const typeSelect = document.getElementById('llm-type-select');
       const providerSelect = document.getElementById('llm-provider-select');
@@ -1201,6 +1228,7 @@
          (changes.type && changes.type !== 'reset') || changes.provider || changes.model;
       if (picked && !changes.from_restore) {
          llmRuntimeState.follows_default = false;
+         updateFollowDefaultControl();
       }
 
       DawnWS.send({

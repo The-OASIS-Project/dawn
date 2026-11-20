@@ -368,11 +368,11 @@ void handle_set_channel_llm(ws_connection_t *conn, struct json_object *payload) 
        !set_channel_llm_field_valid(cloud_provider,
                                     (const char *[]){ "openai", "claude", "anthropic", "gemini",
                                                       "openrouter", NULL }) ||
-       !set_channel_llm_field_valid(thinking_mode,
-                                    (const char *[]){ "disabled", "enabled", "auto", NULL }) ||
+       !set_channel_llm_field_valid(thinking_mode, (const char *[]){ "disabled", "adaptive",
+                                                                     "enabled", "auto", NULL }) ||
        !set_channel_llm_field_valid(reasoning_effort,
                                     (const char *[]){ "none", "minimal", "low", "medium", "high",
-                                                      "xhigh", NULL })) {
+                                                      "xhigh", "max", NULL })) {
       send_error_impl(conn->wsi, "INVALID_PARAM", "Invalid LLM setting value");
       return;
    }

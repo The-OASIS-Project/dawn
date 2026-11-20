@@ -33,13 +33,13 @@ from instance import ADMIN_USER, CLOUD_LLM_PORT, LOCAL_LLM_PORT, WEBUI_PORT, Liv
 CLOUD_URL = f"http://127.0.0.1:{CLOUD_LLM_PORT}"
 
 
-def config(provider, model="fake-cloud", llm_type="cloud"):
+def config(provider, model="fake-cloud", llm_type="cloud", local_model="fake-local"):
     return {
         "llm": {"type": llm_type},
         "llm.cloud": {"provider": provider, "endpoint": CLOUD_URL,
                       "openai_models": [model], "openai_default_model_idx": 0,
                       "openai_use_responses_api": "never"},
-        "llm.local": {"endpoint": f"http://127.0.0.1:{LOCAL_LLM_PORT}", "model": "fake-local"},
+        "llm.local": {"endpoint": f"http://127.0.0.1:{LOCAL_LLM_PORT}", "model": local_model},
     }
 
 
@@ -48,12 +48,13 @@ class SelectionCase(LiveTestCase):
     secrets = ""
     model = "fake-cloud"
     llm_type = "cloud"
+    local_model = "fake-local"
 
     @classmethod
     def setUpClass(cls):
         cls.cloud = FakeLLM(CLOUD_LLM_PORT, "fake-cloud")
         cls.local = FakeLLM(LOCAL_LLM_PORT, "fake-local")
-        cls.start_instance(config(cls.provider, cls.model, cls.llm_type), cls.secrets,
+        cls.start_instance(config(cls.provider, cls.model, cls.llm_type, cls.local_model), cls.secrets,
                            [cls.cloud, cls.local])
         try:
             cls.conv = cls.client.new_conversation()
@@ -180,6 +181,97 @@ class TestPicksAreChecked(SelectionCase):
         self.assertIn("fake-cloud model answering", t.reply)
         self.assertEqual(len(self.cloud.chat_requests(nonce)), 1)
 
+    def test_3_a_pick_for_another_conversation_changes_nothing(self):
+        # A late follow-up for a conversation the user has left (test_2 left this
+        # session on the cloud): nothing in it applies here.
+        reply = self.set_llm({"type": "local", "model": "fake-local",
+                              "conversation_id": self.conv + 1000})
+        self.assertEqual(reply.get("type"), "cloud", reply)
+        nonce, t = self.ask("Still the cloud?")
+        self.assertIn("fake-cloud model answering", t.reply)
+        self.assertNoRequests(self.local)
+
+
+
+class TestSwitchInAPrivateConversation(SelectionCase):
+    """A switch the user asks for lasts in a private conversation too, as a pick in
+    the picker does."""
+
+    llm_type = "local"
+    provider = "openai"
+    secrets = '[secrets]\nopenai_api_key = "sk-live-test"\n'
+
+    def recv_type(self, kind, timeout=10):
+        deadline = time.monotonic() + timeout
+        while True:
+            f = self.client._recv(deadline)
+            if f is None:
+                raise TimeoutError(f"no {kind}")
+            if f.get("type") == kind:
+                return f["payload"]
+
+    def test_it_sticks(self):
+        self.client.send("set_private", {"conversation_id": self.conv, "is_private": True})
+        self.recv_type("set_private_response")
+        self.local.script(tool_call("switch_llm", {"target": "cloud"}), text("Switched."))
+        nonce, t = self.ask("Switch to the cloud.")
+        self.assertNoErrorFrames(t)
+        nonce, t = self.ask("And now?")
+        self.assertIn("fake-cloud model answering", t.reply)
+        self.assertNoRequests(self.local)
+        rows = self.inst.db("SELECT llm_type, cloud_provider, is_private FROM conversations "
+                            "WHERE id = ?", (self.conv,))
+        self.assertEqual(rows, [("cloud", "openai", 1)])
+
+
+class TestSwitchToLocalMidTurn(SelectionCase):
+    """A switch to local mid-turn sends the rest of the turn with the local model
+    (here the server's own: none configured), never the cloud model's name."""
+
+    provider = "openai"
+    local_model = ""
+    secrets = '[secrets]\nopenai_api_key = "sk-live-test"\n'
+
+    def test_the_rest_of_the_turn_names_no_cloud_model(self):
+        self.cloud.script(tool_call("switch_llm", {"target": "local"}))
+        self.local.script(text("Local now."))
+        nonce, t = self.ask("Switch to local.")
+        self.assertNoErrorFrames(t)
+        reqs = self.local.chat_requests()[self.before[self.local]:]
+        self.assertTrue(reqs, "the turn went on to the local server")
+        self.assertNotIn(reqs[0]["body"].get("model"), ("fake-cloud",), reqs[0]["body"].get("model"))
+
+
+class TestBackToTheDefault(SelectionCase):
+    """"Use the default" clears a conversation's own pick: saved, so it follows the
+    default from then on."""
+
+    provider = "openai"
+    secrets = '[secrets]\nopenai_api_key = "sk-live-test"\n'
+
+    def set_llm(self, payload, timeout=10):
+        self.client.send("set_session_llm", payload)
+        deadline = time.monotonic() + timeout
+        while True:
+            f = self.client._recv(deadline)
+            if f is None:
+                raise TimeoutError("no set_session_llm_response")
+            if f.get("type") == "set_session_llm_response":
+                return f["payload"]
+
+    def row(self):
+        return self.inst.db("SELECT llm_type, cloud_provider, model FROM conversations "
+                            "WHERE id = ?", (self.conv,))
+
+    def test_it_follows_the_default_again(self):
+        nonce, t = self.ask("Hello.")  # saves the conversation
+        self.assertTrue(self.set_llm({"type": "local", "model": "fake-local"}).get("success"))
+        self.assertEqual(self.row()[0][0], "local")
+        reply = self.set_llm({"type": "reset"})
+        self.assertTrue(reply.get("follows_default"), reply)
+        self.assertEqual(self.row(), [("", "", "")])
+        nonce, t = self.ask("And now?")
+        self.assertIn("fake-cloud model answering", t.reply)
 
 class TestALocalModelNamedLikeACloudOne(SelectionCase):
     """A model no dawn.toml cloud list names stays local, whether or not the local

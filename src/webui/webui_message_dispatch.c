@@ -629,13 +629,15 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
             from_restore = json_object_get_boolean(restore_obj);
          }
 
-         /* A change made for one conversation is not saved to another: the user may
-          * have opened a different one before this request arrived. */
+         /* A change made for one conversation never reaches another: the user may
+          * have opened a different one before this request arrived, and its
+          * session now carries that one's settings.  The reply resyncs the client. */
          struct json_object *for_conv_obj;
-         if (!from_restore &&
-             json_object_object_get_ex(payload, "conversation_id", &for_conv_obj) &&
+         if (json_object_object_get_ex(payload, "conversation_id", &for_conv_obj) &&
              json_object_get_int64(for_conv_obj) != conn->active_conversation_id) {
-            from_restore = true;
+            has_changes = false;
+            success = 0;
+            error_msg = "That change was for another conversation; nothing changed.";
          }
 
          /* Apply config if changes were made.  The reasoning pick is stored as
