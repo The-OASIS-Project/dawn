@@ -1607,6 +1607,8 @@ static void webui_send_llm_state_update(session_t *session) {
    json_object_object_add(payload, "provider",
                           json_object_new_string(cloud_provider_to_string(config.cloud_provider)));
    json_object_object_add(payload, "model", json_object_new_string(config.model));
+   json_object_object_add(payload, "follows_default",
+                          json_object_new_boolean(session_llm_follows_default(session)));
    json_object_object_add(payload, "openai_available",
                           json_object_new_boolean(llm_has_openai_key()));
    json_object_object_add(payload, "claude_available",

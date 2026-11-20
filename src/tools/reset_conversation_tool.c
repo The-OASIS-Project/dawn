@@ -29,6 +29,9 @@
 #include "conversation_manager.h"
 #include "core/session_manager.h"
 #include "logging.h"
+#ifdef ENABLE_WEBUI
+#include "messaging/messaging_engine.h"
+#endif
 #include "tools/tool_registry.h"
 #include "webui/webui_server.h"
 
@@ -86,6 +89,21 @@ static char *reset_conversation_tool_callback(const char *action,
    bool is_local = (session == local_session);
    OLOG_INFO("Resetting conversation context for %s session via reset_conversation tool.",
              is_local ? "local" : "remote");
+
+#ifdef ENABLE_WEBUI
+   /* A messaging channel: a new conversation, as /new starts (clearing the
+    * session's history alone would come back with the conversation's own at its
+    * next message). */
+   if (session && session->type == SESSION_TYPE_MESSAGING &&
+       session->messaging_identity.channel_id > 0) {
+      const int rc = messaging_engine_reset_channel(session_effective_user_id(session),
+                                                    session->messaging_identity.channel_id);
+      *should_respond = 1;
+      return strdup(rc == MESSAGING_SUCCESS
+                        ? "Conversation reset: the next message starts a new conversation."
+                        : "Couldn't reset this channel's conversation; /new does the same.");
+   }
+#endif
 
    /* For local session, use the legacy reset which handles global state */
    if (is_local) {

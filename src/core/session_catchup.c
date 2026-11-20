@@ -252,15 +252,10 @@ static void rebuild_history(session_t *session,
                             const catchup_view_t *v,
                             const conv_sync_point_t *now) {
    session_history_loader_fn loader = session_history_loader_get();
-   session_llm_config_t base;
+   /* The session keeps its own LLM settings (the loaded ones are unused): it was
+    * already on this conversation, under the settings its user chose. */
    session_llm_config_t cfg;
-   bool has_cfg = false;
-   pthread_mutex_lock(&session->llm_config_mutex);
-   base = session->llm_config;
-   pthread_mutex_unlock(&session->llm_config_mutex);
-   /* The session keeps its own LLM settings: it was already on this
-    * conversation, under the settings its user chose. */
-   struct json_object *hist = loader(user, conv, &base, &cfg, &has_cfg);
+   struct json_object *hist = loader(user, conv, &cfg);
    if (!hist) {
       OLOG_WARNING("Session %u: conversation %lld changed elsewhere and could not be reloaded; "
                    "the turn runs on the history it has",

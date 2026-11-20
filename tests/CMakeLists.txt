@@ -108,6 +108,14 @@ function(dawn_add_unit_test NAME)
    add_dependencies(tests-all ${NAME})
 endfunction()
 
+# Live tests (tests/live/README.md): a throwaway daemon in its own namespaces,
+# driven over the WebUI protocol with fake LLMs.  Run with `ctest -L live` after
+# building dawn and dawn-admin; not in tests-ci or tests-all, and skipped (77)
+# where unprivileged namespaces aren't available.
+add_test(NAME live COMMAND ${SRC_ROOT}/tests/live/run.sh)
+set_tests_properties(live PROPERTIES LABELS "live" SKIP_RETURN_CODE 77 TIMEOUT 900
+                     ENVIRONMENT "DAWN_LIVE_BUILD=${CMAKE_BINARY_DIR}")
+
 # =============================================================================
 # Shared source / library groups
 # =============================================================================
@@ -1243,6 +1251,7 @@ dawn_add_unit_test(test_claude_format
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/third_party/tomlc99/toml.c
@@ -1267,6 +1276,7 @@ dawn_add_unit_test(test_prompt_cache_layout
            ${SRC_ROOT}/src/llm/llm_history_kind.c
            ${SRC_ROOT}/src/llm/llm_context_text.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/third_party/tomlc99/toml.c
@@ -1598,6 +1608,7 @@ dawn_add_unit_test(test_llm_cache_monitor
 dawn_add_unit_test(test_llm_capabilities
    SOURCES test_llm_capabilities.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/third_party/tomlc99/toml.c
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
@@ -2549,6 +2560,31 @@ dawn_add_unit_test(test_config_validate
    LIBS    unity
    LABEL   ci)
 
+# Retired models (models.toml [retired]): matching, dates, chains, refused rows.
+dawn_add_unit_test(test_llm_model_retire
+   SOURCES test_llm_model_retire.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
+           ${SRC_ROOT}/src/config/config_defaults.c
+           ${SRC_ROOT}/third_party/tomlc99/toml.c
+   LIBS    dawn_common unity pthread
+   DEFINES MODELS_TOML_PATH="${SRC_ROOT}/models.toml"
+   LABEL   ci)
+
+# Which LLM a chat runs on, and whether it can: a key only for the selected provider.
+dawn_add_unit_test(test_llm_selection
+   SOURCES test_llm_selection.c
+           ${SRC_ROOT}/src/llm/llm_selection.c
+           ${SRC_ROOT}/src/config/config_defaults.c
+   LIBS    dawn_common unity pthread
+   LABEL   ci)
+
+# Cloud-to-local fallback state: the outage window and the note.
+dawn_add_unit_test(test_llm_local_fallback
+   SOURCES test_llm_local_fallback.c
+           ${SRC_ROOT}/src/llm/llm_local_fallback.c
+   LIBS    unity
+   LABEL   ci)
+
 dawn_add_unit_test(test_config_roundtrip
    SOURCES test_config_roundtrip.c test_config_roundtrip_stub.c
            ${SRC_ROOT}/src/config/config_parser.c
@@ -2809,6 +2845,8 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/llm/llm_interface.c
+           ${SRC_ROOT}/src/llm/llm_selection.c
+           ${SRC_ROOT}/src/llm/llm_local_fallback.c
            ${SRC_ROOT}/src/llm/llm_turn_result.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
@@ -2824,6 +2862,7 @@ dawn_add_unit_test(bench_retrieval
            ${SRC_ROOT}/src/llm/llm_claude_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/src/llm/llm_openai.c
@@ -2941,6 +2980,8 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/llm/llm_interface.c
+           ${SRC_ROOT}/src/llm/llm_selection.c
+           ${SRC_ROOT}/src/llm/llm_local_fallback.c
            ${SRC_ROOT}/src/llm/llm_turn_result.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
@@ -2956,6 +2997,7 @@ dawn_add_unit_test(test_memory_remember
            ${SRC_ROOT}/src/llm/llm_claude_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/src/llm/llm_openai.c
@@ -3068,6 +3110,8 @@ dawn_add_unit_test(test_memory_supersede_kinds
            ${SRC_ROOT}/src/core/memory_filter.c
            ${SRC_ROOT}/src/memory/memory_similarity.c
            ${SRC_ROOT}/src/llm/llm_interface.c
+           ${SRC_ROOT}/src/llm/llm_selection.c
+           ${SRC_ROOT}/src/llm/llm_local_fallback.c
            ${SRC_ROOT}/src/llm/llm_turn_result.c
            ${SRC_ROOT}/src/llm/llm_local_provider.c
            ${SRC_ROOT}/src/llm/llm_claude.c
@@ -3083,6 +3127,7 @@ dawn_add_unit_test(test_memory_supersede_kinds
            ${SRC_ROOT}/src/llm/llm_claude_tools.c
            ${SRC_ROOT}/src/llm/llm_tool_defs.c
            ${SRC_ROOT}/src/llm/llm_capabilities.c
+           ${SRC_ROOT}/src/llm/llm_model_retire.c
            ${SRC_ROOT}/src/llm/llm_model_family.c
            ${SRC_ROOT}/src/llm/llm_model_version.c
            ${SRC_ROOT}/src/llm/llm_openai.c
@@ -3198,6 +3243,9 @@ set(MEMORY_CONSOLIDATE_TEST_SOURCES
     ${SRC_ROOT}/src/core/memory_filter.c
     ${SRC_ROOT}/src/memory/memory_similarity.c
     ${SRC_ROOT}/src/llm/llm_interface.c
+    ${SRC_ROOT}/src/llm/llm_selection.c
+    ${SRC_ROOT}/src/llm/llm_local_fallback.c
+    ${SRC_ROOT}/src/llm/llm_model_retire.c
     ${SRC_ROOT}/src/llm/llm_turn_result.c
     ${SRC_ROOT}/src/llm/llm_local_provider.c
     ${SRC_ROOT}/src/llm/llm_claude.c

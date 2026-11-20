@@ -410,6 +410,26 @@
                options: ['cloud', 'local'],
                hint: 'Server default: cloud uses APIs, local uses llama-server. Users can override per-session.',
             },
+            cloud_provider: {
+               type: 'select',
+               label: 'Cloud Provider',
+               configPath: 'llm.cloud.provider',
+               options: [
+                  { value: '', label: 'Not selected' },
+                  'openai',
+                  'claude',
+                  'gemini',
+                  'openrouter',
+               ],
+               showWhen: { key: 'llm.type', value: 'cloud' },
+               hint: 'Which cloud service handles chat. A provider\'s API key is used only when it is selected here; Not selected uses the local LLM. OpenRouter fronts many vendors via one key — its model list uses "vendor/model" IDs.',
+            },
+            local_fallback: {
+               type: 'checkbox',
+               label: 'Fall Back to the Local LLM',
+               showWhen: { key: 'llm.type', value: 'cloud' },
+               hint: "When the cloud provider can't be reached (or keeps failing), answer from the Local Settings endpoint instead (a voice turn, a chat, a satellite or a message; not background jobs). The first such reply says so, and the cloud is tried again after a minute, then less often while it stays down. Turn on only for a local LLM you run. An http:// endpoint on another machine carries the whole conversation unencrypted, and anyone who can cut this machine's internet connection can make DAWN use it: prefer https or a server on this machine.",
+            },
             max_tokens: {
                type: 'number',
                label: 'Max Tokens',
@@ -425,17 +445,11 @@
                label: 'Cloud Settings',
                advanced: true,
                fields: {
-                  provider: {
-                     type: 'select',
-                     label: 'Provider',
-                     options: ['openai', 'claude', 'gemini', 'openrouter'],
-                     hint: 'Cloud LLM provider. OpenRouter fronts many vendors via one key — its model list uses "vendor/model" IDs.',
-                  },
                   endpoint: {
                      type: 'text',
                      label: 'Custom Endpoint',
                      placeholder: 'Leave empty for default',
-                     hint: 'Override API endpoint (for proxies or compatible APIs)',
+                     hint: 'Override the API endpoint of the provider selected above (for proxies or compatible APIs). Other providers keep their own URLs, so no key is sent to the wrong host.',
                   },
                   vision_enabled: {
                      type: 'checkbox',

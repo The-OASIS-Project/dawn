@@ -99,12 +99,22 @@ static void test_status_transitions(void) {
 
 static void test_create_job_ex_records_origin(void) {
    int64_t voice_job = 0;
+   const conv_llm_columns_t llm = { "cloud", "claude", "claude-haiku-5-5", "auto", "medium" };
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
                          conv_db_create_job_ex(alice_id, "voice job", 0, "detached", "notify", NULL,
-                                               1, "goal text", "voice", &voice_job));
+                                               1, "goal text", "voice", &llm, &voice_job));
    job_record_t r;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(voice_job, alice_id, &r));
    TEST_ASSERT_EQUAL_STRING("voice", r.origin);
+   /* The LLM it runs on is written with the row. */
+   conversation_t conv;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get(voice_job, alice_id, &conv));
+   TEST_ASSERT_EQUAL_STRING("cloud", conv.llm_type);
+   TEST_ASSERT_EQUAL_STRING("claude", conv.cloud_provider);
+   TEST_ASSERT_EQUAL_STRING("claude-haiku-5-5", conv.model);
+   TEST_ASSERT_EQUAL_STRING("auto", conv.thinking_mode);
+   TEST_ASSERT_EQUAL_STRING("medium", conv.reasoning_effort);
+   conv_free(&conv);
 
    /* The plain wrapper preserves the pre-repurpose value. */
    int64_t plain_job = 0;
@@ -118,9 +128,13 @@ static void test_create_job_ex_records_origin(void) {
    int64_t null_origin_job = 0;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
                          conv_db_create_job_ex(alice_id, "null origin", 0, "detached", "notify",
-                                               NULL, 1, "goal text", NULL, &null_origin_job));
+                                               NULL, 1, "goal text", NULL, NULL, &null_origin_job));
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_job_get(null_origin_job, alice_id, &r));
    TEST_ASSERT_EQUAL_STRING("job", r.origin);
+   /* No LLM given: none stored (the job follows the default). */
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_get(null_origin_job, alice_id, &conv));
+   TEST_ASSERT_EQUAL_STRING("", conv.llm_type);
+   conv_free(&conv);
 }
 
 /* ── follow-up scan: terminal + unfired only, disappears after fired ───────── */

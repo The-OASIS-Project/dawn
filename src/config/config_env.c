@@ -1236,6 +1236,8 @@ json_object *config_to_json(const dawn_config_t *config) {
    json_object *llm = json_object_new_object();
    json_object_object_add(llm, "type", json_object_new_string(config->llm.type));
    json_object_object_add(llm, "max_tokens", json_object_new_int(config->llm.max_tokens));
+   json_object_object_add(llm, "local_fallback",
+                          json_object_new_boolean(config->llm.local_fallback));
 
    /* [llm.cloud] */
    json_object *cloud = json_object_new_object();
@@ -2250,6 +2252,7 @@ int config_write_toml(const dawn_config_t *config, const char *path) {
    fprintf(fp, "\n[llm]\n");
    write_toml_string(fp, "type", config->llm.type);
    fprintf(fp, "max_tokens = %d\n", config->llm.max_tokens);
+   fprintf(fp, "local_fallback = %s\n", config->llm.local_fallback ? "true" : "false");
    fprintf(fp, "compact_soft_threshold = %.2f\n", config->llm.compact_soft_threshold);
    fprintf(fp, "compact_hard_threshold = %.2f\n", config->llm.compact_hard_threshold);
    fprintf(fp, "compact_use_session = %s\n", config->llm.compact_use_session ? "true" : "false");

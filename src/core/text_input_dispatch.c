@@ -40,11 +40,16 @@
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
 #include "llm/llm_history_kind.h"
+#include "llm/llm_interface.h"
 #include "logging.h"
 
 char *core_text_input_dispatch(session_t *session,
                                const char *text,
                                const text_input_dispatch_opts_t *opts) {
+   llm_set_last_error(LLM_ERR_NONE); /* this turn's outcome alone, as the LLM calls do */
+   if (opts && opts->refusal && opts->refusal_len > 0) {
+      opts->refusal[0] = '\0';
+   }
    /* A turn with no words is one only when its question carries images (an
     * image-only turn: the caller builds the question message). */
    if (!session || !text || (text[0] == '\0' && !(opts && opts->question_message))) {
@@ -53,6 +58,30 @@ char *core_text_input_dispatch(session_t *session,
    /* A turn that stopped waiting for its conversation never runs: nothing of it
     * is saved (every caller then ends it). */
    if (session_turn_unsent(session)) {
+      return NULL;
+   }
+
+   /* The turn's conversation may only be resolved here (fallback to the active
+    * one) rather than at dequeue; record it before the append attributes it.
+    * Binding it can load that conversation's LLM settings, so it comes first. */
+   if (opts && opts->is_background_turn) {
+      session_turn_mark_background(session);
+   }
+   if (opts && opts->from_visual) {
+      session_turn_mark_from_visual(session);
+   }
+   if (opts && opts->conversation_id > 0) {
+      session_turn_set_conversation(session, opts->conversation_id, true);
+      if (session_turn_unsent(session)) {
+         return NULL; /* stopped waiting for it, before anything was added */
+      }
+   }
+
+   /* An LLM that can't run refuses the turn before its question is added or
+    * saved: LLM_ERR_NOT_SELECTED, and the sentence for the user in opts->refusal. */
+   if (session_turn_selection_problem(session, opts ? opts->refusal : NULL,
+                                      opts ? opts->refusal_len : 0) != 0) {
+      llm_set_last_error(LLM_ERR_NOT_SELECTED);
       return NULL;
    }
    /* What the user attached goes with the turn, or the turn doesn't run:
@@ -93,20 +122,6 @@ char *core_text_input_dispatch(session_t *session,
    /* Step 1: add user message to session history: the caller's prebuilt
     * message when it has one (an image question, built as a reload rebuilds
     * it), else the text. */
-   /* The turn's conversation may only be resolved here (fallback to the active
-    * one) rather than at dequeue; record it before the append attributes it. */
-   if (opts && opts->is_background_turn) {
-      session_turn_mark_background(session);
-   }
-   if (opts && opts->from_visual) {
-      session_turn_mark_from_visual(session);
-   }
-   if (opts && opts->conversation_id > 0) {
-      session_turn_set_conversation(session, opts->conversation_id, true);
-      if (session_turn_unsent(session)) {
-         return NULL; /* stopped waiting for it, before anything was added */
-      }
-   }
    const message_kind_t question_kind = opts ? opts->question_kind : MESSAGE_KIND_NONE;
    struct json_object *kinded_question = NULL; /* ref kept to stamp its row's id */
    if (question_kind != MESSAGE_KIND_NONE) {

@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "auth/auth_db.h"
+#include "core/job_dispatch.h"
 #include "core/job_manager.h"
 #include "core/job_report.h"
 #include "core/session_manager.h"
@@ -88,8 +89,22 @@ void job_manager_end(session_t *s) {
       atomic_store(&g_streamed_at_end, true);
    }
 }
-job_provider_class_t job_provider_from_default(void) {
-   return JOB_PROVIDER_CLOUD;
+/* The LLM job 42 was delegated on; the take must run on it. */
+static atomic_int g_take_provider;
+int job_selection_load(int64_t conv_id, int user_id, session_llm_config_t *out) {
+   (void)conv_id, (void)user_id;
+   memset(out, 0, sizeof(*out));
+   out->type = LLM_CLOUD;
+   out->cloud_provider = CLOUD_PROVIDER_CLAUDE;
+   return AUTH_DB_SUCCESS;
+}
+job_provider_class_t job_provider_for(const session_llm_config_t *cfg) {
+   return cfg->type == LLM_LOCAL ? JOB_PROVIDER_LOCAL : JOB_PROVIDER_CLOUD;
+}
+int session_set_llm_config(session_t *session, const session_llm_config_t *config) {
+   (void)session;
+   atomic_store(&g_take_provider, (int)config->cloud_provider);
+   return 0;
 }
 void job_report_persona(char *out, size_t out_len) {
    snprintf(out, out_len, "You are Friday.");
@@ -192,6 +207,7 @@ static void test_completed_posts_the_take(void) {
       usleep(10 * 1000); /* noted just after the post */
    }
    TEST_ASSERT_NOT_EQUAL(0, atomic_load(&g_noted_take)); /* a turn told it reads the agent */
+   TEST_ASSERT_EQUAL_INT(CLOUD_PROVIDER_CLAUDE, atomic_load(&g_take_provider)); /* the job's LLM */
    TEST_ASSERT_NOT_NULL(strstr(g_post, "Coding job #42 (fix the oracle) finished."));
    TEST_ASSERT_NOT_NULL(strstr(g_post, "[View changes for job #42](#coding-job-42)"));
    TEST_ASSERT_NOT_NULL(strstr(g_post, "the tests pass"));

@@ -53,6 +53,7 @@
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_context_text.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_third_party.h"
 #include "logging.h"
 #include "prompts.h"
@@ -654,79 +655,23 @@ static void announce_briefing(const sched_event_t *event, const char *text, bool
    route_tts_announcement(event, text);
 }
 
-/**
- * Build LLM config from global settings (same pattern as memory extraction_thread)
- */
-static void briefing_build_llm_config(llm_resolved_config_t *cfg,
-                                      char *model_buf,
-                                      size_t model_buf_size,
-                                      char *endpoint_buf,
-                                      size_t endpoint_buf_size) {
-   memset(cfg, 0, sizeof(*cfg));
-
-   const char *provider = g_config.llm.cloud.provider;
-
-   if (strcmp(g_config.llm.type, "local") == 0) {
-      cfg->type = LLM_LOCAL;
-      cfg->cloud_provider = CLOUD_PROVIDER_NONE;
-      safe_strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_size);
-      cfg->endpoint = endpoint_buf;
-      /* Use default local model */
-      if (g_config.llm.local.model[0]) {
-         safe_strncpy(model_buf, g_config.llm.local.model, model_buf_size);
-         cfg->model = model_buf;
-      }
-   } else if (strcmp(provider, "openrouter") == 0) {
-      /* OpenRouter is a first-class provider (gateway retired). Cloud briefings route
-       * through OpenRouter. NO key guard (unlike the direct arms below): a
-       * provider="openrouter" briefing with a MISSING key must FAIL HONESTLY rather than
-       * silently fall through to the OpenAI catch-all — P1, surface the misconfiguration.
-       * Unlike the direct providers (which preserve a configured model string), the
-       * scheduler picks from per-provider model lists, so select the OpenRouter default. */
-      cfg->type = LLM_CLOUD;
-      cfg->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-      cfg->api_key = g_secrets.openrouter_api_key;
-      cfg->endpoint = OPENROUTER_URL;
-      safe_strncpy(model_buf, llm_get_default_openrouter_model(), model_buf_size);
-      cfg->model = model_buf;
-   } else if (strcmp(provider, "claude") == 0 && g_secrets.claude_api_key[0]) {
-      cfg->type = LLM_CLOUD;
-      cfg->cloud_provider = CLOUD_PROVIDER_CLAUDE;
-      cfg->api_key = g_secrets.claude_api_key;
-      if (g_config.llm.cloud.claude_models_count > 0) {
-         int idx = g_config.llm.cloud.claude_default_model_idx;
-         safe_strncpy(model_buf, g_config.llm.cloud.claude_models[idx], model_buf_size);
-         cfg->model = model_buf;
-      }
-   } else if (strcmp(provider, "gemini") == 0 && g_secrets.gemini_api_key[0]) {
-      cfg->type = LLM_CLOUD;
-      cfg->cloud_provider = CLOUD_PROVIDER_GEMINI;
-      cfg->api_key = g_secrets.gemini_api_key;
-      if (g_config.llm.cloud.gemini_models_count > 0) {
-         int idx = g_config.llm.cloud.gemini_default_model_idx;
-         safe_strncpy(model_buf, g_config.llm.cloud.gemini_models[idx], model_buf_size);
-         cfg->model = model_buf;
-      }
-   } else if (g_secrets.openai_api_key[0]) {
-      cfg->type = LLM_CLOUD;
-      cfg->cloud_provider = CLOUD_PROVIDER_OPENAI;
-      cfg->api_key = g_secrets.openai_api_key;
-      if (g_config.llm.cloud.openai_models_count > 0) {
-         int idx = g_config.llm.cloud.openai_default_model_idx;
-         safe_strncpy(model_buf, g_config.llm.cloud.openai_models[idx], model_buf_size);
-         cfg->model = model_buf;
-      }
-   } else {
-      /* Fallback to local */
-      cfg->type = LLM_LOCAL;
-      cfg->cloud_provider = CLOUD_PROVIDER_NONE;
-      safe_strncpy(endpoint_buf, g_config.llm.local.endpoint, endpoint_buf_size);
-      cfg->endpoint = endpoint_buf;
+/* The briefing's LLM: the default selection, as a chat following it would run.
+ * Nonzero, with the reason in @p reason, when that can't run. */
+static int briefing_build_llm_config(llm_resolved_config_t *cfg, char *reason, size_t reason_len) {
+   session_llm_config_t sc;
+   llm_get_default_config(&sc);
+   llm_selection_resolve(&sc);
+   if (llm_selection_problem(&sc, reason, reason_len) != 0) {
+      return 1;
    }
-
+   if (llm_resolve_config(&sc, cfg) != 0) {
+      snprintf(reason, reason_len, "The selected LLM's API key was just removed.");
+      return 1;
+   }
    cfg->suppress_tools = true;
    safe_strscpy(cfg->thinking_mode, "disabled");
    cfg->timeout_ms = 30000;
+   return 0;
 }
 
 /* A persist-eligible briefing step captured for tool-use persistence.  The
@@ -1044,13 +989,11 @@ static void *briefing_thread_func(void *arg) {
                                                         event->instructions[0] ? event->instructions
                                                                                : NULL,
                                                         cleaned_data ? cleaned_data : tool_result);
-   {
-      llm_resolved_config_t cfg;
-      char model_buf[LLM_MODEL_NAME_MAX];
-      char endpoint_buf[128];
-      briefing_build_llm_config(&cfg, model_buf, sizeof(model_buf), endpoint_buf,
-                                sizeof(endpoint_buf));
-
+   char refused[LLM_SELECTION_REASON_MAX] = "";
+   llm_resolved_config_t cfg;
+   if (briefing_build_llm_config(&cfg, refused, sizeof(refused)) != 0) {
+      OLOG_WARNING("scheduler: briefing %lld not summarized: %s", (long long)event->id, refused);
+   } else {
       /* Build minimal history: system (with embedded data) + user intent */
       struct json_object *history = json_object_new_array();
 
@@ -1101,6 +1044,11 @@ static void *briefing_thread_func(void *arg) {
       const char *final_text;
       if (llm_ok) {
          final_text = llm_response;
+      } else if (refused[0]) {
+         snprintf(notice, sizeof(notice),
+                  "The %s briefing collected its data but couldn't summarize it. %s",
+                  briefing_label, refused);
+         final_text = notice;
       } else {
          snprintf(notice, sizeof(notice),
                   "The %s briefing collected its data, but summarization is temporarily "

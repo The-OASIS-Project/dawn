@@ -140,6 +140,82 @@
       return globalDefaults;
    }
 
+   const CLOUD_PROVIDERS = [
+      ['openai', 'OpenAI'],
+      ['claude', 'Claude'],
+      ['gemini', 'Gemini'],
+      ['openrouter', 'OpenRouter'],
+   ];
+
+   /**
+    * The cloud providers to offer: each one with a key, and @p current even
+    * without one (marked), so the selection is never hidden or shown as another.
+    * With no current provider, a placeholder until one is picked.
+    * @param {HTMLSelectElement} providerSelect
+    * @param {string} current - The selected provider ('' for none)
+    */
+   function fillCloudProviders(providerSelect, current) {
+      current = providerKey(current);
+      providerSelect.innerHTML = '';
+      providerSelect.title = 'Switch cloud provider';
+      setControlHint('provider-hint', null);
+      for (const [value, label] of CLOUD_PROVIDERS) {
+         const keyed = !!llmRuntimeState[`${value}_available`];
+         if (!keyed && value !== current) continue;
+         const opt = document.createElement('option');
+         opt.value = value;
+         opt.textContent = keyed ? label : `${label} (no API key)`;
+         opt.selected = value === current;
+         providerSelect.appendChild(opt);
+      }
+      if (!current) {
+         const opt = document.createElement('option');
+         opt.value = '';
+         opt.textContent = providerSelect.options.length
+            ? 'Pick a provider'
+            : 'No API keys configured';
+         opt.disabled = true;
+         opt.selected = true;
+         providerSelect.prepend(opt);
+      }
+      providerSelect.disabled = providerSelect.options.length < 2;
+      // The select is narrow: say it under it too
+      if (current && !llmRuntimeState[`${current}_available`]) {
+         setControlHint('provider-hint', 'No API key');
+         providerSelect.title = 'This provider has no API key: add one in Settings';
+      } else if (providerSelect.options.length < 2 && !current) {
+         setControlHint('provider-hint', 'Add a key in Settings');
+         providerSelect.title = 'No cloud provider has an API key';
+      }
+   }
+
+   /**
+    * The local provider's slot until list_llm_models_response names it
+    * @param {HTMLSelectElement} providerSelect
+    */
+   function showLocalDetecting(providerSelect) {
+      providerSelect.innerHTML = '';
+      const opt = document.createElement('option');
+      opt.value = 'detecting';
+      opt.textContent = 'Detecting...';
+      providerSelect.appendChild(opt);
+      providerSelect.disabled = true;
+      providerSelect.title = 'Auto-detecting local provider';
+      setControlHint('provider-hint', 'Detecting...');
+   }
+
+   /**
+    * A provider name as the picker's option values ('' for none or one it
+    * doesn't offer)
+    * @param {string} name - A provider as the server sends it ("Claude", "none")
+    * @returns {string}
+    */
+   function providerKey(name) {
+      const key = (name || '').toLowerCase();
+      if (key === 'anthropic') return 'claude';
+      return CLOUD_PROVIDERS.some(([value]) => value === key) ? key : '';
+   }
+
    /**
     * Initialize LLM quick controls event listeners
     */
@@ -156,6 +232,15 @@
       return typeof DawnWS !== 'undefined' && DawnWS.isConnected();
    }
 
+   /** "Use the default" shows only while the conversation has a model of its own. */
+   function updateFollowDefaultControl() {
+      const btn = document.getElementById('llm-follow-default');
+      if (!btn) return;
+      const pinned = llmRuntimeState.follows_default === false;
+      btn.classList.toggle('hidden', !pinned);
+      btn.disabled = !pinned;
+   }
+
    function initLlmControls() {
       const typeSelect = document.getElementById('llm-type-select');
       const providerSelect = document.getElementById('llm-provider-select');
@@ -164,59 +249,47 @@
       if (typeSelect) {
          typeSelect.addEventListener('change', () => {
             const newType = typeSelect.value;
-            setSessionLlm({ type: newType });
 
-            // Request local models when switching to local mode
+            // Local: the server's local LLM; its models arrive with the list.  Cloud:
+            // one message with the provider and model below (the server checks the
+            // whole pick, so never "cloud" alone).
             if (newType === 'local') {
+               if (providerSelect) {
+                  showLocalDetecting(providerSelect);
+               }
+               setSessionLlm({ type: 'local' });
                localSwitchConv = wsConnected() ? activeConversationId() : null;
                requestLocalModels();
             } else {
-               // Switching to cloud (direct providers): restore provider dropdown and update model
+               // Cloud means the provider dawn.toml names (as the server does), never
+               // a guess from which keys exist
                if (providerSelect) {
-                  // Rebuild cloud provider options
-                  providerSelect.innerHTML = '';
-                  providerSelect.disabled = false;
-                  setControlHint('provider-hint', null);
-                  if (cloudModelLists.openai.length > 0) {
-                     const opt = document.createElement('option');
-                     opt.value = 'openai';
-                     opt.textContent = 'OpenAI';
-                     providerSelect.appendChild(opt);
-                  }
-                  if (cloudModelLists.claude.length > 0) {
-                     const opt = document.createElement('option');
-                     opt.value = 'claude';
-                     opt.textContent = 'Claude';
-                     providerSelect.appendChild(opt);
-                  }
-                  if (cloudModelLists.gemini.length > 0) {
-                     const opt = document.createElement('option');
-                     opt.value = 'gemini';
-                     opt.textContent = 'Gemini';
-                     providerSelect.appendChild(opt);
-                  }
-                  // Select default provider: prefer global default, fall back to first available
-                  const defaultProvider = globalDefaults.provider;
-                  if (providerSelect.querySelector(`option[value="${defaultProvider}"]`)) {
-                     providerSelect.value = defaultProvider;
-                  } else if (providerSelect.options.length > 0) {
-                     providerSelect.value = providerSelect.options[0].value;
-                  }
-                  // Also send provider to session (only if a provider is actually selected)
-                  if (providerSelect.value) {
-                     setSessionLlm({ provider: providerSelect.value });
-                  }
+                  fillCloudProviders(providerSelect, globalDefaults.provider);
                }
-               // Populate cloud models and send model to session
+               // Populate cloud models and send the pick to the session
                updateModelDropdownForCloud(true);
             }
          });
       }
 
+      const followDefault = document.getElementById('llm-follow-default');
+      if (followDefault) {
+         followDefault.addEventListener('click', () => {
+            // Saved: the conversation follows the default from now on (its reasoning kept)
+            llmRuntimeState.follows_default = true;
+            updateFollowDefaultControl();
+            document.getElementById('llm-type-select')?.focus(); // it hid itself
+            setSessionLlm({
+               type: 'reset',
+               thinking_mode: conversationLlmState.thinking_mode,
+               reasoning_effort: conversationLlmState.reasoning_effort,
+            });
+         });
+      }
+
       if (providerSelect) {
          providerSelect.addEventListener('change', () => {
-            setSessionLlm({ provider: providerSelect.value });
-            // Update model dropdown for new provider and send model to session
+            // The new provider's models, and the pick sent as one message
             updateModelDropdownForCloud(true);
          });
       }
@@ -224,14 +297,14 @@
       if (modelSelect) {
          modelSelect.addEventListener('change', () => {
             if (modelSelect.value) {
+               /* The whole pick: a model name never decides local vs cloud. */
+               const pick = { type: typeSelect ? typeSelect.value : llmRuntimeState.type };
+               if (pick.type === 'cloud' && providerSelect && providerSelect.value) {
+                  pick.provider = providerSelect.value;
+               }
+               pick.model = modelSelect.value;
                if (wsConnected()) pendingModelPick = modelSelect.value;
-               // A local model is named with its type: its name may look like a
-               // cloud model's (Ollama's gpt-oss).
-               setSessionLlm(
-                  typeSelect && typeSelect.value === 'local'
-                     ? { type: 'local', model: modelSelect.value }
-                     : { model: modelSelect.value }
-               );
+               setSessionLlm(pick);
                /* Show the new model's options now; the server's reply carries
                 * the settled values. */
                renderReasoning(
@@ -567,9 +640,15 @@
       // and the session keeps its current provider and model)
       const defaultProviderAvailable =
          !!globalDefaults.provider && !!llmRuntimeState[`${globalDefaults.provider}_available`];
+      if (globalDefaults.type === 'cloud' && providerSelect && !defaultProviderAvailable) {
+         // Shown now (placeholder or "no API key"); the reply settles the rest
+         fillCloudProviders(providerSelect, globalDefaults.provider);
+         llmRuntimeState.model = ''; // the previous session's model isn't this provider's
+         updateModelDropdownForCloud();
+      }
       if (globalDefaults.type === 'cloud' && defaultProviderAvailable) {
          if (providerSelect) {
-            providerSelect.value = globalDefaults.provider;
+            fillCloudProviders(providerSelect, globalDefaults.provider);
          }
 
          // Reset model to provider's default
@@ -613,12 +692,19 @@
          llmRuntimeState.model = sessionReset.model;
       }
 
-      // Send reset to session. Mark as from_restore so the server's
+      // The session follows the default again: the server applies dawn.toml's
+      // (the controls above only show it).  Mark as from_restore so the server's
       // active-conversation persistence cascade is skipped — the new-conversation
       // reset fires BEFORE clear_session, and without the flag it would silently
       // overwrite the locked settings of the conversation the user just left.
-      sessionReset.from_restore = true;
-      setSessionLlm(sessionReset);
+      llmRuntimeState.follows_default = true; /* the server's reply confirms it */
+      updateFollowDefaultControl();
+      setSessionLlm({
+         type: 'reset',
+         thinking_mode: sessionReset.thinking_mode,
+         reasoning_effort: sessionReset.reasoning_effort,
+         from_restore: true,
+      });
    }
 
    /**
@@ -646,10 +732,18 @@
          // session keeps whichever defaults were sent by applyGlobalDefaultsToControls
          // at page load — the UI shows the conversation's value but the server
          // uses the global default for the next request.
+         // A conversation with no selection of its own follows the default:
+         // reset, never pin the default's values onto it.
          const sessionPayload = {};
-         if (settings.llm_type) sessionPayload.type = settings.llm_type;
-         if (settings.cloud_provider) sessionPayload.provider = settings.cloud_provider;
-         if (settings.model) sessionPayload.model = settings.model;
+         llmRuntimeState.follows_default = !!settings.follows_default;
+         updateFollowDefaultControl();
+         if (settings.follows_default) {
+            sessionPayload.type = 'reset';
+         } else {
+            if (settings.llm_type) sessionPayload.type = settings.llm_type;
+            if (settings.cloud_provider) sessionPayload.provider = settings.cloud_provider;
+            if (settings.model) sessionPayload.model = settings.model;
+         }
          /* The pick, not the effective value: the session stores what was picked. */
          sessionPayload.thinking_mode = conversationLlmState.thinking_mode;
          sessionPayload.reasoning_effort = conversationLlmState.reasoning_effort;
@@ -688,10 +782,13 @@
     * @returns {Object} Current LLM settings
     */
    function getConversationLlmSettings() {
+      // Following the default: no selection is stored, so the conversation
+      // keeps following it.
+      const follows = !!llmRuntimeState.follows_default;
       return {
-         llm_type: llmRuntimeState.type,
-         cloud_provider: llmRuntimeState.provider,
-         model: llmRuntimeState.model,
+         llm_type: follows ? '' : llmRuntimeState.type,
+         cloud_provider: follows ? '' : llmRuntimeState.provider,
+         model: follows ? '' : llmRuntimeState.model,
          thinking_mode: conversationLlmState.thinking_mode,
          reasoning_effort: conversationLlmState.reasoning_effort,
       };
@@ -808,9 +905,14 @@
          // from_restore: server-side cascade must NOT persist this auto-detected model
          // onto the active conversation's DB row — the user didn't choose this; the
          // local provider just told us what's loaded.
-         if (payload.current_model && llmRuntimeState.model !== payload.current_model) {
+         // A session following the default isn't pinned to what's loaded.
+         if (
+            payload.current_model &&
+            llmRuntimeState.model !== payload.current_model &&
+            !llmRuntimeState.follows_default
+         ) {
             llmRuntimeState.model = payload.current_model;
-            setSessionLlm({ model: payload.current_model, from_restore: true });
+            setSessionLlm({ type: 'local', model: payload.current_model, from_restore: true });
          }
          // Update collapsed mini bar summary
          if (typeof DAWN !== 'undefined' && DAWN.updateLlmMiniSummary) {
@@ -854,7 +956,7 @@
          if (switchConv !== null) {
             llmRuntimeState.model = current;
             setSessionLlm({ type: 'local', model: current, conversation_id: switchConv });
-         } else if (llmRuntimeState.model !== current) {
+         } else if (llmRuntimeState.model !== current && !llmRuntimeState.follows_default) {
             llmRuntimeState.model = current;
             setSessionLlm({ type: 'local', model: current, from_restore: true });
          }
@@ -895,6 +997,18 @@
 
       modelSelect.innerHTML = '';
 
+      if (!provider) {
+         // Nothing is sent until a provider is picked (its change event sends it)
+         const opt = document.createElement('option');
+         opt.value = '';
+         opt.textContent = 'Pick a provider first';
+         modelSelect.appendChild(opt);
+         modelSelect.disabled = true;
+         modelSelect.title = 'Pick a cloud provider first';
+         setControlHint('model-hint', null);
+         return;
+      }
+
       if (models.length === 0) {
          const opt = document.createElement('option');
          opt.value = '';
@@ -903,6 +1017,9 @@
          modelSelect.disabled = true;
          modelSelect.title = 'Add models in Settings > LLM > Cloud Settings';
          setControlHint('model-hint', 'Configure in Settings');
+         if (sendToSession) {
+            setSessionLlm({ type: 'cloud', provider });
+         }
          return;
       }
 
@@ -941,11 +1058,10 @@
       modelSelect.title = 'Select cloud model';
       setControlHint('model-hint', null);
 
-      // Send selected model to session if requested (e.g., after provider switch)
-      // Only send if model actually changed to avoid feedback loops
-      if (sendToSession && modelSelect.value && llmRuntimeState.model !== modelSelect.value) {
+      // An active switch (type or provider changed): the whole pick, in one message
+      if (sendToSession && provider) {
          llmRuntimeState.model = modelSelect.value;
-         setSessionLlm({ model: modelSelect.value });
+         setSessionLlm({ type: 'cloud', provider, model: modelSelect.value });
       }
    }
 
@@ -980,9 +1096,9 @@
          globalDefaults.type = config.llm.type;
       }
 
-      // Cloud provider
-      if (config.llm?.cloud?.provider) {
-         globalDefaults.provider = config.llm.cloud.provider;
+      // Cloud provider: as saved, including none (a cleared one never lingers)
+      if (config.llm?.cloud) {
+         globalDefaults.provider = providerKey(config.llm.cloud.provider);
       }
       // Default models (resolve idx to model name)
       if (config.llm?.cloud) {
@@ -1060,6 +1176,7 @@
    function updateLlmControls(runtime) {
       llmRuntimeState = { ...llmRuntimeState, ...runtime };
       if (typeof DawnVision !== 'undefined') DawnVision.setLlmType(llmRuntimeState.type);
+      updateFollowDefaultControl();
 
       const typeSelect = document.getElementById('llm-type-select');
       const providerSelect = document.getElementById('llm-provider-select');
@@ -1069,86 +1186,13 @@
       }
 
       if (providerSelect) {
-         // Update available options based on API key availability
-         providerSelect.innerHTML = '';
-
-         if (runtime.openai_available) {
-            const opt = document.createElement('option');
-            opt.value = 'openai';
-            opt.textContent = 'OpenAI';
-            providerSelect.appendChild(opt);
-         }
-
-         if (runtime.claude_available) {
-            const opt = document.createElement('option');
-            opt.value = 'claude';
-            opt.textContent = 'Claude';
-            providerSelect.appendChild(opt);
-         }
-
-         if (runtime.gemini_available) {
-            const opt = document.createElement('option');
-            opt.value = 'gemini';
-            opt.textContent = 'Gemini';
-            providerSelect.appendChild(opt);
-         }
-
-         // OpenRouter is a first-class provider. Surface it whenever a key is present OR
-         // the session is actively on it, so a session resolved to OpenRouter shows/keeps
-         // the right provider instead of falling through to a stale value.
-         if (runtime.openrouter_available || runtime.provider?.toLowerCase() === 'openrouter') {
-            const opt = document.createElement('option');
-            opt.value = 'openrouter';
-            opt.textContent = 'OpenRouter';
-            providerSelect.appendChild(opt);
-         }
-
-         // If no providers available, show disabled message
-         if (
-            !runtime.openai_available &&
-            !runtime.claude_available &&
-            !runtime.gemini_available &&
-            !runtime.openrouter_available &&
-            runtime.provider?.toLowerCase() !== 'openrouter'
-         ) {
-            const opt = document.createElement('option');
-            opt.value = '';
-            opt.textContent = 'No API keys configured';
-            opt.disabled = true;
-            providerSelect.appendChild(opt);
-            providerSelect.disabled = true;
-         } else {
-            providerSelect.disabled = false;
-            // Set current value
-            const currentProvider = runtime.provider?.toLowerCase() || '';
-            if (providerSelect.querySelector(`option[value="${currentProvider}"]`)) {
-               providerSelect.value = currentProvider;
-            }
-         }
+         fillCloudProviders(providerSelect, runtime.provider);
       }
 
       // Enable/disable provider selector based on LLM type
       if (providerSelect) {
          if (runtime.type === 'local') {
-            // Show detecting state until list_llm_models_response arrives
-            providerSelect.innerHTML = '';
-            const opt = document.createElement('option');
-            opt.value = 'detecting';
-            opt.textContent = 'Detecting...';
-            providerSelect.appendChild(opt);
-            providerSelect.disabled = true;
-            providerSelect.title = 'Auto-detecting local provider';
-            setControlHint('provider-hint', 'Detecting...');
-         } else if (
-            runtime.openai_available ||
-            runtime.claude_available ||
-            runtime.gemini_available ||
-            runtime.openrouter_available ||
-            runtime.provider?.toLowerCase() === 'openrouter'
-         ) {
-            providerSelect.disabled = false;
-            providerSelect.title = 'Switch cloud provider';
-            setControlHint('provider-hint', null);
+            showLocalDetecting(providerSelect);
          }
       }
 
@@ -1178,6 +1222,13 @@
       if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) {
          console.error('WebSocket not connected');
          return;
+      }
+      // A pick of its own, from now (the server's reply confirms it)
+      const picked =
+         (changes.type && changes.type !== 'reset') || changes.provider || changes.model;
+      if (picked && !changes.from_restore) {
+         llmRuntimeState.follows_default = false;
+         updateFollowDefaultControl();
       }
 
       DawnWS.send({
@@ -1215,8 +1266,10 @@
             DawnToast.show('Failed to switch LLM: ' + (payload.error || 'Unknown error'), 'error');
          }
 
-         // Revert controls to actual state
-         if (llmRuntimeState) {
+         // Back to what the session has: the server's reply carries it
+         if (payload.type) {
+            updateLlmControls(payload);
+         } else if (llmRuntimeState) {
             updateLlmControls(llmRuntimeState);
          }
       }

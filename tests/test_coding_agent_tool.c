@@ -290,9 +290,10 @@ int conv_db_create_job_ex(int user_id,
                           int spawn_depth,
                           const char *goal,
                           const char *origin,
+                          const conv_llm_columns_t *llm,
                           int64_t *conv_id_out) {
    (void)user_id, (void)title, (void)parent_id, (void)spawn_mode, (void)on_complete;
-   (void)deliver_to, (void)spawn_depth, (void)goal, (void)origin;
+   (void)deliver_to, (void)spawn_depth, (void)goal, (void)origin, (void)llm;
    snprintf(g_status, sizeof(g_status), "queued");
    g_kind[0] = '\0';
    g_fired = false;
@@ -421,6 +422,15 @@ char *event_payload_spawn(int64_t child_conv_id, const char *title) {
 }
 const char *job_spawn_origin_string(void) {
    return "webui";
+}
+void job_selection_of_spawner(session_llm_config_t *out) {
+   memset(out, 0, sizeof(*out));
+   out->type = LLM_CLOUD;
+   out->cloud_provider = CLOUD_PROVIDER_CLAUDE;
+}
+void job_selection_columns(const session_llm_config_t *cfg, conv_llm_columns_t *out) {
+   (void)cfg;
+   memset(out, 0, sizeof(*out));
 }
 
 /* The job's stored events: seven steps, the last a word from the agent. */

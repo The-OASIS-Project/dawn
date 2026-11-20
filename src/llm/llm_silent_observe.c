@@ -56,6 +56,7 @@
 #include "dawn_error.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_tools.h"
 #include "logging.h"
 #include "prompts.h"
@@ -222,7 +223,7 @@ static int resolve_silent_observe_config(llm_resolved_config_t *cfg,
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
       cfg->api_key = g_secrets.openrouter_api_key;
-      cfg->endpoint = OPENROUTER_URL;
+      cfg->endpoint = llm_cloud_url(CLOUD_PROVIDER_OPENROUTER);
       /* silent_observe.model is a "vendor/model" slug here; fall back to the main
        * OpenRouter default when unset. */
       if (!cfg->model || cfg->model[0] == '\0') {

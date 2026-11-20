@@ -70,6 +70,7 @@
 #include "llm/llm_local_provider.h"
 #include "llm/llm_openai_internal.h"
 #include "llm/llm_openai_responses_input.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_tool_defs.h"
 #include "llm/llm_tool_history.h"
 #include "llm/llm_tool_images.h"
@@ -453,6 +454,38 @@ bool job_manager_is_shutting_down(void) {
 }
 void llm_get_default_config(session_llm_config_t *config) {
    memset(config, 0, sizeof(*config));
+}
+/* The LLM selection: every turn here runs (none refused), on the default. */
+void llm_selection_resolve(session_llm_config_t *cfg) {
+   (void)cfg;
+}
+void llm_selection_from_row(const char *llm_type,
+                            const char *provider,
+                            const char *model,
+                            const char *thinking_mode,
+                            const char *reasoning_effort,
+                            session_llm_config_t *out) {
+   (void)llm_type, (void)provider, (void)model, (void)thinking_mode, (void)reasoning_effort;
+   memset(out, 0, sizeof(*out));
+   out->type = LLM_UNDEFINED;
+}
+const char *cloud_provider_to_string(cloud_provider_t provider) {
+   (void)provider;
+   return "none";
+}
+int session_turn_selection_problem(session_t *session, char *reason, size_t reason_len) {
+   (void)session;
+   if (reason && reason_len > 0) {
+      reason[0] = '\0';
+   }
+   return 0;
+}
+void llm_set_last_error(int code) {
+   (void)code;
+}
+bool llm_error_is_transient(int code) {
+   (void)code;
+   return false;
 }
 void webui_send_error(struct session *session, const char *code, const char *message) {
    (void)session, (void)code, (void)message;
@@ -860,11 +893,9 @@ static int s_reloads; /* histories the turn loader built */
 
 static struct json_object *reload_loader(int user_id,
                                          int64_t conv_id,
-                                         const session_llm_config_t *base,
-                                         session_llm_config_t *cfg_out,
-                                         bool *has_cfg_out) {
-   (void)base, (void)cfg_out;
-   *has_cfg_out = false;
+                                         session_llm_config_t *cfg_out) {
+   memset(cfg_out, 0, sizeof(*cfg_out));
+   cfg_out->type = LLM_UNDEFINED; /* none of its own: follows the default */
    s_reloads++;
    conversation_t c = { 0 };
    struct json_object *h = NULL;

@@ -51,6 +51,7 @@
 #include "core/session_manager.h"
 #include "core/turn_origin.h"
 #include "dawn_error.h"
+#include "llm/llm_selection.h"
 #include "logging.h"
 #include "tools/research_run.h"
 #include "tools/tool_pending.h"
@@ -245,7 +246,9 @@ static int dr_pending_claim(const turn_origin_t *origin,
 static char *research_build_proposal(const char *brief, bool private_requested, const char *token) {
    research_budgets_t b;
    research_budgets_load(&b);
-   const bool local = (job_provider_from_default() == JOB_PROVIDER_LOCAL);
+   session_llm_config_t llm;
+   job_selection_of_spawner(&llm);
+   const bool local = (job_provider_for(&llm) == JOB_PROVIDER_LOCAL);
 
    /* Sized to hold a full-length brief (RESEARCH_BRIEF_MAX) plus the fixed prose,
     * so a long brief is never silently truncated. */
@@ -318,8 +321,20 @@ int research_spawn_run(int user_id,
       return FAILURE;
    }
 
+   /* The run uses the LLM of the turn that started it, checked now. */
+   session_llm_config_t llm;
+   job_selection_of_spawner(&llm);
+   char refused[LLM_SELECTION_REASON_MAX];
+   if (llm_selection_problem(&llm, refused, sizeof(refused)) != 0) {
+      snprintf(err, err_len, "Can't start that research run. %s", refused);
+      return FAILURE;
+   }
+
+   conv_llm_columns_t llm_cols;
+   job_selection_columns(&llm, &llm_cols);
+
    /* Refuse cleanly past a running cap before creating any row. */
-   job_provider_class_t provider = job_provider_from_default();
+   job_provider_class_t provider = job_provider_for(&llm);
    int cap = job_manager_capacity(user_id, provider);
    if (cap != JOB_MGR_OK) {
       const char *why = (cap == JOB_MGR_CAP_GLOBAL) ? "the system is at its background-job limit"
@@ -340,7 +355,8 @@ int research_spawn_run(int user_id,
     * reinvoke_parent (§11 HIGH-2). */
    int64_t conv_id = 0;
    if (conv_db_create_job_ex(user_id, title, parent_conv, "detached", "notify", deliver_to, 1,
-                             brief, job_spawn_origin_string(), &conv_id) != AUTH_DB_SUCCESS) {
+                             brief, job_spawn_origin_string(), &llm_cols,
+                             &conv_id) != AUTH_DB_SUCCESS) {
       snprintf(err, err_len, "Error: failed to create the research job.");
       return FAILURE;
    }

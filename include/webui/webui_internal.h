@@ -830,16 +830,12 @@ bool webui_is_same_origin_request(struct lws *wsi);
  * @brief Build a conversation's LLM context for a turn, detached from any session
  *
  * session_turn_begin()'s loader (registered by webui_server_init).  Leaves every
- * session untouched; reports the conversation's stored LLM settings (over
- * @p base) in @p cfg_out / @p has_cfg_out.
+ * session untouched; reports the conversation's stored LLM settings in @p cfg_out
+ * (LLM_UNDEFINED when it has none of its own) when it returns a history.
  *
  * @return New history array (caller owns), or NULL
  */
-json_object *webui_turn_history_loader(int user_id,
-                                       int64_t conv_id,
-                                       const session_llm_config_t *base,
-                                       session_llm_config_t *cfg_out,
-                                       bool *has_cfg_out);
+json_object *webui_turn_history_loader(int user_id, int64_t conv_id, session_llm_config_t *cfg_out);
 
 /**
  * @brief Send JSON response to WebSocket client via the response queue

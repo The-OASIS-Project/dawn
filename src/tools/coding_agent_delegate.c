@@ -362,11 +362,16 @@ char *coding_delegate_confirm(uint32_t id, int user_id, const turn_origin_t *ori
    /* Answered: the job's requests may be asked about on DAWN's own. */
    turn_origin_note_answered(session_get_command_context(), p.hdr.origin.turn_number);
 
-   /* The job row first: the gateway's task is named after it. */
+   /* The job row first: the gateway's task is named after it.  Its report turn
+    * runs on the LLM of the turn that confirmed it. */
    const char *title = p.name;
+   session_llm_config_t llm;
+   job_selection_of_spawner(&llm);
+   conv_llm_columns_t llm_cols;
+   job_selection_columns(&llm, &llm_cols);
    int64_t conv_id = 0;
    if (conv_db_create_job_ex(user_id, title, p.parent_conv, "detached", "notify", NULL, 1, p.task,
-                             job_spawn_origin_string(), &conv_id) != AUTH_DB_SUCCESS) {
+                             job_spawn_origin_string(), &llm_cols, &conv_id) != AUTH_DB_SUCCESS) {
       return coding_agent_error("Couldn't create the coding job.");
    }
    if (conv_db_job_set_kind(conv_id, JOB_KIND_CODING) != AUTH_DB_SUCCESS) {

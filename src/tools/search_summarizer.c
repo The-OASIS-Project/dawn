@@ -379,11 +379,9 @@ static int summarize_with_default_llm(const char *prompt, char **out_summary) {
    // causing a "content field is empty" error.
    llm_tools_suppress_push();
 
-   // Call cloud LLM (non-streaming for summarization)
-   // Pass allow_fallback=false to prevent summarizer failures from triggering
-   // global LLM fallback (which would switch to local LLM and play TTS notification)
+   // Non-streaming, on the turn's selection (or the default with no session)
    const int kind_prev = llm_cache_monitor_push_kind(LLM_CALL_SUMMARIZER);
-   char *response = llm_chat_completion(conversation, prompt, false);
+   char *response = llm_chat_completion(conversation, prompt);
    llm_cache_monitor_pop_kind(kind_prev);
 
    // Restore tools

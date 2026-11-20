@@ -723,14 +723,21 @@ void test_a_tool_exchange_is_extracted_once(void) {
 
 /* ---- two sessions on one conversation ---- */
 
+/* Every turn here runs (none refused): the LLM calls are wrapped. */
+int session_turn_selection_problem(session_t *session, char *reason, size_t reason_len) {
+   (void)session;
+   if (reason && reason_len > 0) {
+      reason[0] = '\0';
+   }
+   return 0;
+}
+
 /* The turn loader the WebUI registers: the conversation as a reload builds it. */
 static struct json_object *reload_loader(int user_id,
                                          int64_t conv_id,
-                                         const session_llm_config_t *base,
-                                         session_llm_config_t *cfg_out,
-                                         bool *has_cfg_out) {
-   (void)base, (void)cfg_out;
-   *has_cfg_out = false;
+                                         session_llm_config_t *cfg_out) {
+   memset(cfg_out, 0, sizeof(*cfg_out));
+   cfg_out->type = LLM_UNDEFINED; /* none of its own: follows the default */
    return memory_history_load_for_llm(conv_id, user_id, NULL);
 }
 

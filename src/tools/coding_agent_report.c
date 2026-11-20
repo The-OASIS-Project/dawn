@@ -247,12 +247,15 @@ static char *write_take(const cr_work_t *w, const job_record_t *rec) {
       return NULL; /* no report, or one the filter flags */
    }
    session_t *s = NULL;
-   /* DAWN's side call, not the user's job: it doesn't count against their cap. */
-   if (job_manager_begin_ex(w->user_id, w->job, job_provider_from_default(), false, &s) !=
-       JOB_MGR_OK) {
+   /* On the job's LLM (stored when it was delegated); DAWN's side call, not the
+    * user's job: it doesn't count against their cap. */
+   session_llm_config_t llm;
+   if (job_selection_load(w->job, w->user_id, &llm) != AUTH_DB_SUCCESS ||
+       job_manager_begin_ex(w->user_id, w->job, job_provider_for(&llm), false, &s) != JOB_MGR_OK) {
       free(framed);
       return NULL;
    }
+   session_set_llm_config(s, &llm);
    atomic_store(&s->stream_conversation_id, 0); /* nothing streams into the job's own panel */
    int slot = -1;
    pthread_mutex_lock(&s_take_mutex);

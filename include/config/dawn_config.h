@@ -257,7 +257,7 @@ typedef struct {
  * Updated: 2026-08 - Update these when new model generations are released */
 #define LLM_DEFAULT_OPENAI_MODEL "gpt-5.6-luna"
 #define LLM_DEFAULT_CLAUDE_MODEL "claude-haiku-5-5"
-#define LLM_DEFAULT_GEMINI_MODEL "gemini-3.7-flash"
+#define LLM_DEFAULT_GEMINI_MODEL "gemini-3.8-flash"
 #define LLM_DEFAULT_OPENROUTER_MODEL "anthropic/claude-haiku-5.5"
 
 typedef struct {
@@ -365,8 +365,10 @@ typedef struct {
 } llm_silent_observe_config_t;
 
 typedef struct {
-   char type[16];  /* "cloud" or "local" */
-   int max_tokens; /* Max response tokens */
+   char type[16];       /* "cloud" or "local" */
+   int max_tokens;      /* Max response tokens */
+   bool local_fallback; /* An interactive turn whose cloud can't be reached is answered by the
+                         * [llm.local] endpoint (opt-in: only an endpoint the user set up) */
    llm_cloud_config_t cloud;
    llm_local_config_t local;
    llm_tools_config_t tools;                   /* Native tool/function calling settings */

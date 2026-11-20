@@ -47,8 +47,10 @@
 #include "llm/llm_compaction.h"
 #include "llm/llm_interface.h"
 #include "llm/llm_local_provider.h"
+#include "llm/llm_model_retire.h"
 #include "llm/llm_models_toml.h"
 #include "llm/llm_pricing.h"
+#include "llm/llm_selection.h"
 #include "llm/llm_tool_images_render.h"
 #include "llm/llm_tools.h"
 #include "llm/llm_turn_blocks.h"
@@ -291,6 +293,56 @@ static void free_model_table(model_context_entry_t **arr) {
    *arr = NULL;
 }
 
+/* One configured model that is retired: it is replaced at each call, but the
+ * setting should be changed. */
+static void warn_if_retired(const char *where,
+                            const char *provider_name,
+                            const char *model,
+                            time_t now) {
+   llm_type_t type;
+   cloud_provider_t provider;
+   if (!model || !model[0] ||
+       cloud_provider_from_string(provider_name, &type, &provider) != SUCCESS ||
+       type != LLM_CLOUD) {
+      return;
+   }
+   if (strcmp(llm_cloud_url(provider), llm_builtin_url(provider)) != 0) {
+      return; /* a custom endpoint: its model ids are the user's own names, kept */
+   }
+   const char *by = llm_model_replacement(provider, model, now);
+   if (by) {
+      OLOG_WARNING("Settings: %s names %s, which %s retired; %s answers instead. Choose another.",
+                   where, model, cloud_provider_display_name(provider), by);
+   }
+}
+
+/* Configured models that are retired: every model list, and the extraction,
+ * compaction and silent-observe models. */
+static void warn_retired_models(void) {
+   const time_t now = time(NULL);
+   const llm_cloud_config_t *c = &g_config.llm.cloud;
+   for (int i = 0; i < c->openai_models_count; i++) {
+      warn_if_retired("the OpenAI model list", "openai", c->openai_models[i], now);
+   }
+   for (int i = 0; i < c->claude_models_count; i++) {
+      warn_if_retired("the Claude model list", "claude", c->claude_models[i], now);
+   }
+   for (int i = 0; i < c->gemini_models_count; i++) {
+      warn_if_retired("the Gemini model list", "gemini", c->gemini_models[i], now);
+   }
+   for (int i = 0; i < c->openrouter_models_count; i++) {
+      warn_if_retired("the OpenRouter model list", "openrouter", c->openrouter_models[i], now);
+   }
+   warn_if_retired("[memory] extraction_model", g_config.memory.extraction_provider,
+                   g_config.memory.extraction_model, now);
+   if (!g_config.llm.compact_use_session) {
+      warn_if_retired("[llm] compact_model", g_config.llm.compact_provider,
+                      g_config.llm.compact_model, now);
+   }
+   warn_if_retired("[llm.silent_observe] model", g_config.llm.silent_observe.provider,
+                   g_config.llm.silent_observe.model, now);
+}
+
 /* Load the model reference tables from models.toml: the context windows here,
  * pricing and reasoning capabilities in their modules.  Each table comes
  * from the disk copy when it has it, else from the shipped copy compiled in. */
@@ -305,6 +357,8 @@ static void load_model_registry(void) {
    llm_capabilities_load_mid_system(llm_models_toml_root_for(&m, "mid_system"));
    llm_capabilities_load_inline_tools(llm_models_toml_root_for(&m, "inline_tools"));
    llm_capabilities_load_image_limits(llm_models_toml_root_for(&m, "max_request_images"));
+   llm_model_retire_load(llm_models_toml_root_for(&m, "retired"));
+   warn_retired_models();
    OLOG_INFO("llm_context: loaded the model registry (%s)",
              m.disk ? m.path : "built-in models.toml");
    llm_models_toml_close(&m);
@@ -398,8 +452,8 @@ void llm_context_refresh_local(void) {
  * @brief Fetch the OpenRouter model catalog and populate the slug->context cache.
  *
  * GETs https://openrouter.ai/api/v1/models, parses data[].id + data[].context_length
- * with json-c, and fills s_state.or_models[]. The Bearer key is optional for this
- * endpoint, but we include it when configured. Graceful: on no key / curl error /
+ * with json-c, and fills s_state.or_models[]. The endpoint is public: no key is
+ * sent (it would go to OpenRouter whatever provider is selected). Graceful: on curl error /
  * parse failure, leaves the cache empty and returns FAILURE — callers then fall
  * back to the offline vendor-strip probe, so there is no regression when offline.
  *
@@ -407,10 +461,6 @@ void llm_context_refresh_local(void) {
  * only at the end to swap in the parsed results.
  */
 static int llm_context_query_openrouter_models(void) {
-   /* Key is optional for /models, but pass it if we have one. */
-   const char *api_key = g_secrets.openrouter_api_key[0] != '\0' ? g_secrets.openrouter_api_key
-                                                                 : NULL;
-
    CURL *curl = curl_easy_init();
    if (!curl) {
       OLOG_WARNING("llm_context: Failed to init CURL for OpenRouter /models query");
@@ -420,26 +470,13 @@ static int llm_context_query_openrouter_models(void) {
    curl_buffer_t response;
    curl_buffer_init_with_max(&response, LLM_CONTEXT_OPENROUTER_MAX_RESPONSE_SIZE);
 
-   struct curl_slist *headers = NULL;
-   char auth_header[CONFIG_API_KEY_MAX + 32];
-   if (api_key) {
-      snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", api_key);
-      headers = curl_slist_append(headers, auth_header);
-   }
-
    curl_easy_setopt(curl, CURLOPT_URL, LLM_CONTEXT_OPENROUTER_MODELS_URL);
-   if (headers) {
-      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-   }
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
 
    CURLcode res = curl_easy_perform(curl);
-   if (headers) {
-      curl_slist_free_all(headers);
-   }
    curl_easy_cleanup(curl);
 
    if (res != CURLE_OK) {
@@ -1187,22 +1224,22 @@ static bool build_compaction_config(llm_resolved_config_t *cfg) {
    if (strcmp(p, "claude") == 0) {
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_CLAUDE;
-      cfg->endpoint = CLAUDE_URL;
+      cfg->endpoint = llm_cloud_url(CLOUD_PROVIDER_CLAUDE);
       cfg->api_key = g_secrets.claude_api_key;
    } else if (strcmp(p, "openai") == 0) {
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_OPENAI;
-      cfg->endpoint = CLOUDAI_URL;
+      cfg->endpoint = llm_cloud_url(CLOUD_PROVIDER_OPENAI);
       cfg->api_key = g_secrets.openai_api_key;
    } else if (strcmp(p, "gemini") == 0) {
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_GEMINI;
-      cfg->endpoint = GEMINI_URL;
+      cfg->endpoint = llm_cloud_url(CLOUD_PROVIDER_GEMINI);
       cfg->api_key = g_secrets.gemini_api_key;
    } else if (strcmp(p, "openrouter") == 0) {
       cfg->type = LLM_CLOUD;
       cfg->cloud_provider = CLOUD_PROVIDER_OPENROUTER;
-      cfg->endpoint = OPENROUTER_URL;
+      cfg->endpoint = llm_cloud_url(CLOUD_PROVIDER_OPENROUTER);
       cfg->api_key = g_secrets.openrouter_api_key;
    } else if (strcmp(p, "local") == 0) {
       cfg->type = LLM_LOCAL;

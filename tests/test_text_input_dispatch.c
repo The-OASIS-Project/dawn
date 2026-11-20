@@ -35,6 +35,7 @@
 #include "core/session_prefix.h"
 #include "core/text_input_dispatch.h"
 #include "llm/llm_history_kind.h"
+#include "llm/llm_interface.h"
 #include "unity.h"
 
 /* What the dispatcher did, as the stubs saw it. */
@@ -186,6 +187,23 @@ void session_turn_set_conversation(session_t *session, int64_t conv_id, bool may
    (void)may_load;
 }
 
+static int s_selection_problem;
+int session_turn_selection_problem(session_t *session, char *reason, size_t reason_len) {
+   (void)session;
+   if (reason && reason_len > 0) {
+      snprintf(reason, reason_len, "%s", s_selection_problem ? "Claude has no API key." : "");
+   }
+   return s_selection_problem;
+}
+
+static int s_last_error;
+void llm_set_last_error(int code) {
+   s_last_error = code;
+}
+int llm_last_error(void) {
+   return s_last_error;
+}
+
 static bool s_unsent;
 bool session_turn_unsent(session_t *session) {
    (void)session;
@@ -208,6 +226,8 @@ void setUp(void) {
    s_llm_calls = 0;
    s_persisted[0] = '\0';
    s_persisted_ref[0] = '\0';
+   s_selection_problem = 0;
+   s_last_error = 0;
    s_unsent = false;
    s_session = calloc(1, sizeof(*s_session));
    TEST_ASSERT_NOT_NULL(s_session);
@@ -301,6 +321,33 @@ static void test_a_failed_attach_refuses_the_turn(void) {
    TEST_ASSERT_EQUAL_STRING("{\"account_id\":3}", s_persisted_ref);
 }
 
+/* An LLM that can't run refuses the turn: nothing added, saved, attached or
+ * sent, the caller is told by LLM_ERR_NOT_SELECTED and handed the sentence.
+ * The next turn starts clean. */
+static void test_a_turn_whose_llm_cant_run_is_refused(void) {
+   s_attaches = 0;
+   s_selection_problem = 1;
+   char refusal[64] = "stale";
+   const text_input_dispatch_opts_t opts = { .conversation_id = 3,
+                                             .auth_user_id = 1,
+                                             .email_account = "work",
+                                             .email_message_id = "u42.7",
+                                             .await_conversation = true,
+                                             .refusal = refusal,
+                                             .refusal_len = sizeof(refusal) };
+   TEST_ASSERT_NULL(core_text_input_dispatch(s_session, "hello", &opts));
+   TEST_ASSERT_EQUAL_INT(LLM_ERR_NOT_SELECTED, s_last_error);
+   TEST_ASSERT_EQUAL_STRING("Claude has no API key.", refusal);
+   TEST_ASSERT_EQUAL_INT(0, s_added_objects + s_added_text + s_llm_calls + s_attaches);
+   TEST_ASSERT_EQUAL_STRING("", s_persisted);
+
+   s_selection_problem = 0;
+   free(core_text_input_dispatch(s_session, "hello", &opts));
+   TEST_ASSERT_EQUAL_INT(LLM_ERR_NONE, s_last_error);
+   TEST_ASSERT_EQUAL_STRING("", refusal);
+   TEST_ASSERT_EQUAL_INT(1, s_llm_calls);
+}
+
 /* A NULL text is never a turn, question or not. */
 static void test_null_text_is_refused(void) {
    struct json_object *question = image_only_question();
@@ -318,5 +365,6 @@ int main(void) {
    RUN_TEST(test_an_unsent_turn_is_refused);
    RUN_TEST(test_from_visual_marks_the_turn);
    RUN_TEST(test_a_failed_attach_refuses_the_turn);
+   RUN_TEST(test_a_turn_whose_llm_cant_run_is_refused);
    return UNITY_END();
 }

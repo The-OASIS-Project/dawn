@@ -86,9 +86,8 @@ typedef struct {
 /**
  * @brief Cloud provider types
  *
- * Automatically detected based on API keys in secrets.toml.
- * If both providers are configured, provider can be selected via
- * --cloud-provider command-line argument or dawn.toml config.
+ * Selected in dawn.toml ([llm.cloud] provider) or by a conversation; never chosen
+ * from which API keys are present.
  */
 typedef enum {
    CLOUD_PROVIDER_OPENAI,     /**< OpenAI (GPT models) */
@@ -115,6 +114,10 @@ typedef enum {
 
 /** CURL connect timeout in milliseconds (TCP + TLS handshake) */
 #define LLM_CONNECT_TIMEOUT_MS 10000L
+
+/** The connect timeout, with one attempt, while the local LLM can still take the
+ *  turn (llm_provider_errors_quiet()): an unreachable cloud is noticed sooner. */
+#define LLM_FALLBACK_CONNECT_TIMEOUT_MS 4000L
 
 /** Maximum length for thinking mode strings */
 #define LLM_THINKING_MODE_MAX 16
@@ -167,24 +170,19 @@ typedef struct {
 /**
  * @brief Initialize the LLM system
  *
- * Detects available cloud providers based on API keys in secrets.toml.
- * If command-line override provided, validates and uses it.
- * If both providers available and no override, defaults to OpenAI.
- *
- * @param cloud_provider_override Optional provider override from command line
- *                                 ("openai", "claude", or NULL to auto-detect)
+ * Tools and the rate limiter.  The LLM a chat runs on is not chosen here: it is
+ * the conversation's own selection or the default from dawn.toml, read at each
+ * use (llm_selection.h).
  */
-void llm_init(const char *cloud_provider_override);
+void llm_init(void);
 
 /**
- * @brief Re-detect available cloud providers at runtime
+ * @brief Say which LLM the default selection is, or why it can't run
  *
- * Call this after API keys are updated (e.g., via WebUI) to refresh
- * provider availability without restarting. Safe to call at any time.
- *
- * @return 1 if at least one cloud provider is now available, 0 otherwise
+ * Spoken (TTS) and logged; at startup once TTS is up, and after a settings save
+ * that changes the default.
  */
-int llm_refresh_providers(void);
+void llm_announce_selection(void);
 
 /**
  * @brief Callback function type for streaming text chunks from LLM
@@ -211,90 +209,34 @@ typedef void (*llm_sentence_callback)(const char *sentence, void *userdata);
 /**
  * @brief Get chat completion from configured LLM (non-streaming)
  *
- * Routes to appropriate provider based on current configuration.
- * Handles local/cloud fallback automatically on connection failure if allow_fallback is true.
- * Conversation history is always stored in OpenAI format internally,
- * but converted as needed for Claude API calls.
+ * Runs on the command context's session's selection, or the default with no
+ * session.  Refused (NULL, LLM_ERR_NOT_SELECTED) when that can't run; never sent
+ * to another provider.  Conversation history is always stored in OpenAI format
+ * internally, but converted as needed for Claude API calls.
  *
  * @param conversation_history JSON array of conversation messages (OpenAI format)
  * @param input_text User's input text
- * @param allow_fallback If true, falls back to local LLM on cloud failure
  * @return Response text (caller must free), or NULL on error
  */
-char *llm_chat_completion(struct json_object *conversation_history,
-                          const char *input_text,
-                          bool allow_fallback);
-
-/**
- * @brief Get chat completion from configured LLM with streaming
- *
- * Routes to appropriate provider based on current configuration.
- * Calls chunk_callback for each incremental text chunk as it arrives.
- * The complete accumulated response is returned when streaming completes.
- * Handles local/cloud fallback automatically on connection failure if allow_fallback is true.
- *
- * @param conversation_history JSON array of conversation messages (OpenAI format)
- * @param input_text User's input text
- * @param chunk_callback Function to call for each text chunk (NULL for non-streaming)
- * @param callback_userdata User context passed to chunk_callback
- * @param allow_fallback If true, falls back to local LLM on cloud failure
- * @return Complete response text (caller must free), or NULL on error
- */
-char *llm_chat_completion_streaming(struct json_object *conversation_history,
-                                    const char *input_text,
-                                    llm_text_chunk_callback chunk_callback,
-                                    void *callback_userdata,
-                                    bool allow_fallback);
-
-/**
- * @brief Get chat completion with streaming and sentence-boundary buffering for TTS
- *
- * Similar to llm_chat_completion_streaming, but buffers chunks and sends complete
- * sentences to the callback. This ensures TTS receives natural speech boundaries
- * (sentences ending with ., !, ?, :) for better prosody and intonation.
- *
- * @param conversation_history JSON array of conversation messages (OpenAI format)
- * @param input_text User's input text
- * @param sentence_callback Function to call for each complete sentence
- * @param callback_userdata User context passed to sentence_callback
- * @param allow_fallback If true, falls back to local LLM on cloud failure
- * @return Complete response text (caller must free), or NULL on error
- */
-char *llm_chat_completion_streaming_tts(struct json_object *conversation_history,
-                                        const char *input_text,
-                                        llm_sentence_callback sentence_callback,
-                                        void *callback_userdata,
-                                        bool allow_fallback);
-
-/**
- * @brief Switch between local and cloud LLM
- *
- * @param type LLM_LOCAL or LLM_CLOUD
- * @return 0 on success, non-zero on failure (e.g., API key not configured)
- */
-int llm_set_type(llm_type_t type);
-
-/**
- * @brief llm_set_type() without speaking or logging it
- *
- * For startup: sets the type before anything can run a turn, ahead of TTS;
- * llm_set_type() with the same type announces it once TTS is up.
- */
-int llm_set_type_quiet(llm_type_t type);
+char *llm_chat_completion(struct json_object *conversation_history, const char *input_text);
 
 /**
  * @brief Get current LLM type
  *
- * @return Current LLM type (LLM_LOCAL, LLM_CLOUD, or LLM_UNDEFINED)
+ * @return Current LLM type (LLM_LOCAL or LLM_CLOUD)
  */
 llm_type_t llm_get_type(void);
 
 /**
  * @brief Get current cloud provider name (for display/logging)
  *
- * @return String name of provider ("OpenAI", "Claude", "Gemini", "None")
+ * @return String name of provider ("OpenAI", "Claude", "Gemini", "OpenRouter", "None")
  */
 const char *llm_get_cloud_provider_name(void);
+
+/* cloud_provider_to_string, cloud_provider_from_string and the llm_get_default_*_model
+ * getters below are defined in llm_selection.c, which needs only g_config, so code
+ * that names providers or models links without the provider stack. */
 
 /**
  * @brief Convert cloud provider enum to lowercase string
@@ -302,7 +244,7 @@ const char *llm_get_cloud_provider_name(void);
  * Use this instead of inline ternary chains for provider-to-string conversion.
  *
  * @param provider Cloud provider enum value
- * @return Lowercase string ("openai", "claude", "gemini", "none")
+ * @return Lowercase string ("openai", "claude", "gemini", "openrouter", "none")
  */
 const char *cloud_provider_to_string(cloud_provider_t provider);
 
@@ -322,18 +264,6 @@ const char *cloud_provider_to_string(cloud_provider_t provider);
 int cloud_provider_from_string(const char *str,
                                llm_type_t *type_out,
                                cloud_provider_t *provider_out);
-
-/**
- * @brief Set the cloud provider at runtime
- *
- * Switches the active cloud provider. Validates that the required API key
- * is available before switching. Updates the endpoint URL if currently in cloud mode.
- *
- * @param provider CLOUD_PROVIDER_OPENAI, CLOUD_PROVIDER_CLAUDE, CLOUD_PROVIDER_GEMINI,
- *                 or CLOUD_PROVIDER_OPENROUTER
- * @return 0 on success, 1 on failure (API key not configured)
- */
-int llm_set_cloud_provider(cloud_provider_t provider);
 
 /**
  * @brief Get current cloud provider enum value
@@ -432,7 +362,47 @@ int llm_check_connection(const char *url, int timeout_seconds);
  * Every public llm_chat_completion* entry point resets the code to
  * LLM_ERR_NONE on entry so each call's outcome stands on its own. */
 #define LLM_ERR_NONE 0
-#define LLM_ERR_TRANSIENT_NETWORK 1 /* pre-flight check failed, host unreachable */
+/* HTTP 429/5xx, a reply that ended before any output, or (non-streaming calls) an
+ * unreachable host. */
+#define LLM_ERR_TRANSIENT_NETWORK 1
+/* The selected LLM can't run (llm_selection_problem says why): never retried,
+ * never sent to another provider. */
+#define LLM_ERR_NOT_SELECTED 2
+/* The cloud can't be reached at all: the pre-flight connect failed, or curl gave up
+ * before the request went out (DNS, connect, TLS). */
+#define LLM_ERR_UNREACHABLE 3
+
+/**
+ * @brief Whether @p code is a temporary failure worth retrying later: the provider
+ *        couldn't be reached (LLM_ERR_UNREACHABLE) or answered 429/5xx
+ *        (LLM_ERR_TRANSIENT_NETWORK).
+ */
+bool llm_error_is_transient(int code);
+
+/**
+ * @brief Record a failed curl transfer of a provider request as this thread's error.
+ *
+ * Only while the local LLM can take the turn (llm_provider_errors_quiet()), and
+ * only a network failure before the request went out (DNS, connect, the TLS
+ * handshake, a connect timeout): LLM_ERR_UNREACHABLE.  Anything else, a TLS
+ * certificate failure included, is left as it is.
+ *
+ * @param curl_handle The transfer's CURL handle
+ * @param curl_code   Its CURLcode
+ */
+void llm_note_curl_failure(void *curl_handle, int curl_code);
+
+/**
+ * @brief Whether the local LLM can still take this thread's provider call
+ *        (a cloud turn with the fallback on, before any tool ran).  While set,
+ *        a provider makes one attempt with LLM_FALLBACK_CONNECT_TIMEOUT_MS and
+ *        keeps its transient-failure error frames to itself (a failure the local
+ *        LLM doesn't answer is reported by the surface).
+ */
+bool llm_provider_errors_quiet(void);
+
+/** @brief Set llm_provider_errors_quiet() for this thread (the tool loop's). */
+void llm_set_provider_errors_quiet(bool quiet);
 
 /**
  * @brief Get the last LLM error code for the calling thread.
@@ -588,16 +558,6 @@ bool llm_has_gemini_key(void);
  */
 bool llm_has_openrouter_key(void);
 
-/**
- * @brief Auto-detect the first cloud provider with an available API key
- *
- * When the OpenRouter gateway is on, returns CLOUD_PROVIDER_OPENROUTER if its
- * key is present.  Otherwise priority: Claude > OpenAI > Gemini.
- *
- * @return The first available provider, or CLOUD_PROVIDER_NONE if no keys found
- */
-cloud_provider_t llm_detect_available_provider(void);
-
 /* ============================================================================
  * Per-Session LLM Configuration Support
  * ============================================================================ */
@@ -606,8 +566,10 @@ cloud_provider_t llm_detect_available_provider(void);
  * @brief Resolve session LLM config to final request config
  *
  * Resolves session config to final configuration with endpoints and API keys.
- * If session config specifies invalid settings (e.g., provider without API key),
- * returns error.
+ * LLM_UNDEFINED is the default selection (llm_selection_resolve()).  A config
+ * llm_selection_problem() refuses (a provider without its API key, cloud with no
+ * provider) is an error; @p resolved then still holds what is selected (type,
+ * provider, model, reasoning) for a display, with no key or endpoint.
  *
  * @param session_config Session's LLM config
  * @param resolved Output: resolved configuration for LLM call
@@ -618,8 +580,8 @@ int llm_resolve_config(const session_llm_config_t *session_config, llm_resolved_
 /**
  * @brief Get default LLM configuration from dawn.toml settings
  *
- * Returns a session_llm_config_t populated with the default settings
- * from the global configuration. Used to initialize new sessions.
+ * A config with no selection of its own (LLM_UNDEFINED: it follows the default,
+ * resolved at each use) and the default reasoning.  Used to initialize sessions.
  *
  * @param config Output: default configuration
  */
@@ -628,9 +590,9 @@ void llm_get_default_config(session_llm_config_t *config);
 /**
  * @brief Chat completion with explicit configuration (non-streaming)
  *
- * Same as llm_chat_completion() but uses provided config instead of global.
- * Resets llm_last_error() to LLM_ERR_NONE on entry so callers reading the
- * code after a NULL return see only this call's outcome.
+ * Same as llm_chat_completion() but uses provided config.  A NULL config is
+ * refused (LLM_ERR_NOT_SELECTED).  Resets llm_last_error() to LLM_ERR_NONE on entry so callers
+ * reading the code after a NULL return see only this call's outcome.
  *
  * @param conversation_history JSON array of conversation messages (OpenAI format)
  * @param input_text User's input text
@@ -644,7 +606,8 @@ char *llm_chat_completion_with_config(struct json_object *conversation_history,
 /**
  * @brief Chat completion with explicit configuration (streaming)
  *
- * Same as llm_chat_completion_streaming() but uses provided config.
+ * Streams the reply to @p chunk_callback; runs the tool loop.  A NULL config is
+ * refused.
  *
  * @param conversation_history JSON array of conversation messages (OpenAI format)
  * @param input_text User's input text
@@ -662,7 +625,8 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
 /**
  * @brief Chat completion with explicit configuration (streaming TTS)
  *
- * Same as llm_chat_completion_streaming_tts() but uses provided config.
+ * As llm_chat_completion_streaming_with_config(), with the reply buffered into
+ * whole sentences for TTS.
  *
  * @param conversation_history JSON array of conversation messages (OpenAI format)
  * @param input_text User's input text

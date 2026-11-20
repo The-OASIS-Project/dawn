@@ -37,6 +37,7 @@
 #include "core/session_manager.h"
 #include "dawn_error.h"
 #include "llm/llm_interface.h"
+#include "llm/llm_selection.h"
 #include "logging.h"
 #include "memory/memory_history_loader.h"
 #include "messaging/messaging_engine.h"
@@ -75,6 +76,27 @@ void evict_session_slot(int64_t channel_id) {
        * for the closing conversation. */
       session_release(evictee);
       session_destroy(evictee_session_id);
+   }
+}
+
+void messaging_engine_apply_conv_llm(int64_t conversation_id, const session_llm_config_t *cfg) {
+   if (conversation_id <= 0 || !cfg) {
+      return;
+   }
+   session_t *live = NULL;
+   pthread_mutex_lock(&s_session_slots_mutex);
+   for (size_t i = 0; i < MESSAGING_MAX_SESSIONS; i++) {
+      session_t *s = s_session_slots[i].session;
+      if (s && s->messaging_identity.conversation_id == conversation_id) {
+         session_retain(s);
+         live = s;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&s_session_slots_mutex);
+   if (live) {
+      session_set_llm_config(live, cfg); /* a running turn keeps its own */
+      session_release(live);
    }
 }
 
@@ -346,47 +368,25 @@ session_t *get_or_create_messaging_session(const channel_ref_t *ref,
     * Stash conversation_id on the session so switch_llm can persist a later
     * in-chat change back to this conversation's row.
     *
-    * Set ONCE at creation.  The channel-name fast-path refresh (~296) must NOT
-    * mirror this — LLM config is per-creation/restart, not per-turn (per-turn
-    * re-application would churn the Anthropic stable-prefix cache).  Safe
-    * without engine locks: session_t is thread-private here, and
-    * session_set_llm_config takes only the leaf llm_config_mutex. */
+    * Set at creation, and again only when someone changes it (the channel panel
+    * or the picker: messaging_engine_apply_conv_llm), never per turn: the
+    * channel-name fast-path refresh (~296) must NOT mirror this (per-turn
+    * re-application would churn the Anthropic stable-prefix cache).  Here, at
+    * creation, the session is still private to this thread, so no engine lock
+    * is needed; a later change goes through messaging_engine_apply_conv_llm,
+    * which holds a reference taken under s_session_slots_mutex.
+    * session_set_llm_config takes only the leaf llm_config_mutex (and
+    * g_config_rwlock to read the default, with no lock held). */
    s->messaging_identity.conversation_id = conversation_id;
    session_bind_history_conversation(s, conversation_id);
    if (conversation_id > 0 && user_id > 0) {
       conversation_t conv;
       if (conv_db_get(conversation_id, user_id, &conv) == AUTH_DB_SUCCESS) {
+         /* The conversation's own selection, or the default it follows. */
          session_llm_config_t mcfg;
-         session_get_llm_config(s, &mcfg); /* seed ALL fields from the global default */
-
-         if (conv.llm_type[0]) {
-            mcfg.type = (strcmp(conv.llm_type, "local") == 0) ? LLM_LOCAL : LLM_CLOUD;
-         }
-         if (conv.cloud_provider[0]) {
-            /* type already set from conv.llm_type above; we only need the
-             * provider enum here, so t is intentionally discarded. */
-            llm_type_t t;
-            cloud_provider_t cp;
-            if (cloud_provider_from_string(conv.cloud_provider, &t, &cp) == SUCCESS) {
-               (void)t;
-               mcfg.cloud_provider = cp;
-            }
-         }
-         if (conv.model[0]) {
-            safe_strscpy(mcfg.model, conv.model);
-         }
-         if (conv.thinking_mode[0]) {
-            safe_strscpy(mcfg.thinking_mode, conv.thinking_mode);
-         }
-         if (conv.reasoning_effort[0]) {
-            safe_strscpy(mcfg.reasoning_effort, conv.reasoning_effort);
-         }
-
-         if (session_set_llm_config(s, &mcfg) != SUCCESS) {
-            OLOG_WARNING(
-                "messaging: conv %lld LLM settings rejected; session %u uses global default",
-                (long long)conversation_id, s->session_id);
-         }
+         llm_selection_from_row(conv.llm_type, conv.cloud_provider, conv.model, conv.thinking_mode,
+                                conv.reasoning_effort, &mcfg);
+         session_set_llm_config(s, &mcfg);
          conv_free(&conv);
       }
    }

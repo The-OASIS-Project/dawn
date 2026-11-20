@@ -672,7 +672,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
              (model_name && model_name[0]) ? model_name : "(server default)");
 
    if (!llm_check_connection(base_url, 4)) {
-      llm_set_last_error(LLM_ERR_TRANSIENT_NETWORK);
+      llm_set_last_error(LLM_ERR_UNREACHABLE);
       OLOG_ERROR("Pre-flight connection check failed (cloud unreachable)");
       json_object_put(root);
       return 1;
@@ -700,7 +700,7 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
    streaming_ctx.stream_ctx = stream_ctx;
    curl_buffer_init_with_max(&streaming_ctx.raw_response, OPENAI_RAW_BUFFER_CAP);
 
-   int max_attempts = 2;
+   int max_attempts = llm_provider_errors_quiet() ? 1 : 2;
    for (int attempt = 0; attempt < max_attempts; attempt++) {
       curl_handle = curl_easy_init();
       if (!curl_handle) {
@@ -724,7 +724,9 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
       curl_easy_setopt(curl_handle, CURLOPT_NOPROGRESS, 0L);
       curl_easy_setopt(curl_handle, CURLOPT_XFERINFOFUNCTION, llm_curl_progress_callback);
       curl_easy_setopt(curl_handle, CURLOPT_XFERINFODATA, NULL);
-      curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT_MS, LLM_CONNECT_TIMEOUT_MS);
+      curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT_MS,
+                       llm_provider_errors_quiet() ? LLM_FALLBACK_CONNECT_TIMEOUT_MS
+                                                   : LLM_CONNECT_TIMEOUT_MS);
       {
          int eff_to = llm_get_effective_timeout_ms();
          long lspt = 60L;
@@ -772,8 +774,10 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
          } else {
             OLOG_ERROR("curl_easy_perform() failed: %s", curl_easy_strerror(res));
          }
+         llm_note_curl_failure(curl_handle, res);
 #ifdef ENABLE_WEBUI
-         if (!stopped) {
+         if (!stopped &&
+             !(llm_provider_errors_quiet() && llm_error_is_transient(llm_last_error()))) {
             session_t *session = session_get_command_context();
             if (session && session->type == SESSION_TYPE_WEBUI) {
                const char *error_code = (res == CURLE_OPERATION_TIMEDOUT) ? "LLM_TIMEOUT"
@@ -819,7 +823,8 @@ int llm_openai_cc_streaming_single_shot(struct json_object *conversation_history
       }
 #ifdef ENABLE_WEBUI
       session_t *session = session_get_command_context();
-      if (session && session->type == SESSION_TYPE_WEBUI) {
+      if (session && session->type == SESSION_TYPE_WEBUI &&
+          !(llm_provider_errors_quiet() && llm_error_is_transient(llm_last_error()))) {
          const char *err_msg = llm_openai_parse_error_message(streaming_ctx.raw_response.data,
                                                               http_code);
          webui_send_error(session, "LLM_ERROR", err_msg);

@@ -273,11 +273,6 @@ int64_t resolve_channel_conversation_id(channel_ref_t *ref,
                                         const char *provider,
                                         const char *provider_address,
                                         bool *gone);
-/**
- * @brief Reset a channel's forever-conversation (see messaging_engine_reset_by_name).
- * @return MESSAGING_SUCCESS / MESSAGING_UNKNOWN_CHANNEL / MESSAGING_FAILURE.
- */
-int messaging_engine_reset_channel(int user_id, int64_t channel_id);
 int clear_channel_conversation_id(int64_t channel_id);
 /** Whether an SMS channel had an exchange within the active window. */
 bool sms_within_active_window(const channel_ref_t *ref);
@@ -306,12 +301,15 @@ void engine_reply_busy(const inbound_item_t *item);
 /**
  * @brief Run an action taken by engine_take_reply_code in the turn begun on
  *        @p session, and word the envelope that tells the model its outcome
- * @return The envelope (malloc'd); NULL on allocation failure, the user then
- *         told the outcome by text
+ * @param tell_user  Tell the user the outcome by text and word no envelope (the
+ *                   turn's LLM can't run, so no model will report it)
+ * @return The envelope (malloc'd); NULL when @p tell_user or on allocation
+ *         failure, the user then told the outcome by text
  */
 char *engine_run_reply_code(const inbound_item_t *item,
                             struct session *session,
-                            tool_redeemed_t *taken);
+                            tool_redeemed_t *taken,
+                            bool tell_user);
 /** STOP: drop the channel's waiting action, telling the user.  A STOP that
  *  finds nothing (a repeat that queued behind the first) gets no reply.
  *  @return whether one was dropped. */

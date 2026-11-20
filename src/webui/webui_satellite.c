@@ -42,6 +42,7 @@
 #include "core/turn_queue.h"
 #include "core/utterance_dedup.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_selection.h"
 #include "logging.h"
 #include "tools/volume_tool.h"
 #include "utils/string_utils.h"
@@ -286,6 +287,21 @@ static void *satellite_worker_thread(void *arg) {
    session_turn_begin(session, 0, (int)session->metrics.user_id);
    turn_begun = true;
 
+   /* An LLM that can't run refuses the query before it's added: the reason is
+    * the reply (spoken by the satellite, or by the server for one without TTS). */
+   bool needs_server_tts = !session_capabilities(session).local_tts;
+   char refusal[LLM_SELECTION_REASON_MAX];
+   if (session_turn_selection_problem(session, refusal, sizeof(refusal)) != 0) {
+      OLOG_WARNING("Satellite: query from %s refused: %s", session->identity.name, refusal);
+      if (needs_server_tts) {
+         webui_sentence_audio_callback(refusal, session);
+      }
+      satellite_send_response(session, refusal);
+      terminal_sent = true;
+      satellite_send_state(session, "idle");
+      goto cleanup;
+   }
+
    /* Add user message to history */
    session_add_turn_message(session, "user", text);
 
@@ -297,7 +313,6 @@ static void *satellite_worker_thread(void *arg) {
    /* Call LLM with TTS callback for Tier 2 satellites (server-side TTS).
     * Tier 1 satellites have local TTS and only need the text response, but
     * Tier 2 devices need the daemon to synthesize speech and send PCM audio. */
-   bool needs_server_tts = !session_capabilities(session).local_tts;
    response = session_llm_call_with_tts_no_add(session, text,
                                                needs_server_tts ? webui_sentence_audio_callback
                                                                 : NULL,

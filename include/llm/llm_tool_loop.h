@@ -107,6 +107,12 @@ typedef struct {
                                               *   input tokens (not this turn's) reach this.  Set only
                                               *   by the research controller (per-round overshoot
                                               *   guard); 0 for every other caller. */
+   bool fallback_available;                  /**< The turn can still be answered by the local LLM:
+                                              *   an unreachable cloud is not retried until a tool
+                                              *   has run (the caller falls back instead). */
+   bool pinned;                              /**< Stay on this provider for the whole turn (don't
+                                              *   follow a switch_llm made during it). */
+   bool tools_ran;                           /**< Out: a tool batch ran in this loop. */
 } llm_tool_loop_params_t;
 
 /**
