@@ -59,6 +59,9 @@
 
 /* ========== Forward Declarations ========== */
 
+/** A spoken album name packed as the album: param ("::album::" + the name) */
+#define MUSIC_TOOL_ALBUM_VALUE_MAX (AUDIO_METADATA_STRING_MAX + 16)
+
 static char *music_tool_callback(const char *action, char *value, int *should_respond);
 
 /* ========== Tool Parameter Definition ========== */
@@ -562,6 +565,18 @@ static char *music_tool_browse(const char *action, char *value, int *should_resp
 
 static char *music_tool_callback(const char *action, char *value, int *should_respond) {
    *should_respond = 1;
+   /* A spoken "play the album X": play with album:'X' */
+   char album_value[MUSIC_TOOL_ALBUM_VALUE_MAX];
+   if (strcmp(action, "play_album") == 0) {
+      static const char key[] = "::album::";
+      const size_t k = sizeof(key) - 1;
+      memcpy(album_value, key, k + 1);
+      if (value) {
+         tool_value_escape(value, strlen(value), album_value + k, sizeof(album_value) - k);
+      }
+      action = "play";
+      value = album_value;
+   }
    /* A session with a player of its own (a WebUI tab, a Tier-1 satellite) */
    bool needs_player = strcmp(action, "search") != 0 && strcmp(action, "library") != 0;
    if (!needs_player) {
