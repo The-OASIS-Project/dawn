@@ -920,7 +920,9 @@ int music_db_album_find(const char *album,
    if (album && album[0]) {
       music_rank_album_key(album, artist, want, sizeof(want));
    }
-   qsort(copies, (size_t)n, sizeof(*copies), cmp_copy);
+   if (n > 1) {
+      qsort(copies, (size_t)n, sizeof(*copies), cmp_copy);
+   }
    int albums = 0;
    for (int i = 0; i < n; i++) {
       if (albums > 0 && cmp_album(&copies[albums - 1], &copies[i]) == 0) {
@@ -934,7 +936,9 @@ int music_db_album_find(const char *album,
       copies[albums].c.exact = want[0] && strcmp(copies[albums].name_key, want) == 0;
       albums++;
    }
-   qsort(copies, (size_t)albums, sizeof(*copies), cmp_choice);
+   if (albums > 1) {
+      qsort(copies, (size_t)albums, sizeof(*copies), cmp_choice);
+   }
 
    music_album_choice_t *list = malloc((size_t)(albums > 0 ? albums : 1) * sizeof(*list));
    if (!list) {

@@ -527,6 +527,38 @@ static int album_tracks(const music_search_filters_t *f,
    return SUCCESS;
 }
 
+/*
+ * Where an album starts for a query given with it: track 1 when there is none or
+ * its words are all in the album's name and artist ("Abbey Road by The
+ * Beatles"); else the track whose title it names best, a close one included
+ * ("Here Come the Sun").  FAILURE when no title shares a word with it.
+ */
+static int album_start(const music_search_result_t *tracks,
+                       int count,
+                       const char *title,
+                       const char *artist,
+                       int *start_out) {
+   *start_out = 0;
+   if (!title || !title[0]) {
+      return SUCCESS;
+   }
+   char named[AUDIO_METADATA_STRING_MAX * 2 + 2];
+   snprintf(named, sizeof(named), "%s %s", tracks[0].album,
+            artist && artist[0] ? artist : tracks[0].artist);
+   if (music_rank_field_quality(named, title) >= MUSIC_RANK_FIELD_MIN) {
+      return SUCCESS;
+   }
+   int best = 0;
+   for (int i = 0; i < count; i++) {
+      int q = music_rank_field_quality(tracks[i].title, title);
+      if (q > best) {
+         best = q;
+         *start_out = i;
+      }
+   }
+   return best > 0 ? SUCCESS : FAILURE;
+}
+
 /* play / enqueue album:'X': the whole album, replacing the queue (and
  * playing it) or appended */
 static int album_to_queue(music_player_t *player,
@@ -560,23 +592,24 @@ static int album_to_queue(music_player_t *player,
       return FAILURE;
    }
    strbuf_free(&reply);
-   /* Start at the track the query names best, unless it only repeats the album */
    int start = 0;
-   char ft[MUSIC_RANK_FOLD_MAX];
-   char fa[MUSIC_RANK_FOLD_MAX];
-   bool named = false;
-   if (title && title[0]) {
-      music_rank_album_key(title, NULL, ft, sizeof(ft));
-      music_rank_album_key(tracks[0].album, NULL, fa, sizeof(fa));
-      named = ft[0] && strcmp(ft, fa) != 0;
-   }
-   int best = MUSIC_RANK_FIELD_MIN - 1;
-   for (int i = 0; named && i < count; i++) {
-      int q = music_rank_field_quality(tracks[i].title, title);
-      if (q > best) {
-         best = q;
-         start = i;
+   if (album_start(tracks, count, title, f->artist, &start) != SUCCESS) {
+      /* A title the album doesn't have: say so rather than play track 1 */
+      if (result_out) {
+         char name[AUDIO_METADATA_STRING_MAX];
+         choice_text(tracks[0].album, name, sizeof(name));
+         strbuf_t sb;
+         strbuf_init(&sb, 256);
+         strbuf_appendf(&sb,
+                        TOOL_RESULT_ERROR_MARK "No track on the album '%s' matches '%s'. Nothing "
+                                               "changed.",
+                        name, title);
+         *result_out = strbuf_oom(&sb) ? strdup(TOOL_RESULT_ERROR_MARK "No track matched")
+                                       : strbuf_steal(&sb);
+         strbuf_free(&sb);
       }
+      free(tracks);
+      return FAILURE;
    }
 
    user_music_queue_t *uq = music_player_queue(player);

@@ -42,13 +42,15 @@
 #include "webui/webui_server.h"
 
 /** Albums an album name from an older client (no album_key) is looked up among */
-#define WEBUI_MUSIC_ALBUM_NAME_CHOICES 8
+#define WEBUI_MUSIC_ALBUM_NAME_CHOICES 16
 
 /*
- * The tracks of the album a request names, in order: album_key (an id an albums
- * browse sent), when it still names that album; else, as when a rescan or Plex
- * sync has changed the ids, or a client sends only a name, the album with that
- * exact name (artist narrows it; the largest when several), else the first found.
+ * The tracks of the album a request names, in order.  With a name (and the
+ * artist the albums browse sent), the album of that name and artist: the one
+ * album_key names when it still is one of them (keys change when the library is
+ * rescanned or Plex syncs), else the one whose album artist is the artist sent,
+ * else the largest named exactly, else the first found.  A request with only a
+ * key uses it as it is.
  */
 static void requested_album_tracks(struct json_object *payload,
                                    music_search_result_t *tracks,
@@ -56,40 +58,46 @@ static void requested_album_tracks(struct json_object *payload,
                                    int *count_out) {
    *count_out = 0;
    struct json_object *o;
+   int64_t key = json_object_object_get_ex(payload, "album_key", &o) ? json_object_get_int64(o) : 0;
    const char *name = json_object_object_get_ex(payload, "album", &o) ? json_object_get_string(o)
                                                                       : NULL;
-   if (json_object_object_get_ex(payload, "album_key", &o)) {
-      int64_t id = json_object_get_int64(o);
-      if (id > 0 && music_db_album_tracks(id, tracks, max, count_out) == SUCCESS &&
-          *count_out > 0) {
-         /* An id a rescan gave to another album: the name says which was meant */
-         char want[MUSIC_RANK_FOLD_MAX];
-         char got[MUSIC_RANK_FOLD_MAX];
-         music_rank_album_key(name, NULL, want, sizeof(want));
-         music_rank_album_key(tracks[0].album, NULL, got, sizeof(got));
-         if (!name || !name[0] || strcmp(want, got) == 0) {
-            return;
-         }
-         *count_out = 0;
-      }
-   }
    const char *artist = json_object_object_get_ex(payload, "artist", &o) ? json_object_get_string(o)
                                                                          : NULL;
-   music_album_choice_t c[WEBUI_MUSIC_ALBUM_NAME_CHOICES];
-   int n = 0;
-   if (!name || !name[0] ||
-       music_db_album_find(name, artist, c, WEBUI_MUSIC_ALBUM_NAME_CHOICES, 0, &n, NULL) !=
-           SUCCESS ||
-       n == 0) {
-      return;
-   }
-   int best = 0;
-   for (int i = 1; i < n && c[i].exact; i++) {
-      if (c[i].track_count > c[best].track_count) {
-         best = i;
+   int64_t id = key > 0 ? key : 0;
+   if (name && name[0]) {
+      music_album_choice_t c[WEBUI_MUSIC_ALBUM_NAME_CHOICES];
+      int n = 0;
+      if (music_db_album_find(name, artist, c, WEBUI_MUSIC_ALBUM_NAME_CHOICES, 0, &n, NULL) !=
+              SUCCESS ||
+          n == 0) {
+         return;
       }
+      char want[MUSIC_RANK_FOLD_MAX] = "";
+      if (artist && artist[0]) {
+         music_rank_fold(artist, want, sizeof(want));
+      }
+      int best = 0;
+      int pick = -1;
+      for (int i = 0; i < n && pick < 0; i++) {
+         if (key > 0 && c[i].id == key) {
+            pick = i;
+         }
+      }
+      for (int i = 0; i < n && pick < 0 && want[0]; i++) {
+         char got[MUSIC_RANK_FOLD_MAX];
+         music_rank_fold(c[i].artist, got, sizeof(got));
+         if (strcmp(got, want) == 0) {
+            pick = i;
+         }
+      }
+      for (int i = 1; i < n && c[i].exact; i++) {
+         if (c[i].track_count > c[best].track_count) {
+            best = i;
+         }
+      }
+      id = c[pick >= 0 ? pick : best].id;
    }
-   if (music_db_album_tracks(c[best].id, tracks, max, count_out) != SUCCESS) {
+   if (id <= 0 || music_db_album_tracks(id, tracks, max, count_out) != SUCCESS) {
       *count_out = 0;
    }
 }
