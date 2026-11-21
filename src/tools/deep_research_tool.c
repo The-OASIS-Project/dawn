@@ -62,6 +62,17 @@
  * per-pass ceiling). */
 #define DR_STATUS_MAX_QUESTIONS RESEARCH_MAX_LEDGER_QUESTIONS
 
+/* The brief length the tool description promises the model.  It is a round
+ * number of characters below the stored limit (RESEARCH_BRIEF_MAX bytes,
+ * including the NUL), so a brief written to it fits; start still refuses
+ * anything longer than the store holds, since non-ASCII text takes more bytes. */
+#define DR_BRIEF_DESCRIBED_MAX 2000
+_Static_assert(DR_BRIEF_DESCRIBED_MAX < RESEARCH_BRIEF_MAX,
+               "the described brief limit must fit in RESEARCH_BRIEF_MAX");
+#define DR_STR_(x) #x
+#define DR_STR(x) DR_STR_(x)
+#define DR_BRIEF_DESCRIBED_MAX_TEXT DR_STR(DR_BRIEF_DESCRIBED_MAX)
+
 /* --- start: propose (unconfirmed) or spawn (confirmed) --------------------- */
 
 /* Confirmation pending-proposal store: one proposal per session
@@ -250,8 +261,8 @@ static char *research_build_proposal(const char *brief, bool private_requested, 
    job_selection_of_spawner(&llm);
    const bool local = (job_provider_for(&llm) == JOB_PROVIDER_LOCAL);
 
-   /* Sized to hold a full-length brief (RESEARCH_BRIEF_MAX) plus the fixed prose,
-    * so a long brief is never silently truncated. */
+   /* Sized to hold a full-length brief (RESEARCH_BRIEF_MAX) plus the fixed prose;
+    * start refuses a longer brief, so the brief and the token are never cut off. */
    char out[RESEARCH_BRIEF_MAX + 768];
    int n = snprintf(
        out, sizeof(out),
@@ -492,6 +503,19 @@ static char *handle_start(struct json_object *details,
    if (memory_filter_check(brief)) {
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: that research brief was rejected by the safety filter.");
+   }
+   /* Refuse before staging: the stored proposal and the proposal text both hold
+    * at most RESEARCH_BRIEF_MAX - 1 bytes, and a longer brief would be cut there
+    * (the proposal would lose its confirm token). */
+   const size_t brief_len = strlen(brief);
+   if (brief_len >= RESEARCH_BRIEF_MAX) {
+      char msg[256];
+      snprintf(msg, sizeof(msg),
+               TOOL_RESULT_ERROR_MARK
+               "Error: the research brief is too long (%zu bytes; the limit is %d). Shorten the "
+               "brief and call deep_research start again.",
+               brief_len, RESEARCH_BRIEF_MAX - 1);
+      return strdup(msg);
    }
 
    /* mode is validated but P0 supports web only (private/both need the P2 egress
@@ -776,11 +800,12 @@ static const treg_param_t deep_research_params[] = {
            "JSON object of the action's arguments, passed as a JSON-encoded string.  "
            "Omit entirely for an action that takes no arguments; never fill it with a "
            "description or rationale.\n"
-           "start: {brief (required — the question/topic to research), mode ('web' (default), "
-           "'private', or 'both'; private/both are not available yet and run web-only), deliver_to "
-           "(optional messaging channel display_name for the completion notice)}. start only "
-           "proposes: it returns the plan + cost envelope and a pending_token; show the plan to "
-           "the user.\n"
+           "start: {brief (required — the question/topic to research, up to "
+           "about " DR_BRIEF_DESCRIBED_MAX_TEXT
+           " characters), mode ('web' (default), 'private', or "
+           "'both'; private/both are not available yet and run web-only), deliver_to (optional "
+           "messaging channel display_name for the completion notice)}. start only proposes: it "
+           "returns the plan + cost envelope and a pending_token; show the plan to the user.\n"
            "confirm_start: {pending_token (required — the token start returned)}. Call it only "
            "after the user agrees, in their reply to the proposal; the run uses the exact brief "
            "proposed. The token is single-use and expires in 10 minutes.\n"
