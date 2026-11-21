@@ -30,6 +30,7 @@
 
 #include "audio/music_db.h"
 #include "audio/music_open.h"
+#include "audio/music_rank.h"
 #include "audio/music_source.h"
 #include "core/path_utils.h"
 #include "core/strbuf.h"
@@ -39,6 +40,78 @@
 #include "utils/string_utils.h"
 #include "webui/webui_music_internal.h"
 #include "webui/webui_server.h"
+
+/** Albums an album name from an older client (no album_key) is looked up among */
+#define WEBUI_MUSIC_ALBUM_NAME_CHOICES 16
+
+/*
+ * The tracks of the album a request names, in order.  With a name (and the
+ * artist the albums browse sent), an album of exactly that name: the one
+ * album_key names when it still is one (keys change when the library is
+ * rescanned or Plex syncs), else the one whose album artist is the artist sent,
+ * else the largest.  None when no album has that name any more.  A request with
+ * only a key, or a name of punctuation only (no words to look up), uses the key.
+ */
+static void requested_album_tracks(struct json_object *payload,
+                                   music_search_result_t *tracks,
+                                   int max,
+                                   int *count_out) {
+   *count_out = 0;
+   struct json_object *o;
+   int64_t key = json_object_object_get_ex(payload, "album_key", &o) ? json_object_get_int64(o) : 0;
+   const char *name = json_object_object_get_ex(payload, "album", &o) ? json_object_get_string(o)
+                                                                      : NULL;
+   const char *artist = json_object_object_get_ex(payload, "artist", &o) ? json_object_get_string(o)
+                                                                         : NULL;
+   char name_key[MUSIC_RANK_FOLD_MAX] = "";
+   if (name) {
+      music_rank_album_key(name, NULL, name_key, sizeof(name_key));
+   }
+   int64_t id = key > 0 ? key : 0;
+   if (name_key[0]) {
+      music_album_choice_t c[WEBUI_MUSIC_ALBUM_NAME_CHOICES];
+      int n = 0;
+      if (music_db_album_find(name, artist, c, WEBUI_MUSIC_ALBUM_NAME_CHOICES, 0, &n, NULL) !=
+              SUCCESS ||
+          n == 0 || !c[0].exact) {
+         return;
+      }
+      char want[MUSIC_RANK_FOLD_MAX] = "";
+      if (artist && artist[0]) {
+         music_rank_fold(artist, want, sizeof(want));
+      }
+      /* Exact names sort first: only those are the album asked for */
+      int exact = 1;
+      while (exact < n && c[exact].exact) {
+         exact++;
+      }
+      int pick = -1;
+      for (int i = 0; i < exact && pick < 0; i++) {
+         if (key > 0 && c[i].id == key) {
+            pick = i;
+         }
+      }
+      for (int i = 0; i < exact && pick < 0 && want[0]; i++) {
+         char got[MUSIC_RANK_FOLD_MAX];
+         music_rank_fold(c[i].artist, got, sizeof(got));
+         if (strcmp(got, want) == 0) {
+            pick = i;
+         }
+      }
+      if (pick < 0) {
+         pick = 0;
+         for (int i = 1; i < exact; i++) {
+            if (c[i].track_count > c[pick].track_count) {
+               pick = i;
+            }
+         }
+      }
+      id = c[pick].id;
+   }
+   if (id <= 0 || music_db_album_tracks(id, tracks, max, count_out) != SUCCESS) {
+      *count_out = 0;
+   }
+}
 
 /* =============================================================================
  * Helpers
@@ -461,21 +534,19 @@ static void music_control_locked(ws_connection_t *conn,
       OLOG_INFO("WebUI music: Added %d tracks by '%s' to queue", added, artist_name);
 
    } else if (strcmp(action, "add_album") == 0) {
-      /* Add all tracks from an album to queue */
-      struct json_object *album_obj;
-      if (!json_object_object_get_ex(payload, "album", &album_obj)) {
+      /* Add all tracks from an album to queue, in order */
+      if (!json_object_object_get_ex(payload, "album_key", NULL) &&
+          !json_object_object_get_ex(payload, "album", NULL)) {
          webui_music_send_error(conn, "INVALID_REQUEST", "Missing album");
          return;
       }
-      const char *album_name = json_object_get_string(album_obj);
-
-      music_search_result_t *tracks = malloc(50 * sizeof(music_search_result_t));
+      music_search_result_t *tracks = malloc(MUSIC_QUEUE_MAX * sizeof(music_search_result_t));
       if (!tracks) {
          webui_music_send_error(conn, "MEMORY_ERROR", "Failed to allocate track list");
          return;
       }
       int count = 0;
-      music_db_get_by_album(album_name, tracks, 50, &count);
+      requested_album_tracks(payload, tracks, MUSIC_QUEUE_MAX, &count);
 
       pthread_mutex_lock(&uq->queue_mutex);
       int added = 0;
@@ -488,8 +559,9 @@ static void music_control_locked(ws_connection_t *conn,
       webui_music_send_state(conn, state);
       webui_music_broadcast_queue_state(uq, state->player);
 
+      OLOG_INFO("WebUI music: Added %d tracks from album '%s' to queue", added,
+                count > 0 ? tracks[0].album : "");
       free(tracks);
-      OLOG_INFO("WebUI music: Added %d tracks from album '%s' to queue", added, album_name);
 
    } else if (strcmp(action, "volume") == 0) {
       /* Set music volume for this session */
@@ -710,22 +782,22 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
       int limit, offset;
       parse_pagination(payload, &limit, &offset);
 
-      music_album_info_t *albums = malloc(limit * sizeof(music_album_info_t));
+      music_album_choice_t *albums = malloc(limit * sizeof(music_album_choice_t));
       if (!albums) {
          webui_music_send_error(conn, "MEMORY_ERROR", "Failed to allocate album list");
          json_object_put(response);
          return;
       }
       int count = 0;
-      music_db_list_albums_with_stats(albums, limit, offset, &count);
-
-      /* Include total count for pagination */
-      music_db_stats_t stats;
-      music_db_get_stats(&stats);
+      int total = 0;
+      music_db_album_find(NULL, NULL, albums, limit, offset, &count, &total);
 
       struct json_object *albums_arr = json_object_new_array();
       for (int i = 0; i < count; i++) {
          struct json_object *album = json_object_new_object();
+         char key[24];
+         snprintf(key, sizeof(key), "%lld", (long long)albums[i].id);
+         json_object_object_add(album, "key", json_object_new_string(key));
          json_object_object_add(album, "name", json_object_new_string(albums[i].name));
          json_object_object_add(album, "artist", json_object_new_string(albums[i].artist));
          json_object_object_add(album, "track_count", json_object_new_int(albums[i].track_count));
@@ -733,7 +805,7 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
       }
       json_object_object_add(resp_payload, "albums", albums_arr);
       json_object_object_add(resp_payload, "count", json_object_new_int(count));
-      json_object_object_add(resp_payload, "total_count", json_object_new_int(stats.album_count));
+      json_object_object_add(resp_payload, "total_count", json_object_new_int(total));
       json_object_object_add(resp_payload, "offset", json_object_new_int(offset));
       free(albums);
 
@@ -772,23 +844,26 @@ void handle_music_library(ws_connection_t *conn, struct json_object *payload) {
       free(tracks);
 
    } else if (strcmp(browse_type, "tracks_by_album") == 0) {
-      /* Get tracks for a specific album */
-      struct json_object *album_obj;
-      if (!json_object_object_get_ex(payload, "album", &album_obj)) {
+      /* Get an album's tracks, in order */
+      struct json_object *album_obj = NULL;
+      json_object_object_get_ex(payload, "album", &album_obj);
+      if (!album_obj && !json_object_object_get_ex(payload, "album_key", NULL)) {
          webui_music_send_error(conn, "INVALID_REQUEST", "Missing album name");
          json_object_put(response);
          return;
       }
-      const char *album_name = json_object_get_string(album_obj);
-
-      music_search_result_t *tracks = malloc(50 * sizeof(music_search_result_t));
+      music_search_result_t *tracks = malloc(MUSIC_QUEUE_MAX * sizeof(music_search_result_t));
       if (!tracks) {
          webui_music_send_error(conn, "MEMORY_ERROR", "Failed to allocate track list");
          json_object_put(response);
          return;
       }
       int count = 0;
-      music_db_get_by_album(album_name, tracks, 50, &count);
+      requested_album_tracks(payload, tracks, MUSIC_QUEUE_MAX, &count);
+      const char *album_name = album_obj ? json_object_get_string(album_obj) : NULL;
+      if (!album_name || !album_name[0]) {
+         album_name = count > 0 ? tracks[0].album : "";
+      }
 
       struct json_object *tracks_arr = json_object_new_array();
       for (int i = 0; i < count; i++) {

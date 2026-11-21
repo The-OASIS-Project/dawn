@@ -66,6 +66,9 @@ typedef struct {
    char album[AUDIO_METADATA_STRING_MAX];
    char genre[AUDIO_METADATA_STRING_MAX];
    char rating_key[32];
+   char album_id[48]; /* "plex:<parentRatingKey>", empty when unknown */
+   uint32_t track_no;
+   uint32_t disc_no;
    uint32_t duration_sec;
    uint32_t year;
    time_t updated_at;
@@ -140,8 +143,8 @@ static int bulk_insert_tracks(plex_track_t *tracks, int count, int *inserted_out
    static const char *SQL_UPSERT =
        "INSERT OR REPLACE INTO music_metadata "
        "(path, mtime, title, artist, album, genre, duration_sec, source, rating_key, sync_gen, "
-       "year) "
-       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+       "year, album_id, track_no, disc_no) "
+       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
    sqlite3_stmt *stmt = NULL;
    int rc = sqlite3_prepare_v2(g_plex_db, SQL_UPSERT, -1, &stmt, NULL);
@@ -178,6 +181,17 @@ static int bulk_insert_tracks(plex_track_t *tracks, int count, int *inserted_out
       } else {
          sqlite3_bind_null(stmt, 11);
       }
+      sqlite3_bind_text(stmt, 12, t->album_id[0] ? t->album_id : NULL, -1, SQLITE_STATIC);
+      if (t->track_no) {
+         sqlite3_bind_int(stmt, 13, (int)t->track_no);
+      } else {
+         sqlite3_bind_null(stmt, 13);
+      }
+      if (t->disc_no) {
+         sqlite3_bind_int(stmt, 14, (int)t->disc_no);
+      } else {
+         sqlite3_bind_null(stmt, 14);
+      }
 
       rc = sqlite3_step(stmt);
       if (rc == SQLITE_DONE) {
@@ -208,6 +222,7 @@ static int bulk_insert_tracks(plex_track_t *tracks, int count, int *inserted_out
       OLOG_WARNING("Plex sync: stale deletion error: %s", err_msg);
       sqlite3_free(err_msg);
    }
+   music_db_library_changed();
 
    pthread_mutex_unlock(&g_plex_db_mutex);
    if (inserted_out)
@@ -373,6 +388,14 @@ static int plex_sync(void) {
             safe_copy(t->artist, sizeof(t->artist), json_str(item, "artist"));
             safe_copy(t->album, sizeof(t->album), json_str(item, "album"));
             safe_copy(t->rating_key, sizeof(t->rating_key), json_str(item, "rating_key"));
+            const char *album_key = json_str(item, "album_key");
+            if (album_key[0]) {
+               snprintf(t->album_id, sizeof(t->album_id), "plex:%s", album_key);
+            }
+            int track_no = json_int(item, "track_no");
+            int disc_no = json_int(item, "disc_no");
+            t->track_no = track_no > 0 ? (uint32_t)track_no : 0;
+            t->disc_no = disc_no > 0 ? (uint32_t)disc_no : 0;
 
             const char *genre = json_str(item, "genre");
             if (genre[0])

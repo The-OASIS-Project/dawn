@@ -140,13 +140,16 @@ typedef struct {
  * because metadata parsing may be slower and not always needed.
  */
 typedef struct {
-   char title[AUDIO_METADATA_STRING_MAX];  /**< Track title (e.g., "Time") */
-   char artist[AUDIO_METADATA_STRING_MAX]; /**< Artist name (e.g., "Pink Floyd") */
-   char album[AUDIO_METADATA_STRING_MAX];  /**< Album name (e.g., "Dark Side of the Moon") */
-   char genre[AUDIO_GENRE_STRING_MAX];     /**< Genre (e.g., "Rock"); comma-joined if multiple */
-   uint32_t year;                          /**< Release year (0 if unknown) */
-   uint32_t duration_sec;                  /**< Duration in seconds (0 if unknown) */
-   bool has_metadata;                      /**< True if any tag metadata was found */
+   char title[AUDIO_METADATA_STRING_MAX];        /**< Track title (e.g., "Time") */
+   char artist[AUDIO_METADATA_STRING_MAX];       /**< Artist name (e.g., "Pink Floyd") */
+   char album[AUDIO_METADATA_STRING_MAX];        /**< Album name (e.g., "Dark Side of the Moon") */
+   char album_artist[AUDIO_METADATA_STRING_MAX]; /**< Album artist tag (empty if none) */
+   char genre[AUDIO_GENRE_STRING_MAX]; /**< Genre (e.g., "Rock"); comma-joined if multiple */
+   uint32_t year;                      /**< Release year (0 if unknown) */
+   uint32_t track_no;                  /**< Track number on its disc (0 if unknown) */
+   uint32_t disc_no;                   /**< Disc number (0 if unknown) */
+   uint32_t duration_sec;              /**< Duration in seconds (0 if unknown) */
+   bool has_metadata;                  /**< True if any tag metadata was found */
 } audio_metadata_t;
 
 /* =============================================================================
@@ -271,6 +274,24 @@ uint32_t audio_metadata_parse_year(const char *s);
  * @param genre    Genre value to add (ignored if NULL/empty)
  */
 void audio_metadata_append_genre(audio_metadata_t *metadata, const char *genre);
+
+/**
+ * @brief The leading number of a track or disc tag ("3", "3/12", " 03 ")
+ *
+ * @return The number, or 0 if the value doesn't start with one
+ */
+uint32_t audio_metadata_parse_number(const char *s);
+
+/**
+ * @brief Take one Vorbis comment ("KEY=VALUE", key case-insensitive) into
+ *        @p metadata: TITLE, ARTIST, ALBUM, ALBUMARTIST ("ALBUM ARTIST",
+ *        "ALBUM_ARTIST"), GENRE (repeats comma-join), DATE (wins over YEAR),
+ *        YEAR, TRACKNUMBER, DISCNUMBER.  FLAC and Ogg Vorbis both carry them.
+ *
+ * @param entry The comment (not necessarily NUL-terminated)
+ * @param len Its length in bytes
+ */
+void audio_metadata_take_vorbis_comment(audio_metadata_t *metadata, const char *entry, size_t len);
 
 /* =============================================================================
  * Utility Functions

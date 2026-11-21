@@ -425,9 +425,14 @@ int ws_client_send_music_seek(ws_client_t *client, float position_sec);
  * @param type Browse type ("stats", "tracks", "artists", "albums",
  *             "tracks_by_artist", "tracks_by_album")
  * @param filter Filter value (artist name, album name, or NULL)
+ * @param artist For "tracks_by_album": the album's artist, as the albums browse
+ *               sent it (tells same-named albums apart; NULL if unknown)
  * @return 0 on success, -1 on failure
  */
-int ws_client_send_music_library(ws_client_t *client, const char *type, const char *filter);
+int ws_client_send_music_library(ws_client_t *client,
+                                 const char *type,
+                                 const char *filter,
+                                 const char *artist);
 
 /**
  * @brief Send paginated music library browse request
@@ -465,9 +470,14 @@ int ws_client_send_music_queue(ws_client_t *client,
  * @param client Client context
  * @param action "add_artist" or "add_album"
  * @param name Artist or album name
+ * @param artist For "add_album": the album's artist, as the albums browse sent it
+ *               (NULL if unknown)
  * @return 0 on success, -1 on failure
  */
-int ws_client_send_music_queue_bulk(ws_client_t *client, const char *action, const char *name);
+int ws_client_send_music_queue_bulk(ws_client_t *client,
+                                    const char *action,
+                                    const char *name,
+                                    const char *artist);
 
 /**
  * @brief Get session token received from daemon during registration

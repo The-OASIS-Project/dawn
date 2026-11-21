@@ -72,6 +72,7 @@ typedef enum {
 
 typedef struct {
    char name[MUSIC_MAX_TITLE];
+   char artist[MUSIC_MAX_ARTIST]; /* albums only: the album artist */
    int track_count;
    int album_count; /* artists only */
 } music_browse_item_t;

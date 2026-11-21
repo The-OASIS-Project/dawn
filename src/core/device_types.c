@@ -131,6 +131,17 @@ const device_type_def_t DEVICE_TYPE_MUSIC = {
          .pattern_count = 5,
       },
       {
+         /* Before "play": its patterns would take these as a track search */
+         .name = "play_album",
+         .patterns = {
+            "play the album %value%",
+            "play album %value%",
+            "play me the album %value%",
+            "can you play the album %value%",
+         },
+         .pattern_count = 4,
+      },
+      {
          .name = "play",
          .patterns = {
             "play %value%",
@@ -151,7 +162,7 @@ const device_type_def_t DEVICE_TYPE_MUSIC = {
          .pattern_count = 4,
       },
    },
-   .action_count = 4,
+   .action_count = 5,
 };
 
 /* ========== Trigger Device Type ========== */

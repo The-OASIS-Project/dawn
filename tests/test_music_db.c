@@ -31,6 +31,7 @@
 
 #include "audio/audio_decoder.h"
 #include "audio/music_db.h"
+#include "audio/music_db_internal.h"
 #include "audio/music_rank.h"
 #include "audio/music_source.h"
 #include "dawn_error.h"
@@ -124,6 +125,7 @@ static void insert_track(const char *path,
 /** Clear all rows between test groups */
 static void clear_tracks(void) {
    sqlite3_exec(g_test_db, "DELETE FROM music_metadata", NULL, NULL, NULL);
+   music_db_library_changed();
 }
 
 /** Free-text search through the ranked query core (strict). */
@@ -203,6 +205,372 @@ static void test_schema_migration_idempotent(void) {
    int rc = music_db_init(g_db_path);
    TEST_ASSERT_TRUE_MESSAGE(rc == 0, "Second init on same DB succeeds");
    TEST_ASSERT_TRUE_MESSAGE(music_db_is_initialized() == true, "DB initialized after second init");
+}
+
+/* A track's album copy is its folder; a disc folder is its album's */
+static void check_folder(const char *path, const char *want, uint32_t want_disc) {
+   char out[512];
+   uint32_t disc = 99;
+   music_db_album_folder(path, out, sizeof(out), &disc);
+   TEST_ASSERT_EQUAL_STRING_MESSAGE(want, out, path);
+   TEST_ASSERT_EQUAL_UINT32_MESSAGE(want_disc, disc, path);
+}
+
+static void test_album_folder(void) {
+   check_folder("/m/Artist/Album/01 One.flac", "/m/Artist/Album", 0);
+   check_folder("/m/Artist/Album/Disc 2/01 One.flac", "/m/Artist/Album", 2);
+   check_folder("/m/Artist/Album/CD1/01 One.flac", "/m/Artist/Album", 1);
+   check_folder("/m/Artist/Album/disk_3/01 One.flac", "/m/Artist/Album", 3);
+   check_folder("/m/BTTF (Complete Score) - Disc 1/01 Main.mp3", "/m/BTTF (Complete Score)", 1);
+   check_folder("/m/MHA 2nd OST [Disk 2]/01 A.flac", "/m/MHA 2nd OST", 2);
+   check_folder("/m/Abbey Road (CD 1)/01 A.flac", "/m/Abbey Road", 1);
+   /* Numbers that aren't discs */
+   check_folder("/m/Blink-182/Enema/01 A.flac", "/m/Blink-182/Enema", 0);
+   check_folder("/m/Album (Remastered 2003)/01 A.flac", "/m/Album (Remastered 2003)", 0);
+   check_folder("/m/Iron Man 2/01 A.flac", "/m/Iron Man 2", 0);
+   check_folder("/m/NCD 3/01 A.flac", "/m/NCD 3", 0);
+   check_folder("nofolder.flac", "", 0);
+}
+
+/* The scan's write stores the album copy, album artist and numbers; a disc the
+ * folder names wins over the tag, and unknown numbers are NULL */
+static void test_insert_stores_album_identity(void) {
+   clear_tracks();
+   audio_metadata_t meta;
+   memset(&meta, 0, sizeof(meta));
+   strcpy(meta.title, "Three");
+   strcpy(meta.album, "Album");
+   strcpy(meta.album_artist, "Band");
+   meta.track_no = 3;
+   meta.disc_no = 1;
+   pthread_mutex_lock(&g_music_db_mutex);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_insert_track("/m/Band/Album/Disc 2/03.flac", 1, &meta));
+   meta.track_no = 0;
+   meta.disc_no = 0;
+   meta.album_artist[0] = '\0';
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_insert_track("/m/Band/Other/01.flac", 1, &meta));
+   pthread_mutex_unlock(&g_music_db_mutex);
+
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(g_test_db,
+                      "SELECT album_id, album_artist, track_no, disc_no FROM music_metadata "
+                      "ORDER BY path",
+                      -1, &st, NULL);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_STRING("/m/Band/Album", (const char *)sqlite3_column_text(st, 0));
+   TEST_ASSERT_EQUAL_STRING("Band", (const char *)sqlite3_column_text(st, 1));
+   TEST_ASSERT_EQUAL_INT(3, sqlite3_column_int(st, 2));
+   TEST_ASSERT_EQUAL_INT(2, sqlite3_column_int(st, 3));
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_STRING("/m/Band/Other", (const char *)sqlite3_column_text(st, 0));
+   TEST_ASSERT_EQUAL_INT(SQLITE_NULL, sqlite3_column_type(st, 1));
+   TEST_ASSERT_EQUAL_INT(SQLITE_NULL, sqlite3_column_type(st, 2));
+   TEST_ASSERT_EQUAL_INT(SQLITE_NULL, sqlite3_column_type(st, 3));
+   sqlite3_finalize(st);
+   clear_tracks();
+}
+
+/* An older database gets its local rows' album copies at once */
+static void test_migration_fills_album_folders(void) {
+   clear_tracks();
+   insert_track("/music/A/Album/Disc 1/01.flac", "One", "A", "Album", NULL, MUSIC_SOURCE_LOCAL,
+                100);
+   insert_track("plex:/library/parts/1/x.flac", "One", "A", "Album", NULL, MUSIC_SOURCE_PLEX, 100);
+   sqlite3_exec(g_test_db, "UPDATE music_metadata SET album_id = NULL; PRAGMA user_version = 1",
+                NULL, NULL, NULL);
+   music_db_cleanup();
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_init(g_db_path));
+
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(g_test_db, "SELECT album_id FROM music_metadata ORDER BY source", -1, &st,
+                      NULL);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_STRING("/music/A/Album", (const char *)sqlite3_column_text(st, 0));
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_NULL(sqlite3_column_text(st, 0)); /* Plex fills on its sync */
+   sqlite3_finalize(st);
+   sqlite3_prepare_v2(g_test_db, "PRAGMA user_version", -1, &st, NULL);
+   TEST_ASSERT_EQUAL_INT(SQLITE_ROW, sqlite3_step(st));
+   TEST_ASSERT_EQUAL_INT(2, sqlite3_column_int(st, 0));
+   sqlite3_finalize(st);
+   clear_tracks();
+}
+
+/* =============================================================================
+ * Albums: copies grouped into albums, a copy's tracks in order
+ * ============================================================================= */
+
+/** Insert a row with its album identity (NULL / 0 = unknown) */
+static void add_album_track(const char *path,
+                            const char *title,
+                            const char *artist,
+                            const char *album,
+                            const char *album_id,
+                            const char *album_artist,
+                            int track_no,
+                            int disc_no,
+                            int source) {
+   const char *sql = "INSERT INTO music_metadata (path, mtime, title, artist, album, source, "
+                     "duration_sec, album_id, album_artist, track_no, disc_no) "
+                     "VALUES (?, 1000, ?, ?, ?, ?, 200, ?, ?, ?, ?)";
+   sqlite3_stmt *st = NULL;
+   sqlite3_prepare_v2(g_test_db, sql, -1, &st, NULL);
+   sqlite3_bind_text(st, 1, path, -1, SQLITE_STATIC);
+   sqlite3_bind_text(st, 2, title, -1, SQLITE_STATIC);
+   sqlite3_bind_text(st, 3, artist, -1, SQLITE_STATIC);
+   sqlite3_bind_text(st, 4, album, -1, SQLITE_STATIC);
+   sqlite3_bind_int(st, 5, source);
+   sqlite3_bind_text(st, 6, album_id, -1, SQLITE_STATIC);
+   sqlite3_bind_text(st, 7, album_artist, -1, SQLITE_STATIC);
+   if (track_no) {
+      sqlite3_bind_int(st, 8, track_no);
+   }
+   if (disc_no) {
+      sqlite3_bind_int(st, 9, disc_no);
+   }
+   TEST_ASSERT_EQUAL_INT(SQLITE_DONE, sqlite3_step(st));
+   sqlite3_finalize(st);
+   music_db_library_changed();
+}
+
+static int find_albums(const char *album,
+                       const char *artist,
+                       music_album_choice_t *out,
+                       int max,
+                       int *total) {
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_album_find(album, artist, out, max, 0, &count, total));
+   return count;
+}
+
+/* Same name by different artists: two albums; an artist narrows to one */
+static void test_album_find_same_name_artists(void) {
+   clear_tracks();
+   const int L = MUSIC_SOURCE_LOCAL;
+   add_album_track("/m/mp3/Tom Petty/Greatest Hits/01.mp3", "Free Fallin'", "Tom Petty",
+                   "Greatest Hits", "/m/mp3/Tom Petty/Greatest Hits", "Tom Petty", 1, 1, L);
+   add_album_track("/m/mp3/Tom Petty/Greatest Hits/02.mp3", "Refugee", "Tom Petty", "Greatest Hits",
+                   "/m/mp3/Tom Petty/Greatest Hits", "Tom Petty", 2, 1, L);
+   add_album_track("/m/flac/Tom Petty/Greatest Hits/01.flac", "Free Fallin'", "Tom Petty",
+                   "Greatest Hits (Remastered)", "/m/flac/Tom Petty/Greatest Hits", "Tom Petty", 1,
+                   0, L);
+   add_album_track("/m/Queen/Greatest Hits/01.flac", "Bohemian Rhapsody", "Queen", "Greatest Hits",
+                   "/m/Queen/Greatest Hits", NULL, 1, 0, L);
+
+   music_album_choice_t a[8];
+   int total = 0;
+   TEST_ASSERT_EQUAL_INT(2, find_albums("Greatest Hits", NULL, a, 8, &total));
+   TEST_ASSERT_EQUAL_INT(2, total);
+   TEST_ASSERT_TRUE(a[0].exact);
+   TEST_ASSERT_TRUE(a[1].exact);
+   TEST_ASSERT_EQUAL_STRING("Queen", a[0].artist);
+   TEST_ASSERT_EQUAL_INT(1, a[0].copies);
+   TEST_ASSERT_EQUAL_STRING("Tom Petty", a[1].artist);
+   TEST_ASSERT_EQUAL_INT(2, a[1].copies);
+   TEST_ASSERT_EQUAL_INT(2, a[1].track_count); /* the copy with the most tracks */
+   TEST_ASSERT_EQUAL_INT(1, a[1].first_track);
+   TEST_ASSERT_EQUAL_INT(2, a[1].last_track);
+   TEST_ASSERT_EQUAL_STRING("Greatest Hits", a[1].name);
+
+   TEST_ASSERT_EQUAL_INT(1, find_albums("Greatest Hits", "Queen", a, 8, NULL));
+   TEST_ASSERT_EQUAL_STRING("Queen", a[0].artist);
+
+   /* Paging */
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS,
+                         music_db_album_find("Greatest Hits", NULL, a, 1, 1, &count, &total));
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT(2, total);
+   TEST_ASSERT_EQUAL_STRING("Tom Petty", a[0].artist);
+   clear_tracks();
+}
+
+/* Local and Plex copies of one album are one album; the album artist without a
+ * tag is the most common track artist; a sequel is its own album, the exact name
+ * first */
+static void test_album_find_copies_and_sequels(void) {
+   clear_tracks();
+   const int L = MUSIC_SOURCE_LOCAL;
+   const int P = MUSIC_SOURCE_PLEX;
+   add_album_track("/m/Iron Man/01.flac", "Driving With The Top Down", "Ramin Djawadi", "Iron Man",
+                   "/m/Iron Man", NULL, 1, 0, L);
+   add_album_track("/m/Iron Man/02.flac", "Merchant Of Death", "Ramin Djawadi", "Iron Man",
+                   "/m/Iron Man", NULL, 2, 0, L);
+   add_album_track("/m/Iron Man/03.flac", "Iron Man", "Black Sabbath", "Iron Man", "/m/Iron Man",
+                   NULL, 3, 0, L);
+   add_album_track("plex:/library/parts/1/a.flac", "Driving With The Top Down", "Ramin Djawadi",
+                   "Iron Man", "plex:100", NULL, 1, 1, P);
+   add_album_track("plex:/library/parts/2/b.flac", "Merchant Of Death", "Ramin Djawadi", "Iron Man",
+                   "plex:100", NULL, 2, 1, P);
+   add_album_track("/m/Iron Man 2/01.flac", "Shoot To Thrill", "AC/DC", "Iron Man 2",
+                   "/m/Iron Man 2", NULL, 1, 0, L);
+
+   music_album_choice_t a[8];
+   TEST_ASSERT_EQUAL_INT(2, find_albums("Iron Man", NULL, a, 8, NULL));
+   TEST_ASSERT_EQUAL_STRING("Iron Man", a[0].name);
+   TEST_ASSERT_TRUE(a[0].exact);
+   TEST_ASSERT_EQUAL_STRING("Ramin Djawadi", a[0].artist);
+   TEST_ASSERT_EQUAL_INT(2, a[0].copies);
+   TEST_ASSERT_EQUAL_INT(3, a[0].track_count);
+   TEST_ASSERT_EQUAL_INT(L, a[0].source);
+   TEST_ASSERT_EQUAL_STRING("Iron Man 2", a[1].name);
+   TEST_ASSERT_FALSE(a[1].exact);
+
+   /* A track artist on the album finds it too */
+   TEST_ASSERT_EQUAL_INT(1, find_albums("Iron Man", "Black Sabbath", a, 8, NULL));
+   TEST_ASSERT_EQUAL_STRING("Iron Man", a[0].name);
+   clear_tracks();
+}
+
+/* A blank album artist and "Various Artists" are the same; equal copies play
+ * the local one; rows without an album copy are skipped */
+static void test_album_find_various_and_ties(void) {
+   clear_tracks();
+   add_album_track("plex:/library/parts/3/c.flac", "Main Title", "Various Artists", "Warcraft III",
+                   "plex:200", NULL, 1, 1, MUSIC_SOURCE_PLEX);
+   add_album_track("/m/Warcraft III/01.flac", "Main Title", NULL, "Warcraft III", "/m/Warcraft III",
+                   NULL, 1, 0, MUSIC_SOURCE_LOCAL);
+   add_album_track("/m/loose.flac", "Main Title", NULL, "Warcraft III", NULL, NULL, 0, 0,
+                   MUSIC_SOURCE_LOCAL);
+   add_album_track("/m/Warcraft III/untagged.flac", "Untagged", NULL, NULL, "/m/Warcraft III", NULL,
+                   0, 0, MUSIC_SOURCE_LOCAL);
+
+   music_album_choice_t a[4];
+   TEST_ASSERT_EQUAL_INT(1, find_albums("warcraft", NULL, a, 4, NULL));
+   TEST_ASSERT_EQUAL_INT(2, a[0].copies);
+   TEST_ASSERT_EQUAL_INT(MUSIC_SOURCE_LOCAL, a[0].source);
+   TEST_ASSERT_EQUAL_INT(1, a[0].track_count);
+   TEST_ASSERT_EQUAL_INT(0, find_albums("Nothing Like This", NULL, a, 4, NULL));
+   TEST_ASSERT_EQUAL_INT(1, find_albums(NULL, NULL, a, 4, NULL)); /* no blank album */
+   clear_tracks();
+}
+
+/* A folder holding several albums holds a copy of each; a trailing " - <artist>"
+ * named in the request is still the exact name */
+static void test_album_find_flat_folder(void) {
+   clear_tracks();
+   const char *dir = "/m/Tom Petty";
+   const int L = MUSIC_SOURCE_LOCAL;
+   add_album_track("/m/Tom Petty/a.mp3", "Refugee", "Tom Petty", "Damn The Torpedoes", dir, NULL, 1,
+                   0, L);
+   add_album_track("/m/Tom Petty/b.mp3", "Here Comes My Girl", "Tom Petty", "Damn The Torpedoes",
+                   dir, NULL, 2, 0, L);
+   add_album_track("/m/Tom Petty/c.mp3", "Free Fallin'", "Tom Petty", "Greatest Hits - Tom Petty",
+                   dir, NULL, 1, 0, L);
+
+   music_album_choice_t a[4];
+   TEST_ASSERT_EQUAL_INT(1, find_albums("Greatest Hits", NULL, a, 4, NULL));
+   TEST_ASSERT_EQUAL_STRING("Greatest Hits - Tom Petty", a[0].name);
+   TEST_ASSERT_EQUAL_INT(1, a[0].track_count);
+   music_search_result_t t[4];
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_album_tracks(a[0].id, t, 4, &count));
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_STRING("Free Fallin'", t[0].title);
+
+   TEST_ASSERT_EQUAL_INT(1, find_albums("Greatest Hits - Tom Petty", "Tom Petty", a, 4, NULL));
+   TEST_ASSERT_TRUE(a[0].exact);
+   /* Asked for by its tag alone, without an artist */
+   TEST_ASSERT_EQUAL_INT(1, find_albums("Greatest Hits - Tom Petty", NULL, a, 4, NULL));
+   TEST_ASSERT_TRUE(a[0].exact);
+
+   TEST_ASSERT_EQUAL_INT(1, find_albums("Damn The Torpedoes", NULL, a, 4, NULL));
+   TEST_ASSERT_EQUAL_INT(2, a[0].track_count);
+   clear_tracks();
+}
+
+/* A folder holding each track twice (FLAC and MP3) counts and plays it once;
+ * another copy of the album keeps its own tracks */
+static void test_album_same_folder_formats(void) {
+   clear_tracks();
+   const int L = MUSIC_SOURCE_LOCAL;
+   add_album_track("/m/flac/A/01.flac", "One", "Band", "Album", "/m/flac/A", NULL, 1, 0, L);
+   add_album_track("/m/flac/A/01.mp3", "One", "Band", "Album", "/m/flac/A", NULL, 1, 0, L);
+   add_album_track("/m/flac/A/02.flac", "Two", "Band", "Album", "/m/flac/A", NULL, 2, 0, L);
+   add_album_track("/m/flac/A/02.mp3", "Two", "Band", "Album", "/m/flac/A", NULL, 2, 0, L);
+   add_album_track("/m/mp3/A/01.mp3", "One", "Band", "Album", "/m/mp3/A", NULL, 1, 0, L);
+
+   music_album_choice_t a[2];
+   TEST_ASSERT_EQUAL_INT(1, find_albums("Album", NULL, a, 2, NULL));
+   TEST_ASSERT_EQUAL_INT(2, a[0].copies);
+   TEST_ASSERT_EQUAL_INT(2, a[0].track_count);
+   music_search_result_t t[8];
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_album_tracks(a[0].id, t, 8, &count));
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_STRING("One", t[0].title);
+   TEST_ASSERT_EQUAL_STRING("Two", t[1].title);
+
+   /* A title on two discs of one copy is two tracks */
+   add_album_track("/m/flac/A/Disc 2/01.flac", "One", "Band", "Album", "/m/flac/A", NULL, 1, 2, L);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_album_tracks(a[0].id, t, 8, &count));
+   TEST_ASSERT_EQUAL_INT(3, count);
+   clear_tracks();
+}
+
+/* A browse is kept for the next page and rebuilt once the library changes */
+static void test_album_browse_cache(void) {
+   clear_tracks();
+   add_album_track("/m/A/01.flac", "One", "Band", "Alpha", "/m/A", NULL, 1, 0, MUSIC_SOURCE_LOCAL);
+   music_album_choice_t a[4];
+   int total = 0;
+   TEST_ASSERT_EQUAL_INT(1, find_albums(NULL, NULL, a, 4, &total));
+
+   /* A write behind the module's back isn't seen until it's announced */
+   sqlite3_exec(g_test_db,
+                "INSERT INTO music_metadata (path, mtime, title, artist, album, source, album_id) "
+                "VALUES ('/m/B/01.flac', 1, 'Two', 'Band', 'Beta', 0, '/m/B')",
+                NULL, NULL, NULL);
+   TEST_ASSERT_EQUAL_INT(1, find_albums(NULL, NULL, a, 4, &total));
+   music_db_library_changed();
+   TEST_ASSERT_EQUAL_INT(2, find_albums(NULL, NULL, a, 4, &total));
+   TEST_ASSERT_EQUAL_INT(2, total);
+
+   /* The scan's write announces itself; paging reads the kept list */
+   audio_metadata_t meta;
+   memset(&meta, 0, sizeof(meta));
+   strcpy(meta.title, "Three");
+   strcpy(meta.album, "Gamma");
+   pthread_mutex_lock(&g_music_db_mutex);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_insert_track("/m/C/01.flac", 1, &meta));
+   pthread_mutex_unlock(&g_music_db_mutex);
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_album_find(NULL, NULL, a, 1, 2, &count, &total));
+   TEST_ASSERT_EQUAL_INT(1, count);
+   TEST_ASSERT_EQUAL_INT(3, total);
+   TEST_ASSERT_EQUAL_STRING("Gamma", a[0].name);
+   clear_tracks();
+}
+
+/* A copy plays by disc, then track number (unknown last), then path; an unknown
+ * disc is disc 1 */
+static void test_album_tracks_order(void) {
+   clear_tracks();
+   const char *id = "/m/BTTF";
+   const int L = MUSIC_SOURCE_LOCAL;
+   add_album_track("/m/BTTF - Disc 2/01.mp3", "D2T1", "Alan Silvestri", "BTTF", id, NULL, 1, 2, L);
+   add_album_track("/m/BTTF - Disc 1/02.mp3", "D1T2", "Alan Silvestri", "BTTF", id, NULL, 2, 1, L);
+   add_album_track("/m/BTTF - Disc 1/zz.mp3", "D1UN", "Alan Silvestri", "BTTF", id, NULL, 0, 1, L);
+   add_album_track("/m/BTTF - Disc 1/01.mp3", "D1T1", "Alan Silvestri", "BTTF", id, NULL, 1, 0, L);
+   add_album_track("/m/Other/01.mp3", "Other", "Someone", "Other", "/m/Other", NULL, 1, 0, L);
+
+   music_album_choice_t a[2];
+   TEST_ASSERT_EQUAL_INT(1, find_albums("BTTF", NULL, a, 2, NULL));
+   music_search_result_t t[8];
+   int count = -1;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_album_tracks(a[0].id, t, 8, &count));
+   TEST_ASSERT_EQUAL_INT(4, count);
+   TEST_ASSERT_EQUAL_STRING("D1T1", t[0].title);
+   TEST_ASSERT_EQUAL_STRING("D1T2", t[1].title);
+   TEST_ASSERT_EQUAL_STRING("D1UN", t[2].title);
+   TEST_ASSERT_EQUAL_STRING("D2T1", t[3].title);
+
+   /* Capped, and an id no longer in the library gives nothing */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_album_tracks(a[0].id, t, 2, &count));
+   TEST_ASSERT_EQUAL_INT(2, count);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_db_album_tracks(999999, t, 8, &count));
+   TEST_ASSERT_EQUAL_INT(0, count);
+   clear_tracks();
 }
 
 /* =============================================================================
@@ -1149,6 +1517,16 @@ int main(void) {
    RUN_TEST(test_source_from_path);
    RUN_TEST(test_init_cleanup);
    RUN_TEST(test_schema_migration_idempotent);
+   RUN_TEST(test_album_folder);
+   RUN_TEST(test_insert_stores_album_identity);
+   RUN_TEST(test_migration_fills_album_folders);
+   RUN_TEST(test_album_find_same_name_artists);
+   RUN_TEST(test_album_find_copies_and_sequels);
+   RUN_TEST(test_album_find_various_and_ties);
+   RUN_TEST(test_album_find_flat_folder);
+   RUN_TEST(test_album_same_folder_formats);
+   RUN_TEST(test_album_browse_cache);
+   RUN_TEST(test_album_tracks_order);
    RUN_TEST(test_search_basic);
    RUN_TEST(test_search_by_title);
    RUN_TEST(test_search_by_album);

@@ -75,6 +75,10 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Indexed search across metadata fields (including genre) with LIKE escaping
    - Incremental scanning with source-scoped stale deletion
    - Automatic cleanup of deleted files (per-source)
+   - Album identity per row: `album_id` names the copy a track belongs to (a local album folder,
+     a trailing "Disc N" / "CD1" folder or " - Disc 1" suffix counted as its album's, or
+     `plex:<album key>`), with `album_artist`, `track_no` and `disc_no` from the tags (a disc
+     number in the folder name wins over the tag)
 
 - **music_source.c/h**: Music source abstraction layer
    - `music_source_provider_t` callback interface for pluggable sources

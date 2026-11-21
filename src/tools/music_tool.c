@@ -59,6 +59,9 @@
 
 /* ========== Forward Declarations ========== */
 
+/** A spoken album name packed as the album: param ("::album::" + the name) */
+#define MUSIC_TOOL_ALBUM_VALUE_MAX (AUDIO_METADATA_STRING_MAX + 16)
+
 static char *music_tool_callback(const char *action, char *value, int *should_respond);
 
 /* ========== Tool Parameter Definition ========== */
@@ -150,12 +153,26 @@ static const treg_param_t music_params[] = {
    {
        .name = "album",
        .description = "For 'search': restrict matching to the ALBUM field (e.g. album:'Whatever "
-                      "and Ever Amen' lists that album's tracks). Combine with artist: to "
-                      "disambiguate.",
+                      "and Ever Amen' lists that album's tracks). For 'play'/'enqueue': the "
+                      "whole album in track order (play replaces the queue, enqueue appends). "
+                      "With a query, play starts the album at that title, while enqueue adds "
+                      "just the query's best match. If several albums match, nothing "
+                      "changes and the reply lists them with ids. Combine with artist: to "
+                      "narrow.",
        .type = TOOL_PARAM_TYPE_STRING,
        .required = false,
        .maps_to = TOOL_MAPS_TO_CUSTOM,
        .field_name = "album",
+   },
+   {
+       .name = "album_ids",
+       .description = "For 'play'/'enqueue': albums by the ids a reply listed, queued in the "
+                      "order given (e.g. both parts of an album split in two, by their track "
+                      "ranges).",
+       .type = TOOL_PARAM_TYPE_ARRAY,
+       .required = false,
+       .maps_to = TOOL_MAPS_TO_CUSTOM,
+       .field_name = "album_ids",
    },
    {
        .name = "year_min",
@@ -548,6 +565,18 @@ static char *music_tool_browse(const char *action, char *value, int *should_resp
 
 static char *music_tool_callback(const char *action, char *value, int *should_respond) {
    *should_respond = 1;
+   /* A spoken "play the album X": play with album:'X' */
+   char album_value[MUSIC_TOOL_ALBUM_VALUE_MAX];
+   if (strcmp(action, "play_album") == 0) {
+      static const char key[] = "::album::";
+      const size_t k = sizeof(key) - 1;
+      memcpy(album_value, key, k + 1);
+      if (value) {
+         tool_value_escape(value, strlen(value), album_value + k, sizeof(album_value) - k);
+      }
+      action = "play";
+      value = album_value;
+   }
    /* A session with a player of its own (a WebUI tab, a Tier-1 satellite) */
    bool needs_player = strcmp(action, "search") != 0 && strcmp(action, "library") != 0;
    if (!needs_player) {

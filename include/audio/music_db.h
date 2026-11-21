@@ -38,6 +38,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "audio/audio_decoder.h"
 #include "audio/music_source.h"
@@ -385,20 +386,6 @@ int music_db_list_artists_with_stats(music_artist_info_t *artists,
                                      int *count_out);
 
 /**
- * @brief List albums with statistics (track count, artist)
- *
- * @param albums Output array for album info
- * @param max_albums Maximum number of albums to return
- * @param offset Number of albums to skip (for pagination)
- * @param count_out Output for number of albums found
- * @return SUCCESS or FAILURE
- */
-int music_db_list_albums_with_stats(music_album_info_t *albums,
-                                    int max_albums,
-                                    int offset,
-                                    int *count_out);
-
-/**
  * @brief List an artist's albums (discography-style inventory)
  *
  * Albums with at least one track whose artist matches @p artist as whole words
@@ -423,6 +410,69 @@ int music_db_list_albums_by_artist(const char *artist,
                                    int *total_out);
 
 /**
+ * @brief An album found by music_db_album_find()
+ *
+ * An album is an album artist plus an album name (editions stripped, as
+ * music_rank_album_key() folds it). The library may hold several copies of it (the
+ * album's tracks in one folder or one Plex album); one plays: the copy with the
+ * most tracks, a local one first on a tie.
+ */
+typedef struct {
+   int64_t id;                             /**< The copy that plays, for music_db_album_tracks();
+                                                valid until the next scan or Plex sync */
+   char name[AUDIO_METADATA_STRING_MAX];   /**< Album name, as that copy's first track tags it */
+   char artist[AUDIO_METADATA_STRING_MAX]; /**< Album artist: the copy's album-artist tag, else its
+                                                most common track artist (may be empty) */
+   music_source_t source;                  /**< Where that copy is */
+   int track_count;                        /**< Tracks in that copy */
+   int first_track;                        /**< Lowest track number in it (0 = unknown) */
+   int last_track;                         /**< Highest track number in it (0 = unknown) */
+   int copies;                             /**< Copies of this album in the library */
+   bool exact; /**< Its name, editions stripped, equals the requested one */
+} music_album_choice_t;
+
+/**
+ * @brief Note that rows changed outside this module's writes (the Plex sync's own
+ *        connection), so the cached album list is rebuilt
+ */
+void music_db_library_changed(void);
+
+/**
+ * @brief Find albums by name and artist
+ *
+ * Albums with a track whose album matches @p album as whole words and, when @p artist
+ * is given, whose album artist or artist matches it. Exact names first, then by name
+ * and artist.
+ *
+ * @param album     Album words (NULL = every album)
+ * @param artist    Artist words (NULL = any)
+ * @param out       Output array
+ * @param max       Capacity of @p out
+ * @param offset    Albums to skip (paging)
+ * @param count_out Albums written
+ * @param total_out Albums found in all (may be NULL)
+ * @return SUCCESS or FAILURE
+ */
+int music_db_album_find(const char *album,
+                        const char *artist,
+                        music_album_choice_t *out,
+                        int max,
+                        int offset,
+                        int *count_out,
+                        int *total_out);
+
+/**
+ * @brief A copy's tracks, in order: disc, track number, path
+ *
+ * @param id        music_album_choice_t::id
+ * @param results   Output array
+ * @param max       Capacity of @p results
+ * @param count_out Tracks written (0 when @p id no longer names a copy)
+ * @return SUCCESS or FAILURE
+ */
+int music_db_album_tracks(int64_t id, music_search_result_t *results, int max, int *count_out);
+
+/**
  * @brief Get all tracks by a specific artist
  *
  * @param artist Artist name (exact match)
@@ -435,20 +485,6 @@ int music_db_get_by_artist(const char *artist,
                            music_search_result_t *results,
                            int max_results,
                            int *count_out);
-
-/**
- * @brief Get all tracks in a specific album
- *
- * @param album Album name (exact match)
- * @param results Output array for results
- * @param max_results Maximum number of results
- * @param count_out Output for number of tracks found
- * @return SUCCESS or FAILURE
- */
-int music_db_get_by_album(const char *album,
-                          music_search_result_t *results,
-                          int max_results,
-                          int *count_out);
 
 #ifdef __cplusplus
 }

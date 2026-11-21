@@ -17,7 +17,8 @@
  * the project author(s).
  *
  * Music DB search: the relevance-ranked, paged structured query, the per-artist
- * album inventory, and the SQLite matching functions behind both. Lifecycle,
+ * album inventory, finding albums and their copies' tracks, and the SQLite matching
+ * functions behind them. Lifecycle,
  * scanning and browsing live in music_db.c.
  */
 
@@ -691,5 +692,331 @@ int music_db_list_albums_by_artist(const char *artist,
    if (total_out) {
       *total_out = total;
    }
+   return SUCCESS;
+}
+
+/* =============================================================================
+ * Albums: copies grouped into albums
+ * ============================================================================= */
+
+/* A copy's match key (its tracks share it within their album_id) and play order */
+#define MUSIC_COPY_KEY "music_album_key(album, NULL)"
+#define MUSIC_COPY_ORDER "COALESCE(disc_no, 1), track_no IS NULL, track_no, path"
+
+/* Dedup within one copy: a track the folder holds twice (a FLAC and an MP3 of it,
+ * same disc and number) counts and plays once; a title repeated on another disc
+ * stays.  Other copies keep theirs. */
+#define MUSIC_DEDUP_SAME_COPY                                                                \
+   MUSIC_DEDUP_EXISTS_2(" AND 0",                                                            \
+                        " AND m2.source = music_metadata.source "                            \
+                        "AND m2.album_id IS music_metadata.album_id "                        \
+                        "AND COALESCE(m2.disc_no, 1) = COALESCE(music_metadata.disc_no, 1) " \
+                        "AND m2.track_no IS music_metadata.track_no")
+
+/* One row per copy with a track matching ?1 (album words, NULL = any) and ?2
+ * (artist words against album artist or artist, NULL = any). A copy is the
+ * tracks of one album_id (a folder, a Plex album) sharing an album name, editions
+ * stripped: a folder may hold several albums. Tracks with no album name are in none. Per copy: its
+ * smallest id; its first track's album name (play order) and source; its track count and number
+ * range; and its album artist (the most common album-artist tag, else the most common track
+ * artist). */
+static const char *SQL_ALBUM_COPIES =
+    "WITH cand AS (SELECT DISTINCT album_id, " MUSIC_COPY_KEY " AS akey "
+    "   FROM music_metadata WHERE album_id IS NOT NULL AND album <> '' "
+    "   AND (?1 IS NULL OR music_match(album, ?1) >= ?3) "
+    "   AND (?2 IS NULL OR music_match(album_artist, ?2) >= ?3 "
+    "        OR music_match(artist, ?2) >= ?3)), "
+    "trk AS (SELECT music_metadata.album_id, c.akey, id, album, source, track_no, "
+    "   album_artist, artist, ROW_NUMBER() OVER (PARTITION BY music_metadata.album_id, c.akey "
+    "      ORDER BY " MUSIC_COPY_ORDER ") AS pos "
+    "   FROM cand c CROSS JOIN music_metadata ON music_metadata.album_id = c.album_id "
+    "   AND " MUSIC_COPY_KEY " = c.akey WHERE " MUSIC_DEDUP_SAME_COPY "), "
+    "names AS (SELECT album_id, akey, v, ROW_NUMBER() OVER "
+    "   (PARTITION BY album_id, akey ORDER BY k, n DESC, v) AS rn FROM "
+    "   (SELECT album_id, akey, k, MIN(v) AS v, COUNT(*) AS n FROM "
+    "      (SELECT album_id, akey, 0 AS k, album_artist AS v FROM trk WHERE album_artist <> '' "
+    "       UNION ALL SELECT album_id, akey, 1, artist FROM trk WHERE artist <> '') "
+    "    GROUP BY album_id, akey, k, lower(v))), "
+    "copies AS (SELECT album_id, akey, MIN(id) AS id, "
+    "   MAX(CASE WHEN pos = 1 THEN album END) AS album, MIN(source) AS source, COUNT(*) AS n, "
+    "   COALESCE(MIN(track_no), 0) AS lo, COALESCE(MAX(track_no), 0) AS hi "
+    "   FROM trk GROUP BY album_id, akey) "
+    "SELECT c.id, c.album, c.source, c.n, c.lo, c.hi, nm.v FROM copies c "
+    "LEFT JOIN names nm ON nm.album_id = c.album_id AND nm.akey = c.akey AND nm.rn = 1";
+
+typedef struct {
+   music_album_choice_t c;
+   char name_key[MUSIC_RANK_FOLD_MAX];
+   char artist_key[MUSIC_RANK_FOLD_MAX];
+} album_copy_t;
+
+/* Folded album artist; blank and "Various Artists" are the same artist. */
+static void artist_key(const char *artist, char *out, size_t cap) {
+   music_rank_fold(artist, out, cap);
+   if (strcmp(out, "various artists") == 0) {
+      out[0] = '\0';
+   }
+}
+
+static int cmp_album(const album_copy_t *a, const album_copy_t *b) {
+   int d = strcmp(a->name_key, b->name_key);
+   return d ? d : strcmp(a->artist_key, b->artist_key);
+}
+
+/* Album order, then the copy that plays first: most tracks, local, smallest id. */
+static int cmp_copy(const void *pa, const void *pb) {
+   const album_copy_t *a = pa;
+   const album_copy_t *b = pb;
+   int d = cmp_album(a, b);
+   if (d) {
+      return d;
+   }
+   if (a->c.track_count != b->c.track_count) {
+      return b->c.track_count - a->c.track_count;
+   }
+   if (a->c.source != b->c.source) {
+      return (int)a->c.source - (int)b->c.source;
+   }
+   return (a->c.id > b->c.id) - (a->c.id < b->c.id);
+}
+
+/* Exact names first; the rest keep album order. */
+static int cmp_choice(const void *pa, const void *pb) {
+   const album_copy_t *a = pa;
+   const album_copy_t *b = pb;
+   if (a->c.exact != b->c.exact) {
+      return a->c.exact ? -1 : 1;
+   }
+   return cmp_album(a, b);
+}
+
+/* Read every matching copy; caller holds g_music_db_mutex. *copies_out is malloc'd. */
+static int read_copies(const char *album,
+                       const char *artist,
+                       album_copy_t **copies_out,
+                       int *n_out) {
+   *copies_out = NULL;
+   *n_out = 0;
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(g_music_db, SQL_ALBUM_COPIES, -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("music_db_album_find: prepare failed: %s", sqlite3_errmsg(g_music_db));
+      return FAILURE;
+   }
+   if (album && album[0]) {
+      sqlite3_bind_text(st, 1, album, -1, SQLITE_STATIC);
+   }
+   if (artist && artist[0]) {
+      sqlite3_bind_text(st, 2, artist, -1, SQLITE_STATIC);
+   }
+   sqlite3_bind_int(st, 3, MUSIC_RANK_FIELD_MIN);
+
+   album_copy_t *copies = NULL;
+   int n = 0;
+   int cap = 0;
+   int rc;
+   while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+      if (n == cap) {
+         int ncap = cap ? cap * 2 : 16;
+         album_copy_t *grown = realloc(copies, (size_t)ncap * sizeof(*copies));
+         if (!grown) {
+            rc = SQLITE_NOMEM;
+            break;
+         }
+         copies = grown;
+         cap = ncap;
+      }
+      album_copy_t *a = &copies[n++];
+      memset(a, 0, sizeof(*a));
+      a->c.id = sqlite3_column_int64(st, 0);
+      copy_col(st, 1, a->c.name, sizeof(a->c.name));
+      a->c.source = (music_source_t)sqlite3_column_int(st, 2);
+      a->c.track_count = sqlite3_column_int(st, 3);
+      a->c.first_track = sqlite3_column_int(st, 4);
+      a->c.last_track = sqlite3_column_int(st, 5);
+      copy_col(st, 6, a->c.artist, sizeof(a->c.artist));
+      music_rank_album_key(a->c.name, a->c.artist, a->name_key, sizeof(a->name_key));
+      if (!a->name_key[0] && a->c.name[0]) {
+         /* A name of punctuation only ("+", "÷") folds to nothing: keep its text */
+         snprintf(a->name_key, sizeof(a->name_key), "\x01%s", a->c.name);
+      }
+      artist_key(a->c.artist, a->artist_key, sizeof(a->artist_key));
+   }
+   sqlite3_finalize(st);
+   if (rc != SQLITE_DONE) {
+      OLOG_ERROR("music_db_album_find: query failed (%d)", rc);
+      free(copies);
+      return FAILURE;
+   }
+   *copies_out = copies;
+   *n_out = n;
+   return SUCCESS;
+}
+
+/* The whole-library album list (a browse), as it was at s_browse_gen: every page
+ * of a browse is the same list until the library changes.  Guarded by
+ * g_music_db_mutex. */
+static music_album_choice_t *s_browse;
+static int s_browse_n;
+static unsigned s_browse_gen;
+
+void music_db_album_cache_clear(void) {
+   free(s_browse);
+   s_browse = NULL;
+   s_browse_n = 0;
+}
+
+/* Copy page [offset, offset + max) of @p list into @p out */
+static int album_page(const music_album_choice_t *list,
+                      int n,
+                      int offset,
+                      music_album_choice_t *out,
+                      int max) {
+   int count = 0;
+   for (int i = offset; i < n && count < max; i++) {
+      out[count++] = list[i];
+   }
+   return count;
+}
+
+int music_db_album_find(const char *album,
+                        const char *artist,
+                        music_album_choice_t *out,
+                        int max,
+                        int offset,
+                        int *count_out,
+                        int *total_out) {
+   if (!out || max <= 0 || !count_out) {
+      return FAILURE;
+   }
+   *count_out = 0;
+   if (total_out) {
+      *total_out = 0;
+   }
+   if (offset < 0) {
+      offset = 0;
+   }
+   bool browse = !(album && album[0]) && !(artist && artist[0]);
+
+   pthread_mutex_lock(&g_music_db_mutex);
+   if (!g_music_db_initialized) {
+      pthread_mutex_unlock(&g_music_db_mutex);
+      return FAILURE;
+   }
+   unsigned gen = music_db_library_generation();
+   if (browse && s_browse && s_browse_gen == gen) {
+      *count_out = album_page(s_browse, s_browse_n, offset, out, max);
+      if (total_out) {
+         *total_out = s_browse_n;
+      }
+      pthread_mutex_unlock(&g_music_db_mutex);
+      return SUCCESS;
+   }
+   album_copy_t *copies = NULL;
+   int n = 0;
+   int ret = read_copies(album, artist, &copies, &n);
+   pthread_mutex_unlock(&g_music_db_mutex);
+   if (ret != SUCCESS) {
+      return FAILURE;
+   }
+
+   /* Collapse each album's copies into its first (the one that plays). */
+   char want[MUSIC_RANK_FOLD_MAX] = "";
+   if (album && album[0]) {
+      music_rank_album_key(album, artist, want, sizeof(want));
+   }
+   if (n > 1) {
+      qsort(copies, (size_t)n, sizeof(*copies), cmp_copy);
+   }
+   int albums = 0;
+   for (int i = 0; i < n; i++) {
+      if (albums > 0 && cmp_album(&copies[albums - 1], &copies[i]) == 0) {
+         copies[albums - 1].c.copies++;
+         continue;
+      }
+      if (albums != i) {
+         copies[albums] = copies[i];
+      }
+      copies[albums].c.copies = 1;
+      copies[albums].c.exact = want[0] && strcmp(copies[albums].name_key, want) == 0;
+      if (want[0] && !copies[albums].c.exact) {
+         /* "Greatest Hits - Tom Petty" asked for without an artist: the album's
+          * own artist comes off the name, as it does in the album's key */
+         char own[MUSIC_RANK_FOLD_MAX];
+         music_rank_album_key(album, copies[albums].c.artist, own, sizeof(own));
+         copies[albums].c.exact = strcmp(copies[albums].name_key, own) == 0;
+      }
+      albums++;
+   }
+   if (albums > 1) {
+      qsort(copies, (size_t)albums, sizeof(*copies), cmp_choice);
+   }
+
+   music_album_choice_t *list = malloc((size_t)(albums > 0 ? albums : 1) * sizeof(*list));
+   if (!list) {
+      free(copies);
+      return FAILURE;
+   }
+   for (int i = 0; i < albums; i++) {
+      list[i] = copies[i].c;
+   }
+   free(copies);
+   *count_out = album_page(list, albums, offset, out, max);
+   if (total_out) {
+      *total_out = albums;
+   }
+
+   /* Keep a browse for the next page; a write since it was read makes it stale */
+   if (browse) {
+      pthread_mutex_lock(&g_music_db_mutex);
+      if (g_music_db_initialized) {
+         free(s_browse);
+         s_browse = list;
+         s_browse_n = albums;
+         s_browse_gen = gen;
+         list = NULL;
+      }
+      pthread_mutex_unlock(&g_music_db_mutex);
+   }
+   free(list);
+   return SUCCESS;
+}
+
+static const char *SQL_ALBUM_TRACKS =
+    "SELECT " MUSIC_ROW_COLS " FROM music_metadata "
+    "WHERE album_id = (SELECT album_id FROM music_metadata WHERE id = ?1) "
+    "AND " MUSIC_COPY_KEY " = (SELECT " MUSIC_COPY_KEY " FROM music_metadata WHERE id = ?1) "
+    "AND " MUSIC_DEDUP_SAME_COPY "ORDER BY " MUSIC_COPY_ORDER " LIMIT ?2";
+
+int music_db_album_tracks(int64_t id, music_search_result_t *results, int max, int *count_out) {
+   if (!results || max <= 0 || !count_out) {
+      return FAILURE;
+   }
+   *count_out = 0;
+
+   pthread_mutex_lock(&g_music_db_mutex);
+   if (!g_music_db_initialized) {
+      pthread_mutex_unlock(&g_music_db_mutex);
+      return FAILURE;
+   }
+   sqlite3_stmt *st = NULL;
+   if (sqlite3_prepare_v2(g_music_db, SQL_ALBUM_TRACKS, -1, &st, NULL) != SQLITE_OK) {
+      OLOG_ERROR("music_db_album_tracks: prepare failed: %s", sqlite3_errmsg(g_music_db));
+      pthread_mutex_unlock(&g_music_db_mutex);
+      return FAILURE;
+   }
+   sqlite3_bind_int64(st, 1, id);
+   sqlite3_bind_int(st, 2, max);
+   int count = 0;
+   int rc;
+   while ((rc = sqlite3_step(st)) == SQLITE_ROW && count < max) {
+      music_db_populate_row(st, &results[count++]);
+   }
+   sqlite3_finalize(st);
+   pthread_mutex_unlock(&g_music_db_mutex);
+
+   if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
+      return FAILURE;
+   }
+   *count_out = count;
    return SUCCESS;
 }
