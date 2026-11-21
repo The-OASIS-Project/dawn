@@ -1599,12 +1599,19 @@ static bool call_carries_tag(const tool_call_t *call) {
    return carried;
 }
 
-/* @p result neutralized (llm_context_neutralize) in place, and the
- * conversation's tag secret masked in it; a result that can't be is replaced
- * by an error rather than passed on as it came. */
+/* @p result made well-formed UTF-8, neutralized (llm_context_neutralize) in
+ * place, and the conversation's tag secret masked in it; a result that can't
+ * be is replaced by an error rather than passed on as it came.
+ *
+ * A tool can cut text at a byte width (a "%.80s", a fixed buffer) in the
+ * middle of a character, and one ill-formed byte makes a provider refuse the
+ * whole request.  The repair comes first, so the neutralizer checks the text
+ * as it is sent.  The error mark is already off by now (is_error carries it). */
 static void neutralize_result(const char *tool, tool_result_t *result) {
    session_t *ctx = session_get_command_context();
+   sanitize_utf8_for_json(result->result);
    if (result->result_extended) {
+      sanitize_utf8_for_json(result->result_extended);
       result->result_extended = session_prefix_mask_secret(ctx, llm_context_neutralize_owned(
                                                                     result->result_extended));
       if (!result->result_extended) {

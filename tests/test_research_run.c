@@ -327,6 +327,36 @@ static void test_digest_respects_cap(void) {
    TEST_ASSERT_NOT_NULL(strstr(digest, "brief")); /* rendered content before truncating */
 }
 
+/* ── digest stays well-formed: a claim cut inside a character is repaired ────── */
+
+static void test_digest_repairs_a_cut_character(void) {
+   /* 239 ASCII bytes, then an em dash: the digest shows 240 bytes of a claim, so
+    * the cut lands after the dash's first byte. */
+   char claim[300];
+   memset(claim, 'a', 239);
+   snprintf(claim + 239, sizeof(claim) - 239, "\xE2\x80\x94 and more");
+   int64_t q1 = 0;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, research_db_question_add(run, "a question?", 0, &q1));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_db_claim_add(run, q1, claim, "http://a", "web", NULL, 0));
+
+   research_budgets_t b;
+   research_budgets_defaults(&b);
+   char digest[8192];
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_render_round_digest(run, "brief", &b, digest, sizeof(digest)));
+   char expect[300];
+   memset(expect, 'a', 239);
+   snprintf(expect + 239, sizeof(expect) - 239, "?\n");
+   TEST_ASSERT_NOT_NULL(strstr(digest, expect));
+
+   research_run_t cur = { 0 };
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         research_render_critic_digest(run, "brief", &b, &cur, "coverage", 1,
+                                                       digest, sizeof(digest)));
+   TEST_ASSERT_NOT_NULL(strstr(digest, expect));
+}
+
 /* ── report render: view over claims, grouped by question, with sources ──────── */
 
 static void test_render_report(void) {
@@ -427,6 +457,7 @@ int main(void) {
    RUN_TEST(test_should_stop_decision);
    RUN_TEST(test_digest_content);
    RUN_TEST(test_digest_respects_cap);
+   RUN_TEST(test_digest_repairs_a_cut_character);
    RUN_TEST(test_render_report);
    RUN_TEST(test_render_report_empty);
    return UNITY_END();

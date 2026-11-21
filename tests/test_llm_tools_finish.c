@@ -252,8 +252,134 @@ static void test_a_call_to_a_gone_tool_is_refused(void) {
    free(result.result_extended);
 }
 
+/* Whether @p s is well-formed UTF-8 (RFC 3629: no overlong forms, surrogates
+ * or code points past U+10FFFF).  Written here rather than borrowed from the
+ * code under test. */
+static bool valid_utf8(const char *s) {
+   const unsigned char *p = (const unsigned char *)s;
+   while (*p) {
+      size_t n;
+      unsigned cp;
+      if (p[0] < 0x80) {
+         p++;
+         continue;
+      } else if ((p[0] & 0xE0) == 0xC0) {
+         n = 2;
+         cp = p[0] & 0x1F;
+      } else if ((p[0] & 0xF0) == 0xE0) {
+         n = 3;
+         cp = p[0] & 0x0F;
+      } else if ((p[0] & 0xF8) == 0xF0) {
+         n = 4;
+         cp = p[0] & 0x07;
+      } else {
+         return false;
+      }
+      for (size_t i = 1; i < n; i++) {
+         if ((p[i] & 0xC0) != 0x80) {
+            return false;
+         }
+         cp = (cp << 6) | (p[i] & 0x3F);
+      }
+      static const unsigned min[] = { 0, 0, 0x80, 0x800, 0x10000 };
+      if (cp < min[n] || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+         return false;
+      }
+      p += n;
+   }
+   return true;
+}
+
+static tool_call_t plain_call(void) {
+   tool_call_t call = { 0 };
+   snprintf(call.id, sizeof(call.id), "c_utf8");
+   snprintf(call.name, sizeof(call.name), "research_plan");
+   return call;
+}
+
+/* A character cut after two of its three bytes in the middle of a result (a
+ * "%.80s" through an em dash) leaves the result well-formed, the rest intact. */
+static void test_a_cut_character_mid_result_is_repaired(void) {
+   tool_call_t call = plain_call();
+   tool_result_t r = { 0 };
+   snprintf(r.result, sizeof(r.result), "[q1] the first part \xE2\x80\n[q2] the second part\n");
+   r.success = true;
+   TEST_ASSERT_FALSE(valid_utf8(r.result));
+   llm_tools_finish_result(&call, &r, NULL);
+   const char *text = tool_result_content(&r);
+   TEST_ASSERT_TRUE(valid_utf8(text));
+   TEST_ASSERT_EQUAL_INT(0, strncmp(text, "[q1] the first part ", 20));
+   TEST_ASSERT_NOT_NULL(strstr(text, "\n[q2] the second part\n"));
+   free(r.result_extended);
+}
+
+/* The same in a result too large for the inline buffer, and in its preview. */
+static void test_a_cut_character_in_an_extended_result_is_repaired(void) {
+   tool_call_t call = plain_call();
+   const size_t len = LLM_TOOLS_RESULT_LEN * 2;
+   char *big = malloc(len + 1);
+   TEST_ASSERT_NOT_NULL(big);
+   memset(big, 'a', len);
+   big[len] = '\0';
+   memcpy(big + 100, "\xE2\x80", 2);                       /* in the preview */
+   memcpy(big + LLM_TOOLS_RESULT_LEN + 50, "\xE2\x80", 2); /* past it */
+   memcpy(big + len - 5, "tail!", 5);
+   tool_result_t r = { 0 };
+   r.result_extended = big;
+   memcpy(r.result, big, LLM_TOOLS_RESULT_LEN - 1);
+   r.result[LLM_TOOLS_RESULT_LEN - 1] = '\0';
+   r.success = true;
+   llm_tools_finish_result(&call, &r, NULL);
+   TEST_ASSERT_NOT_NULL(r.result_extended);
+   TEST_ASSERT_TRUE(valid_utf8(r.result_extended));
+   TEST_ASSERT_TRUE(valid_utf8(r.result));
+   TEST_ASSERT_EQUAL_size_t(len, strlen(r.result_extended));
+   TEST_ASSERT_EQUAL_STRING("tail!", r.result_extended + len - 5);
+   free(r.result_extended);
+}
+
+/* An error result (its mark taken off where the callback returned, is_error
+ * set from it) stays an error, unframed, and is repaired too. */
+static void test_an_error_result_stays_an_error(void) {
+   tool_call_t call = plain_call();
+   tool_result_t e = { 0 };
+   snprintf(e.result, sizeof(e.result), "Error: no question \xE2\x80 found");
+   e.success = true;
+   e.is_error = true;
+   e.third_party = "WEB CONTENT";
+   llm_tools_finish_result(&call, &e, NULL);
+   const char *text = tool_result_content(&e);
+   TEST_ASSERT_TRUE(e.is_error);
+   TEST_ASSERT_TRUE(valid_utf8(text));
+   TEST_ASSERT_EQUAL_INT(0, strncmp(text, "Error: no question ", 19));
+   TEST_ASSERT_NOT_NULL(strstr(text, " found"));
+   TEST_ASSERT_NULL(llm_third_party_present(text));
+   free(e.result_extended);
+}
+
+/* Well-formed text (an em dash, an emoji joined by a ZWJ, a no-break space,
+ * line breaks and tabs) comes out byte for byte as it went in. */
+static void test_well_formed_text_is_unchanged(void) {
+   static const char clean[] = "Plans \xE2\x80\x94 today:\n"
+                               "\t\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x92\xBB coding\n"
+                               "price:\xC2\xA0"
+                               "10\r\n";
+   TEST_ASSERT_TRUE(valid_utf8(clean));
+   tool_call_t call = plain_call();
+   tool_result_t r = { 0 };
+   snprintf(r.result, sizeof(r.result), "%s", clean);
+   r.success = true;
+   llm_tools_finish_result(&call, &r, NULL);
+   TEST_ASSERT_EQUAL_STRING(clean, tool_result_content(&r));
+   free(r.result_extended);
+}
+
 int main(void) {
    UNITY_BEGIN();
+   RUN_TEST(test_a_cut_character_mid_result_is_repaired);
+   RUN_TEST(test_a_cut_character_in_an_extended_result_is_repaired);
+   RUN_TEST(test_an_error_result_stays_an_error);
+   RUN_TEST(test_well_formed_text_is_unchanged);
    RUN_TEST(test_a_batch_reaches_its_finish_raw_and_leaves_finished);
    RUN_TEST(test_a_header_is_put_on_after_neutralizing);
    RUN_TEST(test_third_party_text_is_framed);

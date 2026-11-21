@@ -638,6 +638,9 @@ int research_render_round_digest(int64_t run_id,
    }
    free(last_md);
 
+   /* A claim shown at a byte width, or the cap, can cut a character in half, and
+    * one ill-formed byte makes a provider refuse the round. */
+   sanitize_utf8_for_json(out);
    return AUTH_DB_SUCCESS;
 }
 
@@ -707,6 +710,7 @@ int research_render_critic_digest(int64_t run_id,
          }
       }
    }
+   sanitize_utf8_for_json(out); /* as the round digest: a cut claim or the cap */
    return AUTH_DB_SUCCESS;
 }
 
