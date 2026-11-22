@@ -21,11 +21,13 @@
  * rendering.
  */
 
+#include <ctype.h>
 #include <json-c/json.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "dawn_error.h"
 #include "llm/llm_claude_blocks.h"
 #include "llm/llm_reasoning_details.h"
 #include "llm/llm_turn_blocks.h"
@@ -155,6 +157,60 @@ static void test_foreign_reasoning_is_left_out(void) {
    TEST_ASSERT_EQUAL_STRING("text", str_at(rendered, 0, "type"));
    json_object_put(rendered);
    json_object_put(blocks);
+}
+
+/* For the test: the text upper-cased, an "x" emptied, "fail" fails. */
+static char *test_clean(const char *text, void *ctx) {
+   (void)ctx;
+   if (strcmp(text, "fail") == 0) {
+      return NULL;
+   }
+   char *out = strdup(strcmp(text, "x") == 0 ? "" : text);
+   for (char *p = out; p && *p; p++) {
+      *p = (char)toupper((unsigned char)*p);
+   }
+   return out;
+}
+
+static void test_clean_text_keeps_places_and_drops_empties(void) {
+   json_object *blocks = llm_turn_blocks_new();
+   llm_turn_blocks_add_reasoning(blocks, TEST_CLAUDE_CARRIER, LLM_FORMAT_ANTHROPIC,
+                                 "claude-opus-5-5",
+                                 json_tokener_parse("{\"type\":\"thinking\",\"thinking\":\"t\","
+                                                    "\"signature\":\"S\"}"));
+   llm_turn_blocks_add_text(blocks, "x"); /* an emote-only narration, emptied */
+   llm_turn_blocks_add_tool_call(blocks, "call_1", "search", "{}");
+   llm_turn_blocks_add_text(blocks, "then this");
+   llm_turn_blocks_add_tool_call(blocks, "call_2", "weather", "{}");
+
+   TEST_ASSERT_EQUAL_INT(SUCCESS, llm_turn_blocks_clean_text(blocks, test_clean, NULL));
+   TEST_ASSERT_EQUAL_INT(4, json_object_array_length(blocks));
+   TEST_ASSERT_EQUAL_STRING("reasoning", str_at(blocks, 0, "type"));
+   TEST_ASSERT_EQUAL_STRING("tool_call", str_at(blocks, 1, "type"));
+   TEST_ASSERT_EQUAL_STRING("THEN THIS", str_at(blocks, 2, "text"));
+   TEST_ASSERT_EQUAL_STRING("tool_call", str_at(blocks, 3, "type"));
+
+   /* What Claude is sent again has no empty text block. */
+   json_object *rendered = llm_turn_blocks_render_claude(blocks, TEST_CLAUDE_CARRIER);
+   for (size_t i = 0; i < json_object_array_length(rendered); i++) {
+      const char *type = str_at(rendered, i, "type");
+      if (type && strcmp(type, "text") == 0) {
+         TEST_ASSERT_TRUE(strlen(str_at(rendered, i, "text")) > 0);
+      }
+   }
+   json_object_put(rendered);
+   json_object_put(blocks);
+}
+
+static void test_clean_text_failure_and_null(void) {
+   json_object *blocks = llm_turn_blocks_new();
+   llm_turn_blocks_add_text(blocks, "fail");
+   llm_turn_blocks_add_text(blocks, "kept");
+   TEST_ASSERT_EQUAL_INT(FAILURE, llm_turn_blocks_clean_text(blocks, test_clean, NULL));
+   TEST_ASSERT_EQUAL_INT(1, json_object_array_length(blocks)); /* never kept raw */
+   TEST_ASSERT_EQUAL_STRING("KEPT", str_at(blocks, 0, "text"));
+   json_object_put(blocks);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, llm_turn_blocks_clean_text(NULL, test_clean, NULL));
 }
 
 static void test_final_text_replaces_the_answer_keeping_reasoning(void) {
@@ -863,6 +919,8 @@ int main(void) {
    RUN_TEST(test_capture_keeps_every_block_in_order);
    RUN_TEST(test_blocks_replay_to_claude_verbatim);
    RUN_TEST(test_foreign_reasoning_is_left_out);
+   RUN_TEST(test_clean_text_keeps_places_and_drops_empties);
+   RUN_TEST(test_clean_text_failure_and_null);
    RUN_TEST(test_final_text_replaces_the_answer_keeping_reasoning);
    RUN_TEST(test_an_unfinished_block_is_discarded);
    RUN_TEST(test_unknown_blocks_are_kept_for_their_vendor);

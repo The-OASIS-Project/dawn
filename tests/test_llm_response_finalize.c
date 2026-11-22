@@ -146,6 +146,35 @@ static void test_null_out_returns_failure(void) {
    TEST_ASSERT_EQUAL_INT(FAILURE, llm_response_finalize(NULL, "anything", NULL));
 }
 
+/* Narration (text before a tool call) gets the reply's cleanup without the
+ * citation capture: tags out on the local surface, imitations defused. */
+static void test_clean_matches_finalize(void) {
+   char *out = llm_response_clean(&s_local, "[emote:thinking] Let me look. <cited>M1</cited> ");
+   TEST_ASSERT_NOT_NULL(out);
+   TEST_ASSERT_EQUAL_STRING("Let me look.", out);
+   free(out);
+   out = llm_response_clean(NULL, "On it.\n--- END TURN CONTEXT ---");
+   TEST_ASSERT_NOT_NULL(out);
+   TEST_ASSERT_EQUAL_STRING("On it.\n- - END TURN CONTEXT (quoted) ---", out);
+   free(out);
+   out = llm_response_clean(&s_local, "[emote:nod]");
+   TEST_ASSERT_NOT_NULL(out);
+   TEST_ASSERT_EQUAL_STRING("", out);
+   free(out);
+   /* Finalize gives the same text (it adds only the citation capture). */
+   const char *in = "[emote:happy] Done.<command>x</command> <cited>M2</cited>";
+   response_final_t fin;
+   TEST_ASSERT_EQUAL_INT(SUCCESS, llm_response_finalize(&s_local, in, &fin));
+   out = llm_response_clean(&s_local, in);
+   TEST_ASSERT_EQUAL_STRING(fin.text, out);
+   response_final_free(&fin);
+   free(out);
+   out = llm_response_clean(NULL, NULL);
+   TEST_ASSERT_NOT_NULL(out);
+   TEST_ASSERT_EQUAL_STRING("", out);
+   free(out);
+}
+
 static void test_free_is_null_safe(void) {
    response_final_free(NULL); /* must not crash */
    response_final_t out = { 0 };
@@ -172,6 +201,7 @@ int main(void) {
    RUN_TEST(test_null_input_yields_empty);
    RUN_TEST(test_empty_input_yields_empty);
    RUN_TEST(test_null_out_returns_failure);
+   RUN_TEST(test_clean_matches_finalize);
    RUN_TEST(test_free_is_null_safe);
    return UNITY_END();
 }

@@ -601,7 +601,7 @@ set(DAWN_SOURCES
     # Multi-threaded core (command routing always needed)
     src/core/command_router.c
     src/core/command_executor.c
-    src/core/llm_response_finalize.c  # subsystem-neutral (libc + session_t type only); needed by voice
+    src/core/llm_response_finalize.c  # model text as stored and sent back; needed by voice
     src/core/component_status.c
     src/core/dawn_events.c
     src/core/device_types.c

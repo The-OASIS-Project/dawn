@@ -83,6 +83,13 @@ __attribute__((weak)) bool session_prefix_tag(session_t *session, char *out, siz
    }
    return false;
 }
+/* The tool loop cleans what the model says before a tool call; the harness
+ * keeps the text as written (finalize's filters aren't linked here). */
+__attribute__((weak)) char *llm_response_clean(session_t *session, const char *raw) {
+   (void)session;
+   return strdup(raw ? raw : "");
+}
+
 __attribute__((weak)) char *session_prefix_mask_secret(session_t *session, char *text) {
    (void)session;
    return text;
