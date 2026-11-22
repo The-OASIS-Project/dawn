@@ -254,6 +254,10 @@ int weather_geocode_parse(const char *location, weather_geo_query_t *out) {
          /* Only two ASCII letters go into the URL; anything else is matched locally. */
          out->country_code[0] = (char)toupper((unsigned char)country[0]);
          out->country_code[1] = (char)toupper((unsigned char)country[1]);
+         if (strcmp(out->country_code, "UK") == 0) {
+            /* The geocoder knows the United Kingdom only by its ISO code. */
+            safe_strscpy(out->country_code, "GB");
+         }
       } else {
          safe_strscpy(out->country, country);
       }

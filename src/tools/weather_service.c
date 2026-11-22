@@ -571,7 +571,8 @@ weather_response_t *weather_get(const char *location, forecast_type_t forecast) 
    double latitude, longitude;
    char *resolved_name = NULL;
 
-   char why[256];
+   /* Holds "Couldn't find <city> in <region>." whole, whatever the two fields are. */
+   char why[2 * WEATHER_GEO_FIELD_MAX + 32];
    if (geocode_location(location, &latitude, &longitude, &resolved_name, why, sizeof(why)) !=
        SUCCESS) {
       weather_response_t *response = calloc(1, sizeof(weather_response_t));

@@ -310,6 +310,9 @@ static void test_country_code_only_letters(void) {
    TEST_ASSERT_EQUAL_STRING("&a", q.country);
    TEST_ASSERT_EQUAL_INT(SUCCESS, weather_geocode_parse("Paris, Ile-de-France, fr", &q));
    TEST_ASSERT_EQUAL_STRING("FR", q.country_code);
+   /* "UK" is how people write it; the geocoder's rows say GB. */
+   TEST_ASSERT_EQUAL_INT(SUCCESS, weather_geocode_parse("London, England, UK", &q));
+   TEST_ASSERT_EQUAL_STRING("GB", q.country_code);
 }
 
 static void test_bare_washington_is_dc(void) {
