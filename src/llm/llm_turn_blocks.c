@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "dawn_error.h"
 #include "llm/llm_history_kind.h"
 #include "llm/llm_key_tag.h"
 
@@ -515,6 +516,31 @@ struct json_object *llm_turn_blocks_stopped_reply(struct json_object *blocks,
       json_object_array_del_idx(out, --n, 1);
    }
    return out;
+}
+
+int llm_turn_blocks_clean_text(struct json_object *blocks,
+                               llm_turn_text_clean_fn clean,
+                               void *ctx) {
+   if (!blocks || !clean || !json_object_is_type(blocks, json_type_array)) {
+      return SUCCESS;
+   }
+   int rc = SUCCESS;
+   /* Backwards, so removing one leaves the indexes still to visit in place. */
+   for (size_t i = json_object_array_length(blocks); i-- > 0;) {
+      struct json_object *b = json_object_array_get_idx(blocks, i);
+      if (!is(str_of(b, "type"), "text")) {
+         continue;
+      }
+      char *text = clean(str_of(b, "text") ? str_of(b, "text") : "", ctx);
+      if (!text || text[0] == '\0') {
+         rc = text ? rc : FAILURE; /* uncleaned text is dropped, never kept */
+         json_object_array_del_idx(blocks, i, 1);
+      } else {
+         json_object_object_add(b, "text", json_object_new_string(text));
+      }
+      free(text);
+   }
+   return rc;
 }
 
 void llm_turn_message_set_text(struct json_object *message, const char *text) {

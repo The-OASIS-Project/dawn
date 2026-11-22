@@ -35,6 +35,7 @@
 #include <time.h>
 
 #include "config/dawn_config.h"
+#include "core/llm_response_finalize.h"
 #include "core/session_manager.h"
 #include "core/session_stop.h"
 #include "core/tool_result_store.h"
@@ -154,6 +155,28 @@ static session_t *call_session(const llm_tool_loop_params_t *params, bool even_d
    }
    return even_detached ? session_get_for_reconnect(params->session_id)
                         : session_get(params->session_id);
+}
+
+static char *clean_block_text(const char *text, void *session) {
+   return llm_response_clean((session_t *)session, text);
+}
+
+/* What the model said before its tool calls is stored and sent back on every
+ * later request, like a reply: it gets the reply's cleanup (tags out, text
+ * imitating DAWN's framing defused).  Its text and its blocks, which every
+ * provider renders and stores the turn from.  Text that can't be cleaned (a
+ * failed allocation) is dropped, never kept as the model wrote it. */
+static void clean_narration(const llm_tool_loop_params_t *params, llm_tool_response_t *result) {
+   session_t *s = call_session(params, true);
+   if (result->text && result->text[0] != '\0') {
+      char *clean = llm_response_clean(s, result->text);
+      free(result->text);
+      result->text = clean; /* NULL on failure: no text, as with none written */
+   }
+   llm_turn_blocks_clean_text(result->blocks, clean_block_text, s);
+   if (s) {
+      session_release(s);
+   }
 }
 
 /* Persist the tool messages just appended to history in [before_len, end)
@@ -795,6 +818,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
       }
 
       /* Step 8: Append assistant message + tool results to history */
+      clean_narration(params, &result);
       int hist_before = json_object_array_length(params->conversation_history);
       if (params->history_format == LLM_HISTORY_CLAUDE) {
          char carrier[LLM_CARRIER_MAX];

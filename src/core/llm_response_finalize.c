@@ -45,6 +45,47 @@ static void rtrim(char *text) {
    }
 }
 
+/* The cleanup after any citation capture: @p clean (taken) has had its <cited>
+ * tags normalized.  Returns the cleaned text (owned), or NULL on OOM. */
+static char *clean_normalized(session_t *session, char *clean) {
+   /* The tags DAWN reads out of a reply come out next, before the reply is
+    * defused: what stripping removes can't join a marker back together after
+    * it was checked. */
+   /* [emote:…] first (removing one joins its neighbours), and only on the local
+    * voice surface: the one told to write them.  Elsewhere it is text (a reply
+    * explaining the feature, a quoted message). */
+   if (session != NULL && session->type == SESSION_TYPE_LOCAL) {
+      text_filter_emote_strip(clean, NULL, 0);
+   }
+   text_filter_end_of_turn_strip(clean);
+   text_filter_cited_strip(clean); /* <cited>…</cited> (always removed) */
+
+   /* What the model was led to write that imitates DAWN's framing, or carries
+    * the conversation's tag, doesn't stay in the conversation to pass for
+    * DAWN's on a later turn (the text is kept otherwise, byte for byte). */
+   char *safe = session_prefix_mask_secret(session, llm_context_neutralize(clean));
+   if (!safe) {
+      free(clean);
+      return NULL;
+   }
+   if (strcmp(safe, clean) != 0) {
+      OLOG_WARNING(
+          "finalize: the model's text imitated DAWN's framing or carried its tag; defused");
+   }
+   free(clean);
+   rtrim(safe);
+   return safe;
+}
+
+char *llm_response_clean(session_t *session, const char *raw) {
+   char *clean = strdup(raw != NULL ? raw : "");
+   if (clean == NULL) {
+      return NULL;
+   }
+   text_filter_cited_normalize(clean);
+   return clean_normalized(session, clean);
+}
+
 int llm_response_finalize(session_t *session, const char *raw_response, response_final_t *out) {
    if (out == NULL) {
       return FAILURE;
@@ -68,33 +109,10 @@ int llm_response_finalize(session_t *session, const char *raw_response, response
     * trailing <cited> tag from the parser. */
    memory_citation_capture(session, clean);
 
-   /* The tags DAWN reads out of a reply come out next, before the reply is
-    * defused: what stripping removes can't join a marker back together after
-    * it was checked. */
-   /* [emote:…] first (removing one joins its neighbours), and only on the local
-    * voice surface: the one told to write them.  Elsewhere it is text (a reply
-    * explaining the feature, a quoted message). */
-   if (session != NULL && session->type == SESSION_TYPE_LOCAL) {
-      text_filter_emote_strip(clean, NULL, 0);
-   }
-   text_filter_end_of_turn_strip(clean);
-   text_filter_cited_strip(clean); /* <cited>…</cited> (always removed) */
-
-   /* What the model was led to write that imitates DAWN's framing, or carries
-    * the conversation's tag, doesn't stay in the conversation to pass for
-    * DAWN's on a later turn (the text is kept otherwise, byte for byte). */
-   char *safe = session_prefix_mask_secret(session, llm_context_neutralize(clean));
-   if (!safe) {
-      free(clean);
+   clean = clean_normalized(session, clean);
+   if (clean == NULL) {
       return FAILURE;
    }
-   if (strcmp(safe, clean) != 0) {
-      OLOG_WARNING("finalize: the reply imitated DAWN's framing or carried its tag; defused");
-   }
-   free(clean);
-   clean = safe;
-   rtrim(clean);
-
    out->text = clean;
    out->length = strlen(clean);
    return SUCCESS;
