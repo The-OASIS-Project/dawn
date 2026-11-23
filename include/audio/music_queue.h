@@ -18,7 +18,7 @@
  *
  * Music queue: one shared queue per signed-in user (every tab and player of
  * that user sees the same tracks), a private one for anyone else, kept in
- * music.db across restarts.  Each player keeps its own position in it.
+ * music_queue.db across restarts.  Each player keeps its own position in it.
  */
 
 #ifndef MUSIC_QUEUE_H
@@ -94,10 +94,11 @@ typedef enum {
 } music_queue_outcome_t;
 
 /**
- * Open the queue store (music.db; its tables are created if missing).
+ * Open the queue store (its tables are created if missing), copying in once
+ * the queues saved in @p legacy_path (music.db, where they were kept before).
  * @return SUCCESS, or FAILURE: queues then work but aren't kept
  */
-int music_queue_init(const char *db_path);
+int music_queue_init(const char *db_path, const char *legacy_path);
 
 /** Free every queue no player holds and close the store (one still held at
  *  exit is left allocated for its last release) */

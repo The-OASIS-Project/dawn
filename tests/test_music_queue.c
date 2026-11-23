@@ -22,6 +22,7 @@
  * (temp database).
  */
 
+#include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,7 +59,7 @@ void setUp(void) {
    int fd = mkstemp(s_db_path);
    TEST_ASSERT_TRUE(fd >= 0);
    close(fd);
-   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path, NULL));
 }
 
 void tearDown(void) {
@@ -167,7 +168,7 @@ static void test_kept_across_restart(void) {
    music_queue_release(uq);
 
    music_queue_shutdown();
-   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path, NULL));
 
    uq = music_queue_acquire(7);
    TEST_ASSERT_EQUAL_INT(2, uq->queue_length);
@@ -182,6 +183,56 @@ static void test_kept_across_restart(void) {
    user_music_queue_t *other = music_queue_acquire(8);
    TEST_ASSERT_EQUAL_INT(0, other->queue_length);
    music_queue_release(other);
+}
+
+/* Queues saved in music.db before the queue had its own file come across
+ * once; a queue cleared after that stays cleared across a restart */
+static void test_imports_legacy_once(void) {
+   char legacy[64];
+   snprintf(legacy, sizeof(legacy), "/tmp/test_music_legacy_XXXXXX");
+   int fd = mkstemp(legacy);
+   TEST_ASSERT_TRUE(fd >= 0);
+   close(fd);
+   sqlite3 *db = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_open(legacy, &db));
+   TEST_ASSERT_EQUAL_INT(
+       SQLITE_OK,
+       sqlite3_exec(db,
+                    "CREATE TABLE user_queue (user_id INTEGER NOT NULL, position INTEGER NOT "
+                    "NULL, path TEXT NOT NULL, title TEXT, artist TEXT, album TEXT, "
+                    "duration_sec INTEGER, PRIMARY KEY (user_id, position));"
+                    "CREATE TABLE user_queue_state (user_id INTEGER PRIMARY KEY, shuffle "
+                    "INTEGER DEFAULT 0, repeat_mode INTEGER DEFAULT 0);"
+                    "INSERT INTO user_queue VALUES (5, 0, '/m/a.flac', 'A', '', '', 200);"
+                    "INSERT INTO user_queue VALUES (5, 1, '/m/b.flac', 'B', '', '', 210);"
+                    "INSERT INTO user_queue_state VALUES (5, 1, 2);",
+                    NULL, NULL, NULL));
+   sqlite3_close(db);
+
+   /* setUp opened a fresh store with no legacy file: start it again with one */
+   music_queue_shutdown();
+   remove_db();
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path, legacy));
+   user_music_queue_t *uq = music_queue_acquire(5);
+   TEST_ASSERT_EQUAL_INT(2, uq->queue_length);
+   TEST_ASSERT_EQUAL_STRING("/m/b.flac", uq->queue[1].path);
+   TEST_ASSERT_EQUAL_UINT32(210, uq->queue[1].duration_sec);
+   TEST_ASSERT_TRUE(uq->shuffle);
+   TEST_ASSERT_EQUAL_INT(2, (int)uq->repeat_mode);
+
+   pthread_mutex_lock(&uq->queue_mutex);
+   music_queue_clear(uq);
+   music_queue_changed(uq, true);
+   pthread_mutex_unlock(&uq->queue_mutex);
+   music_queue_release(uq);
+
+   music_queue_shutdown();
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path, legacy));
+   uq = music_queue_acquire(5);
+   TEST_ASSERT_EQUAL_INT(0, uq->queue_length);
+   music_queue_release(uq);
+
+   unlink(legacy);
 }
 
 static void fill(user_music_queue_t *uq, int n) {
@@ -345,5 +396,6 @@ int main(void) {
    RUN_TEST(test_place_on_dropped_track);
    RUN_TEST(test_replace_resets_places);
    RUN_TEST(test_listener_hears_announce);
+   RUN_TEST(test_imports_legacy_once);
    return UNITY_END();
 }
