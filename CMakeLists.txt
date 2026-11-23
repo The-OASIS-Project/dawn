@@ -734,6 +734,7 @@ set(DAWN_SOURCES
     src/tools/web_search_tavily.c
     src/tools/tavily_rate_limit.c
     src/tools/weather_service.c
+    src/tools/weather_geocode.c
     src/tools/calculator.c
     src/tools/calculator_bignum.c
     third_party/tinyexpr/tinyexpr.c

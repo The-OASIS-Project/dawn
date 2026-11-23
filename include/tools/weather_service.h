@@ -28,6 +28,11 @@
 
 // Open-Meteo API endpoints
 #define OPEN_METEO_GEOCODING_URL "https://geocoding-api.open-meteo.com/v1/search"
+/* Geocoder results asked for.  A query with a state or country filter asks for more: the
+ * place wanted can rank below the first ten same-named towns (Mount Vernon, New York is
+ * ninth). */
+#define WEATHER_GEO_COUNT 10
+#define WEATHER_GEO_COUNT_FILTERED 50
 #define OPEN_METEO_FORECAST_URL "https://api.open-meteo.com/v1/forecast"
 
 // Weather condition codes (WMO)

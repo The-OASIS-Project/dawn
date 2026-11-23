@@ -662,6 +662,13 @@ if(DAWN_ENABLE_EMAIL_TOOL)
       LABEL    ci)
 endif()
 
+# Weather geocoding without the network: the location parsed, the result chosen.
+dawn_add_unit_test(test_weather_geocode
+   SOURCES test_weather_geocode.c
+           ${SRC_ROOT}/src/tools/weather_geocode.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # The confirm rule: the same session, the next turn (any later one by code).
 dawn_add_unit_test(test_turn_origin
    SOURCES test_turn_origin.c
