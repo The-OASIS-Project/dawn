@@ -26,6 +26,7 @@
 #include <string.h>
 
 #include "tools/calculator.h"
+#include "tools/tool_registry.h"
 #include "unity.h"
 
 void setUp(void) {
@@ -273,6 +274,7 @@ static void test_format_error(void) {
    char *s = calculator_format_result(&r);
    TEST_ASSERT_NOT_NULL(s);
    TEST_ASSERT_NOT_NULL(strstr(s, "Error:"));
+   TEST_ASSERT_TRUE(tool_result_is_error(s));
    free(s);
 }
 
@@ -304,6 +306,7 @@ static void test_convert_incompatible(void) {
    char *s = calculator_convert("5 miles to kg");
    TEST_ASSERT_NOT_NULL(s);
    TEST_ASSERT_NOT_NULL(strstr(s, "Cannot convert"));
+   TEST_ASSERT_TRUE(tool_result_is_error(s));
    free(s);
 }
 
@@ -311,7 +314,22 @@ static void test_convert_unknown_unit(void) {
    char *s = calculator_convert("5 flurbs to km");
    TEST_ASSERT_NOT_NULL(s);
    TEST_ASSERT_NOT_NULL(strstr(s, "Error"));
+   TEST_ASSERT_TRUE(tool_result_is_error(s));
    free(s);
+}
+
+/* An argument the tool can't use is a failure to its caller, not a result. */
+static void test_argument_errors_are_marked(void) {
+   char *(*const fn[])(const char *) = { calculator_convert, calculator_base_convert,
+                                         calculator_base_convert, calculator_base_convert,
+                                         calculator_random };
+   const char *const arg[] = { "five miles", "255", "255 to base7", "zz to hex", "one to ten" };
+   for (size_t i = 0; i < sizeof(arg) / sizeof(arg[0]); i++) {
+      char *s = fn[i](arg[i]);
+      TEST_ASSERT_NOT_NULL_MESSAGE(s, arg[i]);
+      TEST_ASSERT_TRUE_MESSAGE(tool_result_is_error(s), arg[i]);
+      free(s);
+   }
 }
 
 /* ── Base conversion ────────────────────────────────────────────────────── */
@@ -441,6 +459,7 @@ int main(void) {
    /* base conversion */
    RUN_TEST(test_base_dec_to_hex);
    RUN_TEST(test_base_hex_to_dec);
+   RUN_TEST(test_argument_errors_are_marked);
    RUN_TEST(test_base_dec_to_bin);
    RUN_TEST(test_base_bin_to_dec);
 

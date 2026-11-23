@@ -36,3 +36,48 @@ auth_db_state_t s_db = {
  * Zero-init here = versioning disabled, so non-versioning tests are unaffected;
  * versioning tests set the field explicitly in setUp(). */
 dawn_config_t g_config;
+
+/* document_read.c (its gap-safe pagination is tested here, over the same
+ * in-memory documents): the registry, the caller's user and the framing call. */
+#include <stdbool.h>
+#include <stddef.h>
+
+#include "core/session_manager.h"
+#include "dawn_error.h"
+#include "tools/tool_registry.h"
+
+const tool_metadata_t *g_test_registered_tool = NULL;
+
+int tool_registry_register(const tool_metadata_t *metadata) {
+   g_test_registered_tool = metadata;
+   return SUCCESS;
+}
+
+session_t *session_get_command_context(void) {
+   return NULL;
+}
+
+int session_effective_user_id(session_t *session) {
+   (void)session;
+   return 0;
+}
+
+int session_default_voice_user_id(void) {
+   return 1; /* alice */
+}
+
+bool scheduled_context_get(int *user_id_out) {
+   (void)user_id_out;
+   return false;
+}
+
+bool embedding_engine_available(void) {
+   return true;
+}
+
+int g_test_frame_calls = 0;
+
+void llm_tools_result_third_party(const char *frame) {
+   (void)frame;
+   g_test_frame_calls++;
+}

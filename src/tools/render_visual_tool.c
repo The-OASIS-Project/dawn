@@ -146,7 +146,8 @@ static char *load_guidelines_callback(const char *action, char *value, int *shou
    *should_respond = 1;
 
    if (!value || value[0] == '\0') {
-      return strdup("Error: provide module names (e.g., 'diagram', 'chart', 'interactive').");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: provide module names (e.g., 'diagram', 'chart', 'interactive').");
    }
 
    /* Check session cache — return short message if modules already in context.
@@ -191,7 +192,7 @@ static char *render_visual_callback(const char *action, char *value, int *should
    *should_respond = 1;
 
    if (!value || value[0] == '\0') {
-      return strdup("Error: provide visual parameters as JSON.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: provide visual parameters as JSON.");
    }
 
    /* Parse the JSON value to extract title, type, and code.
@@ -217,13 +218,13 @@ static char *render_visual_callback(const char *action, char *value, int *should
 
    if (!code || code[0] == '\0') {
       json_object_put(json);
-      return strdup("Error: 'code' parameter is required.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'code' parameter is required.");
    }
 
    /* Validate type */
    if (strcmp(type, "svg") != 0 && strcmp(type, "html") != 0) {
       json_object_put(json);
-      return strdup("Error: 'type' must be 'svg' or 'html'.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'type' must be 'svg' or 'html'.");
    }
 
    /* Sanitize title — strip characters that would break the tag attribute,

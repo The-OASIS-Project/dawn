@@ -327,6 +327,7 @@ depends on, so every build runs them, and they fail the build when broken:
 | `no_ws_direct_write_check` | `check_no_ws_direct_write.sh` | Every WebSocket data frame goes through `webui_send.c`'s `write_frame()`, which holds it while earlier output is still going out; never a direct `lws_write()` |
 | `messaging_send_funnel_check` | `check_messaging_send_funnel.sh` | Every messaging driver send goes through `messaging_deliver` (per-provider formatting and escaping) |
 | `tool_action_kinds_check` | `check_tool_action_kinds.sh` | Every tool's action-kinds table names its own actions, and each prepare names a listed confirm |
+| `tool_error_mark_check` | `check_tool_error_mark.sh` | An "Error" literal a tool returns through `strdup()` or `make_response()` starts with `TOOL_RESULT_ERROR_MARK`, or it counts as a success (an error formatted into a buffer and returned later is not checked) |
 | `llm_blocks_confined_check` | `check_llm_blocks_confined.sh` | Stored turn blocks (`messages.llm_blocks`) are read only to rebuild an LLM request |
 | `llm_selection_resolved_check` | `check_llm_selection_resolved.sh` | A session's LLM settings are read resolved (`session_get_llm_config`); only the writers that store them back read them raw |
 | `message_kind_confined_check` | `check_message_kind_confined.sh` | Request-context rows (a `messages.kind`) are never shown, searched, counted or extracted |

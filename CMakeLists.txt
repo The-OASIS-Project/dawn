@@ -1277,6 +1277,15 @@ add_custom_target(tool_action_kinds_check
     COMMENT "Checking tool kinds-of-action tables")
 add_dependencies(dawn tool_action_kinds_check)
 
+# Tool error-mark CI invariant: an "Error ..." literal a tool returns through
+# strdup() or make_response() starts with TOOL_RESULT_ERROR_MARK, or it counts
+# as a success.  See scripts/check_tool_error_mark.sh.
+add_custom_target(tool_error_mark_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_tool_error_mark.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking tool error results carry the error mark")
+add_dependencies(dawn tool_error_mark_check)
+
 # Blob-marker CI invariant: the chat-attachment "blob:<id>]" marker is encoded
 # in three places (JS producer, JS parser, orphan-sweep SQL) that must agree, or
 # the maintenance sweep silently reclaims still-attached original files (data
