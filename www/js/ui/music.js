@@ -426,7 +426,14 @@
       if (!elements.panel) return;
 
       isOpen = false;
+      // The closed panel is out of the tab order: focus inside it goes back to
+      // the button that opens it.
+      const hadFocus = elements.panel.contains(document.activeElement);
       elements.panel.classList.add('hidden');
+      if (hadFocus) {
+         const opener = document.getElementById('music-btn');
+         if (opener) opener.focus();
+      }
       DawnStore.setBool(DawnStore.KEYS.MUSIC_PANEL_OPEN, false);
       if (musicEscToken !== null) {
          DawnEscStack.unregister(musicEscToken);

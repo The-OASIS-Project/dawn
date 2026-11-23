@@ -3514,6 +3514,13 @@ add_test(NAME check_tool_error_mark
          WORKING_DIRECTORY ${SRC_ROOT})
 set_tests_properties(check_tool_error_mark PROPERTIES LABELS "ci")
 
+# The WebUI has no global `.hidden` rule: a header button that starts hidden
+# needs its own, or its auth gate styles nothing.
+add_test(NAME check_header_hidden_rules
+         COMMAND bash ${SRC_ROOT}/tests/check_header_hidden_rules.sh
+         WORKING_DIRECTORY ${SRC_ROOT})
+set_tests_properties(check_header_hidden_rules PROPERTIES LABELS "ci")
+
 # The tests that load models.toml read the copy compiled in (models_toml_builtin.h).
 add_dependencies(bench_retrieval models_toml_builtin)
 add_dependencies(test_memory_remember models_toml_builtin)

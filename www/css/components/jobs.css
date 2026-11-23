@@ -73,29 +73,25 @@
    flex-direction: column;
    opacity: 1;
    transform: translateY(0);
-   visibility: visible;
    transition:
       opacity 0.15s ease,
-      transform 0.15s ease,
-      visibility 0s;
+      transform 0.15s ease;
 }
 
-/* `visibility: hidden` — deliberately STRICTER than the sibling popovers,
- * which hide with opacity + pointer-events alone.  Those leave their contents
- * in the tab order while "closed"; here the contents are Cancel and Resume
- * buttons that destroy or restart real work, so a Tab-reachable invisible
- * Cancel is not acceptable.  Delayed to the end of the fade so the transition
- * still plays.  (The siblings want the same treatment — filed separately,
- * since changing four shipped panels belongs in its own change.) */
+/* Closed, the panel's contents are skipped: its controls can't take focus or
+ * a Tab stop.  `content-visibility` and not `visibility`, which is inherited:
+ * a child with `transition: all` would animate it and still be hidden when
+ * the panel opens and focuses it.  Delayed to the end of the close transition
+ * so that still plays. */
 #jobs-popover.hidden {
    opacity: 0;
    transform: translateY(-8px);
    pointer-events: none;
-   visibility: hidden;
+   content-visibility: hidden;
    transition:
       opacity 0.15s ease,
       transform 0.15s ease,
-      visibility 0s linear 0.15s;
+      content-visibility 0s linear 0.15s allow-discrete;
 }
 
 /* ---- header ---------------------------------------------------------- */

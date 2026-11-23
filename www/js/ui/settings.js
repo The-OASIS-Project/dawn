@@ -70,8 +70,20 @@
    function open() {
       if (!settingsElements.panel) return;
 
+      const wasClosed = settingsElements.panel.classList.contains('hidden');
       settingsElements.panel.classList.remove('hidden');
       settingsElements.overlay.classList.remove('hidden');
+      // The panel sits late in the page: without this a keyboard user tabs
+      // through everything else to reach it.  Deferred past the click that
+      // opened it: a popover that click closes takes focus back to its own
+      // button on the way out.
+      if (wasClosed && settingsElements.closeBtn) {
+         setTimeout(() => {
+            if (!settingsElements.panel.classList.contains('hidden')) {
+               settingsElements.closeBtn.focus();
+            }
+         }, 0);
+      }
 
       if (settingsEscToken === null) {
          settingsEscToken = DawnEscStack.register(() => {
@@ -161,8 +173,12 @@
       if (typeof DawnMySettings !== 'undefined' && DawnMySettings.revertUnsavedTheme) {
          DawnMySettings.revertUnsavedTheme();
       }
+      // The closed panel is out of the tab order, so focus inside it goes back
+      // to the button that opens it and isn't left on nothing.
+      const hadFocus = settingsElements.panel.contains(document.activeElement);
       settingsElements.panel.classList.add('hidden');
       settingsElements.overlay.classList.add('hidden');
+      if (hadFocus && settingsElements.openBtn) settingsElements.openBtn.focus();
       if (settingsEscToken !== null) {
          DawnEscStack.unregister(settingsEscToken);
          settingsEscToken = null;
@@ -700,23 +716,15 @@
     * Set callbacks for external dependencies
     */
    function setCallbacks(cbs) {
-      if (cbs.getAuthState) callbacks.getAuthState = cbs.getAuthState;
-      if (cbs.setAuthState) callbacks.setAuthState = cbs.setAuthState;
-      if (cbs.updateHistoryButtonVisibility)
-         callbacks.updateHistoryButtonVisibility = cbs.updateHistoryButtonVisibility;
-      if (cbs.updateMemoryButtonVisibility)
-         callbacks.updateMemoryButtonVisibility = cbs.updateMemoryButtonVisibility;
-      /* Was never stored, so updateAuthVisibility's call to it (above) could
-       * never fire.  It went unnoticed because both panels behind it survived
-       * by accident: #scheduler-btn has no `.hidden` CSS rule at all, so its
-       * gate is inert and the button is simply always visible, and #coding-btn
-       * is revealed a second way (setEnabled, on get_config_response).  The
-       * jobs button is the first with a real `.hidden` rule AND no second
-       * path — i.e. the first one actually gated by this callback. */
-      if (cbs.updateSchedulerButtonVisibility)
-         callbacks.updateSchedulerButtonVisibility = cbs.updateSchedulerButtonVisibility;
-      if (cbs.restoreHistorySidebarState)
-         callbacks.restoreHistorySidebarState = cbs.restoreHistorySidebarState;
+      /* Copy every declared key from the one list above, so a new callback
+       * can't be declared and then silently never stored. */
+      for (const key of Object.keys(cbs)) {
+         if (!Object.prototype.hasOwnProperty.call(callbacks, key)) {
+            console.warn('DawnSettings.setCallbacks: unknown callback "' + key + '"');
+         } else if (cbs[key]) {
+            callbacks[key] = cbs[key];
+         }
+      }
 
       // Update Config module's callbacks with setAuthState
       Config.setCallbacks({
