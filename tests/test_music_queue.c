@@ -232,6 +232,18 @@ static void test_imports_legacy_once(void) {
    TEST_ASSERT_EQUAL_INT(0, uq->queue_length);
    music_queue_release(uq);
 
+   /* A copy left for a later start (music.db unreadable) never overwrites a
+    * queue saved here meanwhile, even an empty one */
+   music_queue_shutdown();
+   sqlite3 *qdb = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_open(s_db_path, &qdb));
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(qdb, "PRAGMA user_version = 0", NULL, NULL, NULL));
+   sqlite3_close(qdb);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path, legacy));
+   uq = music_queue_acquire(5);
+   TEST_ASSERT_EQUAL_INT(0, uq->queue_length);
+   music_queue_release(uq);
+
    unlink(legacy);
 }
 

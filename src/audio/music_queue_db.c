@@ -67,7 +67,8 @@ static const char *SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS user_queue ("
  * Queues were once kept in music.db, where a library scan's write lock held
  * up every queue save.  Copy them into this file once (user_version 0 -> 1);
  * music.db's old tables are left as they were.  A failed copy leaves the
- * version at 0, so the next start tries again.
+ * version at 0, so the next start tries again; a user who saved a queue
+ * here meanwhile (every save writes their state row) keeps it.
  */
 static void import_legacy(const char *legacy_path) {
    sqlite3_stmt *stmt = NULL;
@@ -113,7 +114,8 @@ static void import_legacy(const char *legacy_path) {
                         "BEGIN;"
                         "INSERT OR IGNORE INTO user_queue (user_id, position, path, title, "
                         "artist, album, duration_sec) SELECT user_id, position, path, title, "
-                        "artist, album, duration_sec FROM legacy.user_queue;"
+                        "artist, album, duration_sec FROM legacy.user_queue WHERE user_id NOT IN "
+                        "(SELECT user_id FROM main.user_queue_state);"
                         "INSERT OR IGNORE INTO user_queue_state (user_id, shuffle, repeat_mode) "
                         "SELECT user_id, shuffle, repeat_mode FROM legacy.user_queue_state;"
                         "PRAGMA user_version = 1;"
