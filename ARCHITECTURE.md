@@ -273,6 +273,8 @@ call into each other: read them as one Layer-2 unit, not as separate modules wit
 | `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |
 | `src/memory/memory_consolidate.c`, `memory_consolidation_undo.c` (a batch recorded, undone or kept) | `webui_broadcasts.c` (`memory_batch` to every tab of the user) | weak `memory_consolidation_batch_notify` |
 | `src/core/job_manager.c` (cancel a job whose work runs outside DAWN) | `coding_agent_tool.c` (asks the agent gateway to stop a coding job's task) | `job_manager_register_kind_cancel` |
+| `src/core/job_worker.c`, `job_reinvoke.c` (a tool loop's per-iteration hook) | `webui_text_processing.c` (seals a viewer's streaming bubble at each tool boundary) | weak `webui_tool_iteration_cb` (a no-op in `webui_absent.c`) |
+| `src/core/session_manager.c` (a session about to be freed) | `webui_send.c` (drops the queued WebUI responses that name it) | weak `webui_send_purge_session` |
 | `src/core/conv_post.c` (a post into a conversation) | the WebUI, which tells the tabs viewing it to refetch | `webui_broadcast_conversation_messages_appended` (strong in `webui_broadcasts.c`, a no-op in `webui_absent.c`) |
 | `src/core/conv_turn_lease.c` (a queued post written at the holder's release) | `conv_post.c`'s writer | `conv_turn_lease_set_writer`, at startup |
 | `src/core/session_turn_lease.c` (a turn waits for its conversation, gets it, or stops waiting) | the waiting session's client (`webui_turn_wait.c`) | weak `session_turn_waiting_notice` |

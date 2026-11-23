@@ -202,6 +202,19 @@ void webui_broadcast_jobs_invalidate(int user_id) {
  * Inbound: jobs_request -> jobs_snapshot (the complete active set)
  * ============================================================================= */
 
+/* A list frame that couldn't be built answers anyway, with `success: false` and
+ * no `jobs`: a silent drop would leave the client unable to tell a failed read
+ * from one still on its way, and keep showing counts that may be stale. */
+static void send_list_failure(ws_connection_t *conn, const char *type, const char *error) {
+   json_object *payload = json_object_new_object();
+   if (!payload) {
+      return;
+   }
+   json_object_object_add(payload, "success", json_object_new_boolean(false));
+   json_object_object_add(payload, "error", json_object_new_string(error));
+   send_frame(conn, type, payload);
+}
+
 void webui_jobs_send_snapshot(ws_connection_t *conn) {
    if (!conn || !conn->session || !conn->authenticated || conn->is_satellite ||
        conn->auth_user_id <= 0) {
@@ -227,6 +240,7 @@ void webui_jobs_send_snapshot(ws_connection_t *conn) {
    job_record_t *rows = calloc((size_t)query_max, sizeof(*rows));
    if (!rows) {
       OLOG_ERROR("webui_jobs: snapshot alloc failed (%d rows)", query_max);
+      send_list_failure(conn, "jobs_snapshot", "Couldn't read your background jobs.");
       return;
    }
 
@@ -235,6 +249,7 @@ void webui_jobs_send_snapshot(ws_connection_t *conn) {
        AUTH_DB_SUCCESS) {
       free(rows);
       OLOG_WARNING("webui_jobs: active-list read failed for user %d", conn->auth_user_id);
+      send_list_failure(conn, "jobs_snapshot", "Couldn't read your background jobs.");
       return;
    }
 
@@ -253,6 +268,7 @@ void webui_jobs_send_snapshot(ws_connection_t *conn) {
    for (int i = 0; i < emit; i++) {
       json_object_array_add(arr, job_to_json(&rows[i]));
    }
+   json_object_object_add(payload, "success", json_object_new_boolean(true));
    json_object_object_add(payload, "jobs", arr);
    json_object_object_add(payload, "truncated", json_object_new_boolean(truncated));
    if (truncated) {
@@ -286,6 +302,7 @@ void webui_jobs_send_history(ws_connection_t *conn,
    job_record_t *rows = calloc((size_t)limit, sizeof(*rows));
    if (!rows) {
       OLOG_ERROR("webui_jobs: history alloc failed (%d rows)", limit);
+      send_list_failure(conn, "list_jobs_response", "Couldn't read your finished jobs.");
       return;
    }
 
@@ -294,6 +311,7 @@ void webui_jobs_send_history(ws_connection_t *conn,
                                         limit, &n) != AUTH_DB_SUCCESS) {
       free(rows);
       OLOG_WARNING("webui_jobs: history read failed for user %d", conn->auth_user_id);
+      send_list_failure(conn, "list_jobs_response", "Couldn't read your finished jobs.");
       return;
    }
 
@@ -302,6 +320,7 @@ void webui_jobs_send_history(ws_connection_t *conn,
    for (int i = 0; i < n; i++) {
       json_object_array_add(arr, job_to_json(&rows[i]));
    }
+   json_object_object_add(payload, "success", json_object_new_boolean(true));
    json_object_object_add(payload, "jobs", arr);
    /* A full page means there MAY be more; the cursor is the last row's sort key,
     * so the follow-up request resumes exactly where this page stopped even if

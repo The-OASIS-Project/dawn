@@ -1305,7 +1305,11 @@
             case 'jobs_snapshot':
                // Connect/reconnect rehydration of the complete active set.
                if (typeof DawnJobsActivity !== 'undefined' && msg.payload) {
-                  DawnJobsActivity.applySnapshot(msg.payload.jobs, msg.payload.truncated);
+                  if (msg.payload.success === false) {
+                     DawnJobsActivity.snapshotFailed(msg.payload.error);
+                  } else {
+                     DawnJobsActivity.applySnapshot(msg.payload.jobs, msg.payload.truncated);
+                  }
                }
                break;
             case 'jobs_invalidate':

@@ -389,6 +389,19 @@ window.DawnJobsActivity = (function () {
       }
    }
 
+   // jobs_snapshot with success:false: the server couldn't read the active set.
+   // Keep the set this tab already has (a wrong empty set would hide running
+   // jobs) and say the counts may be stale.
+   function snapshotFailed(error) {
+      console.warn('DawnJobsActivity: active-job snapshot failed:', error || '(no reason)');
+      if (typeof DawnToast !== 'undefined') {
+         DawnToast.show(
+            (error || "Couldn't read your background jobs.") + ' Job counts may be out of date.',
+            'error'
+         );
+      }
+   }
+
    // Every active job row, for surfaces that need more than a count (the jobs
    // panel). The ARRAY is a copy, but the rows are the store's own objects —
    // treat them as read-only. Mutating a row would silently desync the derived
@@ -446,6 +459,7 @@ window.DawnJobsActivity = (function () {
       init: init,
       upsertJob: upsertJob,
       applySnapshot: applySnapshot,
+      snapshotFailed: snapshotFailed,
       handleReconnect: handleReconnect,
       // A jobs_invalidate nudge re-syncs exactly like a reconnect: re-request the
       // snapshot so the pill drops a removed (e.g. cascade-deleted) job.

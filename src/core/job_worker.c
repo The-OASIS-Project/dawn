@@ -35,6 +35,7 @@
 #include <time.h>
 
 #include "auth/auth_db.h"
+#include "auth/auth_db_conv_prefix.h" /* conv_db_retract_envelope */
 #include "auth/auth_db_messages.h"
 #include "core/conv_event.h"
 #include "core/event_payload.h"
@@ -49,7 +50,6 @@
 #include "logging.h"
 #include "memory/memory_history_loader.h"
 #include "prompts.h"
-#include "webui/webui_server.h" /* webui_tool_iteration_cb — bubble-seal hook (jobs run only in WebUI builds) */
 
 /* Work item handed to the detached worker thread. */
 typedef struct {
@@ -120,8 +120,8 @@ static void job_worker_run(job_work_t *work) {
     * confident non-answer, marked the job `done`, and — because `done` is not
     * resumable — destroyed the retry.  Observed live on conv 970, which is why
     * v74 made the goal durable at creation. */
+   bool continued = false; /* a resume carrying on a restored transcript */
    if (work->resume) {
-      bool continued = false;
       size_t restored = 0;
       /* Read before the load: the turn's catch-up pulls what lands after. */
       conv_sync_point_t at;
@@ -155,10 +155,10 @@ static void job_worker_run(job_work_t *work) {
 
       /* Durable boundary marker in the event stream: without it a tailer sees
        * complete{interrupted} → status{generating} → fresh tool_calls with nothing
-       * marking the restart, and the transcript renderer (CP4b) would draw the
-       * JOB_RESUME_DIRECTIVE as if the user typed it.  The message role stays
-       * `user` (the provider needs a user turn); the renderer draws the boundary
-       * off this event instead. */
+       * marking the restart, and the transcript renderer (CP4b) would not draw
+       * the restart at all.  The directive itself is sent as an envelope (below):
+       * a `user` turn to the provider, request context everywhere else, so no
+       * transcript shows it as something the user typed. */
       struct json_object *pj = json_object_new_object();
       char *payload = NULL;
       if (pj != NULL) {
@@ -184,6 +184,10 @@ static void job_worker_run(job_work_t *work) {
 
    text_input_dispatch_opts_t opts = {
       .conversation_id = work->conv_id, /* persist the goal (user msg) to the job conv */
+      /* A continued resume's JOB_RESUME_DIRECTIVE is DAWN's words, not the
+       * user's: saved and replayed as request context.  A resume that restarts
+       * from the stored goal sends the user's goal, an ordinary question. */
+      .question_kind = continued ? MESSAGE_KIND_ENVELOPE : MESSAGE_KIND_NONE,
       .auth_user_id = work->user_id,
       .sentence_cb = NULL, /* no TTS — text-only job */
       .sentence_userdata = NULL,
@@ -341,6 +345,18 @@ static void job_worker_run(job_work_t *work) {
        * than double-renders (0 would re-render). Reasoning capture is Phase 1. */
       conv_event_notify_message_appended(work->conv_id, work->user_id, final_msg_id, "assistant",
                                          response, NULL, atomic_load(&s->current_stream_id));
+   }
+   /* A resume that produced nothing takes its directive back (and the context
+    * sent with it), so failed resumes don't pile up copies the next one replays.
+    * Kept when anything was saved after it (a tool exchange: work the next
+    * attempt sees).  The job session's own history ends with it. */
+   if (continued && !have_answer) {
+      const int64_t envelope = session_turn_envelope_id(s);
+      if (envelope > 0 &&
+          conv_db_retract_envelope(work->conv_id, work->user_id, envelope) == AUTH_DB_SUCCESS) {
+         OLOG_INFO("job_worker: took back the unanswered directive of conv %lld",
+                   (long long)work->conv_id);
+      }
    }
    session_turn_end(s);
 

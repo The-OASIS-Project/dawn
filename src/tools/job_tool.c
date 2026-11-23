@@ -444,13 +444,14 @@ static char *job_tool_callback(const char *action, char *value, int *should_resp
     * (mosquitto_comms.c), UNAUTHENTICATED on a broker without auth/TLS, which
     * would otherwise run as the default voice user with the fan-out backstop
     * wide open.
-    * Reads stay available (they are already user-scoped and harmless); anything
-    * that starts work fails closed. */
-   if (ctx == NULL && starts_work) {
+    * Every action fails closed, reads included: `list` and `status` would show
+    * that user's jobs and their results to the publisher, and `cancel` would stop
+    * them. */
+   if (ctx == NULL) {
       json_object_put(details);
       OLOG_WARNING("job_tool: refused '%s' from a caller with no session context", action);
       return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: background jobs can only be started from a user session.");
+                    "Error: background jobs can only be used from a user session.");
    }
 
    /* Backstop: a background-job worker runs headless and must never start further

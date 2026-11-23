@@ -442,8 +442,8 @@ char *event_payload_tool_result(const char *tool_name,
 }
 
 /* The rest of job_dispatch.c, whose persist hook a turn here saves through. */
-bool job_manager_claim_reaped(const session_t *session, bool *user_cancelled_out) {
-   (void)session;
+bool job_manager_claim_reaped(uint32_t session_id, bool *user_cancelled_out) {
+   (void)session_id;
    if (user_cancelled_out) {
       *user_cancelled_out = false;
    }
@@ -705,6 +705,10 @@ static int64_t newest_of_kind(const char *kind) {
 static message_kind_t s_question_kind = MESSAGE_KIND_NONE;
 static bool s_retract_unanswered;
 static bool s_retract_envelope_row;
+/* As a resumed job that produced nothing: its own envelope taken back by row
+ * (session_turn_envelope_id); the result is kept for the test. */
+static bool s_retract_turn_envelope;
+static int s_retract_rc;
 /* The turn starts before its conversation is known (a voice turn), and binds
  * it in dispatch. */
 static bool s_begin_unbound;
@@ -782,6 +786,10 @@ static void run_turn(int64_t conv, const char *question, script_t script) {
    } else if (s_retract_envelope_row) {
       TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
                             conv_db_retract_envelope(conv, s_user, newest_of_kind("envelope")));
+   } else if ((!reply || reply[0] == '\0') && s_retract_turn_envelope) {
+      const int64_t envelope = session_turn_envelope_id(s);
+      TEST_ASSERT_EQUAL_INT64(newest_of_kind("envelope"), envelope);
+      s_retract_rc = conv_db_retract_envelope(conv, s_user, envelope);
    }
    free(reply);
    session_turn_end(s);
@@ -1500,6 +1508,44 @@ static void test_a_boundary_by_the_other_session(void) {
    caught_up(b, SIGNED);
 }
 
+/* The job worker's next resume: the session's history built again from the
+ * conversation, as memory_history_load_for_llm hands it over. */
+static void resume_from_storage(int64_t conv) {
+   session_replace_history_at(s, reload(conv), conv, s_user, NULL);
+   assert_live_is_reload(conv, NULL);
+}
+
+/* Resumed jobs: one that produces nothing takes its directive and the context
+ * sent with it back, so failed resumes leave no copies; one whose attempt saved
+ * a tool exchange keeps its directive (the restart point of that work). */
+static void test_failed_resumes_leave_one_directive(void) {
+   run_turn(s_conv, "The goal", (script_t){ .reply = "Halfway.", .tool_call = "toolu_1" });
+   const int64_t contexts = saved_rows(s_conv, "turn_context");
+   s_question_kind = MESSAGE_KIND_ENVELOPE;
+   s_retract_turn_envelope = true;
+   for (int attempt = 0; attempt < 2; attempt++) {
+      resume_from_storage(s_conv);
+      run_turn(s_conv, "Your previous attempt did not finish.", (script_t){ .reply = NULL });
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, s_retract_rc);
+      TEST_ASSERT_EQUAL_INT64(0, saved_rows(s_conv, "envelope"));
+      TEST_ASSERT_EQUAL_INT64(contexts, saved_rows(s_conv, "turn_context"));
+   }
+   /* A resume whose attempt did work before failing keeps its directive. */
+   resume_from_storage(s_conv);
+   run_turn(s_conv, "Your previous attempt did not finish.",
+            (script_t){ .reply = NULL, .tool_call = "toolu_2" });
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_DUPLICATE, s_retract_rc);
+   TEST_ASSERT_EQUAL_INT64(1, saved_rows(s_conv, "envelope"));
+   /* The resume after it adds one more: a real restart point. */
+   s_retract_turn_envelope = false;
+   resume_from_storage(s_conv);
+   run_turn(s_conv, "Your previous attempt did not finish.", (script_t){ .reply = "Done." });
+   TEST_ASSERT_EQUAL_INT64(2, saved_rows(s_conv, "envelope"));
+   TEST_ASSERT_TRUE(saved_rows(s_conv, "turn_context") > contexts); /* each resume has one */
+   s_question_kind = MESSAGE_KIND_NONE;
+   resume_from_storage(s_conv);
+}
+
 /* A re-engagement with no reply, its take-back tried as the code does it, and
  * one whose envelope's row is taken back inside its own turn (as a
  * re-engagement does once it knows the row): the other session never holds
@@ -1712,6 +1758,7 @@ int main(void) {
    RUN_TEST(test_a_reasoned_reply_stopped_after_it_completed);
    RUN_TEST(test_a_reply_stopped_mid_stream);
    RUN_TEST(test_a_re_engagement);
+   RUN_TEST(test_failed_resumes_leave_one_directive);
    RUN_TEST(test_an_openai_tool_exchange);
    RUN_TEST(test_an_openai_tool_exchange_with_reasoning);
    RUN_TEST(test_a_tool_result_with_an_image);

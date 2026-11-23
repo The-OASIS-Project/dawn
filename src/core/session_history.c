@@ -414,6 +414,25 @@ int64_t session_turn_question_id(session_t *session) {
    return row;
 }
 
+int64_t session_turn_envelope_id(session_t *session) {
+   if (!session) {
+      return 0;
+   }
+   pthread_mutex_lock(&session->history_mutex);
+   struct json_object *hist = turn_target_locked(session);
+   int64_t row = 0;
+   for (size_t i = hist ? json_object_array_length(hist) : 0; i-- > 0;) {
+      struct json_object *msg = json_object_array_get_idx(hist, i);
+      struct json_object *id = NULL;
+      if (llm_history_kind_of(msg) == MESSAGE_KIND_ENVELOPE) {
+         row = json_object_object_get_ex(msg, "id", &id) ? json_object_get_int64(id) : 0;
+         break;
+      }
+   }
+   pthread_mutex_unlock(&session->history_mutex);
+   return row;
+}
+
 bool session_stop_turn(session_t *session, const char *note) {
    if (!session || !note) {
       return false;
