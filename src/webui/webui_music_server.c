@@ -162,6 +162,40 @@ static bool login_may_bind(const music_ws_connection_t *conn, session_t *session
    return session_owner_is(session, conn->login_key);
 }
 
+/* A {"type":"music_buffer","buffered_ms":N} report: the client's buffered
+ * depth, for closed-loop flow control.  Anything else is ignored. */
+static void handle_buffer_report(session_t *session, const void *in, size_t len) {
+   if (!session) {
+      return;
+   }
+   struct json_tokener *tok = json_tokener_new();
+   if (!tok) {
+      return;
+   }
+   struct json_object *msg = json_tokener_parse_ex(tok, (const char *)in, (int)len);
+   json_tokener_free(tok);
+   if (!msg) {
+      return;
+   }
+   struct json_object *type_obj = NULL;
+   struct json_object *ms_obj = NULL;
+   const char *mtype = NULL;
+   /* Guard json_object_get_string() → NULL for a JSON null value before
+    * strcmp (CWE-476): a {"type":null} frame must not crash. */
+   if (json_object_object_get_ex(msg, "type", &type_obj) &&
+       (mtype = json_object_get_string(type_obj)) != NULL && strcmp(mtype, "music_buffer") == 0 &&
+       json_object_object_get_ex(msg, "buffered_ms", &ms_obj)) {
+      int ms = json_object_get_int(ms_obj);
+      if (ms < 0) {
+         ms = 0;
+      } else if (ms > WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS) {
+         ms = WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS;
+      }
+      webui_music_report_buffer(session, (uint32_t)ms);
+   }
+   json_object_put(msg);
+}
+
 /* =============================================================================
  * WebSocket Callback
  * ============================================================================= */
@@ -293,33 +327,7 @@ static int callback_music_websocket(struct lws *wsi,
              * would kill playback (and mirrors the client's own back-compat leniency
              * toward an old server). */
             if (!lws_frame_is_binary(wsi)) {
-               struct json_tokener *tok = json_tokener_new();
-               struct json_object *msg = tok ? json_tokener_parse_ex(tok, (const char *)in,
-                                                                     (int)len)
-                                             : NULL;
-               if (tok) {
-                  json_tokener_free(tok);
-               }
-               if (msg) {
-                  struct json_object *type_obj = NULL;
-                  struct json_object *ms_obj = NULL;
-                  const char *mtype = NULL;
-                  /* Guard json_object_get_string() → NULL for a JSON null value
-                   * before strcmp (CWE-476): a {"type":null} frame must not crash. */
-                  if (conn->session && json_object_object_get_ex(msg, "type", &type_obj) &&
-                      (mtype = json_object_get_string(type_obj)) != NULL &&
-                      strcmp(mtype, "music_buffer") == 0 &&
-                      json_object_object_get_ex(msg, "buffered_ms", &ms_obj)) {
-                     int ms = json_object_get_int(ms_obj);
-                     if (ms < 0) {
-                        ms = 0;
-                     } else if (ms > WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS) {
-                        ms = WEBUI_MUSIC_CLIENT_BUFFER_MAX_MS;
-                     }
-                     webui_music_report_buffer(conn->session, (uint32_t)ms);
-                  }
-                  json_object_put(msg);
-               }
+               handle_buffer_report(conn->session, in, len);
             }
          }
          break;

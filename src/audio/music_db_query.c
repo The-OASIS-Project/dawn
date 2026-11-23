@@ -982,7 +982,7 @@ int music_db_album_find(const char *album,
 }
 
 static const char *SQL_ALBUM_TRACKS =
-    "SELECT " MUSIC_ROW_COLS " FROM music_metadata "
+    "SELECT " MUSIC_ROW_COLS ", COALESCE(disc_no, 1) FROM music_metadata "
     "WHERE album_id = (SELECT album_id FROM music_metadata WHERE id = ?1) "
     "AND " MUSIC_COPY_KEY " = (SELECT " MUSIC_COPY_KEY " FROM music_metadata WHERE id = ?1) "
     "AND " MUSIC_DEDUP_SAME_COPY "ORDER BY " MUSIC_COPY_ORDER " LIMIT ?2";
@@ -1009,7 +1009,8 @@ int music_db_album_tracks(int64_t id, music_search_result_t *results, int max, i
    int count = 0;
    int rc;
    while ((rc = sqlite3_step(st)) == SQLITE_ROW && count < max) {
-      music_db_populate_row(st, &results[count++]);
+      music_db_populate_row(st, &results[count]);
+      results[count++].disc_no = (uint32_t)sqlite3_column_int(st, 8);
    }
    sqlite3_finalize(st);
    pthread_mutex_unlock(&g_music_db_mutex);

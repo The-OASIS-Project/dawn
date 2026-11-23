@@ -119,6 +119,15 @@ size_t music_rank_fold(const char *in, char *out, size_t cap) {
       j--;
    }
    out[j] = '\0';
+
+   /* "disk" and "disc" are one word: a spoken "disc one" must find a set
+    * tagged "Disk 1", and the reverse.  Both sides of a match are folded. */
+   for (size_t i = 0; i + 4 <= j; i++) {
+      if ((i == 0 || out[i - 1] == ' ') && memcmp(out + i, "disk", 4) == 0 &&
+          (i + 4 == j || out[i + 4] == ' ')) {
+         out[i + 3] = 'c';
+      }
+   }
    return j;
 }
 
