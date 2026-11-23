@@ -143,14 +143,18 @@ void tearDown(void) {
 static void test_plan_echoes_every_question(void) {
    char value[TEST_PLAN_CAP * TEST_PLAN_ITEM_MAX + 16];
    size_t off = 0;
-   off += (size_t)snprintf(value + off, sizeof(value) - off, "[");
+   value[off++] = '[';
    for (int i = 0; i < TEST_PLAN_CAP; i++) {
-      off += (size_t)snprintf(value + off, sizeof(value) - off,
-                              "%s\"Question %02d about a fairly long research topic that runs "
-                              "well past eighty bytes of text\"",
-                              i ? "," : "", i);
+      int n = snprintf(value + off, sizeof(value) - off,
+                       "%s\"Question %02d about a fairly long research topic that runs "
+                       "well past eighty bytes of text\"",
+                       i ? "," : "", i);
+      /* Each item must fit whole: the next write starts where this one ended. */
+      TEST_ASSERT_TRUE(n > 0 && (size_t)n < sizeof(value) - off - 1);
+      off += (size_t)n;
    }
-   snprintf(value + off, sizeof(value) - off, "]");
+   value[off++] = ']';
+   value[off] = '\0';
 
    char *out = call_tool("research_plan", value);
    TEST_ASSERT_NOT_NULL(out);
