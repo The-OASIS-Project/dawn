@@ -23,7 +23,6 @@
 
 #include "tools/weather_service.h"
 
-#include <ctype.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
 #include <pthread.h>
@@ -35,7 +34,7 @@
 #include "core/curl_buffer.h"
 #include "dawn_error.h"
 #include "logging.h"
-#include "utils/string_utils.h"
+#include "tools/weather_geocode.h"
 
 // Module state (thread-safe with mutex protection)
 static int module_initialized = 0;
@@ -185,178 +184,36 @@ void weather_service_cleanup(void) {
    OLOG_INFO("weather_service: Cleanup complete");
 }
 
-// US state abbreviation to full name mapping
-static const struct {
-   const char *abbrev;
-   const char *full;
-} us_state_map[] = { { "AL", "Alabama" },
-                     { "AK", "Alaska" },
-                     { "AZ", "Arizona" },
-                     { "AR", "Arkansas" },
-                     { "CA", "California" },
-                     { "CO", "Colorado" },
-                     { "CT", "Connecticut" },
-                     { "DE", "Delaware" },
-                     { "FL", "Florida" },
-                     { "GA", "Georgia" },
-                     { "HI", "Hawaii" },
-                     { "ID", "Idaho" },
-                     { "IL", "Illinois" },
-                     { "IN", "Indiana" },
-                     { "IA", "Iowa" },
-                     { "KS", "Kansas" },
-                     { "KY", "Kentucky" },
-                     { "LA", "Louisiana" },
-                     { "ME", "Maine" },
-                     { "MD", "Maryland" },
-                     { "MA", "Massachusetts" },
-                     { "MI", "Michigan" },
-                     { "MN", "Minnesota" },
-                     { "MS", "Mississippi" },
-                     { "MO", "Missouri" },
-                     { "MT", "Montana" },
-                     { "NE", "Nebraska" },
-                     { "NV", "Nevada" },
-                     { "NH", "New Hampshire" },
-                     { "NJ", "New Jersey" },
-                     { "NM", "New Mexico" },
-                     { "NY", "New York" },
-                     { "NC", "North Carolina" },
-                     { "ND", "North Dakota" },
-                     { "OH", "Ohio" },
-                     { "OK", "Oklahoma" },
-                     { "OR", "Oregon" },
-                     { "PA", "Pennsylvania" },
-                     { "RI", "Rhode Island" },
-                     { "SC", "South Carolina" },
-                     { "SD", "South Dakota" },
-                     { "TN", "Tennessee" },
-                     { "TX", "Texas" },
-                     { "UT", "Utah" },
-                     { "VT", "Vermont" },
-                     { "VA", "Virginia" },
-                     { "WA", "Washington" },
-                     { "WV", "West Virginia" },
-                     { "WI", "Wisconsin" },
-                     { "WY", "Wyoming" },
-                     { "DC", "District of Columbia" },
-                     { NULL, NULL } };
+/* Ask the geocoder for a name.  On SUCCESS *root_out holds the parsed response (caller
+ * frees) and *results_out its "results" array, or NULL when it found nothing. */
+static int geocode_query(const char *name,
+                         const char *country_code,
+                         int count,
+                         struct json_object **root_out,
+                         struct json_object **results_out) {
+   *root_out = NULL;
+   *results_out = NULL;
 
-/**
- * @brief Expand US state abbreviation to full name
- * @param abbrev State abbreviation (e.g., "GA")
- * @return Full state name (e.g., "Georgia") or NULL if not found
- */
-static const char *expand_state_abbrev(const char *abbrev) {
-   if (!abbrev || strlen(abbrev) != 2) {
-      return NULL;
-   }
-   // Make uppercase copy for comparison
-   char upper[3];
-   upper[0] = toupper((unsigned char)abbrev[0]);
-   upper[1] = toupper((unsigned char)abbrev[1]);
-   upper[2] = '\0';
-
-   for (int i = 0; us_state_map[i].abbrev != NULL; i++) {
-      if (strcmp(upper, us_state_map[i].abbrev) == 0) {
-         return us_state_map[i].full;
-      }
-   }
-   return NULL;
-}
-
-// Case-insensitive substring match
-static int str_contains_ci(const char *haystack, const char *needle) {
-   if (!haystack || !needle)
-      return 0;
-
-   size_t hay_len = strlen(haystack);
-   size_t needle_len = strlen(needle);
-
-   if (needle_len > hay_len)
-      return 0;
-
-   for (size_t i = 0; i <= hay_len - needle_len; i++) {
-      int match = 1;
-      for (size_t j = 0; j < needle_len; j++) {
-         if (tolower((unsigned char)haystack[i + j]) != tolower((unsigned char)needle[j])) {
-            match = 0;
-            break;
-         }
-      }
-      if (match)
-         return 1;
-   }
-   return 0;
-}
-
-// Geocode a location string to lat/lon
-static int geocode_location(const char *location,
-                            double *latitude,
-                            double *longitude,
-                            char **resolved_name) {
    CURL *curl = curl_easy_init();
    if (!curl) {
       OLOG_ERROR("Failed to initialize curl for geocoding");
-      return 1;
+      return FAILURE;
    }
+
+   char *encoded = curl_easy_escape(curl, name, 0);
+   if (!encoded) {
+      curl_easy_cleanup(curl);
+      return FAILURE;
+   }
+
+   char url[512];
+   snprintf(url, sizeof(url), "%s?name=%s&count=%d&language=en&format=json%s%s",
+            OPEN_METEO_GEOCODING_URL, encoded, count, country_code[0] ? "&countryCode=" : "",
+            country_code);
+   curl_free(encoded);
 
    curl_buffer_t buffer;
    curl_buffer_init_with_max(&buffer, CURL_BUFFER_MAX_WEB_SEARCH);
-
-   // Parse location into city and optional state/region
-   // Supports formats: "Atlanta, Georgia", "Atlanta Georgia", "Atlanta, GA", "Atlanta"
-   char city_name[256] = { 0 };
-   char state_filter[128] = { 0 };
-
-   snprintf(city_name, sizeof(city_name), "%s", location);
-
-   // Check for comma separator
-   char *comma = strchr(city_name, ',');
-   if (comma) {
-      *comma = '\0';
-      // Extract state/region after comma
-      const char *state_start = comma + 1;
-      while (*state_start == ' ')
-         state_start++;
-      safe_strscpy(state_filter, state_start);
-      // Trim trailing whitespace from state
-      char *end = state_filter + strlen(state_filter) - 1;
-      while (end > state_filter && *end == ' ')
-         *end-- = '\0';
-
-      // Expand US state abbreviation to full name (e.g., "GA" -> "Georgia")
-      const char *expanded = expand_state_abbrev(state_filter);
-      if (expanded) {
-         OLOG_INFO("Geocoding: Expanded state '%s' to '%s'", state_filter, expanded);
-         safe_strscpy(state_filter, expanded);
-      }
-   }
-
-   // Trim whitespace from city name
-   char *city_start = city_name;
-   while (*city_start == ' ')
-      city_start++;
-   char *city_end = city_start + strlen(city_start) - 1;
-   while (city_end > city_start && *city_end == ' ')
-      *city_end-- = '\0';
-
-   // URL encode the city name
-   char *encoded_location = curl_easy_escape(curl, city_start, 0);
-   if (!encoded_location) {
-      curl_easy_cleanup(curl);
-      return 1;
-   }
-
-   OLOG_INFO("Geocoding: city='%s', state_filter='%s'", city_start,
-             state_filter[0] ? state_filter : "(none)");
-
-   // Request multiple results so we can filter by state
-   char url[512];
-   snprintf(url, sizeof(url), "%s?name=%s&count=10&language=en&format=json",
-            OPEN_METEO_GEOCODING_URL, encoded_location);
-   curl_free(encoded_location);
-
    curl_easy_setopt(curl, CURLOPT_URL, url);
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
@@ -364,69 +221,74 @@ static int geocode_location(const char *location,
 
    CURLcode res = curl_easy_perform(curl);
    curl_easy_cleanup(curl);
-
    if (res != CURLE_OK) {
       OLOG_ERROR("Geocoding request failed: %s", curl_easy_strerror(res));
       curl_buffer_free(&buffer);
-      return 1;
+      return FAILURE;
    }
 
-   // Parse JSON response
-   struct json_object *root = json_tokener_parse(buffer.data);
+   *root_out = json_tokener_parse(buffer.data);
    curl_buffer_free(&buffer);
-
-   if (!root) {
+   if (!*root_out) {
       OLOG_ERROR("Failed to parse geocoding response");
-      return 1;
+      return FAILURE;
+   }
+   json_object_object_get_ex(*root_out, "results", results_out);
+   return SUCCESS;
+}
+
+/* Geocode a location string to lat/lon.  On failure, why (if not empty) says what wasn't
+ * found, for the model. */
+static int geocode_location(const char *location,
+                            double *latitude,
+                            double *longitude,
+                            char **resolved_name,
+                            char *why,
+                            size_t why_len) {
+   weather_geo_query_t q;
+   why[0] = '\0';
+   if (weather_geocode_parse(location, &q) != SUCCESS) {
+      return FAILURE;
    }
 
-   struct json_object *results;
-   if (!json_object_object_get_ex(root, "results", &results) ||
-       json_object_array_length(results) == 0) {
-      OLOG_ERROR("No geocoding results found for: %s", location);
-      json_object_put(root);
-      return 1;
-   }
+   OLOG_INFO("Geocoding: city='%s', region='%s', country='%s%s'", q.city,
+             q.region[0] ? q.region : "(none)", q.country_code, q.country);
 
-   // Find the best matching result
-   struct json_object *best_result = NULL;
-   size_t num_results = json_object_array_length(results);
-
-   if (state_filter[0]) {
-      // Filter results by state/admin1
-      for (size_t i = 0; i < num_results; i++) {
-         struct json_object *result = json_object_array_get_idx(results, i);
-         struct json_object *admin1_obj;
-
-         if (json_object_object_get_ex(result, "admin1", &admin1_obj)) {
-            const char *admin1 = json_object_get_string(admin1_obj);
-            // Check if state filter matches admin1 (case-insensitive, partial match)
-            if (admin1 && str_contains_ci(admin1, state_filter)) {
-               best_result = result;
-               OLOG_INFO("Matched result %zu: admin1='%s' matches filter '%s'", i, admin1,
-                         state_filter);
-               break;
-            }
-         }
+   int count = (q.region[0] || q.country[0]) ? WEATHER_GEO_COUNT_FILTERED : WEATHER_GEO_COUNT;
+   /* Both spellings when they differ: "Saint Paul" is stored spelled out, "St. Louis" not.
+    * The name as given goes first, so it wins when neither answer has a population. */
+   const char *names[2] = { q.city_given, q.city };
+   size_t nsets = strcmp(names[0], names[1]) == 0 ? 1 : 2;
+   struct json_object *roots[2] = { NULL, NULL };
+   struct json_object *results[2] = { NULL, NULL };
+   for (size_t i = 0; i < nsets; i++) {
+      if (geocode_query(names[i], q.country_code, count, &roots[i], &results[i]) != SUCCESS) {
+         json_object_put(roots[0]);
+         json_object_put(roots[1]);
+         return FAILURE;
       }
+   }
+   struct json_object *best = weather_geocode_pick(results, nsets, &q);
 
-      if (!best_result) {
-         OLOG_WARNING("No results matched state filter '%s', using first result", state_filter);
+   if (!best) {
+      json_object_put(roots[0]);
+      json_object_put(roots[1]);
+      const char *where = q.region[0] ? q.region : q.country[0] ? q.country : NULL;
+      if (where) {
+         snprintf(why, why_len, "Couldn't find %s in %s.", q.city_given, where);
       }
+      OLOG_WARNING("Geocoding: no result for '%s'%s%s", location, where ? " in " : "",
+                   where ? where : "");
+      return FAILURE;
    }
 
-   // Fall back to first result if no state match
-   if (!best_result) {
-      best_result = json_object_array_get_idx(results, 0);
-   }
-
-   struct json_object *lat_obj, *lon_obj, *name_obj, *admin1_obj, *country_obj;
-
-   json_object_object_get_ex(best_result, "latitude", &lat_obj);
-   json_object_object_get_ex(best_result, "longitude", &lon_obj);
-   json_object_object_get_ex(best_result, "name", &name_obj);
-   json_object_object_get_ex(best_result, "admin1", &admin1_obj);
-   json_object_object_get_ex(best_result, "country", &country_obj);
+   struct json_object *lat_obj = NULL, *lon_obj = NULL, *name_obj = NULL, *admin1_obj = NULL,
+                      *country_obj = NULL;
+   json_object_object_get_ex(best, "latitude", &lat_obj);
+   json_object_object_get_ex(best, "longitude", &lon_obj);
+   json_object_object_get_ex(best, "name", &name_obj);
+   json_object_object_get_ex(best, "admin1", &admin1_obj);
+   json_object_object_get_ex(best, "country", &country_obj);
 
    *latitude = json_object_get_double(lat_obj);
    *longitude = json_object_get_double(lon_obj);
@@ -448,8 +310,9 @@ static int geocode_location(const char *location,
 
    OLOG_INFO("Resolved location: %s (lat=%.4f, lon=%.4f)", *resolved_name, *latitude, *longitude);
 
-   json_object_put(root);
-   return 0;
+   json_object_put(roots[0]);
+   json_object_put(roots[1]);
+   return *resolved_name ? SUCCESS : FAILURE;
 }
 
 // Fetch weather data from Open-Meteo
@@ -708,12 +571,22 @@ weather_response_t *weather_get(const char *location, forecast_type_t forecast) 
    double latitude, longitude;
    char *resolved_name = NULL;
 
-   if (geocode_location(location, &latitude, &longitude, &resolved_name) != 0) {
+   /* Holds "Couldn't find <city> in <region>." whole, whatever the two fields are. */
+   char why[2 * WEATHER_GEO_FIELD_MAX + 32];
+   if (geocode_location(location, &latitude, &longitude, &resolved_name, why, sizeof(why)) !=
+       SUCCESS) {
       weather_response_t *response = calloc(1, sizeof(weather_response_t));
       if (response) {
          /* Compose an LLM-actionable message: name the input that failed and
           * suggest disambiguation strategies the model can actually try. */
-         char msg[256];
+         char msg[512];
+         if (why[0]) {
+            /* Never another state's place: say this one wasn't found there. */
+            snprintf(msg, sizeof(msg),
+                     "%s Check the spelling, or ask the user which place they mean.", why);
+            response->error = strdup(msg);
+            return response;
+         }
          snprintf(msg, sizeof(msg),
                   "Could not geocode '%s'. Try: add country/state ('%s, USA' or '%s, GA'), "
                   "drop punctuation, or use a major city near the target. If the user said "
