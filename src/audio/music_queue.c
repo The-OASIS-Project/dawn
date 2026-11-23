@@ -55,8 +55,8 @@ static void free_queue(user_music_queue_t *uq) {
    free(uq);
 }
 
-int music_queue_init(const char *db_path) {
-   return music_queue_db_init(db_path) == 0 ? SUCCESS : FAILURE;
+int music_queue_init(const char *db_path, const char *legacy_path) {
+   return music_queue_db_init(db_path, legacy_path) == 0 ? SUCCESS : FAILURE;
 }
 
 void music_queue_shutdown(void) {

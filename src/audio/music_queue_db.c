@@ -26,6 +26,7 @@
 #include <pthread.h>
 #include <sqlite3.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "audio/music_queue.h"
 #include "core/path_utils.h"
@@ -62,12 +63,88 @@ static const char *SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS user_queue ("
  * Lifecycle
  * ============================================================================= */
 
-static int db_init(const char *db_path) {
+/*
+ * Queues were once kept in music.db, where a library scan's write lock held
+ * up every queue save.  Copy them into this file once (user_version 0 -> 1);
+ * music.db's old tables are left as they were.  A failed copy leaves the
+ * version at 0, so the next start tries again; a user who saved a queue
+ * here meanwhile (every save writes their state row) keeps it.
+ */
+static void import_legacy(const char *legacy_path) {
+   sqlite3_stmt *stmt = NULL;
+   int version = -1;
+   if (sqlite3_prepare_v2(s_db, "PRAGMA user_version", -1, &stmt, NULL) == SQLITE_OK &&
+       sqlite3_step(stmt) == SQLITE_ROW) {
+      version = sqlite3_column_int(stmt, 0);
+   }
+   sqlite3_finalize(stmt);
+   if (version != 0) {
+      return;
+   }
+
+   char expanded[MUSIC_DB_PATH_MAX];
+   bool attached = false;
+   /* Known: there's no old file, or its tables were counted.  Anything
+    * else leaves the version at 0 so the next start looks again. */
+   bool checked = !legacy_path || !path_expand_tilde(legacy_path, expanded, sizeof(expanded)) ||
+                  access(expanded, F_OK) != 0;
+   if (!checked &&
+       sqlite3_prepare_v2(s_db, "ATTACH DATABASE ? AS legacy", -1, &stmt, NULL) == SQLITE_OK) {
+      sqlite3_bind_text(stmt, 1, expanded, -1, SQLITE_STATIC);
+      attached = sqlite3_step(stmt) == SQLITE_DONE;
+      sqlite3_finalize(stmt);
+   }
+
+   int tables = 0;
+   if (attached &&
+       sqlite3_prepare_v2(s_db,
+                          "SELECT COUNT(*) FROM legacy.sqlite_master WHERE type = 'table' "
+                          "AND name IN ('user_queue', 'user_queue_state')",
+                          -1, &stmt, NULL) == SQLITE_OK) {
+      if (sqlite3_step(stmt) == SQLITE_ROW) {
+         tables = sqlite3_column_int(stmt, 0);
+         checked = true;
+      }
+      sqlite3_finalize(stmt);
+   }
+
+   int rc;
+   if (tables == 2) {
+      rc = sqlite3_exec(s_db,
+                        "BEGIN;"
+                        "INSERT OR IGNORE INTO user_queue (user_id, position, path, title, "
+                        "artist, album, duration_sec) SELECT user_id, position, path, title, "
+                        "artist, album, duration_sec FROM legacy.user_queue WHERE user_id NOT IN "
+                        "(SELECT user_id FROM main.user_queue_state);"
+                        "INSERT OR IGNORE INTO user_queue_state (user_id, shuffle, repeat_mode) "
+                        "SELECT user_id, shuffle, repeat_mode FROM legacy.user_queue_state;"
+                        "PRAGMA user_version = 1;"
+                        "COMMIT;",
+                        NULL, NULL, NULL);
+      if (rc == SQLITE_OK) {
+         OLOG_INFO("Music queue DB: Moved saved queues from %s", expanded);
+      } else {
+         OLOG_WARNING("Music queue DB: Couldn't move saved queues from %s: %s", expanded,
+                      sqlite3_errmsg(s_db));
+         sqlite3_exec(s_db, "ROLLBACK", NULL, NULL, NULL);
+      }
+   } else if (checked) {
+      sqlite3_exec(s_db, "PRAGMA user_version = 1", NULL, NULL, NULL);
+   } else {
+      OLOG_WARNING("Music queue DB: Couldn't read %s; will look for saved queues next start",
+                   expanded);
+   }
+   if (attached) {
+      sqlite3_exec(s_db, "DETACH DATABASE legacy", NULL, NULL, NULL);
+   }
+}
+
+static int db_init(const char *db_path, const char *legacy_path) {
    if (s_db) {
       return 0; /* Already initialized */
    }
 
-   /* Expand tilde (e.g. ~/.local/share/dawn/music.db) — the caller passes the
+   /* Expand tilde (e.g. ~/.local/share/dawn/music_queue.db) — the caller passes the
     * raw configured data_dir, which may start with '~'. sqlite3_open() does not
     * expand it, so do it here, matching music_db.c (same MUSIC_DB_PATH_MAX). */
    char expanded[MUSIC_DB_PATH_MAX];
@@ -84,7 +161,6 @@ static int db_init(const char *db_path) {
       return 1;
    }
 
-   /* WAL mode for concurrency with music_db scans */
    sqlite3_exec(s_db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
    sqlite3_exec(s_db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
    sqlite3_busy_timeout(s_db, 5000);
@@ -100,6 +176,7 @@ static int db_init(const char *db_path) {
       return 1;
    }
 
+   import_legacy(legacy_path);
    OLOG_INFO("Music queue DB: Initialized at %s", expanded);
    return 0;
 }
@@ -335,9 +412,9 @@ static int db_delete_user(int user_id) {
  * Public entry points: each holds s_db_mutex across its whole use of s_db
  * ============================================================================= */
 
-int music_queue_db_init(const char *db_path) {
+int music_queue_db_init(const char *db_path, const char *legacy_path) {
    pthread_mutex_lock(&s_db_mutex);
-   int rc = db_init(db_path);
+   int rc = db_init(db_path, legacy_path);
    pthread_mutex_unlock(&s_db_mutex);
    return rc;
 }
