@@ -1121,6 +1121,7 @@ dawn_add_unit_test(test_document_chunker
 dawn_add_unit_test(test_document_db
    SOURCES test_document_db.c test_document_db_stub.c
            ${SRC_ROOT}/src/tools/document_db.c
+           ${SRC_ROOT}/src/tools/document_read.c
            ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/tools/document_db_embeddings.c
            # v61: document_db.c now stems label/body for the FTS sync helpers and
@@ -2404,6 +2405,18 @@ dawn_add_unit_test(test_research_run
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# research_plan / research_record on a real ledger: the plan echo and the
+# stored claim's framing.
+dawn_add_unit_test(test_research_tools
+   SOURCES test_research_tools.c
+           ${SRC_ROOT}/src/tools/research_tools.c
+           ${SRC_ROOT}/src/tools/research_run.c
+           ${SRC_ROOT}/src/core/memory_filter.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Header-only predicate (the read-only research allowlist, HIGH-1): no link deps.
 dawn_add_unit_test(test_research_allowlist
    SOURCES test_research_allowlist.c
@@ -3486,6 +3499,13 @@ add_test(NAME check_settings_sections_rendered
          COMMAND bash ${SRC_ROOT}/tests/check_settings_sections_rendered.sh
          WORKING_DIRECTORY ${SRC_ROOT})
 set_tests_properties(check_settings_sections_rendered PROPERTIES LABELS "ci")
+
+# scripts/check_tool_error_mark.sh on fixtures: it refuses an unmarked error
+# result and passes a marked one.
+add_test(NAME check_tool_error_mark
+         COMMAND bash ${SRC_ROOT}/tests/check_tool_error_mark_test.sh
+         WORKING_DIRECTORY ${SRC_ROOT})
+set_tests_properties(check_tool_error_mark PROPERTIES LABELS "ci")
 
 # The tests that load models.toml read the copy compiled in (models_toml_builtin.h).
 add_dependencies(bench_retrieval models_toml_builtin)

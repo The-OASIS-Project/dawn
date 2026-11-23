@@ -74,19 +74,21 @@ static char *handle_list_channels(int user_id) {
 
 static char *handle_send(struct json_object *details, int user_id) {
    if (!details) {
-      return make_response("Error: 'send' requires details with 'channel' and 'text'.");
+      return make_response(TOOL_RESULT_ERROR_MARK
+                           "Error: 'send' requires details with 'channel' and 'text'.");
    }
 
    struct json_object *chan_obj = NULL;
    struct json_object *text_obj = NULL;
    if (!json_object_object_get_ex(details, "channel", &chan_obj) ||
        !json_object_object_get_ex(details, "text", &text_obj)) {
-      return make_response("Error: 'send' requires 'channel' and 'text' fields.");
+      return make_response(TOOL_RESULT_ERROR_MARK
+                           "Error: 'send' requires 'channel' and 'text' fields.");
    }
    const char *channel = json_object_get_string(chan_obj);
    const char *text = json_object_get_string(text_obj);
    if (!channel || !text || text[0] == '\0') {
-      return make_response("Error: 'channel' and 'text' must be non-empty.");
+      return make_response(TOOL_RESULT_ERROR_MARK "Error: 'channel' and 'text' must be non-empty.");
    }
 
    int rc = messaging_engine_send(user_id, channel, text);
@@ -117,15 +119,17 @@ static char *handle_send(struct json_object *details, int user_id) {
 
 static char *handle_reset_conversation(struct json_object *details, int user_id) {
    if (!details) {
-      return make_response("Error: 'reset_conversation' requires details with a 'channel' field.");
+      return make_response(TOOL_RESULT_ERROR_MARK
+                           "Error: 'reset_conversation' requires details with a 'channel' field.");
    }
    struct json_object *chan_obj = NULL;
    if (!json_object_object_get_ex(details, "channel", &chan_obj)) {
-      return make_response("Error: 'reset_conversation' requires 'channel'.");
+      return make_response(TOOL_RESULT_ERROR_MARK
+                           "Error: 'reset_conversation' requires 'channel'.");
    }
    const char *channel = json_object_get_string(chan_obj);
    if (!channel || channel[0] == '\0') {
-      return make_response("Error: 'channel' must be non-empty.");
+      return make_response(TOOL_RESULT_ERROR_MARK "Error: 'channel' must be non-empty.");
    }
    int rc = messaging_engine_reset_by_name(user_id, channel);
    switch (rc) {
@@ -168,15 +172,16 @@ static int64_t read_time_bound(struct json_object *details, const char *key, boo
 
 static char *handle_read_channel(struct json_object *details, int user_id) {
    if (!details) {
-      return make_response("Error: 'read_channel' requires details with a 'channel' field.");
+      return make_response(TOOL_RESULT_ERROR_MARK
+                           "Error: 'read_channel' requires details with a 'channel' field.");
    }
    struct json_object *chan_obj = NULL;
    if (!json_object_object_get_ex(details, "channel", &chan_obj)) {
-      return make_response("Error: 'read_channel' requires 'channel'.");
+      return make_response(TOOL_RESULT_ERROR_MARK "Error: 'read_channel' requires 'channel'.");
    }
    const char *channel = json_object_get_string(chan_obj);
    if (!channel || channel[0] == '\0') {
-      return make_response("Error: 'channel' must be non-empty.");
+      return make_response(TOOL_RESULT_ERROR_MARK "Error: 'channel' must be non-empty.");
    }
 
    /* Optional time range: 'since' (lower) and 'until' (upper); 0 = unbounded. */
@@ -339,11 +344,11 @@ static char *handle_list_discord_channels(struct json_object *details, int user_
 
 static char *handle_link_status(struct json_object *details) {
    if (!details) {
-      return make_response("Error: 'link_status' requires a 'code' field.");
+      return make_response(TOOL_RESULT_ERROR_MARK "Error: 'link_status' requires a 'code' field.");
    }
    struct json_object *code_obj = NULL;
    if (!json_object_object_get_ex(details, "code", &code_obj)) {
-      return make_response("Error: 'link_status' requires 'code'.");
+      return make_response(TOOL_RESULT_ERROR_MARK "Error: 'link_status' requires 'code'.");
    }
    const char *code = json_object_get_string(code_obj);
    if (!code) {
@@ -401,7 +406,7 @@ static char *messaging_callback(const char *action, char *value, int *should_res
       *should_respond = 1;
    }
    if (!action) {
-      return make_response("Error: missing action.");
+      return make_response(TOOL_RESULT_ERROR_MARK "Error: missing action.");
    }
 
    /* Resolve user_id.  Interactive turns carry a thread-local session

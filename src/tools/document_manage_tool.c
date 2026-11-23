@@ -578,6 +578,11 @@ static char *do_save_text(int user_id, const char *title, const char *text) {
                res.error_msg);
       return strdup(msg);
    }
+   /* The document's text is what this turn wrote: it carries what the turn read. */
+   if (res.doc_id > 0) {
+      const int outside = memory_turn_outside(user_id);
+      (void)document_db_set_outside(user_id, res.doc_id, outside, false, outside);
+   }
    char msg[256];
    snprintf(msg, sizeof(msg), "%s document '%s' (%d chunk%s).",
             overwrite ? "Updated (overwrote existing)" : "Saved", title, res.num_chunks,

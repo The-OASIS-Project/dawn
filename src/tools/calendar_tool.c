@@ -297,7 +297,8 @@ static char *handle_range(struct json_object *details, int user_id, const tz_t *
    const char *calendar_name = json_get_str(details, "calendar");
 
    if (!start_str) {
-      return strdup("Error: 'start' is required for range query (ISO 8601 datetime)");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: 'start' is required for range query (ISO 8601 datetime)");
    }
 
    time_t start;
@@ -373,7 +374,7 @@ static char *handle_next(struct json_object *details, int user_id, const tz_t *z
 static char *handle_search(struct json_object *details, int user_id, const tz_t *zone) {
    const char *query = json_get_str(details, "query");
    if (!query || !query[0])
-      return strdup("Error: 'query' text is required for search");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'query' text is required for search");
 
    const char *calendar_name = json_get_str(details, "calendar");
 
@@ -560,11 +561,11 @@ static char *write_error(int rc, const char *verb) {
 static char *handle_add(struct json_object *details, int user_id, const tz_t *zone) {
    const char *summary = json_get_str(details, "summary");
    if (!summary || !summary[0])
-      return strdup("Error: 'summary' (event title) is required");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'summary' (event title) is required");
 
    const char *start_str = json_get_str(details, "start");
    if (!start_str)
-      return strdup("Error: 'start' datetime is required (ISO 8601)");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'start' datetime is required (ISO 8601)");
 
    calendar_ical_new_t n = { .summary = summary,
                              .location = json_get_str(details, "location"),
@@ -687,7 +688,7 @@ static char *read_change(const tz_t *zone,
 static char *handle_update(struct json_object *details, int user_id, const tz_t *zone) {
    const char *uid = json_get_str(details, "uid");
    if (!uid || !uid[0])
-      return strdup("Error: 'uid' of the event to update is required");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'uid' of the event to update is required");
 
    calendar_ical_change_t c = CALENDAR_ICAL_CHANGE_INIT;
    char start_date[16], end_date[16];
@@ -725,7 +726,7 @@ static char *handle_update(struct json_object *details, int user_id, const tz_t 
 static char *handle_delete(struct json_object *details, int user_id, const tz_t *zone) {
    const char *uid = json_get_str(details, "uid");
    if (!uid || !uid[0])
-      return strdup("Error: 'uid' of the event to delete is required");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: 'uid' of the event to delete is required");
    const char *calendar_name = json_get_str(details, "calendar");
    struct json_object *occ = NULL;
    if (json_object_object_get_ex(details, "occurrence", &occ)) {
@@ -756,7 +757,7 @@ static char *calendar_tool_callback(const char *action, char *value, int *should
    *should_respond = 1;
 
    if (!action || !action[0])
-      return strdup("Error: action is required");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: action is required");
 
    /* 'calendars' takes no arguments, so tolerate a prose `arguments` value (a
     * model may still narrate despite the schema); every other action reads

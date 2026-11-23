@@ -32,6 +32,8 @@
 #include "auth/auth_db_internal.h"
 #include "dawn_error.h"
 #include "tools/document_db.h"
+#include "tools/document_read.h"
+#include "tools/tool_registry.h"
 #include "unity.h"
 
 /* ============================================================================
@@ -597,6 +599,68 @@ static void test_chunk_create_and_read(void) {
    TEST_ASSERT_TRUE_MESSAGE(chunks[1].chunk_index == 2, "second paginated chunk is index 2");
 }
 
+/* document_read pages by chunk_index: a gap (an index skipped when a chunk
+ * failed to embed) neither shifts the window nor mislabels it. */
+extern const tool_metadata_t *g_test_registered_tool;
+extern int g_test_frame_calls;
+
+static char *read_doc(const char *value) {
+   char *v = strdup(value);
+   int respond = 0;
+   char *out = g_test_registered_tool->callback("read", v, &respond);
+   free(v);
+   return out;
+}
+
+static void test_document_read_across_gap(void) {
+   int64_t doc_id = 0;
+   document_db_create(1, "gap.txt", "gap.txt", "txt",
+                      "777777777777777777777777777777777777777777777777777777"
+                      "7777777777",
+                      4, false, &doc_id);
+   TEST_ASSERT_TRUE(doc_id > 0);
+   float emb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+   const int idx[] = { 0, 1, 3, 4 }; /* index 2 never stored */
+   const char *text[] = { "Text zero.", "Text one.", "Text three.", "Text four." };
+   for (int i = 0; i < 4; i++) {
+      int64_t c = 0;
+      document_db_chunk_create(doc_id, idx[i], text[i], emb, 4, 1.0f, 0, &c);
+      TEST_ASSERT_TRUE(c > 0);
+   }
+   TEST_ASSERT_EQUAL_INT(SUCCESS, document_read_tool_register());
+   TEST_ASSERT_NOT_NULL(g_test_registered_tool);
+   g_test_frame_calls = 0;
+
+   /* The first page's hint names the next index, and the read starts there. */
+   char *out = read_doc("gap.txt::count::2");
+   TEST_ASSERT_NOT_NULL(out);
+   TEST_ASSERT_NOT_NULL(strstr(out, "(chunks 0-1 of 4)"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "start_chunk=2 to continue"));
+   free(out);
+
+   out = read_doc("gap.txt::start_chunk::2::count::2");
+   TEST_ASSERT_NOT_NULL(out);
+   TEST_ASSERT_NOT_NULL(strstr(out, "(chunks 3-4 of 4)"));
+   TEST_ASSERT_NOT_NULL(strstr(out, "--- Chunk 3 ---\nText three."));
+   TEST_ASSERT_NOT_NULL(strstr(out, "--- Chunk 4 ---\nText four."));
+   TEST_ASSERT_NULL(strstr(out, "More content available"));
+   free(out);
+
+   /* An index past the gap is still in the document; one past the end isn't. */
+   out = read_doc("gap.txt::start_chunk::4");
+   TEST_ASSERT_NOT_NULL(out);
+   TEST_ASSERT_NOT_NULL(strstr(out, "(chunks 4-4 of 4)"));
+   free(out);
+   /* A read that returns text is framed as someone else's; one that returns
+    * none (and names nothing of the document's) is not. */
+   TEST_ASSERT_EQUAL_INT(3, g_test_frame_calls);
+   out = read_doc("gap.txt::start_chunk::5");
+   TEST_ASSERT_TRUE(tool_result_is_error(out));
+   TEST_ASSERT_NULL(strstr(out, "gap.txt"));
+   TEST_ASSERT_EQUAL_INT(3, g_test_frame_calls);
+   free(out);
+}
+
 /* A note's chunk is the user's own words unless its text carries outside text
  * (a research report, a note written in a turn that read a page); one stored
  * before the kind was recorded counts as own.  A document's isn't until the
@@ -1029,6 +1093,7 @@ int main(void) {
    RUN_TEST(test_tainted_write_clears_own);
    RUN_TEST(test_document_tools_own);
    RUN_TEST(test_chunk_read_range);
+   RUN_TEST(test_document_read_across_gap);
    RUN_TEST(test_chunk_grep);
    RUN_TEST(test_invalid_params);
    RUN_TEST(test_cascade_delete);

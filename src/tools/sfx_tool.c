@@ -355,7 +355,8 @@ static char *sfx_callback(const char *action, char *value, int *should_respond) 
    }
 
    if (!value) {
-      return strdup("Error: sfx play/stop requires a filename. Call action='list' to see "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: sfx play/stop requires a filename. Call action='list' to see "
                     "available files.");
    }
 

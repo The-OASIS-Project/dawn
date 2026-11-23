@@ -48,6 +48,8 @@
 #include "core/event_payload.h"
 #include "core/memory_filter.h"
 #include "core/session_manager.h"
+#include "core/strbuf.h"
+#include "llm/llm_context_text.h"
 #include "logging.h"
 #include "tools/research_run.h" /* research_canonicalize_url (B1) */
 #include "tools/tool_registry.h"
@@ -122,7 +124,8 @@ static char *research_plan_callback(const char *action, char *value, int *should
    int round = 0;
    int64_t run_id = research_active_run(&round);
    if (run_id <= 0) {
-      return strdup("Error: research_plan is only available inside a research run.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: research_plan is only available inside a research run.");
    }
    /* Plan freeze (§6): once past plan_freeze_round the model must converge on the
     * plan it has rather than keep expanding the denominator (runs 2/4/5 grew the plan
@@ -137,13 +140,14 @@ static char *research_plan_callback(const char *action, char *value, int *should
           "research_mark_unanswerable, or call research_conclude if you're done.");
    }
    if (!value || value[0] == '\0') {
-      return strdup("Error: research_plan needs a JSON array of sub-question strings, e.g. "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: research_plan needs a JSON array of sub-question strings, e.g. "
                     "[\"question 1\", \"question 2\"].");
    }
 
    struct json_object *root = json_tokener_parse(value);
    if (!root) {
-      return strdup("Error: research_plan arguments were not valid JSON.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: research_plan arguments were not valid JSON.");
    }
 
    /* `questions` maps_to VALUE, so the tool marshaller (llm_tools.c) delivers
@@ -161,7 +165,8 @@ static char *research_plan_callback(const char *action, char *value, int *should
    }
    if (questions == NULL) {
       json_object_put(root);
-      return strdup("Error: research_plan needs a JSON array of sub-question strings, "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: research_plan needs a JSON array of sub-question strings, "
                     "e.g. [\"question 1\", \"question 2\"].");
    }
 
@@ -170,8 +175,8 @@ static char *research_plan_callback(const char *action, char *value, int *should
     * this the model has no ids until a later round's digest surfaces them, so the
     * round that plans records everything as question_id=0 (general), which never
     * advances per-question coverage. */
-   char list[1024];
-   size_t off = 0;
+   strbuf_t list;
+   strbuf_init(&list, 0);
    int added = 0;
    int total = (int)json_object_array_length(questions);
    for (int i = 0; i < total && added < RESEARCH_PLAN_MAX_QUESTIONS; i++) {
@@ -190,38 +195,44 @@ static char *research_plan_callback(const char *action, char *value, int *should
              (long long)run_id);
          continue;
       }
-      int64_t qid = 0;
-      if (research_db_question_add(run_id, q, 0, &qid) == AUTH_DB_SUCCESS) {
-         added++;
-         int n = snprintf(list + off, sizeof(list) - off, "[q%lld] %.80s\n", (long long)qid, q);
-         if (n > 0 && (size_t)n < sizeof(list) - off) {
-            off += (size_t)n;
-         }
+      /* Stored defused: the question reaches the round and critic digests, the
+       * synthesis prompt and the report's headings. */
+      char *safe_q = llm_context_neutralize(q);
+      if (!safe_q) {
+         continue;
       }
+      int64_t qid = 0;
+      if (research_db_question_add(run_id, safe_q, 0, &qid) == AUTH_DB_SUCCESS) {
+         added++;
+         strbuf_appendf(&list, "[q%lld] %.80s\n", (long long)qid, safe_q);
+      }
+      free(safe_q);
    }
    json_object_put(root);
    if (questions_owned != NULL) {
       json_object_put(questions_owned); /* independent of root when the string form was re-parsed */
    }
 
-   char buf[1024 + 256];
+   strbuf_t out;
+   strbuf_init(&out, 0);
    if (added == 0) {
-      snprintf(buf, sizeof(buf),
-               "No questions added (empty, all rejected by the safety filter, or invalid).");
+      strbuf_append(&out,
+                    "No questions added (empty, all rejected by the safety filter, or invalid).");
    } else {
       /* Only warn about the cap when it ACTUALLY truncated — i.e. we hit the cap
        * AND there were more array items past it.  Keying on raw `total` alone
        * would falsely warn when the extras were just empty/rejected items. */
       bool capped = (added == RESEARCH_PLAN_MAX_QUESTIONS && total > RESEARCH_PLAN_MAX_QUESTIONS);
-      snprintf(buf, sizeof(buf),
-               "Added %d research question%s. Pass the matching question_id when you record a "
-               "finding with research_record:\n%s%s",
-               added, added == 1 ? "" : "s", list,
-               capped ? "(Extra questions past the per-call cap were dropped — add them in a later "
-                        "call.)"
-                      : "");
+      strbuf_appendf(&out,
+                     "Added %d research question%s. Pass the matching question_id when you record "
+                     "a finding with research_record:\n%s%s",
+                     added, added == 1 ? "" : "s", strbuf_str(&list),
+                     capped ? "(Extra questions past the per-call cap were dropped — add them in "
+                              "a later call.)"
+                            : "");
    }
-   return strdup(buf);
+   strbuf_free(&list);
+   return strbuf_steal(&out);
 }
 
 /* =============================================================================
@@ -264,15 +275,17 @@ static char *research_record_callback(const char *action, char *value, int *shou
    int round = 0;
    int64_t run_id = research_active_run(&round);
    if (run_id <= 0) {
-      return strdup("Error: research_record is only available inside a research run.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: research_record is only available inside a research run.");
    }
    if (!value || value[0] == '\0') {
-      return strdup("Error: research_record needs a JSON object with at least \"claim\".");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: research_record needs a JSON object with at least \"claim\".");
    }
 
    struct json_object *root = json_tokener_parse(value);
    if (!root) {
-      return strdup("Error: research_record arguments were not valid JSON.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: research_record arguments were not valid JSON.");
    }
 
    struct json_object *j_claim = NULL, *j_url = NULL, *j_kind = NULL, *j_quote = NULL,
@@ -286,7 +299,7 @@ static char *research_record_callback(const char *action, char *value, int *shou
    const char *claim = j_claim ? json_object_get_string(j_claim) : NULL;
    if (!claim || claim[0] == '\0') {
       json_object_put(root);
-      return strdup("Error: research_record needs a non-empty \"claim\".");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: research_record needs a non-empty \"claim\".");
    }
 
    /* Memory-poisoning gate: refuse to STORE a claim that carries injected
@@ -297,7 +310,8 @@ static char *research_record_callback(const char *action, char *value, int *shou
       json_object_put(root);
       OLOG_WARNING("research_record: refused a claim flagged by the injection filter (run %lld)",
                    (long long)run_id);
-      return strdup("Error: that claim was rejected by the safety filter and NOT recorded. "
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: that claim was rejected by the safety filter and NOT recorded. "
                     "Record the factual finding in your own words without any embedded "
                     "instructions.");
    }
@@ -357,8 +371,22 @@ static char *research_record_callback(const char *action, char *value, int *shou
       }
    }
 
-   int rc = research_db_claim_add(run_id, question_id, claim, source_url, source_kind, quote,
-                                  round);
+   /* The claim, quote and URL are written by an agent reading outside pages, and
+    * every path to the model (round digests, synthesis, the report) reads them from
+    * the ledger: defuse text imitating DAWN's framing once, here, where they're
+    * stored (the URL kept to one line, as the report cites it inline). */
+   char *safe_claim = llm_context_neutralize(claim);
+   char *safe_quote = quote ? llm_context_neutralize(quote) : NULL;
+   char *safe_url = source_url ? llm_context_neutralize_line(source_url) : NULL;
+   if (!safe_claim || (quote && !safe_quote) || (source_url && !safe_url)) {
+      free(safe_claim);
+      free(safe_quote);
+      free(safe_url);
+      json_object_put(root);
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to record the claim.");
+   }
+   int rc = research_db_claim_add(run_id, question_id, safe_claim, safe_url, source_kind,
+                                  safe_quote, round);
 
    /* Observe/replay (§10): emit a research_claim event with the recorded finding.
     * The claim is already injection-command-gated above; source_url/kind are
@@ -369,17 +397,21 @@ static char *research_record_callback(const char *action, char *value, int *shou
       if (ctx != NULL) {
          conv_event_emit(atomic_load(&ctx->stream_conversation_id), ctx->metrics.user_id,
                          CONV_EVENT_RESEARCH_CLAIM,
-                         event_payload_research_claim(round, question_id, source_url, source_kind,
-                                                      claim));
+                         event_payload_research_claim(round, question_id, safe_url, source_kind,
+                                                      safe_claim));
       }
    }
+   const bool cited = safe_url && safe_url[0];
+   free(safe_claim);
+   free(safe_quote);
+   free(safe_url);
    json_object_put(root);
 
    if (rc != AUTH_DB_SUCCESS) {
-      return strdup("Error: failed to record the claim.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to record the claim.");
    }
-   return strdup(source_url && source_url[0] ? "Claim recorded with its source."
-                                             : "Claim recorded (no source URL given).");
+   return strdup(cited ? "Claim recorded with its source."
+                       : "Claim recorded (no source URL given).");
 }
 
 /* =============================================================================
@@ -467,7 +499,8 @@ static char *research_conclude_callback(const char *action, char *value, int *sh
    int round = 0;
    int64_t run_id = research_active_run(&round);
    if (run_id <= 0) {
-      return strdup("Error: research_conclude is only available inside a research run.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: research_conclude is only available inside a research run.");
    }
 
    /* Raise the flag on the command-context session.  The controller reads it at the
@@ -479,7 +512,8 @@ static char *research_conclude_callback(const char *action, char *value, int *sh
       /* Unreachable in practice: research_active_run above already read run_id > 0
        * from this same thread-local context.  Fail loud rather than telling the
        * agent the run ended when the flag was never actually set. */
-      return strdup("Error: research_conclude could not reach the research session; keep going.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: research_conclude could not reach the research session; keep going.");
    }
    session_research_mark_concluded(ctx);
    /* Observe (§10): make the agent-judgment path visible in the panel rather than
@@ -505,15 +539,18 @@ static char *research_mark_unanswerable_callback(const char *action,
 
    int64_t run_id = research_active_run(NULL);
    if (run_id <= 0) {
-      return strdup("Error: research_mark_unanswerable is only available inside a research run.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: research_mark_unanswerable is only available inside a research run.");
    }
    if (!value || value[0] == '\0') {
-      return strdup("Error: research_mark_unanswerable needs {\"question_id\": N}.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: research_mark_unanswerable needs {\"question_id\": N}.");
    }
 
    struct json_object *root = json_tokener_parse(value);
    if (!root) {
-      return strdup("Error: research_mark_unanswerable arguments were not valid JSON.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: research_mark_unanswerable arguments were not valid JSON.");
    }
    struct json_object *j_qid = NULL;
    json_object_object_get_ex(root, "question_id", &j_qid);
@@ -526,10 +563,11 @@ static char *research_mark_unanswerable_callback(const char *action,
     * stays the controller's deterministic call (§6). */
    research_question_t q;
    if (qid <= 0 || research_db_question_get(run_id, qid, &q) != AUTH_DB_SUCCESS) {
-      return strdup("Error: no such question in this run. Use the [qID] from the directive.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: no such question in this run. Use the [qID] from the directive.");
    }
    if (research_db_question_set_status(qid, "unanswerable", 0.0, "agent") != AUTH_DB_SUCCESS) {
-      return strdup("Error: failed to mark the question unanswerable.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to mark the question unanswerable.");
    }
 
    session_t *ctx = session_get_command_context();

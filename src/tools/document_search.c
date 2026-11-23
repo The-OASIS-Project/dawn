@@ -157,7 +157,7 @@ static char *doc_search_callback(const char *action, char *value, int *should_re
    *should_respond = 1;
 
    if (!value || value[0] == '\0')
-      return strdup("Error: no search query provided.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: no search query provided.");
 
    int user_id = tool_get_current_user_id();
    if (user_id <= 0)
