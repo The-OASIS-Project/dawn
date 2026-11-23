@@ -11,6 +11,7 @@
 
    let metricsInterval = null;
    let metricsVisible = false;
+   let metricsEscToken = null; // DawnEscStack registration while the panel is open
 
    /* =============================================================================
     * Panel Control
@@ -28,6 +29,18 @@
    function showMetricsPanel() {
       const panel = document.getElementById('metrics-panel');
       panel.classList.remove('hidden');
+      const closeBtn = document.getElementById('metrics-close');
+      if (closeBtn) closeBtn.focus();
+      // The panel stays open as a monitor while the user works elsewhere, so
+      // Escape closes it only when focus is inside it; otherwise the key goes
+      // on to whatever is under it.
+      if (metricsEscToken === null && typeof DawnEscStack !== 'undefined') {
+         metricsEscToken = DawnEscStack.register(() => {
+            if (!panel.contains(document.activeElement)) return false;
+            hideMetricsPanel();
+            return true;
+         });
+      }
       metricsVisible = true;
       requestMetrics();
       // Refresh every 2 seconds while visible
@@ -36,8 +49,19 @@
 
    function hideMetricsPanel() {
       const panel = document.getElementById('metrics-panel');
+      // The closed panel is out of the tab order: focus inside it goes back to
+      // the menu that opens it.
+      const hadFocus = panel.contains(document.activeElement);
       panel.classList.add('hidden');
+      if (hadFocus) {
+         const opener = document.getElementById('user-badge');
+         if (opener) opener.focus();
+      }
       metricsVisible = false;
+      if (metricsEscToken !== null) {
+         DawnEscStack.unregister(metricsEscToken);
+         metricsEscToken = null;
+      }
       if (metricsInterval) {
          clearInterval(metricsInterval);
          metricsInterval = null;

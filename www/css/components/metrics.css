@@ -26,8 +26,18 @@
    letter-spacing: 0.03em;
 }
 
+/* Closed, the panel's contents are skipped: its controls can't take focus or
+ * a Tab stop.  `content-visibility` and not `visibility`, which is inherited:
+ * a child with `transition: all` would animate it and still be hidden when
+ * the panel opens and focuses it.  Delayed to the end of the close transition
+ * so that still plays. */
 .metrics-panel.hidden {
    transform: translateY(100%);
+   content-visibility: hidden;
+   transition:
+      transform var(--transition-medium) ease,
+      opacity var(--transition-medium) ease,
+      content-visibility 0s linear var(--transition-medium) allow-discrete;
 }
 
 /* Dim when idle (70% opacity) - add .idle class via JS when state is idle */

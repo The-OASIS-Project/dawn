@@ -27,6 +27,11 @@
    transition: color var(--transition-fast);
 }
 
+/* No global `.hidden` utility: without this the auth gate styles nothing. */
+#history-btn.hidden {
+   display: none;
+}
+
 #history-btn:hover {
    color: var(--accent);
 }
@@ -86,8 +91,17 @@
    transition: transform var(--transition-medium) cubic-bezier(0.32, 0.72, 0, 1);
 }
 
+/* Closed, the panel's contents are skipped: its controls can't take focus or
+ * a Tab stop.  `content-visibility` and not `visibility`, which is inherited:
+ * a child with `transition: all` would animate it and still be hidden when
+ * the panel opens and focuses it.  Delayed to the end of the close transition
+ * so that still plays. */
 #history-panel.hidden {
    transform: translateX(-100%);
+   content-visibility: hidden;
+   transition:
+      transform var(--transition-medium) cubic-bezier(0.32, 0.72, 0, 1),
+      content-visibility 0s linear var(--transition-medium) allow-discrete;
 }
 
 /* Desktop: overlay behavior (no content push) */

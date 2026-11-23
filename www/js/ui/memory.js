@@ -1228,6 +1228,7 @@
        * was reportedly hijacking Facts-tab visits after a user dismissed
        * the panel without resolving proposals.  `autoRoutedThisLoad`
        * is module-private to memory.js so a page reload re-enables it. */
+      let tabLoaded = false;
       if (
          !autoRoutedThisLoad &&
          window.DawnMemoryAliases &&
@@ -1235,7 +1236,8 @@
          DawnMemoryAliases.shouldAutoRouteToGraph() &&
          memoryState.activeTab !== 'entities'
       ) {
-         switchTab('entities');
+         switchTab('entities'); /* loads the tab's data itself */
+         tabLoaded = true;
          autoRoutedThisLoad = true;
          /* Visual cue: flash the Graph tab so the user's eye is drawn
           * to why the panel opened where it did.  CSS class removed
@@ -1255,7 +1257,7 @@
       // on the same tab, so opening on the default tab wouldn't otherwise sync it).
       syncSortControl();
       requestStats();
-      loadActiveTabData();
+      if (!tabLoaded) loadActiveTabData();
 
       // Set up focus trap
       if (callbacks.trapFocus) {

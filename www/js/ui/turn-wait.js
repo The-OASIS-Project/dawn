@@ -36,6 +36,9 @@
       job: "Sends when the background job's turn finishes…",
    };
    const STOPPING_TEXT = 'Stopping the other reply…';
+   // A new chat has no conversation id until its first message is saved; an
+   // unsent first message is kept under this key and offered in a new chat.
+   const NEW_CHAT = '0';
 
    let enabled = false;
    let refSeq = 0;
@@ -55,11 +58,9 @@
    }
 
    function activeConv() {
-      const id =
-         typeof DawnHistory !== 'undefined' && DawnHistory.getActiveConversationId
-            ? DawnHistory.getActiveConversationId()
-            : null;
-      return id != null ? String(id) : null;
+      if (typeof DawnHistory === 'undefined' || !DawnHistory.getActiveConversationId) return null;
+      const id = DawnHistory.getActiveConversationId();
+      return id ? String(id) : NEW_CHAT;
    }
 
    function setEnabled(on) {
@@ -388,7 +389,7 @@
 
    function handleUnsent(payload) {
       if (!enabled) return;
-      const conv = convKey(payload);
+      const conv = payload && payload.conversation_id === 0 ? NEW_CHAT : convKey(payload);
       if (!conv) return;
       const rec = records.get(conv);
       const ref = typeof payload.client_ref === 'string' ? payload.client_ref : null;
@@ -414,6 +415,9 @@
       if (!note || note.fromVisual) return;
       forgetUnsent(conv);
       unsentByConv.set(conv, { note, shown: false, toast: null });
+      // A turn stopped before it ran sends no turn_waiting, so nothing else
+      // has started the observer that re-offers or withdraws on a chat switch.
+      ensureObserver();
       offerUnsent();
    }
 

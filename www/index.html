@@ -1608,16 +1608,16 @@ Format rules:
 
             <div class="jobs-popover-body">
                <div class="jobs-section-head">
-                  <span>Running</span>
+                  <span id="jobs-active-heading" role="heading" aria-level="4">Running</span>
                   <span class="jobs-section-count" id="jobs-active-count">0</span>
                </div>
-               <div id="jobs-active-list"></div>
+               <div id="jobs-active-list" role="list" aria-labelledby="jobs-active-heading"></div>
 
                <div class="jobs-section-head">
-                  <span>Finished</span>
+                  <span id="jobs-history-heading" role="heading" aria-level="4">Finished</span>
                   <span class="jobs-section-note" id="jobs-history-count"></span>
                </div>
-               <div id="jobs-history-list"></div>
+               <div id="jobs-history-list" role="list" aria-labelledby="jobs-history-heading"></div>
                <button id="jobs-load-more" class="hidden" type="button">Load more</button>
 
                <details id="coding-grants" class="coding-grants hidden">

@@ -54,10 +54,20 @@
    overflow: hidden;
 }
 
+/* Closed, the panel's contents are skipped: its controls can't take focus or
+ * a Tab stop.  `content-visibility` and not `visibility`, which is inherited:
+ * a child with `transition: all` would animate it and still be hidden when
+ * the panel opens and focuses it.  Delayed to the end of the close transition
+ * so that still plays. */
 #code-projects-popover.hidden {
    opacity: 0;
    transform: translateY(-8px);
    pointer-events: none;
+   content-visibility: hidden;
+   transition:
+      opacity 0.15s ease,
+      transform 0.15s ease,
+      content-visibility 0s linear 0.15s allow-discrete;
 }
 
 .code-projects-header {
