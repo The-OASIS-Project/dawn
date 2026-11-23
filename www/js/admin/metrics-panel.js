@@ -29,8 +29,12 @@
    function showMetricsPanel() {
       const panel = document.getElementById('metrics-panel');
       panel.classList.remove('hidden');
+      // Deferred past the click that opened it: a popover that click closes
+      // takes focus back to its own button on the way out.
       const closeBtn = document.getElementById('metrics-close');
-      if (closeBtn) closeBtn.focus();
+      setTimeout(() => {
+         if (closeBtn && !panel.classList.contains('hidden')) closeBtn.focus();
+      }, 0);
       // The panel stays open as a monitor while the user works elsewhere, so
       // Escape closes it only when focus is inside it; otherwise the key goes
       // on to whatever is under it.

@@ -74,8 +74,16 @@
       settingsElements.panel.classList.remove('hidden');
       settingsElements.overlay.classList.remove('hidden');
       // The panel sits late in the page: without this a keyboard user tabs
-      // through everything else to reach it.
-      if (wasClosed && settingsElements.closeBtn) settingsElements.closeBtn.focus();
+      // through everything else to reach it.  Deferred past the click that
+      // opened it: a popover that click closes takes focus back to its own
+      // button on the way out.
+      if (wasClosed && settingsElements.closeBtn) {
+         setTimeout(() => {
+            if (!settingsElements.panel.classList.contains('hidden')) {
+               settingsElements.closeBtn.focus();
+            }
+         }, 0);
+      }
 
       if (settingsEscToken === null) {
          settingsEscToken = DawnEscStack.register(() => {

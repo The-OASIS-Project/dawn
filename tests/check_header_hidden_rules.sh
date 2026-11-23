@@ -45,7 +45,8 @@ if [ -z "${ELEMENTS}" ]; then
    exit 2
 fi
 
-CSS="$(cat "${CSS_DIR}"/*.css "${CSS_DIR}"/*/*.css 2>/dev/null)"
+# Comments out first: a rule named in a comment is not a rule.
+CSS="$(cat "${CSS_DIR}"/*.css "${CSS_DIR}"/*/*.css 2>/dev/null | perl -0777 -pe 's{/\*.*?\*/}{}gs')"
 MISSING=""
 COUNT=0
 while read -r id classes; do
