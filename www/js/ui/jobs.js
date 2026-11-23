@@ -184,6 +184,13 @@
       return n;
    }
 
+   /* The two job lists are role="list" (index.html); each group or job row is one
+    * item. Empty, loading and error lines are not items. */
+   function listItem(n) {
+      n.setAttribute('role', 'listitem');
+      return n;
+   }
+
    function toast(message, kind) {
       if (typeof DawnToast !== 'undefined') {
          DawnToast.show(message, kind || 'info');
@@ -535,7 +542,7 @@
 
       order.forEach(function (key) {
          const rows = groups[key];
-         const group = elem('div', 'jobs-group');
+         const group = listItem(elem('div', 'jobs-group'));
          group.appendChild(buildGroupHeader(Number(key), rows.length));
          rows.forEach(function (job) {
             group.appendChild(buildRow(job));
@@ -622,7 +629,7 @@
          el.historyList.appendChild(elem('div', 'jobs-empty', 'No finished jobs yet.'));
       } else {
          historyRows.forEach(function (job) {
-            el.historyList.appendChild(buildRow(job));
+            el.historyList.appendChild(listItem(buildRow(job)));
          });
       }
       /* An error gets its own colour and a Retry, so a failed load can never be
@@ -745,6 +752,13 @@
       historyLoading = false;
       historyError = '';
       if (!payload) {
+         renderHistory();
+         return;
+      }
+      /* The server couldn't read the page: say so, like a timeout, rather than
+       * let the rows already shown read as the whole list. */
+      if (payload.success === false) {
+         historyError = (payload.error || "Couldn't load finished jobs.") + ' Reopen to retry.';
          renderHistory();
          return;
       }

@@ -734,6 +734,7 @@ set(DAWN_SOURCES
     src/tools/web_search_tavily.c
     src/tools/tavily_rate_limit.c
     src/tools/weather_service.c
+    src/tools/weather_geocode.c
     src/tools/calculator.c
     src/tools/calculator_bignum.c
     third_party/tinyexpr/tinyexpr.c
@@ -1275,6 +1276,15 @@ add_custom_target(tool_action_kinds_check
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Checking tool kinds-of-action tables")
 add_dependencies(dawn tool_action_kinds_check)
+
+# Tool error-mark CI invariant: an "Error ..." literal a tool returns through
+# strdup() or make_response() starts with TOOL_RESULT_ERROR_MARK, or it counts
+# as a success.  See scripts/check_tool_error_mark.sh.
+add_custom_target(tool_error_mark_check
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_tool_error_mark.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking tool error results carry the error mark")
+add_dependencies(dawn tool_error_mark_check)
 
 # Blob-marker CI invariant: the chat-attachment "blob:<id>]" marker is encoded
 # in three places (JS producer, JS parser, orphan-sweep SQL) that must agree, or

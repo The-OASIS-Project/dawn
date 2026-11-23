@@ -273,6 +273,8 @@ call into each other: read them as one Layer-2 unit, not as separate modules wit
 | `src/tools/email_account_lease.c` (a queued lease ticket was granted) | the WebUI email executor, which runs that task | `email_lease_set_hook` |
 | `src/memory/memory_consolidate.c`, `memory_consolidation_undo.c` (a batch recorded, undone or kept) | `webui_broadcasts.c` (`memory_batch` to every tab of the user) | weak `memory_consolidation_batch_notify` |
 | `src/core/job_manager.c` (cancel a job whose work runs outside DAWN) | `coding_agent_tool.c` (asks the agent gateway to stop a coding job's task) | `job_manager_register_kind_cancel` |
+| `src/core/job_worker.c`, `job_reinvoke.c` (a tool loop's per-iteration hook) | `webui_text_processing.c` (seals a viewer's streaming bubble at each tool boundary) | weak `webui_tool_iteration_cb` (a no-op in `webui_absent.c`) |
+| `src/core/session_manager.c` (a session about to be freed) | `webui_send.c` (drops the queued WebUI responses that name it) | weak `webui_send_purge_session` |
 | `src/core/conv_post.c` (a post into a conversation) | the WebUI, which tells the tabs viewing it to refetch | `webui_broadcast_conversation_messages_appended` (strong in `webui_broadcasts.c`, a no-op in `webui_absent.c`) |
 | `src/core/conv_turn_lease.c` (a queued post written at the holder's release) | `conv_post.c`'s writer | `conv_turn_lease_set_writer`, at startup |
 | `src/core/session_turn_lease.c` (a turn waits for its conversation, gets it, or stops waiting) | the waiting session's client (`webui_turn_wait.c`) | weak `session_turn_waiting_notice` |
@@ -327,6 +329,7 @@ depends on, so every build runs them, and they fail the build when broken:
 | `no_ws_direct_write_check` | `check_no_ws_direct_write.sh` | Every WebSocket data frame goes through `webui_send.c`'s `write_frame()`, which holds it while earlier output is still going out; never a direct `lws_write()` |
 | `messaging_send_funnel_check` | `check_messaging_send_funnel.sh` | Every messaging driver send goes through `messaging_deliver` (per-provider formatting and escaping) |
 | `tool_action_kinds_check` | `check_tool_action_kinds.sh` | Every tool's action-kinds table names its own actions, and each prepare names a listed confirm |
+| `tool_error_mark_check` | `check_tool_error_mark.sh` | An "Error" literal a tool returns through `strdup()` or `make_response()` starts with `TOOL_RESULT_ERROR_MARK`, or it counts as a success (an error formatted into a buffer and returned later is not checked) |
 | `llm_blocks_confined_check` | `check_llm_blocks_confined.sh` | Stored turn blocks (`messages.llm_blocks`) are read only to rebuild an LLM request |
 | `llm_selection_resolved_check` | `check_llm_selection_resolved.sh` | A session's LLM settings are read resolved (`session_get_llm_config`); only the writers that store them back read them raw |
 | `message_kind_confined_check` | `check_message_kind_confined.sh` | Request-context rows (a `messages.kind`) are never shown, searched, counted or extracted |

@@ -1089,6 +1089,7 @@ static char *handle_update(struct json_object *details, int user_id) {
    }
    if (mask == 0 && !has_steps) {
       snprintf(result, sizeof(result),
+               TOOL_RESULT_ERROR_MARK
                "Error: nothing to update — pass add_steps/steps (briefings) or a field such as "
                "new_name, fire_at, recurrence, deliver_to, say_aloud, or instructions");
       return strdup(result);

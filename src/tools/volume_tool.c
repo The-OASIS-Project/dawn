@@ -186,7 +186,8 @@ static char *volume_tool_callback(const char *action, char *value, int *should_r
    /* Action: set */
    if (!value || !*value) {
       *should_respond = 1;
-      return strdup("Error: 'level' parameter is required for 'set' action.");
+      return strdup(TOOL_RESULT_ERROR_MARK
+                    "Error: 'level' parameter is required for 'set' action.");
    }
 
    float vol = parse_volume_level(value);

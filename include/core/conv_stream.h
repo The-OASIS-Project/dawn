@@ -66,6 +66,10 @@
 #include <stdint.h>
 #include <time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /** Max distinct conversations tracked at once (LRU-reclaimed when exceeded). */
 #define CONV_STREAM_MAX_SLOTS 32
 
@@ -132,5 +136,9 @@ void conv_stream_evict_stale(time_t now);
 
 /** @brief Free every slot's buffer and reset the table (test/shutdown). */
 void conv_stream_reset(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* CONV_STREAM_H */

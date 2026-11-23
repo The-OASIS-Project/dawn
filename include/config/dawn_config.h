@@ -923,6 +923,10 @@ typedef struct {
  * read.  0 stays legal (means "unset" -> the runtime default in payload_cap()). */
 #define JOBS_EVENT_CHUNK_CAP_MIN 256
 
+/* Default event_chunk_cap, and what an unset (0) cap means at runtime.  The
+ * settings schema (www/js/ui/settings/schema.js) repeats it as its default. */
+#define JOBS_EVENT_CHUNK_CAP_DEFAULT 16384
+
 typedef struct {
    bool enabled;                   /* Master enable/disable for background jobs */
    int max_concurrent_local;       /* Concurrent jobs on a local (GPU) LLM — keep low */

@@ -1625,7 +1625,9 @@
       // Pinned section at the top, most-recent-active first.  The server already
       // sorts is_pinned DESC, updated_at DESC; sort defensively in case the cached
       // array was mutated in place (pin toggle patches without a refetch).
-      const pinned = conversations.filter(isPinnedTop).sort((a, b) => b.updated_at - a.updated_at);
+      const pinned = conversations
+         .filter(isPinnedTop)
+         .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
       if (pinned.length > 0) {
          // Decorative glyph (aria-hidden) — the visible "Pinned" text is the label.
          html += `<div class="history-date-group pinned-group"><span class="history-item-pinned" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M16 3v2l-1 1v4l3 3v2h-5v5l-1 1-1-1v-5H5v-2l3-3V6L7 5V3h9z"/></svg></span><span>Pinned</span></div>`;
@@ -1651,7 +1653,7 @@
       // array would otherwise make that row's date-group heading jump above Today.
       const datedTopLevel = conversations
          .filter((conv) => !isChild[conv.id] && !isPinnedTop(conv))
-         .sort((a, b) => b.updated_at - a.updated_at);
+         .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
 
       datedTopLevel.forEach((conv) => {
          const timestamp = conv.updated_at * 1000;

@@ -662,6 +662,13 @@ if(DAWN_ENABLE_EMAIL_TOOL)
       LABEL    ci)
 endif()
 
+# Weather geocoding without the network: the location parsed, the result chosen.
+dawn_add_unit_test(test_weather_geocode
+   SOURCES test_weather_geocode.c
+           ${SRC_ROOT}/src/tools/weather_geocode.c
+   LIBS    dawn_common unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # The confirm rule: the same session, the next turn (any later one by code).
 dawn_add_unit_test(test_turn_origin
    SOURCES test_turn_origin.c
@@ -1121,6 +1128,7 @@ dawn_add_unit_test(test_document_chunker
 dawn_add_unit_test(test_document_db
    SOURCES test_document_db.c test_document_db_stub.c
            ${SRC_ROOT}/src/tools/document_db.c
+           ${SRC_ROOT}/src/tools/document_read.c
            ${SRC_ROOT}/src/auth/auth_db_ids.c
            ${SRC_ROOT}/src/tools/document_db_embeddings.c
            # v61: document_db.c now stems label/body for the FTS sync helpers and
@@ -2404,6 +2412,18 @@ dawn_add_unit_test(test_research_run
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# research_plan / research_record on a real ledger: the plan echo and the
+# stored claim's framing.
+dawn_add_unit_test(test_research_tools
+   SOURCES test_research_tools.c
+           ${SRC_ROOT}/src/tools/research_tools.c
+           ${SRC_ROOT}/src/tools/research_run.c
+           ${SRC_ROOT}/src/core/memory_filter.c
+           ${SRC_ROOT}/src/core/strbuf.c
+           ${AUTH_DB_SOURCES}
+   LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # Header-only predicate (the read-only research allowlist, HIGH-1): no link deps.
 dawn_add_unit_test(test_research_allowlist
    SOURCES test_research_allowlist.c
@@ -2545,6 +2565,13 @@ dawn_add_unit_test(test_job_manager
            ${SRC_ROOT}/src/core/job_manager.c
            ${SRC_ROOT}/src/core/conv_turn_lease.c
    LIBS    dawn_common unity pthread
+   LABEL   ci)
+
+# The `job` tool's guards: no-session callers refused, a model's resume asks as the tool.
+dawn_add_unit_test(test_job_tool
+   SOURCES test_job_tool.c
+           ${SRC_ROOT}/src/tools/job_tool.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
 dawn_add_unit_test(test_conv_stream
@@ -3486,6 +3513,20 @@ add_test(NAME check_settings_sections_rendered
          COMMAND bash ${SRC_ROOT}/tests/check_settings_sections_rendered.sh
          WORKING_DIRECTORY ${SRC_ROOT})
 set_tests_properties(check_settings_sections_rendered PROPERTIES LABELS "ci")
+
+# scripts/check_tool_error_mark.sh on fixtures: it refuses an unmarked error
+# result and passes a marked one.
+add_test(NAME check_tool_error_mark
+         COMMAND bash ${SRC_ROOT}/tests/check_tool_error_mark_test.sh
+         WORKING_DIRECTORY ${SRC_ROOT})
+set_tests_properties(check_tool_error_mark PROPERTIES LABELS "ci")
+
+# The WebUI has no global `.hidden` rule: a header button that starts hidden
+# needs its own, or its auth gate styles nothing.
+add_test(NAME check_header_hidden_rules
+         COMMAND bash ${SRC_ROOT}/tests/check_header_hidden_rules.sh
+         WORKING_DIRECTORY ${SRC_ROOT})
+set_tests_properties(check_header_hidden_rules PROPERTIES LABELS "ci")
 
 # The tests that load models.toml read the copy compiled in (models_toml_builtin.h).
 add_dependencies(bench_retrieval models_toml_builtin)

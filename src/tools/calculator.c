@@ -39,6 +39,7 @@
 #include "logging.h"
 #include "tinyexpr.h"
 #include "tools/calculator_bignum.h"
+#include "tools/tool_registry.h"
 
 #define RESULT_BUFFER_SIZE 256
 
@@ -337,7 +338,7 @@ calc_result_t calculator_evaluate(const char *expression) {
 
 char *calculator_evaluate_exact_str(const char *expression) {
    if (expression == NULL || expression[0] == '\0') {
-      return strdup("Error: Empty expression");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: Empty expression");
    }
 
    char *exact = NULL;
@@ -392,7 +393,8 @@ char *calculator_convert(const char *value_str) {
    }
 
    if (parsed != 3) {
-      snprintf(buf, RESULT_BUFFER_SIZE, "Error: Use format '5 miles to km' or '100 f to c'");
+      snprintf(buf, RESULT_BUFFER_SIZE,
+               TOOL_RESULT_ERROR_MARK "Error: Use format '5 miles to km' or '100 f to c'");
       return buf;
    }
 
@@ -400,17 +402,19 @@ char *calculator_convert(const char *value_str) {
    const unit_def_t *to = find_unit(to_unit);
 
    if (from == NULL) {
-      snprintf(buf, RESULT_BUFFER_SIZE, "Error: Unknown unit '%s'", from_unit);
+      snprintf(buf, RESULT_BUFFER_SIZE, TOOL_RESULT_ERROR_MARK "Error: Unknown unit '%s'",
+               from_unit);
       return buf;
    }
 
    if (to == NULL) {
-      snprintf(buf, RESULT_BUFFER_SIZE, "Error: Unknown unit '%s'", to_unit);
+      snprintf(buf, RESULT_BUFFER_SIZE, TOOL_RESULT_ERROR_MARK "Error: Unknown unit '%s'", to_unit);
       return buf;
    }
 
    if (strcmp(from->category, to->category) != 0) {
-      snprintf(buf, RESULT_BUFFER_SIZE, "Error: Cannot convert %s (%s) to %s (%s)", from_unit,
+      snprintf(buf, RESULT_BUFFER_SIZE,
+               TOOL_RESULT_ERROR_MARK "Error: Cannot convert %s (%s) to %s (%s)", from_unit,
                from->category, to_unit, to->category);
       return buf;
    }
@@ -440,7 +444,8 @@ char *calculator_base_convert(const char *value_str) {
    /* Parse "VALUE to BASE" format */
    int parsed = sscanf(value_str, "%63s to %15s", input, to_base);
    if (parsed != 2) {
-      snprintf(buf, RESULT_BUFFER_SIZE, "Error: Use format '255 to hex' or '0xFF to decimal'");
+      snprintf(buf, RESULT_BUFFER_SIZE,
+               TOOL_RESULT_ERROR_MARK "Error: Use format '255 to hex' or '0xFF to decimal'");
       return buf;
    }
 
@@ -469,11 +474,13 @@ char *calculator_base_convert(const char *value_str) {
 
    /* Validate parsing succeeded */
    if (errno == ERANGE) {
-      snprintf(buf, RESULT_BUFFER_SIZE, "Error: Number '%s' is out of range", input);
+      snprintf(buf, RESULT_BUFFER_SIZE, TOOL_RESULT_ERROR_MARK "Error: Number '%s' is out of range",
+               input);
       return buf;
    }
    if (endptr == parse_start || (endptr != NULL && *endptr != '\0')) {
-      snprintf(buf, RESULT_BUFFER_SIZE, "Error: Invalid number format '%s'", input);
+      snprintf(buf, RESULT_BUFFER_SIZE, TOOL_RESULT_ERROR_MARK "Error: Invalid number format '%s'",
+               input);
       return buf;
    }
 
@@ -500,7 +507,8 @@ char *calculator_base_convert(const char *value_str) {
          snprintf(buf, RESULT_BUFFER_SIZE, "%s0b%s", value < 0 ? "-" : "", &binary[idx + 1]);
       }
    } else {
-      snprintf(buf, RESULT_BUFFER_SIZE, "Error: Unknown base '%s'. Use hex, dec, oct, or bin",
+      snprintf(buf, RESULT_BUFFER_SIZE,
+               TOOL_RESULT_ERROR_MARK "Error: Unknown base '%s'. Use hex, dec, oct, or bin",
                to_base);
       return buf;
    }
@@ -526,7 +534,8 @@ char *calculator_random(const char *value_str) {
       if (parsed == 1) {
          min_val = 1; /* Default: 1 to MAX */
       } else {
-         snprintf(buf, RESULT_BUFFER_SIZE, "Error: Use format '1 to 100' or just '100'");
+         snprintf(buf, RESULT_BUFFER_SIZE,
+                  TOOL_RESULT_ERROR_MARK "Error: Use format '1 to 100' or just '100'");
          return buf;
       }
    }
@@ -578,7 +587,7 @@ char *calculator_format_result(calc_result_t *result) {
          snprintf(buf, RESULT_BUFFER_SIZE, "%.10g", val);
       }
    } else {
-      snprintf(buf, RESULT_BUFFER_SIZE, "Error: %s", result->error);
+      snprintf(buf, RESULT_BUFFER_SIZE, TOOL_RESULT_ERROR_MARK "Error: %s", result->error);
    }
 
    return buf;

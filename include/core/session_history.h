@@ -756,6 +756,12 @@ int session_rollback_turn(session_t *session);
  *  or 0 when it has none saved.  For the turn's own code. */
 int64_t session_turn_question_id(session_t *session);
 
+/** The row id of the newest envelope in the running turn's history (the input
+ *  DAWN wrote for a turn it started), or 0 when there is none saved.  An
+ *  envelope is request context, so session_turn_question_id() doesn't name it.
+ *  For the turn's own code. */
+int64_t session_turn_envelope_id(session_t *session);
+
 /**
  * @brief End a turn the user stopped, keeping their question
  *

@@ -302,7 +302,8 @@ int job_manager_reap_overdue(time_t now);
  * Call it exactly once, before job_manager_end().  Idempotent, but a second call
  * returns false because the first already consumed the verdict.
  *
- * @param session The job session (NULL-safe).
+ * @param session_id The job session's id (matched like the resolver: by id, never
+ *        by pointer; an id no slot holds claims nothing).
  * @param user_cancelled_out Receives true if the cancel came from
  *        job_manager_cancel() — i.e. a human asked for it — rather than from the
  *        shutdown sweep.  Both arrive as the same `cancel_requested` flag, so
@@ -313,7 +314,7 @@ int job_manager_reap_overdue(time_t now);
  *        May be NULL.
  * @return true if this session's slot had been flagged by job_manager_reap_overdue().
  */
-bool job_manager_claim_reaped(const session_t *session, bool *user_cancelled_out);
+bool job_manager_claim_reaped(uint32_t session_id, bool *user_cancelled_out);
 
 /**
  * @brief Did this job record end as a runtime-reap timeout?

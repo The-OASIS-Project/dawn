@@ -665,7 +665,8 @@ static char *handle_delete_sms(struct json_object *details,
       int rc = phone_db_sms_log_get_by_id(user_id, id, &match);
       if (rc == PHONE_DB_NOT_FOUND) {
          drop_pending(origin, user_id, PHONE_PENDING_DELETE_SMS);
-         snprintf(buf, sizeof(buf), "Error: SMS record #%lld not found.", (long long)id);
+         snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Error: SMS record #%lld not found.",
+                  (long long)id);
          return strdup(buf);
       }
       if (rc != PHONE_DB_SUCCESS) {
@@ -851,7 +852,7 @@ static char *handle_confirm_delete_sms(struct json_object *details,
          snprintf(buf, sizeof(buf), "Deletion failed: database error.");
       }
    } else {
-      snprintf(buf, sizeof(buf), "Error: pending state is inconsistent.");
+      snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Error: pending state is inconsistent.");
    }
 
    return strdup(buf);
@@ -883,7 +884,8 @@ static char *handle_delete_call(struct json_object *details,
       int rc = phone_db_call_log_get_by_id(user_id, id, &match);
       if (rc == PHONE_DB_NOT_FOUND) {
          drop_pending(origin, user_id, PHONE_PENDING_DELETE_CALL);
-         snprintf(buf, sizeof(buf), "Error: call record #%lld not found.", (long long)id);
+         snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Error: call record #%lld not found.",
+                  (long long)id);
          return strdup(buf);
       }
       if (rc != PHONE_DB_SUCCESS) {
@@ -989,7 +991,7 @@ static char *handle_confirm_delete_call(struct json_object *details,
          snprintf(buf, sizeof(buf), "Deletion failed: database error.");
       }
    } else {
-      snprintf(buf, sizeof(buf), "Error: pending state is inconsistent.");
+      snprintf(buf, sizeof(buf), TOOL_RESULT_ERROR_MARK "Error: pending state is inconsistent.");
    }
 
    return strdup(buf);
@@ -1195,6 +1197,7 @@ static char *phone_tool_callback(const char *action, char *value, int *should_re
    } else {
       char buf[320];
       snprintf(buf, sizeof(buf),
+               TOOL_RESULT_ERROR_MARK
                "Error: unknown action '%s'. Valid: call, confirm_call, answer, hang_up, "
                "send_sms, confirm_sms, read_sms, call_log, sms_log, delete_sms, "
                "confirm_delete_sms, delete_call, confirm_delete_call, status",

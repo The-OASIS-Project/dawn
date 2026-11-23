@@ -413,7 +413,8 @@ static char *doc_index_callback(const char *action, char *value, int *should_res
    char result_buf[512];
 
    if (!value || strlen(value) == 0) {
-      snprintf(result_buf, sizeof(result_buf), "Error: URL parameter is required.");
+      snprintf(result_buf, sizeof(result_buf),
+               TOOL_RESULT_ERROR_MARK "Error: URL parameter is required.");
       return strdup(result_buf);
    }
 

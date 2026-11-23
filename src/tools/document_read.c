@@ -26,6 +26,8 @@
 
 #include "tools/document_read.h"
 
+#include <limits.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -145,7 +147,7 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
    *should_respond = 1;
 
    if (!value || value[0] == '\0')
-      return strdup("Error: no document name provided.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: no document name provided.");
 
    /* Extract custom parameters */
    int start_chunk = 0;
@@ -176,7 +178,7 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
    }
 
    if (doc_id <= 0 && doc_name[0] == '\0')
-      return strdup("Error: provide a document name/label or a numeric id.");
+      return strdup(TOOL_RESULT_ERROR_MARK "Error: provide a document name/label or a numeric id.");
 
    int user_id = tool_get_current_user_id();
    if (user_id <= 0)
@@ -206,35 +208,42 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
       return strdup(err_buf);
    }
 
-   /* Someone else's text, framed as such, from here on: every result below
-    * quotes its name or its text. */
-   if (!document_is_own(&doc, user_id)) {
-      llm_tools_result_third_party(TOOL_FRAME_DOCUMENT);
-   }
-
-   /* Validate start_chunk */
+   /* start_chunk is a chunk_index (the "Chunk N" lines and the pagination hint
+    * show indices), read by value: an index skipped when a chunk failed to embed
+    * leaves a gap, so a row offset would shift the window and mislabel it.  One
+    * row past @c count says whether more follow. */
    if (start_chunk < 0)
       start_chunk = 0;
-   if (start_chunk >= doc.num_chunks) {
-      char err_buf[DOC_FILENAME_MAX + 128];
-      snprintf(err_buf, sizeof(err_buf),
-               TOOL_RESULT_ERROR_MARK
-               "Error: start_chunk %d is beyond end of document '%s' (%d chunks total).",
-               start_chunk, doc.filename, doc.num_chunks);
-      return strdup(err_buf);
-   }
 
-   /* Read chunks */
-   document_chunk_t *chunks = calloc((size_t)count, sizeof(document_chunk_t));
+   document_chunk_t *chunks = calloc((size_t)count + 1, sizeof(document_chunk_t));
    if (!chunks)
       return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
 
    int read_count = 0;
-   if (document_db_chunk_read(doc.id, chunks, count, start_chunk, &read_count) != SUCCESS ||
-       read_count <= 0) {
+   if (document_db_chunk_read_range(doc.id, start_chunk, INT_MAX, chunks, count + 1, &read_count) !=
+       SUCCESS) {
       free(chunks);
       return strdup(TOOL_RESULT_ERROR_MARK "Error: failed to read document chunks.");
    }
+   if (read_count <= 0) {
+      free(chunks);
+      char err_buf[128];
+      snprintf(err_buf, sizeof(err_buf),
+               TOOL_RESULT_ERROR_MARK
+               "Error: start_chunk %d is beyond the end of that document (%d chunks total).",
+               start_chunk, doc.num_chunks);
+      return strdup(err_buf);
+   }
+
+   /* Someone else's text, framed as such, from here on: the result quotes the
+    * document's name and its text.  The errors above quote neither, so a read
+    * that returned nothing isn't one that read outside text. */
+   if (!document_is_own(&doc, user_id)) {
+      llm_tools_result_third_party(TOOL_FRAME_DOCUMENT);
+   }
+   bool more = read_count > count;
+   if (more)
+      read_count = count;
 
    /* Build result string */
    char *result = malloc(DOC_READ_RESULT_BUF_SIZE);
@@ -243,22 +252,26 @@ static char *doc_read_callback(const char *action, char *value, int *should_resp
       return strdup(TOOL_RESULT_ERROR_MARK "Error: memory allocation failed.");
    }
 
-   int end_chunk = start_chunk + read_count - 1;
+   int first_chunk = chunks[0].chunk_index;
+   int end_chunk = chunks[read_count - 1].chunk_index;
    int pos = snprintf(result, DOC_READ_RESULT_BUF_SIZE, "DOCUMENT: %s (chunks %d-%d of %d)\n",
-                      doc.filename, start_chunk, end_chunk, doc.num_chunks);
+                      doc.filename, first_chunk, end_chunk, doc.num_chunks);
 
    for (int i = 0; i < read_count && pos < DOC_READ_RESULT_BUF_SIZE - 256; i++) {
       pos += snprintf(result + pos, (size_t)(DOC_READ_RESULT_BUF_SIZE - pos),
                       "\n--- Chunk %d ---\n%s\n", chunks[i].chunk_index, chunks[i].text);
    }
 
-   /* Pagination hint */
-   int remaining = doc.num_chunks - (start_chunk + read_count);
-   if (remaining > 0) {
+   /* Pagination hint.  The count assumes no gap before end_chunk (the usual case);
+    * with one it can be short, never zero while more follow. */
+   if (more) {
+      int remaining = doc.num_chunks - (end_chunk + 1);
+      if (remaining < 1)
+         remaining = 1;
       snprintf(result + pos, (size_t)(DOC_READ_RESULT_BUF_SIZE - pos),
                "\n[More content available: use document_read with start_chunk=%d to continue. "
                "%d chunk%s remaining.]",
-               start_chunk + read_count, remaining, remaining == 1 ? "" : "s");
+               end_chunk + 1, remaining, remaining == 1 ? "" : "s");
    }
 
    free(chunks);

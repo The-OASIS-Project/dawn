@@ -1334,6 +1334,13 @@ dap2_capabilities_t session_capabilities(session_t *session);
 void session_destroy(uint32_t session_id);
 
 /**
+ * @brief Drop every queued WebUI response that names @p s, before it is freed,
+ *        so the send thread never reads a freed session.  The WebUI's is in
+ *        webui_send.c; session_manager.c has a weak no-op for builds without it.
+ */
+void webui_send_purge_session(const session_t *s);
+
+/**
  * @brief Record the credential that owns @p session: when it is created, never
  *        later (a session is never adopted by another login).
  * @return true if @p key owns it (set now, or already its owner).
