@@ -576,7 +576,7 @@ void config_set_defaults(dawn_config_t *config) {
    config->jobs.max_reinvokes_per_tree = 8;
    config->jobs.max_concurrent_reinvokes = 2;
    config->jobs.max_runtime_sec = 1800;
-   config->jobs.event_chunk_cap = 16384;
+   config->jobs.event_chunk_cap = JOBS_EVENT_CHUNK_CAP_DEFAULT;
    config->jobs.event_retention_days = 30;
 
    /* Deep research — master switch OFF by default (opt-in; the tool is compiled in

@@ -210,6 +210,8 @@ One attach protocol, two renderers. All server→client frames go through the `s
    | `list_jobs_response` | one keyset-paginated page of TERMINAL jobs (history) | unbounded feed — **never feed a count from it** |
    | `jobs_invalidate` | contentless "re-sync your job views" nudge for STRUCTURAL changes the deltas don't cover (a job removed by the parent-delete cascade) | — |
 
+   A `jobs_snapshot` or `list_jobs_response` the server can't build (a database or memory failure) is still sent, with `success: false`, an `error` sentence and no `jobs`, so a client never mistakes a failed read for one in flight; a built one carries `success: true`. The client keeps the active set it has on a failed snapshot.
+
    `job_update` is a delta (add/change); a removal has no delta because a removed job may live in the paginated history, not the active set — so a `job_removed` delta would have to be applied to both lists. `jobs_invalidate` instead tells the client to re-pull the authoritative snapshot (+ reload history if the panel is open), which is what it already does on reconnect. Emitted browser+owner-only from the delete handler after the cascade.
 
    Job object: `{conversation_id, parent_id, title, status, spawn_mode, on_complete, spawn_depth, reinvoke_count, created_at, started_at, finished_at, deliver_to?, error?}`.

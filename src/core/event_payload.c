@@ -112,7 +112,7 @@ size_t event_payload_utf8_floor(const char *s, size_t len) {
 static size_t payload_cap(void) {
    int cap = g_config.jobs.event_chunk_cap;
    if (cap <= 0) {
-      return 16384;
+      return JOBS_EVENT_CHUNK_CAP_DEFAULT;
    }
    return (cap < JOBS_EVENT_CHUNK_CAP_MIN) ? JOBS_EVENT_CHUNK_CAP_MIN : (size_t)cap;
 }

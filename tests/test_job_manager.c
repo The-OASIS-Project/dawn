@@ -587,7 +587,7 @@ static void test_reap_overdue(void) {
 
    /* The worker claims the verdict — true, so it records `failed`/timed-out
     * rather than `cancelled` (which would suppress the completion follow-up). */
-   TEST_ASSERT_TRUE(job_manager_claim_reaped(a, NULL));
+   TEST_ASSERT_TRUE(job_manager_claim_reaped(a->session_id, NULL));
 
    /* The slot is only released by the worker's job_manager_end(). */
    TEST_ASSERT_EQUAL_INT(1, job_manager_running_count());
@@ -603,7 +603,7 @@ static void test_claim_stops_the_reap_clock(void) {
    TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 708, JOB_PROVIDER_CLOUD, &a));
 
    /* Worker finishes just under the wire and claims: not reaped. */
-   TEST_ASSERT_FALSE(job_manager_claim_reaped(a, NULL));
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(a->session_id, NULL));
 
    /* A tick well past the deadline must now find nothing to reap. */
    TEST_ASSERT_EQUAL_INT(0, job_manager_reap_overdue(time(NULL) + 999999));
@@ -633,7 +633,7 @@ static void test_reap_force_releases_provider_counter(void) {
    TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 711, JOB_PROVIDER_LOCAL, &next));
 
    /* The zombie's slot is still occupied, so its session is still resolvable. */
-   TEST_ASSERT_TRUE(job_manager_claim_reaped(stuck, NULL));
+   TEST_ASSERT_TRUE(job_manager_claim_reaped(stuck->session_id, NULL));
 
    /* If the zombie ever returns, job_manager_end must NOT double-decrement. */
    job_manager_end(stuck);
@@ -648,7 +648,7 @@ static void test_reap_not_yet_overdue(void) {
 
    /* Exactly at the limit is NOT overdue (strictly-greater comparison). */
    TEST_ASSERT_EQUAL_INT(0, job_manager_reap_overdue(time(NULL) + g_config.jobs.max_runtime_sec));
-   TEST_ASSERT_FALSE(job_manager_claim_reaped(a, NULL));
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(a->session_id, NULL));
    TEST_ASSERT_FALSE(atomic_load(&a->cancel_requested));
 
    job_manager_end(a);
@@ -660,7 +660,7 @@ static void test_reap_disabled_when_zero(void) {
    TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 702, JOB_PROVIDER_CLOUD, &a));
 
    TEST_ASSERT_EQUAL_INT(0, job_manager_reap_overdue(time(NULL) + 999999));
-   TEST_ASSERT_FALSE(job_manager_claim_reaped(a, NULL));
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(a->session_id, NULL));
    TEST_ASSERT_FALSE(atomic_load(&a->cancel_requested));
 
    job_manager_end(a);
@@ -672,7 +672,7 @@ static void test_reap_ignores_backwards_clock(void) {
 
    /* An NTP step backwards must not mass-reap the pool (negative elapsed). */
    TEST_ASSERT_EQUAL_INT(0, job_manager_reap_overdue(time(NULL) - 999999));
-   TEST_ASSERT_FALSE(job_manager_claim_reaped(a, NULL));
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(a->session_id, NULL));
 
    job_manager_end(a);
 }
@@ -685,7 +685,7 @@ static void test_reap_distinct_from_user_cancel(void) {
     * a reap — otherwise the worker would fire a follow-up for a cancelled job. */
    TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_cancel(704, 5));
    TEST_ASSERT_TRUE(atomic_load(&a->cancel_requested));
-   TEST_ASSERT_FALSE(job_manager_claim_reaped(a, NULL));
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(a->session_id, NULL));
 
    job_manager_end(a);
 }
@@ -711,11 +711,28 @@ static void test_reap_all_overdue_slots(void) {
    job_manager_end(c);
 }
 
-static void test_claim_reaped_null_and_unknown(void) {
-   TEST_ASSERT_FALSE(job_manager_claim_reaped(NULL, NULL));
-   session_t orphan;
-   memset(&orphan, 0, sizeof(orphan)); /* never in the pool */
-   TEST_ASSERT_FALSE(job_manager_claim_reaped(&orphan, NULL));
+static void test_claim_reaped_unknown_id(void) {
+   bool user_cancelled = true;
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(0, &user_cancelled)); /* the local session's id */
+   TEST_ASSERT_FALSE(user_cancelled);
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(UINT32_MAX, NULL)); /* never issued */
+}
+
+/* A finished job's id names nothing once its slot is reused: claiming with it
+ * must neither take the next job's verdict nor stop that job's reap clock. */
+static void test_claim_reaped_by_a_finished_id_misses_the_slots_next_job(void) {
+   g_config.jobs.max_runtime_sec = 10;
+   session_t *a = NULL, *b = NULL;
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 720, JOB_PROVIDER_CLOUD, &a));
+   const uint32_t old_id = a->session_id;
+   job_manager_end(a);
+   TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 721, JOB_PROVIDER_CLOUD, &b));
+   TEST_ASSERT_NOT_EQUAL(old_id, b->session_id);
+
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(old_id, NULL));
+   TEST_ASSERT_EQUAL_INT(1, job_manager_reap_overdue(time(NULL) + 11)); /* b's clock still ran */
+   TEST_ASSERT_TRUE(job_manager_claim_reaped(b->session_id, NULL));
+   job_manager_end(b);
 }
 
 /* A human's Cancel and the shutdown sweep raise the SAME cancel_requested flag,
@@ -729,7 +746,7 @@ static void test_user_cancel_verdict_is_per_job(void) {
    TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_cancel(1400, 1));
 
    bool user_cancelled = false;
-   TEST_ASSERT_FALSE(job_manager_claim_reaped(a, &user_cancelled));
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(a->session_id, &user_cancelled));
    TEST_ASSERT_TRUE(user_cancelled);
    job_manager_end(a);
 
@@ -737,7 +754,7 @@ static void test_user_cancel_verdict_is_per_job(void) {
    session_t *b = NULL;
    TEST_ASSERT_EQUAL_INT(JOB_MGR_OK, job_manager_begin(1, 1401, JOB_PROVIDER_CLOUD, &b));
    user_cancelled = true; /* poison the out-param so a no-op write would show */
-   TEST_ASSERT_FALSE(job_manager_claim_reaped(b, &user_cancelled));
+   TEST_ASSERT_FALSE(job_manager_claim_reaped(b->session_id, &user_cancelled));
    TEST_ASSERT_FALSE(user_cancelled);
    job_manager_end(b);
 }
@@ -1031,7 +1048,8 @@ int main(void) {
    RUN_TEST(test_reap_all_overdue_slots);
    RUN_TEST(test_claim_stops_the_reap_clock);
    RUN_TEST(test_reap_force_releases_provider_counter);
-   RUN_TEST(test_claim_reaped_null_and_unknown);
+   RUN_TEST(test_claim_reaped_unknown_id);
+   RUN_TEST(test_claim_reaped_by_a_finished_id_misses_the_slots_next_job);
    RUN_TEST(test_user_cancel_verdict_is_per_job);
    RUN_TEST(test_shutdown_can_be_noted_before_teardown);
    RUN_TEST(test_undeliverable_notice_is_queued_not_dropped);

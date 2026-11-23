@@ -2567,6 +2567,13 @@ dawn_add_unit_test(test_job_manager
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
+# The `job` tool's guards: no-session callers refused, a model's resume asks as the tool.
+dawn_add_unit_test(test_job_tool
+   SOURCES test_job_tool.c
+           ${SRC_ROOT}/src/tools/job_tool.c
+   LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 dawn_add_unit_test(test_conv_stream
    SOURCES test_conv_stream.c
            ${SRC_ROOT}/src/core/conv_stream.c

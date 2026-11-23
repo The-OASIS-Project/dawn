@@ -128,6 +128,16 @@ typedef struct {
  */
 int64_t job_dispatch_tool_persist_cb(void *userdata, const session_tool_row_t *row);
 
+/**
+ * @brief The WebUI's tool-iteration hook (seals a viewer's streaming bubble at
+ *        each tool boundary), defined in webui_text_processing.c, or as a no-op
+ *        in webui_absent.c.  Declared weak so a job runner reaches it without
+ *        including the WebUI; every daemon build links one of the two, so it can
+ *        be absent only in a test binary.  A file that DEFINES it must not include
+ *        this header, or its definition becomes weak.
+ */
+__attribute__((weak)) void webui_tool_iteration_cb(struct session *session, void *userdata);
+
 #ifdef __cplusplus
 }
 #endif

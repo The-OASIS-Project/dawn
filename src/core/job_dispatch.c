@@ -72,7 +72,7 @@ void job_disposition_signals(session_t *s,
                              bool *reaped,
                              bool *shutdown_stop) {
    bool uc = false;
-   bool rp = job_manager_claim_reaped(s, &uc);
+   bool rp = s != NULL && job_manager_claim_reaped(s->session_id, &uc);
    if (user_cancelled != NULL) {
       *user_cancelled = uc;
    }

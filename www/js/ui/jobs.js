@@ -755,6 +755,13 @@
          renderHistory();
          return;
       }
+      /* The server couldn't read the page: say so, like a timeout, rather than
+       * let the rows already shown read as the whole list. */
+      if (payload.success === false) {
+         historyError = (payload.error || "Couldn't load finished jobs.") + ' Reopen to retry.';
+         renderHistory();
+         return;
+      }
       const rows = Array.isArray(payload.jobs) ? payload.jobs : [];
       /* Merge each page row at its sorted position rather than tail-appending.
        * A plain push assumes historyRows only ever grows by older pages, which an

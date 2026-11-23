@@ -863,17 +863,16 @@ int job_manager_reap_overdue(time_t now) {
    return n_reaped;
 }
 
-bool job_manager_claim_reaped(const session_t *session, bool *user_cancelled_out) {
+bool job_manager_claim_reaped(uint32_t session_id, bool *user_cancelled_out) {
    if (user_cancelled_out != NULL) {
       *user_cancelled_out = false;
-   }
-   if (session == NULL) {
-      return false;
    }
    bool reaped = false;
    pthread_mutex_lock(&s_pool_mutex);
    for (int i = 0; i < s_pool_size; i++) {
-      if (s_slots[i].session == session) {
+      /* By id, as job_manager_resolve matches: ids are never reused, so a stale
+       * caller can't claim the verdict of a session recycled at the same address. */
+      if (s_slots[i].session != NULL && s_slots[i].session->session_id == session_id) {
          reaped = (s_slots[i].reaped_at != 0);
          if (user_cancelled_out != NULL) {
             *user_cancelled_out = s_slots[i].user_cancelled;

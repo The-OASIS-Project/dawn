@@ -2254,8 +2254,15 @@ Reply to `jobs_request`; sent on (re)connect. Replaces the client's whole active
 set. `truncated: true` means the server hit its row ceiling and any count derived
 from this set is a **lower bound** — it should not happen under any valid config.
 ```json
-{ "type": "jobs_snapshot", "payload": { "jobs": [ /* … */ ], "truncated": false } }
+{ "type": "jobs_snapshot", "payload": { "success": true, "jobs": [ /* … */ ], "truncated": false } }
 ```
+When the server can't read the set (a database or memory failure) it still answers,
+with `success: false`, an `error` sentence and no `jobs`:
+```json
+{ "type": "jobs_snapshot", "payload": { "success": false, "error": "Couldn't read your background jobs." } }
+```
+Keep the active set the client already has (replacing it with nothing would hide
+running jobs) and tell the user its counts may be stale.
 
 #### `job_update` — one job's lifecycle transition
 Pushed when a job enters the active set (spawn), changes state within it
@@ -2436,6 +2443,10 @@ case. `next_before_*` are omitted on an empty page.
    }
 }
 ```
+`success` is `true` on a page. When the server can't read one it answers with
+`success: false`, an `error` sentence and none of the other fields
+(`{ "success": false, "error": "Couldn't read your finished jobs." }`): show the
+error and treat the list as incomplete; the same request may be sent again.
 
 #### `job_notification`
 A background job finished: a silent completion toast to the owner's browser

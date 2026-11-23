@@ -2306,6 +2306,7 @@
                min: 256,
                max: 262144,
                hint: 'Max bytes of a single tool_call/tool_result event before head+tail truncation',
+               // JOBS_EVENT_CHUNK_CAP_DEFAULT in include/config/dawn_config.h
                default: 16384,
                advanced: true,
             },
