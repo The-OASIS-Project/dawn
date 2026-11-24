@@ -82,9 +82,17 @@ static char *handle_spawn(struct json_object *details,
    if (goal == NULL || goal[0] == '\0') {
       return strdup(TOOL_RESULT_ERROR_MARK "Error: 'goal' is required to start a background job.");
    }
-   if (memory_filter_check(goal)) {
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: that job goal was rejected by the safety filter.");
+   /* The goal is the user's request in the model's words, so only phrases that
+    * read as a command to the model are refused; the refusal names the phrase. */
+   const char *blocked = memory_filter_injection_command_match(goal);
+   if (blocked != NULL) {
+      char refusal[256];
+      snprintf(refusal, sizeof(refusal),
+               TOOL_RESULT_ERROR_MARK "Error: that job goal contains \"%s\", which reads as an "
+                                      "instruction to the model, so it was refused. Reword that "
+                                      "phrase and try again.",
+               blocked);
+      return strdup(refusal);
    }
 
    /* Default: reinvoke_parent — bring the result back into THIS conversation and

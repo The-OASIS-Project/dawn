@@ -467,24 +467,27 @@ bool memory_filter_check(const char *text) {
    return blocked;
 }
 
-bool memory_filter_check_injection_commands(const char *text) {
+const char *memory_filter_injection_command_match(const char *text) {
    if (!text) {
-      return false;
+      return NULL;
    }
    char *normalized = memory_filter_normalize(text);
    if (!normalized) {
       OLOG_WARNING("memory_filter: normalization failed, blocking for safety");
-      return true;
+      return "text that could not be read";
    }
-   bool blocked = false;
+   const char *match = NULL;
    for (int i = 0; INJECTION_COMMAND_PATTERNS[i] != NULL; i++) {
       if (strstr(normalized, INJECTION_COMMAND_PATTERNS[i]) != NULL) {
-         OLOG_WARNING("memory_filter: blocked injection command: '%s'",
-                      INJECTION_COMMAND_PATTERNS[i]);
-         blocked = true;
+         match = INJECTION_COMMAND_PATTERNS[i];
+         OLOG_WARNING("memory_filter: blocked injection command: '%s'", match);
          break;
       }
    }
    free(normalized);
-   return blocked;
+   return match;
+}
+
+bool memory_filter_check_injection_commands(const char *text) {
+   return memory_filter_injection_command_match(text) != NULL;
 }

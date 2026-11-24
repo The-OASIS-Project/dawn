@@ -89,6 +89,11 @@ _Static_assert(DR_BRIEF_DESCRIBED_MAX < RESEARCH_BRIEF_MAX,
 #define DR_DELIVER_MAX 128
 #define DR_PENDING_PROPOSAL 1
 
+/* A refused brief names the phrase, so the model rewords that and nothing else. */
+#define RESEARCH_BRIEF_REFUSED_FMT                                                     \
+   "Error: that research brief contains \"%s\", which reads as an instruction to the " \
+   "model, so it was refused. Reword that phrase and try again."
+
 typedef struct {
    pending_slot_t hdr;
    char token[DR_TOKEN_HEX_LEN];
@@ -312,10 +317,14 @@ int research_spawn_run(int user_id,
       snprintf(err, err_len, "Error: 'brief' is required — the question or topic to research.");
       return FAILURE;
    }
-   /* Re-filter here so BOTH spawn surfaces gate the brief (§16.4); the tool also
-    * filters early, before its proposal, so a bad brief never gets a proposal. */
-   if (memory_filter_check(brief)) {
-      snprintf(err, err_len, "Error: that research brief was rejected by the safety filter.");
+   /* Checked here so both spawn surfaces gate the brief; the tool also checks
+    * before its proposal, so a refused brief never gets one.  Only phrases that
+    * read as a command to the model are refused: the full memory blocklist also
+    * refuses credential vocabulary ("password", "OAuth tokens"), which is the
+    * subject of ordinary security research. */
+   const char *blocked = memory_filter_injection_command_match(brief);
+   if (blocked != NULL) {
+      snprintf(err, err_len, RESEARCH_BRIEF_REFUSED_FMT, blocked);
       return FAILURE;
    }
 
@@ -500,9 +509,12 @@ static char *handle_start(struct json_object *details,
       return strdup(TOOL_RESULT_ERROR_MARK
                     "Error: 'brief' is required — the question or topic to research.");
    }
-   if (memory_filter_check(brief)) {
-      return strdup(TOOL_RESULT_ERROR_MARK
-                    "Error: that research brief was rejected by the safety filter.");
+   const char *blocked = memory_filter_injection_command_match(brief);
+   if (blocked != NULL) {
+      char refusal[256];
+      snprintf(refusal, sizeof(refusal), TOOL_RESULT_ERROR_MARK RESEARCH_BRIEF_REFUSED_FMT,
+               blocked);
+      return strdup(refusal);
    }
    /* Refuse before staging: the stored proposal and the proposal text both hold
     * at most RESEARCH_BRIEF_MAX - 1 bytes, and a longer brief would be cut there

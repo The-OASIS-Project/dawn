@@ -74,6 +74,18 @@ bool memory_filter_check(const char *text);
  */
 bool memory_filter_check_injection_commands(const char *text);
 
+/**
+ * @brief The injection-command pattern a text contains, so a caller can say
+ *        which phrase to reword.
+ *
+ * Same scan as memory_filter_check_injection_commands().
+ *
+ * @param text  Input text to check.
+ * @return The matched pattern (a static string, never freed), or NULL when the
+ *         text passes.
+ */
+const char *memory_filter_injection_command_match(const char *text);
+
 #ifdef __cplusplus
 }
 #endif
