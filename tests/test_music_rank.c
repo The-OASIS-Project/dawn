@@ -112,6 +112,13 @@ static void test_fold_basic(void) {
    TEST_ASSERT_EQUAL_STRING("dont stop", out);
    music_rank_fold("Beyonc\xC3\xA9", out, sizeof(out)); /* UTF-8 kept */
    TEST_ASSERT_EQUAL_STRING("beyonc\xC3\xA9", out);
+   /* "disk" and "disc" fold to one word, as a whole word only */
+   music_rank_fold("The Hits - Disk 1", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("the hits disc 1", out);
+   music_rank_fold("Disk", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("disc", out);
+   music_rank_fold("Diskette Disks", out, sizeof(out));
+   TEST_ASSERT_EQUAL_STRING("diskette disks", out);
    music_rank_fold(NULL, out, sizeof(out));
    TEST_ASSERT_EQUAL_STRING("", out);
 }

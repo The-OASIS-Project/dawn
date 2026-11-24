@@ -244,8 +244,6 @@ void music_queue_add(user_music_queue_t *uq,
       music_queue_outcome_t oc;
       if (tracks[i].path[0] == '\0') {
          oc = MUSIC_QUEUE_NOT_FOUND;
-      } else if (music_queue_find(uq, tracks[i].path, -1) >= 0) {
-         oc = MUSIC_QUEUE_DUPLICATE; /* also a repeat within tracks */
       } else if (music_queue_insert(uq, uq->queue_length, &tracks[i]) != SUCCESS) {
          oc = MUSIC_QUEUE_FULL;
       } else {

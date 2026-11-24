@@ -74,6 +74,14 @@ typedef struct {
 /* Forward declarations for vtable */
 extern const struct audio_decoder_vtable *mp3_get_vtable(void);
 
+/* libmpg123 prints tag and stream complaints ("No comment text", ...) to
+ * stderr; a library scan opens thousands of files, so keep it quiet */
+static void quiet_mpg123(mpg123_handle *mpg) {
+   if (mpg123_param(mpg, MPG123_ADD_FLAGS, MPG123_QUIET, 0) != MPG123_OK) {
+      OLOG_WARNING("mpg123: couldn't silence library messages: %s", mpg123_strerror(mpg));
+   }
+}
+
 /* =============================================================================
  * Vtable Implementation
  * ============================================================================= */
@@ -98,6 +106,7 @@ audio_decoder_t *mp3_decoder_open(const char *path) {
       free(handle);
       return NULL;
    }
+   quiet_mpg123(handle->mpg);
 
    /* Force output format to signed 16-bit for consistency */
    mpg123_format_none(handle->mpg);
@@ -608,6 +617,7 @@ int mp3_get_metadata(const char *path, audio_metadata_t *metadata) {
    if (!mpg) {
       return AUDIO_DECODER_ERR_MEMORY;
    }
+   quiet_mpg123(mpg);
 
    /* We need to scan the file for ID3 tags */
    if (mpg123_open(mpg, path) != MPG123_OK) {

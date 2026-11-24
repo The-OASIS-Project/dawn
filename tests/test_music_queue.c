@@ -17,7 +17,7 @@
  * the project author(s).
  *
  * Unit tests for the music queue (music_queue.c): shared and private queues,
- * adding with dedup and a full queue, inserting at the top, removing, the
+ * adding (repeats kept) and a full queue, inserting at the top, removing, the
  * nearest copy, a queue kept across a restart, and two users saving at once
  * (temp database).
  */
@@ -81,7 +81,7 @@ static void test_shared_and_private(void) {
    music_queue_release(p); /* frees the private one */
 }
 
-static void test_add_dedups_and_fills(void) {
+static void test_add_keeps_repeats_and_fills(void) {
    user_music_queue_t *uq = music_queue_acquire(0);
    music_search_result_t t[3] = { track("/m/a.flac"), track("/m/b.flac"), track("/m/a.flac") };
    t[1].path[0] = '\0'; /* no track */
@@ -89,12 +89,29 @@ static void test_add_dedups_and_fills(void) {
    int added = -1;
    uint32_t gen = uq->generation;
    music_queue_add(uq, t, 3, false, oc, &added);
-   TEST_ASSERT_EQUAL_INT(1, added);
+   TEST_ASSERT_EQUAL_INT(2, added); /* the same track twice in one add: queued twice */
    TEST_ASSERT_EQUAL_UINT32(gen + 1, uq->generation); /* other players see it */
    TEST_ASSERT_EQUAL_INT(MUSIC_QUEUE_ADDED, oc[0]);
    TEST_ASSERT_EQUAL_INT(MUSIC_QUEUE_NOT_FOUND, oc[1]);
-   TEST_ASSERT_EQUAL_INT(MUSIC_QUEUE_DUPLICATE, oc[2]);
+   TEST_ASSERT_EQUAL_INT(MUSIC_QUEUE_ADDED, oc[2]);
    TEST_ASSERT_EQUAL_STRING("Title of /m/a.flac", uq->queue[0].title);
+   TEST_ASSERT_EQUAL_STRING("/m/a.flac", uq->queue[1].path);
+
+   /* A later add of a queued track queues it again */
+   music_queue_add(uq, &t[0], 1, false, oc, &added);
+   TEST_ASSERT_EQUAL_INT(1, added);
+   TEST_ASSERT_EQUAL_INT(3, uq->queue_length);
+   TEST_ASSERT_EQUAL_STRING("/m/a.flac", uq->queue[2].path);
+
+   /* An album whose one track is queued already: every track goes in */
+   music_search_result_t album[3] = { track("/m/x1.flac"), track("/m/a.flac"),
+                                      track("/m/x3.flac") };
+   music_queue_add(uq, album, 3, false, oc, &added);
+   TEST_ASSERT_EQUAL_INT(3, added);
+   TEST_ASSERT_EQUAL_INT(6, uq->queue_length);
+   TEST_ASSERT_EQUAL_STRING("/m/x1.flac", uq->queue[3].path);
+   TEST_ASSERT_EQUAL_STRING("/m/a.flac", uq->queue[4].path);
+   TEST_ASSERT_EQUAL_STRING("/m/x3.flac", uq->queue[5].path);
 
    /* Fill it, then one more is refused */
    for (int i = uq->queue_length; i < MUSIC_QUEUE_MAX; i++) {
@@ -183,6 +200,27 @@ static void test_kept_across_restart(void) {
    user_music_queue_t *other = music_queue_acquire(8);
    TEST_ASSERT_EQUAL_INT(0, other->queue_length);
    music_queue_release(other);
+}
+
+/* A deleted user's saved queue goes; another user's stays */
+static void test_delete_user_removes_saved_queue(void) {
+   music_search_result_t t = track("/m/one.flac");
+   user_music_queue_t *a = music_queue_acquire(7);
+   user_music_queue_t *b = music_queue_acquire(8);
+   music_queue_add(a, &t, 1, false, NULL, NULL);
+   music_queue_add(b, &t, 1, false, NULL, NULL);
+   music_queue_release(a);
+   music_queue_release(b);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_db_delete_user(7));
+
+   music_queue_shutdown();
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path, NULL));
+   a = music_queue_acquire(7);
+   b = music_queue_acquire(8);
+   TEST_ASSERT_EQUAL_INT(0, a->queue_length);
+   TEST_ASSERT_EQUAL_INT(1, b->queue_length);
+   music_queue_release(a);
+   music_queue_release(b);
 }
 
 /* Queues saved in music.db before the queue had its own file come across
@@ -399,10 +437,11 @@ static void test_listener_hears_announce(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_shared_and_private);
-   RUN_TEST(test_add_dedups_and_fills);
+   RUN_TEST(test_add_keeps_repeats_and_fills);
    RUN_TEST(test_insert_top_drops_last_when_full);
    RUN_TEST(test_remove_and_nearest_copy);
    RUN_TEST(test_kept_across_restart);
+   RUN_TEST(test_delete_user_removes_saved_queue);
    RUN_TEST(test_two_users_save_at_once);
    RUN_TEST(test_places_follow_edits);
    RUN_TEST(test_place_on_dropped_track);

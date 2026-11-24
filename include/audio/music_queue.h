@@ -88,7 +88,6 @@ struct user_music_queue {
 /** What music_queue_add() did with each track */
 typedef enum {
    MUSIC_QUEUE_ADDED = 0, /**< Appended */
-   MUSIC_QUEUE_DUPLICATE, /**< Already queued */
    MUSIC_QUEUE_NOT_FOUND, /**< No track (empty path) */
    MUSIC_QUEUE_FULL,      /**< Queue at MUSIC_QUEUE_MAX */
 } music_queue_outcome_t;
@@ -157,8 +156,9 @@ void music_queue_clear(user_music_queue_t *uq);
 void music_queue_changed(user_music_queue_t *uq, bool tracks);
 
 /**
- * Append @p tracks (all of them in place of the queue when @p replace),
- * skipping any already queued; an entry with an empty path is no track.
+ * Append @p tracks (all of them in place of the queue when @p replace); a
+ * track already queued is queued again.  An entry with an empty path is no
+ * track.
  * Takes queue_mutex, bumps generation, saves.
  * @param outcomes Optional, one per track
  * @param added_out Optional, tracks appended

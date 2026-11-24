@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "audio/music_rank.h"
 #include "dawn_error.h"
@@ -108,7 +109,9 @@ void music_search_build_query(music_query_t *out,
    }
 }
 
-int music_search_resolve_item(const char *item, music_search_result_t *out) {
+int music_search_resolve_item(const char *item,
+                              const music_search_filters_t *f,
+                              music_search_result_t *out) {
    if (!item || !out) {
       return FAILURE;
    }
@@ -141,7 +144,10 @@ int music_search_resolve_item(const char *item, music_search_result_t *out) {
    /* Strict matching, never the approximate fallback: this plays what it finds */
    music_search_result_t r[MUSIC_SEARCH_RESOLVE_CANDIDATES];
    int count = 0;
-   music_query_t mq = { .text = title_query, .has_source = has_source, .source = source };
+   music_query_t mq;
+   music_search_build_query(&mq, title_query, f);
+   mq.has_source = has_source;
+   mq.source = source;
    if (music_db_query(&mq, r, MUSIC_SEARCH_RESOLVE_CANDIDATES, &count) != SUCCESS || count <= 0) {
       return FAILURE;
    }
@@ -149,9 +155,150 @@ int music_search_resolve_item(const char *item, music_search_result_t *out) {
    return SUCCESS;
 }
 
-/* Echo the query back ("query 'x', artist 'y', years 1980-1989") so the LLM can
- * see exactly what was searched when reading a count or an empty result. */
-static void describe_query(strbuf_t *sb, const char *text, const music_search_filters_t *f) {
+/* Whether no earlier track of @p tracks carries track @p i's album tag */
+static bool first_of_tag(const music_search_result_t *tracks, int i) {
+   for (int j = 0; j < i; j++) {
+      if (strcasecmp(tracks[j].album, tracks[i].album) == 0) {
+         return false;
+      }
+   }
+   return true;
+}
+
+/* Whether no earlier track of @p tracks is on track @p i's disc */
+static bool first_of_disc(const music_search_result_t *tracks, int i) {
+   for (int j = 0; j < i; j++) {
+      if (tracks[j].disc_no == tracks[i].disc_no) {
+         return false;
+      }
+   }
+   return true;
+}
+
+/* How well @p album names @p name with its artist ("The Hits Prince") */
+static int names_quality(const char *name, const char *artist, const char *album) {
+   char named[AUDIO_METADATA_STRING_MAX * 2 + 2];
+   snprintf(named, sizeof(named), "%s %s", name, artist);
+   return music_rank_field_quality(named, album);
+}
+
+/* Whether the tracks tagged @p tag are exactly one disc: all on one disc number,
+ * which no other tag's track is on (an edition tag inside a disc is not a disc) */
+static bool tag_is_disc(const music_search_result_t *tracks, int count, const char *tag) {
+   uint32_t disc = 0;
+   for (int i = 0; i < count; i++) {
+      if (strcasecmp(tracks[i].album, tag) == 0) {
+         if (disc && tracks[i].disc_no != disc) {
+            return false;
+         }
+         disc = tracks[i].disc_no;
+      }
+   }
+   for (int i = 0; i < count; i++) {
+      if (tracks[i].disc_no == disc && strcasecmp(tracks[i].album, tag) != 0) {
+         return false;
+      }
+   }
+   return disc != 0;
+}
+
+/* The tag @p album names better than every other tag and the set's own name,
+ * else -1 */
+static int named_tag(const music_search_result_t *tracks,
+                     int count,
+                     const char *album,
+                     const char *artist) {
+   int tags = 0;
+   int best = 0;
+   int best_i = -1;
+   bool tie = false;
+   for (int i = 0; i < count; i++) {
+      if (!first_of_tag(tracks, i)) {
+         continue;
+      }
+      tags++;
+      int q = names_quality(tracks[i].album, artist && artist[0] ? artist : tracks[i].artist,
+                            album);
+      if (q > best) {
+         best = q;
+         best_i = i;
+         tie = false;
+      } else if (q == best) {
+         tie = true;
+      }
+   }
+   if (tags < 2 || best_i < 0 || tie || best < MUSIC_RANK_FIELD_MIN) {
+      return -1;
+   }
+   char set[AUDIO_METADATA_STRING_MAX];
+   music_search_album_set_name(tracks[0].album, set, sizeof(set));
+   if (names_quality(set, artist && artist[0] ? artist : tracks[0].artist, album) >= best) {
+      return -1; /* "The Hits": the whole set */
+   }
+   return best_i;
+}
+
+int music_search_album_disc(music_search_result_t *tracks,
+                            int count,
+                            const char *album,
+                            const char *artist,
+                            int *discs_out) {
+   int discs = 0;
+   for (int i = 0; i < count; i++) {
+      discs += first_of_disc(tracks, i);
+   }
+   int t = (album && album[0] && discs > 1) ? named_tag(tracks, count, album, artist) : -1;
+   if (t >= 0 && tag_is_disc(tracks, count, tracks[t].album)) {
+      char tag[AUDIO_METADATA_STRING_MAX];
+      snprintf(tag, sizeof(tag), "%s", tracks[t].album);
+      int kept = 0;
+      for (int i = 0; i < count; i++) {
+         if (strcasecmp(tracks[i].album, tag) == 0) {
+            if (kept != i) {
+               tracks[kept] = tracks[i];
+            }
+            kept++;
+         }
+      }
+      count = kept;
+      discs = 1;
+   }
+   if (discs_out) {
+      *discs_out = discs;
+   }
+   return count;
+}
+
+void music_search_album_set_name(const char *tag, char *out, size_t cap) {
+   if (!out || cap == 0) {
+      return;
+   }
+   out[0] = '\0';
+   if (!tag) {
+      return;
+   }
+   /* The shortest leading part of the tag that is already its album key: the
+    * tag before the qualifiers the key drops */
+   char key[MUSIC_RANK_FOLD_MAX];
+   music_rank_album_key(tag, NULL, key, sizeof(key));
+   size_t len = strlen(tag);
+   for (size_t n = 1; n < len && key[0]; n++) {
+      if (tag[n] != ' ' && tag[n] != '(' && tag[n] != '[') {
+         continue;
+      }
+      char part[AUDIO_METADATA_STRING_MAX];
+      char folded[MUSIC_RANK_FOLD_MAX];
+      snprintf(part, sizeof(part), "%.*s", (int)n, tag);
+      music_rank_fold(part, folded, sizeof(folded));
+      if (strcmp(folded, key) == 0) {
+         snprintf(out, cap, "%s", part);
+         return;
+      }
+   }
+   snprintf(out, cap, "%s", tag);
+}
+
+void music_search_describe_query(strbuf_t *sb, const char *text, const music_search_filters_t *f) {
    const char *sep = "";
    if (text && text[0]) {
       strbuf_appendf(sb, "query '%s'", text);
@@ -232,12 +379,12 @@ static void append_lead(strbuf_t *sb,
                         const music_search_filters_t *f) {
    if (page->approximate) {
       strbuf_appendf(sb, "No track matches every word of ");
-      describe_query(sb, text, f);
+      music_search_describe_query(sb, text, f);
       strbuf_appendf(sb, "; found %d closest match%s (one word unmatched)", page->total,
                      page->total == 1 ? "" : "es");
    } else {
       strbuf_appendf(sb, "Found %d track%s for ", page->total, page->total == 1 ? "" : "s");
-      describe_query(sb, text, f);
+      music_search_describe_query(sb, text, f);
    }
 }
 
@@ -276,7 +423,7 @@ char *music_search_page_text(const char *text,
    int pages = (page.total + limit - 1) / limit;
    if (page.total == 0) {
       strbuf_appendf(&sb, "No music found for ");
-      describe_query(&sb, text, f);
+      music_search_describe_query(&sb, text, f);
       strbuf_appendf(&sb, ".");
    } else if (page.count == 0) {
       append_lead(&sb, &page, text, f);
