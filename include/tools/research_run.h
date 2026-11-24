@@ -248,15 +248,17 @@ int research_critic_parse_verdict(const char *response, research_critic_verdict_
 /**
  * @brief The completion message a finished run posts into the chat it came from.
  *
- * Sized to its parts, so a long brief never cuts the take or the closing line.
+ * Sized to its parts, so nothing cuts the take or the closing line.
  *
- * @param brief       The run's brief.
+ * @param label       What the run is called, for the user: the report's title in
+ *                    their notes, or the job's title.  Not the brief, which is
+ *                    written for the research agent.
  * @param summary     The take or excerpt to lead with (NULL or empty: none).
  * @param claim_count Findings recorded.
  * @param has_report  The cited report was saved to the user's notes.
  * @return The message (caller frees), or NULL when out of memory.
  */
-char *research_completion_message(const char *brief,
+char *research_completion_message(const char *label,
                                   const char *summary,
                                   int claim_count,
                                   bool has_report);

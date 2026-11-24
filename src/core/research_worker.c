@@ -41,6 +41,7 @@
 #include "core/job_report.h"
 #include "core/session_manager.h"
 #include "logging.h"
+#include "tools/document_db.h" /* the report's title */
 #include "tools/research_run.h"
 
 /* Work item handed to the detached worker thread. */
@@ -84,7 +85,15 @@ static void research_deliver_to_parent(int64_t job_conv, int user_id, const char
    }
    int claim_count = 0;
    research_db_claim_count(run.id, &claim_count);
-   char *msg = research_completion_message(run.brief, summary, claim_count, run.report_doc_id > 0);
+   /* Named as the user would look for it: the report's title in their notes,
+    * else the job's.  The brief is the research agent's instructions. */
+   const char *label = rec.title[0] != '\0' ? rec.title : run.brief;
+   document_t report;
+   if (run.report_doc_id > 0 && document_db_get(run.report_doc_id, &report) == SUCCESS &&
+       report.filename[0] != '\0') {
+      label = report.filename;
+   }
+   char *msg = research_completion_message(label, summary, claim_count, run.report_doc_id > 0);
    if (!msg) {
       OLOG_ERROR("research_worker: out of memory for conv %lld's completion message",
                  (long long)job_conv);
