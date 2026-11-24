@@ -400,19 +400,19 @@ static void canon_eq(const char *in, const char *expect) {
    TEST_ASSERT_EQUAL_STRING(expect, out);
 }
 
-/* A long brief and a long take: the message carries both whole, and its
+/* A long label and a long take: the message carries both whole, and its
  * closing line. */
 static void test_completion_message_is_never_cut(void) {
-   char brief[RESEARCH_BRIEF_MAX];
-   memset(brief, 'b', sizeof(brief) - 1);
-   brief[sizeof(brief) - 1] = '\0';
+   char label[RESEARCH_BRIEF_MAX];
+   memset(label, 'b', sizeof(label) - 1);
+   label[sizeof(label) - 1] = '\0';
    char take[4096];
    memset(take, 't', sizeof(take) - 1);
    take[sizeof(take) - 1] = '\0';
 
-   char *msg = research_completion_message(brief, take, 108, true);
+   char *msg = research_completion_message(label, take, 108, true);
    TEST_ASSERT_NOT_NULL(msg);
-   TEST_ASSERT_NOT_NULL(strstr(msg, brief));
+   TEST_ASSERT_NOT_NULL(strstr(msg, label));
    TEST_ASSERT_NOT_NULL(strstr(msg, take));
    const char *tail = "I gathered 108 findings; the full cited report is in your notes.";
    TEST_ASSERT_TRUE(strlen(msg) > strlen(tail));
