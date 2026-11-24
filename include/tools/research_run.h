@@ -246,6 +246,22 @@ bool research_is_natural_end(const char *stop_reason);
 int research_critic_parse_verdict(const char *response, research_critic_verdict_t *out);
 
 /**
+ * @brief The completion message a finished run posts into the chat it came from.
+ *
+ * Sized to its parts, so a long brief never cuts the take or the closing line.
+ *
+ * @param brief       The run's brief.
+ * @param summary     The take or excerpt to lead with (NULL or empty: none).
+ * @param claim_count Findings recorded.
+ * @param has_report  The cited report was saved to the user's notes.
+ * @return The message (caller frees), or NULL when out of memory.
+ */
+char *research_completion_message(const char *brief,
+                                  const char *summary,
+                                  int claim_count,
+                                  bool has_report);
+
+/**
  * @brief Render the BOUNDED per-round digest into @p out (§4a.2).
  *
  * Emits, capped at @p b->round_digest_max_chars: the brief, the top-K open

@@ -599,6 +599,9 @@ static const tool_metadata_t research_conclude_metadata = {
    .capabilities = TOOL_CAP_NONE,
    .default_local = true,
    .default_remote = true,
+   /* Concluding ends the round: the rest of its batch runs (records saved),
+    * and no call follows to read the canned result. */
+   .skip_followup = true,
    .callback = research_conclude_callback,
 };
 

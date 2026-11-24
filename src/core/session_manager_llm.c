@@ -379,7 +379,7 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
              * !server_saved save-gate already honors it (no client change). */
             webui_send_transcript_ex(session, "assistant", response,
                                      atomic_load(&session->will_persist_turn), 0);
-         } else {
+         } else if (!session->turn_save_note) { /* a save turn ends without a word */
             /* Empty completion AND nothing streamed — the model produced no text and no
              * user-visible tool output (observed with some preview models returning an empty
              * completion after a tool call). The all-tools-silent case takes a different path,
@@ -481,7 +481,7 @@ static char *llm_call_finalize(session_t *session, char *response, llm_call_ctx_
    // Add assistant response to history (only if non-empty to avoid Claude API errors)
    if (*response) {
       add_reply_to_history(session, response, false);
-   } else {
+   } else if (!session->turn_save_note) { /* a save turn's expected end */
       OLOG_WARNING("Session %u: LLM returned empty response, not adding to history",
                    session->session_id);
    }

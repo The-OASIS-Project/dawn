@@ -84,33 +84,11 @@ static void research_deliver_to_parent(int64_t job_conv, int user_id, const char
    }
    int claim_count = 0;
    research_db_claim_count(run.id, &claim_count);
-   bool have_summary = (summary != NULL && summary[0] != '\0');
-
-   char msg[RESEARCH_BRIEF_MAX + 1024];
-   if (claim_count > 0 && run.report_doc_id > 0 && have_summary) {
-      /* The useful case: lead with the synthesized answer, then point to the note. */
-      snprintf(msg, sizeof(msg),
-               "🔍 Deep research complete — \"%s\".\n\n%s\n\nThat's the gist — I gathered %d "
-               "finding%s; the full cited report is in your notes.",
-               run.brief, summary, claim_count, claim_count == 1 ? "" : "s");
-   } else if (claim_count > 0 && run.report_doc_id > 0) {
-      snprintf(msg, sizeof(msg),
-               "🔍 Deep research complete — \"%s\".\n\nI gathered %d finding%s and saved a cited "
-               "report to your notes. Ask me about it, or open it in your documents.",
-               run.brief, claim_count, claim_count == 1 ? "" : "s");
-   } else if (claim_count > 0) {
-      /* Findings gathered, but the note/document save failed (report_doc_id stayed
-       * 0) — don't claim a report is in notes when it isn't.  The evidence is still
-       * in the ledger, so offer to summarize rather than point at a missing doc. */
-      snprintf(msg, sizeof(msg),
-               "🔍 Deep research complete — \"%s\".\n\nI gathered %d finding%s, but couldn't save "
-               "the report to your notes. Ask me and I'll summarize what I found.",
-               run.brief, claim_count, claim_count == 1 ? "" : "s");
-   } else {
-      snprintf(msg, sizeof(msg),
-               "🔍 Deep research on \"%s\" finished, but I couldn't find enough to report. Try "
-               "rephrasing or narrowing the question.",
-               run.brief);
+   char *msg = research_completion_message(run.brief, summary, claim_count, run.report_doc_id > 0);
+   if (!msg) {
+      OLOG_ERROR("research_worker: out of memory for conv %lld's completion message",
+                 (long long)job_conv);
+      return;
    }
 
    /* DAWN's own completion note, not a model turn: unprompted, so memory
@@ -118,6 +96,7 @@ static void research_deliver_to_parent(int64_t job_conv, int user_id, const char
    if (job_report_post(rec.parent_id, user_id, msg) == SUCCESS) {
       OLOG_INFO("research_worker: posted completion to parent conv %lld", (long long)rec.parent_id);
    }
+   free(msg);
 }
 
 static void research_worker_run(research_work_t *work) {

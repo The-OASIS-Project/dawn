@@ -37,6 +37,10 @@
 #include "logging.h"
 #include "utils/string_utils.h" /* sanitize_utf8_for_json */
 
+/* Room for the completion message's own words around the brief and the take
+ * (its longest form is under 200 bytes, plus a count). */
+#define RESEARCH_COMPLETION_FIXED_MAX 256
+
 /* Bounds for the synthesis render. Claims per run are structurally bounded (a
  * few rounds x a handful of questions x a few claims), so a real run lands well
  * under this; the cap is a memory backstop on the heap snapshot, NOT the expected
@@ -845,4 +849,45 @@ int research_render_report(int64_t run_id, const char *brief, char **out_markdow
 
    *out_markdown = buf;
    return AUTH_DB_SUCCESS;
+}
+
+char *research_completion_message(const char *brief,
+                                  const char *summary,
+                                  int claim_count,
+                                  bool has_report) {
+   const char *b = brief ? brief : "";
+   const bool have_summary = summary != NULL && summary[0] != '\0';
+   const char *plural = claim_count == 1 ? "" : "s";
+   const size_t size = strlen(b) + (have_summary ? strlen(summary) : 0) +
+                       RESEARCH_COMPLETION_FIXED_MAX;
+   char *msg = malloc(size);
+   if (!msg) {
+      return NULL;
+   }
+   if (claim_count > 0 && has_report && have_summary) {
+      /* The useful case: lead with the synthesized answer, then point to the note. */
+      snprintf(msg, size,
+               "🔍 Deep research complete — \"%s\".\n\n%s\n\nThat's the gist — I gathered %d "
+               "finding%s; the full cited report is in your notes.",
+               b, summary, claim_count, plural);
+   } else if (claim_count > 0 && has_report) {
+      snprintf(msg, size,
+               "🔍 Deep research complete — \"%s\".\n\nI gathered %d finding%s and saved a cited "
+               "report to your notes. Ask me about it, or open it in your documents.",
+               b, claim_count, plural);
+   } else if (claim_count > 0) {
+      /* Findings gathered, but the note save failed: don't claim a report is in
+       * notes when it isn't.  The evidence is still in the ledger, so offer to
+       * summarize rather than point at a missing document. */
+      snprintf(msg, size,
+               "🔍 Deep research complete — \"%s\".\n\nI gathered %d finding%s, but couldn't save "
+               "the report to your notes. Ask me and I'll summarize what I found.",
+               b, claim_count, plural);
+   } else {
+      snprintf(msg, size,
+               "🔍 Deep research on \"%s\" finished, but I couldn't find enough to report. Try "
+               "rephrasing or narrowing the question.",
+               b);
+   }
+   return msg;
 }

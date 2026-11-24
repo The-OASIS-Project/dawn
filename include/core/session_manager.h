@@ -787,6 +787,16 @@ typedef struct session {
    // Single-writer (the research controller, set before a round dispatch, cleared
    // before synthesis); read on the dispatch thread at loop-params construction.
    int64_t input_token_ceiling;
+   // What a turn's last tool-loop call is for (llm_tool_loop_params_t.save_note):
+   // NULL, an answer; set, a save, and this note goes to the model before it.  A
+   // static string.  Single-writer (the research controller, between dispatches),
+   // read on the dispatch thread at loop-params construction and at finalize.
+   const char *turn_save_note;
+   // The loop is running a save step's tool batch: the policy lets only state-kind
+   // calls through (it narrows every caller to TOOL_CALLER_SAVE_STEP's row).  Set and
+   // cleared by the loop around the
+   // batch, read on the tool worker threads that share the session's context.
+   atomic_bool turn_save_step;
 
    // Streaming metrics for UI visualization
    uint64_t stream_start_ms;     // Timestamp when LLM call started
@@ -1071,6 +1081,17 @@ static inline bool session_tools_suppressed(session_t *session) {
 static inline void session_set_input_token_ceiling(session_t *session, int64_t ceiling) {
    if (session != NULL) {
       session->input_token_ceiling = ceiling;
+   }
+}
+
+/**
+ * @brief Make the session's turns end on a save, not an answer (NULL: an answer).
+ *        @p note is static; the research controller sets it around a round's
+ *        dispatch and clears it after.
+ */
+static inline void session_set_turn_save_note(session_t *session, const char *note) {
+   if (session != NULL) {
+      session->turn_save_note = note;
    }
 }
 

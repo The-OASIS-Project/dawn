@@ -20,6 +20,7 @@
  * kind of action.
  */
 
+#include <stdatomic.h>
 #include <string.h>
 
 #include "core/session_manager.h"
@@ -109,6 +110,15 @@ static void test_callers(void) {
    s_background_turn = true;
    TEST_ASSERT_EQUAL_INT(TOOL_CALLER_UNATTENDED, tool_call_policy_caller());
 
+   /* A save step never changes who calls: the check narrows the call. */
+   atomic_store(&s_session.turn_save_step, true);
+   s_background_turn = false;
+   s_session.type = SESSION_TYPE_WEBUI;
+   s_session.messaging_identity.sender_unverified = false;
+   s_user_turn = true;
+   TEST_ASSERT_EQUAL_INT(TOOL_CALLER_USER, tool_call_policy_caller());
+   atomic_store(&s_session.turn_save_step, false);
+
    s_ctx = NULL;
    TEST_ASSERT_EQUAL_INT(TOOL_CALLER_UNATTENDED, tool_call_policy_caller());
 }
@@ -124,6 +134,7 @@ static void test_allows(void) {
       { TOOL_CALLER_JOB, true, true, true, false, false, false },
       { TOOL_CALLER_UNATTENDED, true, false, true, false, false, false },
       { TOOL_CALLER_THIRD_PARTY, true, true, true, false, true, false },
+      { TOOL_CALLER_SAVE_STEP, false, false, true, false, false, false },
    };
    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
       const tool_caller_t c = rows[i].caller;
@@ -328,6 +339,43 @@ static void test_prepare_while_code_waits(void) {
    tool_call_challenge_clear_all();
 }
 
+/* A save step's check: a state call runs, every other kind is refused with a
+ * message, and one that would wait for a reply code is refused instead. */
+static void test_save_step_check(void) {
+   static const tool_action_kind_entry_t state_kinds[] = { { "list", TOOL_KIND_STATE, NULL } };
+   tool_metadata_t saver = s_tool;
+   saver.action_kinds = state_kinds;
+   tool_call_verdict_t v;
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW, tool_call_policy_check(&saver, NULL, "list", NULL,
+                                                                 TOOL_CALLER_SAVE_STEP, false, &v));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE,
+                         tool_call_policy_check(&s_tool, NULL, "list", NULL, TOOL_CALLER_SAVE_STEP,
+                                                false, &v));
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_READ, v.kind);
+   TEST_ASSERT_NOT_NULL(strstr(v.message, "last step"));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE, tool_call_policy_check(&s_tool, NULL, "send", NULL,
+                                                                  TOOL_CALLER_SAVE_STEP, true, &v));
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE,
+                         tool_call_policy_decide((tool_caller_t)(TOOL_CALLER_SAVE_STEP + 1),
+                                                 TOOL_KIND_STATE));
+
+   /* While a session runs its save step, every caller is narrowed to that row,
+    * and never widened by it. */
+   atomic_store(&s_session.turn_save_step, true);
+   for (int c = TOOL_CALLER_USER; c < TOOL_CALLER_SAVE_STEP; c++) {
+      TEST_ASSERT_EQUAL_INT(tool_call_policy_decide((tool_caller_t)c, TOOL_KIND_STATE),
+                            tool_call_policy_check(&saver, NULL, "list", NULL, (tool_caller_t)c,
+                                                   false, &v));
+      TEST_ASSERT_EQUAL_INT(TOOL_CALL_REFUSE, tool_call_policy_check(&s_tool, NULL, "list", NULL,
+                                                                     (tool_caller_t)c, false, &v));
+      TEST_ASSERT_EQUAL_INT(TOOL_CALLER_SAVE_STEP, v.caller);
+      TEST_ASSERT_NOT_NULL(strstr(v.message, "last step"));
+   }
+   atomic_store(&s_session.turn_save_step, false);
+   TEST_ASSERT_EQUAL_INT(TOOL_CALL_ALLOW, tool_call_policy_check(&s_tool, NULL, "list", NULL,
+                                                                 TOOL_CALLER_USER, false, &v));
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_callers);
@@ -336,5 +384,6 @@ int main(void) {
    RUN_TEST(test_check);
    RUN_TEST(test_challenge);
    RUN_TEST(test_prepare_while_code_waits);
+   RUN_TEST(test_save_step_check);
    return UNITY_END();
 }

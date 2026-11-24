@@ -203,7 +203,8 @@ Layer 2 (Services) — deps: Layers 0-1 and each other, acyclic
 │                               message DAWN sent) goes through conv_post_unprompted(), through the lease
 ├── src/core/tool_call_policy.c Who may make a tool call: the caller's kind of turn (user, unverified sender,
 │                               background job, unattended, a user turn carrying an attached email) against the
-│                               action's kind; decided once per call
+│                               action's kind, narrowed to state calls on the last step of a turn that ends
+│                               on a save; decided once per call
 ├── src/memory/                 Persistent memory, contacts, extraction, forgetting
 ├── src/auth/                   Users, settings, conversations and messages; auth_db_messages.c is the one
 │                               message insert (and the LLM replay read)

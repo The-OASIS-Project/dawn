@@ -400,6 +400,38 @@ static void canon_eq(const char *in, const char *expect) {
    TEST_ASSERT_EQUAL_STRING(expect, out);
 }
 
+/* A long brief and a long take: the message carries both whole, and its
+ * closing line. */
+static void test_completion_message_is_never_cut(void) {
+   char brief[RESEARCH_BRIEF_MAX];
+   memset(brief, 'b', sizeof(brief) - 1);
+   brief[sizeof(brief) - 1] = '\0';
+   char take[4096];
+   memset(take, 't', sizeof(take) - 1);
+   take[sizeof(take) - 1] = '\0';
+
+   char *msg = research_completion_message(brief, take, 108, true);
+   TEST_ASSERT_NOT_NULL(msg);
+   TEST_ASSERT_NOT_NULL(strstr(msg, brief));
+   TEST_ASSERT_NOT_NULL(strstr(msg, take));
+   const char *tail = "I gathered 108 findings; the full cited report is in your notes.";
+   TEST_ASSERT_TRUE(strlen(msg) > strlen(tail));
+   TEST_ASSERT_EQUAL_STRING(tail, msg + strlen(msg) - strlen(tail));
+   free(msg);
+
+   /* No take, and no saved report: the forms that say so. */
+   msg = research_completion_message("a question", NULL, 1, true);
+   TEST_ASSERT_NOT_NULL(strstr(msg, "I gathered 1 finding and saved a cited report"));
+   free(msg);
+   msg = research_completion_message("a question", "a take", 2, false);
+   TEST_ASSERT_NOT_NULL(strstr(msg, "couldn't save the report"));
+   TEST_ASSERT_NULL(strstr(msg, "a take"));
+   free(msg);
+   msg = research_completion_message("a question", "a take", 0, false);
+   TEST_ASSERT_NOT_NULL(strstr(msg, "couldn't find enough to report"));
+   free(msg);
+}
+
 static void test_canonicalize_url(void) {
    /* scheme + host lowercased, path left byte-exact (paths are case-sensitive) */
    canon_eq("HTTPS://Example.COM/Path/Page", "https://example.com/Path/Page");
@@ -460,5 +492,6 @@ int main(void) {
    RUN_TEST(test_digest_repairs_a_cut_character);
    RUN_TEST(test_render_report);
    RUN_TEST(test_render_report_empty);
+   RUN_TEST(test_completion_message_is_never_cut);
    return UNITY_END();
 }
