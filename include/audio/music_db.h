@@ -192,7 +192,9 @@ int music_db_get_stats(music_db_stats_t *stats);
  * album/genre hold every significant query token, ranked best-first;
  * artist/title/album are word-boundary-strict filters requiring every word;
  * genre is a substring filter; year bounds are inclusive. The file path is never
- * matched, so folder names don't leak into results.
+ * matched, so folder names don't leak into results.  Text of one character is
+ * too short to search every field: with another filter and no @ref title, it is
+ * the title filter ("7" by Prince); alone, it matches nothing.
  *
  * A source filter (@ref has_source, or a "source:<name>" word in @ref text such
  * as "source:plex" or "source:local", spelled as music_source_name() does)

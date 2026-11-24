@@ -488,11 +488,12 @@ static int album_tracks(const music_search_filters_t *f,
                         strbuf_t *sb) {
    int count = 0;
    size_t n_ids = ids ? json_object_array_length(ids) : 0;
-   for (size_t i = 0; ids && i < n_ids && count < MUSIC_QUEUE_MAX; i++) {
+   for (size_t i = 0; ids && i < n_ids && count < MUSIC_SEARCH_ALBUM_ROWS_MAX; i++) {
       int64_t id = json_object_get_int64(json_object_array_get_idx(ids, i));
       int got = 0;
       if (id <= 0 ||
-          music_db_album_tracks(id, out + count, MUSIC_QUEUE_MAX - count, &got) != SUCCESS ||
+          music_db_album_tracks(id, out + count, MUSIC_SEARCH_ALBUM_ROWS_MAX - count, &got) !=
+              SUCCESS ||
           got == 0) {
          strbuf_appendf(sb,
                         TOOL_RESULT_ERROR_MARK "Album id %lld isn't in the library (ids change "
@@ -508,7 +509,7 @@ static int album_tracks(const music_search_filters_t *f,
       if (id == 0) {
          return FAILURE;
       }
-      if (music_db_album_tracks(id, out, MUSIC_QUEUE_MAX, &count) != SUCCESS) {
+      if (music_db_album_tracks(id, out, MUSIC_SEARCH_ALBUM_ROWS_MAX, &count) != SUCCESS) {
          strbuf_appendf(sb, TOOL_RESULT_ERROR_MARK "Couldn't read that album. Nothing changed.");
          return FAILURE;
       }
@@ -580,7 +581,9 @@ static int album_to_queue(music_player_t *player,
          *result_out = strdup("Music database not available");
       return FAILURE;
    }
-   music_search_result_t *tracks = malloc(MUSIC_QUEUE_MAX * sizeof(*tracks));
+   /* The whole album, so the disc asked for is chosen from all of it; the queue
+    * takes what fits */
+   music_search_result_t *tracks = malloc(MUSIC_SEARCH_ALBUM_ROWS_MAX * sizeof(*tracks));
    if (!tracks) {
       if (result_out)
          *result_out = strdup("Memory allocation failed");
@@ -621,7 +624,9 @@ static int album_to_queue(music_player_t *player,
          snprintf(album, sizeof(album), "the album '%s'", name);
       }
    }
-   if (!album_start(tracks, count, title, f->artist, &start)) {
+   /* A start is a track the queue holds */
+   int fits = count < MUSIC_QUEUE_MAX ? count : MUSIC_QUEUE_MAX;
+   if (!album_start(tracks, fits, title, f->artist, &start)) {
       if (result_out) {
          strbuf_t sb;
          strbuf_init(&sb, 512);
@@ -665,10 +670,14 @@ static int album_to_queue(music_player_t *player,
    }
    music_open_result_t outcome = tool_start_track(player, first_path, start, for_model);
    if (result_out) {
-      char buf[AUDIO_METADATA_STRING_MAX + MUSIC_STRING_MAX + 200];
-      snprintf(buf, sizeof(buf), "Replaced queue with %s (%d track%s); #%d, %s, %s.", album, added,
-               added == 1 ? "" : "s", start + 1, first_title[0] ? first_title : "Unknown",
-               tool_outcome_phrase(outcome));
+      char over[48] = "";
+      char buf[AUDIO_METADATA_STRING_MAX + MUSIC_STRING_MAX + sizeof(over) + 200];
+      if (added < count) {
+         snprintf(over, sizeof(over), "; %d more didn't fit the queue", count - added);
+      }
+      snprintf(buf, sizeof(buf), "Replaced queue with %s (%d track%s%s); #%d, %s, %s.", album,
+               added, added == 1 ? "" : "s", over, start + 1,
+               first_title[0] ? first_title : "Unknown", tool_outcome_phrase(outcome));
       *result_out = result_with_footer(player, buf, for_model);
    }
    return tool_outcome_rc(outcome);

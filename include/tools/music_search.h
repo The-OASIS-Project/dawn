@@ -47,6 +47,10 @@ extern "C" {
 /** Highest page number accepted; keeps (page - 1) * limit far from int overflow. */
 #define MUSIC_SEARCH_MAX_PAGE 100000
 
+/** Tracks read of an album request before its disc is chosen: a whole box set (they
+ * run to a few hundred tracks), so a late disc is found; the queue limit applies after. */
+#define MUSIC_SEARCH_ALBUM_ROWS_MAX 1000
+
 /**
  * @brief Parsed 'search' filter params (fielded filters + year range)
  *
