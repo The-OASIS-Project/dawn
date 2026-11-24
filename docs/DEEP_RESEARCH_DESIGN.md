@@ -589,7 +589,7 @@ a free inheritance.
 Reuses the background-job manager primitives (`BACKGROUND_JOBS_DESIGN.md §5`) but via a **sibling worker with
 its own spawn path** (arch MED-2), not `job_worker`'s `handle_spawn`:
 
-1. **Spawn** (`deep_research start`, [§7](#7-tools)): `memory_filter_check(brief)` → capacity peek
+1. **Spawn** (`deep_research start`, [§7](#7-tools)): `memory_filter_injection_command_match(brief)` → capacity peek
    `job_manager_capacity` → `conv_db_create_job(...)` with `job_kind='research'` (status `queued`) →
    `job_update_emit` **before** dispatch → detached `research_worker_spawn(user_id, conv_id, brief, mode)`.
    `INSERT research_runs` (status `planning`). No change to `job_worker.c`.
@@ -888,7 +888,7 @@ Wall-clock ceiling reuses the `[jobs]` runtime reap rather than a duplicate knob
 1. **Owner-scoped, structurally.** No research read path accepts a raw `run_id` without also taking `user_id`
    and JOINing `research_runs` (sec MED-4). `status`/`cancel` validate ownership exactly as `job_tool.c:219`
    (`AUTH_DB_FORBIDDEN`). No cross-user visibility.
-2. **Authorization inherits the job path.** `deep_research start` runs the same authorize + `memory_filter_check`
+2. **Authorization inherits the job path.** `deep_research start` runs the same authorize + injection-command check
    + capacity gate as `job spawn`. A research run *is* a background job and obeys `[jobs]` concurrency caps.
 3. **Ledger lifecycle** ([§3](#3-data-model)): claims + questions kept until the parent conversation is
    deleted; only report revisions pruned (after replay verification).
@@ -1247,7 +1247,7 @@ So P0 of this feature extracts the post-confirm body into a shared non-static
 **`research_spawn_run(user_id, parent_conv, brief, mode, deliver_to, &run_id, &conv_id, &err)`**, called by
 **both** `handle_start` (after its confirm gate; since 2026-10-03 the separate `confirm_start` action,
 `handle_confirm_start`) and the admin handler. Only then is "changes nothing about the
-loop / allowlist / gates" literally true rather than aspirational. `memory_filter_check(brief)` lives inside the
+loop / allowlist / gates" literally true rather than aspirational. `memory_filter_injection_command_match(brief)` lives inside the
 shared function, so it fires on both paths by construction.
 
 **The `research` admin verb** (`src/auth/admin_socket_research.c` — GPL header per CLAUDE.md — mirroring the
@@ -1300,7 +1300,7 @@ gate** — and that is correct, not a hole (confirmed by security review against
   cost-envelope half is preserved by [§16.7](#167-cost--methodology). "Operator" here means anyone in the
   daemon's group — the population being authorized; name it, don't widen it.
 - It bypasses **only** the conversational confirm + the LLM routing decision. Every other control still fires:
-  `[research] enabled`, `memory_filter_check(brief)` (inside the shared spawn), `[jobs]` caps, owner-scoping, the
+  `[research] enabled`, `memory_filter_injection_command_match(brief)` (inside the shared spawn), `[jobs]` caps, owner-scoping, the
   read-only in-loop allowlist, ingest-time injection gating, and the disabled `reinvoke_parent`. Decision #17's
   "never autonomously" is about the *model*; an operator-initiated spawn is not the model acting.
 
@@ -1371,7 +1371,7 @@ touches C and a re-score never re-runs research.
 1. **Extract `research_spawn_run()`** (the load-bearing step, arch HIGH-1) — pull the post-confirm body of
    `handle_start` (`deep_research_tool.c`) into a shared non-static function called by both `handle_start` (after
    its confirm gate; now `handle_confirm_start`) and the new admin handler, preserving the exact ordering (fail-closed `job_kind` stamp,
-   `research_db_run_create` before spawn). `memory_filter_check(brief)` lives inside it. Zero behaviour change to
+   `research_db_run_create` before spawn). `memory_filter_injection_command_match(brief)` lives inside it. Zero behaviour change to
    the conversational path.
 2. **`admin_socket_research.c`** (GPL header) — the `research start`/`status`/`cancel` verb, wired into the admin
    dispatch like the sibling `admin_socket_*` modules: `ADMIN_MSG_RESEARCH_*` enum, handler module, client parse

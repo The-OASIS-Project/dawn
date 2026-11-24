@@ -176,6 +176,10 @@ bool memory_filter_check_injection_commands(const char *text) {
    (void)text;
    return false;
 }
+const char *memory_filter_injection_command_match(const char *text) {
+   (void)text;
+   return NULL;
+}
 
 /* ---- stubs: the registry (captures the callback) ---- */
 
