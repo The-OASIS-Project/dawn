@@ -47,6 +47,10 @@ extern "C" {
 /** Highest page number accepted; keeps (page - 1) * limit far from int overflow. */
 #define MUSIC_SEARCH_MAX_PAGE 100000
 
+/** Tracks read of an album request before its disc is chosen: a whole box set (they
+ * run to a few hundred tracks), so a late disc is found; the queue limit applies after. */
+#define MUSIC_SEARCH_ALBUM_ROWS_MAX 1000
+
 /**
  * @brief Parsed 'search' filter params (fielded filters + year range)
  *
@@ -101,6 +105,18 @@ void music_search_build_query(music_query_t *out,
                               const music_search_filters_t *f);
 
 /**
+ * @brief Echo a query back ("query 'x', artist 'y', years 1980-1989")
+ *
+ * So the LLM sees exactly what was searched when reading a count or an empty
+ * result.
+ *
+ * @param sb   Output buffer
+ * @param text Free text (may be NULL/empty)
+ * @param f    Filters (may be NULL)
+ */
+void music_search_describe_query(strbuf_t *sb, const char *text, const music_search_filters_t *f);
+
+/**
  * @brief Run one page of a search and render it for the LLM
  *
  * The text always leads with the real total and page count ("Found 480 tracks
@@ -152,15 +168,50 @@ char *music_library_albums_text(const char *artist, int page, int per_page);
  * @brief Resolve one free-text item to its best-matching track (play/enqueue)
  *
  * Takes off a source word, splits an optional "Artist - Title", runs one strict,
- * relevance-ranked query on the title (or whole item) and prefers a candidate
- * whose artist matches.  Shared by the WebUI and local-speaker executors; paths
- * are the caller's to look up.
+ * relevance-ranked query on the title (or whole item) within @p f and prefers a
+ * candidate whose artist matches.  Never widens past @p f: a title that isn't
+ * inside the filters is no match.  Shared by the WebUI and local-speaker
+ * executors; paths are the caller's to look up.
  *
  * @param item Track name, "Artist - Title", optionally with "source:<name>"
+ * @param f    Filters the track must match (NULL = the whole library)
  * @param out  Receives the chosen track
  * @return SUCCESS, or FAILURE (no match)
  */
-int music_search_resolve_item(const char *item, music_search_result_t *out);
+int music_search_resolve_item(const char *item,
+                              const music_search_filters_t *f,
+                              music_search_result_t *out);
+
+/**
+ * @brief Narrow an album's tracks to the disc a request names
+ *
+ * A multi-disc set is one album whose discs may carry their own album tags
+ * ("The Hits - Disk 1", "The Hits - Disk 2").  When @p album matches one tag
+ * better than every other tag and better than the set's own name (see
+ * music_search_album_set_name()), and that tag's tracks are exactly one disc
+ * (one disc_no, which no other tag's track has), only that disc is kept (in
+ * order, compacted in place).  Otherwise every track is kept: the set's name,
+ * a tie, an edition tag within a disc ("X (Deluxe Edition)"), one tag.
+ *
+ * @param tracks    The album's tracks in play order, with disc_no (narrowed in place)
+ * @param count     Number of tracks
+ * @param album     The album name asked for (NULL = count discs only)
+ * @param artist    Artist given with it (may be NULL)
+ * @param discs_out Receives the distinct disc numbers left (may be NULL)
+ * @return the number of tracks kept
+ */
+int music_search_album_disc(music_search_result_t *tracks,
+                            int count,
+                            const char *album,
+                            const char *artist,
+                            int *discs_out);
+
+/**
+ * @brief The name of a set from one disc's tag ("The Hits - Disk 1" → "The Hits")
+ *
+ * The leading part of @p tag that is its album key, else @p tag itself.
+ */
+void music_search_album_set_name(const char *tag, char *out, size_t cap);
 
 #ifdef __cplusplus
 }

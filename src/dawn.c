@@ -2322,7 +2322,10 @@ int main(int argc, char *argv[]) {
       snprintf(music_db_path, sizeof(music_db_path), "%s/music.db",
                g_config.paths.data_dir_resolved);
       if (music_db_init(music_db_path) == 0) {
-         if (music_queue_init(music_db_path) != SUCCESS) {
+         char queue_db_path[CONFIG_PATH_MAX + 24];
+         snprintf(queue_db_path, sizeof(queue_db_path), "%s/music_queue.db",
+                  g_config.paths.data_dir_resolved);
+         if (music_queue_init(queue_db_path, music_db_path) != SUCCESS) {
             OLOG_WARNING("Music queue store failed to open; queues won't be kept");
          }
          // Register available music source providers before starting scanner

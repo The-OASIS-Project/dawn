@@ -76,6 +76,8 @@ typedef struct {
    uint32_t duration_sec;                            /**< Duration in seconds */
    uint32_t year;                                    /**< Release year (0 if unknown) */
    music_source_t source;                            /**< Which source this track came from */
+   uint32_t
+       disc_no; /**< Disc of its album (1 when untagged); music_db_album_tracks() only, else 0 */
 } music_search_result_t;
 
 /**
@@ -190,7 +192,9 @@ int music_db_get_stats(music_db_stats_t *stats);
  * album/genre hold every significant query token, ranked best-first;
  * artist/title/album are word-boundary-strict filters requiring every word;
  * genre is a substring filter; year bounds are inclusive. The file path is never
- * matched, so folder names don't leak into results.
+ * matched, so folder names don't leak into results.  Text of one character is
+ * too short to search every field: with another filter and no @ref title, it is
+ * the title filter ("7" by Prince); alone, it matches nothing.
  *
  * A source filter (@ref has_source, or a "source:<name>" word in @ref text such
  * as "source:plex" or "source:local", spelled as music_source_name() does)
@@ -462,7 +466,7 @@ int music_db_album_find(const char *album,
                         int *total_out);
 
 /**
- * @brief A copy's tracks, in order: disc, track number, path
+ * @brief A copy's tracks, in order: disc, track number, path; each with its disc_no
  *
  * @param id        music_album_choice_t::id
  * @param results   Output array

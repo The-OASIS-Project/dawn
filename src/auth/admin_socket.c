@@ -45,6 +45,7 @@
 #define ADMIN_SOCKET_INTERNAL_ALLOWED
 
 #include "audio/music_db.h"
+#include "audio/music_queue_db.h"
 #include "audio/music_scanner.h"
 #include "auth/admin_socket_internal.h"
 #include "auth/auth_crypto.h"
@@ -1047,6 +1048,8 @@ static int handle_delete_user(int client_fd, const char *payload, uint16_t paylo
    conv_db_withdraw_intent_end();
    if (rc == AUTH_DB_SUCCESS && removed_id > 0) {
       session_withdraw_forgotten_async(removed_id, false);
+      /* Its saved music queue is in its own file, so nothing cascades to it */
+      (void)music_queue_db_delete_user(removed_id);
    }
 
    if (rc == AUTH_DB_LAST_ADMIN) {

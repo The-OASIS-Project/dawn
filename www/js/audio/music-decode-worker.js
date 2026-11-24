@@ -51,6 +51,7 @@ let decoderReady = false;
 let decodeTimestamp = 0;
 let workletBufferedMs = 0;
 let statusPostCounter = 0;
+let flushGeneration = 0; // bumped by flush(): a frame from before it is stale
 const STATUS_POST_EVERY = 3; // ~96ms: UI buffer-bar cadence (the WS report stays at ~32ms)
 
 /* ---- Music WebSocket (ported from MusicStreamConnection; self.location works in a worker) ---- */
@@ -221,7 +222,12 @@ function handleDecodedAudio(audioData) {
 }
 
 async function handleMusicData(data) {
-   if (!decoderReady) await initDecoder();
+   if (!decoderReady) {
+      const generation = flushGeneration;
+      await initDecoder();
+      // A flush while the decoder started belongs after this frame: drop it
+      if (generation !== flushGeneration) return;
+   }
    if (!decoder || decoder.state === 'closed') return;
 
    DawnMusicDecode.forEachOpusFrame(data, (opusFrame) => {
@@ -247,6 +253,7 @@ function flush() {
          /* ignore */
       }
    }
+   flushGeneration++;
    decodeTimestamp = 0;
    workletBufferedMs = 0;
    if (workletPort) workletPort.postMessage({ type: 'clear' });

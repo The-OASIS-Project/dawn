@@ -462,7 +462,7 @@ void setUp(void) {
    int fd = mkstemp(s_db_path);
    TEST_ASSERT_TRUE(fd >= 0);
    close(fd);
-   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path, NULL));
 }
 
 void tearDown(void) {

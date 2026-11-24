@@ -28,6 +28,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "audio/music_queue_db.h"
 #include "auth/auth_crypto.h"
 #include "auth/auth_db.h"
 #include "auth/auth_db_withdraw.h"
@@ -230,6 +231,8 @@ void handle_delete_user(ws_connection_t *conn, struct json_object *payload) {
    conv_db_withdraw_intent_end();
    if (result == AUTH_DB_SUCCESS && target_id > 0) {
       session_withdraw_forgotten_async(target_id, false);
+      /* Its saved music queue is in its own file, so nothing cascades to it */
+      (void)music_queue_db_delete_user(target_id);
    }
 
    if (result == AUTH_DB_SUCCESS) {

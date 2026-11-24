@@ -72,7 +72,8 @@ static const treg_param_t music_params[] = {
        .description =
            "The action: 'play' (REPLACE the queue with search results or items, then play), "
            "'enqueue' (APPEND to the queue without interrupting — use this to add to an existing "
-           "playlist), 'stop', 'pause', 'resume', 'next', 'previous', "
+           "playlist; it adds exactly what you pass, a track already queued included, so pass "
+           "only tracks you mean to add), 'stop', 'pause', 'resume', 'next', 'previous', "
            "'list' (show queue + shuffle/repeat state), "
            "'select' (jump to track N, 1-based), "
            "'remove' (drop track N (1-based) or a title match from the queue), "
@@ -154,9 +155,10 @@ static const treg_param_t music_params[] = {
        .name = "album",
        .description = "For 'search': restrict matching to the ALBUM field (e.g. album:'Whatever "
                       "and Ever Amen' lists that album's tracks). For 'play'/'enqueue': the "
-                      "whole album in track order (play replaces the queue, enqueue appends). "
+                      "whole album in track order, every disc of a set (play replaces the queue, "
+                      "enqueue appends); a disc's own album name takes just that disc. "
                       "With a query, play starts the album at that title, while enqueue adds "
-                      "just the query's best match. If several albums match, nothing "
+                      "just the query's best match on that album. If several albums match, nothing "
                       "changes and the reply lists them with ids. Combine with artist: to "
                       "narrow.",
        .type = TOOL_PARAM_TYPE_STRING,

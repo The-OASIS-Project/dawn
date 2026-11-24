@@ -453,7 +453,7 @@ int main(void) {
       return 1;
    }
    close(fd);
-   music_queue_init(s_db_path);
+   music_queue_init(s_db_path, NULL);
    music_speaker_set_device("test-device");
 
    UNITY_BEGIN();

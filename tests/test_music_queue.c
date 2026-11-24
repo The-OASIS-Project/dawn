@@ -17,11 +17,12 @@
  * the project author(s).
  *
  * Unit tests for the music queue (music_queue.c): shared and private queues,
- * adding with dedup and a full queue, inserting at the top, removing, the
+ * adding (repeats kept) and a full queue, inserting at the top, removing, the
  * nearest copy, a queue kept across a restart, and two users saving at once
  * (temp database).
  */
 
+#include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,7 +59,7 @@ void setUp(void) {
    int fd = mkstemp(s_db_path);
    TEST_ASSERT_TRUE(fd >= 0);
    close(fd);
-   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path, NULL));
 }
 
 void tearDown(void) {
@@ -80,7 +81,7 @@ static void test_shared_and_private(void) {
    music_queue_release(p); /* frees the private one */
 }
 
-static void test_add_dedups_and_fills(void) {
+static void test_add_keeps_repeats_and_fills(void) {
    user_music_queue_t *uq = music_queue_acquire(0);
    music_search_result_t t[3] = { track("/m/a.flac"), track("/m/b.flac"), track("/m/a.flac") };
    t[1].path[0] = '\0'; /* no track */
@@ -88,12 +89,29 @@ static void test_add_dedups_and_fills(void) {
    int added = -1;
    uint32_t gen = uq->generation;
    music_queue_add(uq, t, 3, false, oc, &added);
-   TEST_ASSERT_EQUAL_INT(1, added);
+   TEST_ASSERT_EQUAL_INT(2, added); /* the same track twice in one add: queued twice */
    TEST_ASSERT_EQUAL_UINT32(gen + 1, uq->generation); /* other players see it */
    TEST_ASSERT_EQUAL_INT(MUSIC_QUEUE_ADDED, oc[0]);
    TEST_ASSERT_EQUAL_INT(MUSIC_QUEUE_NOT_FOUND, oc[1]);
-   TEST_ASSERT_EQUAL_INT(MUSIC_QUEUE_DUPLICATE, oc[2]);
+   TEST_ASSERT_EQUAL_INT(MUSIC_QUEUE_ADDED, oc[2]);
    TEST_ASSERT_EQUAL_STRING("Title of /m/a.flac", uq->queue[0].title);
+   TEST_ASSERT_EQUAL_STRING("/m/a.flac", uq->queue[1].path);
+
+   /* A later add of a queued track queues it again */
+   music_queue_add(uq, &t[0], 1, false, oc, &added);
+   TEST_ASSERT_EQUAL_INT(1, added);
+   TEST_ASSERT_EQUAL_INT(3, uq->queue_length);
+   TEST_ASSERT_EQUAL_STRING("/m/a.flac", uq->queue[2].path);
+
+   /* An album whose one track is queued already: every track goes in */
+   music_search_result_t album[3] = { track("/m/x1.flac"), track("/m/a.flac"),
+                                      track("/m/x3.flac") };
+   music_queue_add(uq, album, 3, false, oc, &added);
+   TEST_ASSERT_EQUAL_INT(3, added);
+   TEST_ASSERT_EQUAL_INT(6, uq->queue_length);
+   TEST_ASSERT_EQUAL_STRING("/m/x1.flac", uq->queue[3].path);
+   TEST_ASSERT_EQUAL_STRING("/m/a.flac", uq->queue[4].path);
+   TEST_ASSERT_EQUAL_STRING("/m/x3.flac", uq->queue[5].path);
 
    /* Fill it, then one more is refused */
    for (int i = uq->queue_length; i < MUSIC_QUEUE_MAX; i++) {
@@ -167,7 +185,7 @@ static void test_kept_across_restart(void) {
    music_queue_release(uq);
 
    music_queue_shutdown();
-   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path));
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path, NULL));
 
    uq = music_queue_acquire(7);
    TEST_ASSERT_EQUAL_INT(2, uq->queue_length);
@@ -182,6 +200,89 @@ static void test_kept_across_restart(void) {
    user_music_queue_t *other = music_queue_acquire(8);
    TEST_ASSERT_EQUAL_INT(0, other->queue_length);
    music_queue_release(other);
+}
+
+/* A deleted user's saved queue goes; another user's stays */
+static void test_delete_user_removes_saved_queue(void) {
+   music_search_result_t t = track("/m/one.flac");
+   user_music_queue_t *a = music_queue_acquire(7);
+   user_music_queue_t *b = music_queue_acquire(8);
+   music_queue_add(a, &t, 1, false, NULL, NULL);
+   music_queue_add(b, &t, 1, false, NULL, NULL);
+   music_queue_release(a);
+   music_queue_release(b);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_db_delete_user(7));
+
+   music_queue_shutdown();
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path, NULL));
+   a = music_queue_acquire(7);
+   b = music_queue_acquire(8);
+   TEST_ASSERT_EQUAL_INT(0, a->queue_length);
+   TEST_ASSERT_EQUAL_INT(1, b->queue_length);
+   music_queue_release(a);
+   music_queue_release(b);
+}
+
+/* Queues saved in music.db before the queue had its own file come across
+ * once; a queue cleared after that stays cleared across a restart */
+static void test_imports_legacy_once(void) {
+   char legacy[64];
+   snprintf(legacy, sizeof(legacy), "/tmp/test_music_legacy_XXXXXX");
+   int fd = mkstemp(legacy);
+   TEST_ASSERT_TRUE(fd >= 0);
+   close(fd);
+   sqlite3 *db = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_open(legacy, &db));
+   TEST_ASSERT_EQUAL_INT(
+       SQLITE_OK,
+       sqlite3_exec(db,
+                    "CREATE TABLE user_queue (user_id INTEGER NOT NULL, position INTEGER NOT "
+                    "NULL, path TEXT NOT NULL, title TEXT, artist TEXT, album TEXT, "
+                    "duration_sec INTEGER, PRIMARY KEY (user_id, position));"
+                    "CREATE TABLE user_queue_state (user_id INTEGER PRIMARY KEY, shuffle "
+                    "INTEGER DEFAULT 0, repeat_mode INTEGER DEFAULT 0);"
+                    "INSERT INTO user_queue VALUES (5, 0, '/m/a.flac', 'A', '', '', 200);"
+                    "INSERT INTO user_queue VALUES (5, 1, '/m/b.flac', 'B', '', '', 210);"
+                    "INSERT INTO user_queue_state VALUES (5, 1, 2);",
+                    NULL, NULL, NULL));
+   sqlite3_close(db);
+
+   /* setUp opened a fresh store with no legacy file: start it again with one */
+   music_queue_shutdown();
+   remove_db();
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path, legacy));
+   user_music_queue_t *uq = music_queue_acquire(5);
+   TEST_ASSERT_EQUAL_INT(2, uq->queue_length);
+   TEST_ASSERT_EQUAL_STRING("/m/b.flac", uq->queue[1].path);
+   TEST_ASSERT_EQUAL_UINT32(210, uq->queue[1].duration_sec);
+   TEST_ASSERT_TRUE(uq->shuffle);
+   TEST_ASSERT_EQUAL_INT(2, (int)uq->repeat_mode);
+
+   pthread_mutex_lock(&uq->queue_mutex);
+   music_queue_clear(uq);
+   music_queue_changed(uq, true);
+   pthread_mutex_unlock(&uq->queue_mutex);
+   music_queue_release(uq);
+
+   music_queue_shutdown();
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path, legacy));
+   uq = music_queue_acquire(5);
+   TEST_ASSERT_EQUAL_INT(0, uq->queue_length);
+   music_queue_release(uq);
+
+   /* A copy left for a later start (music.db unreadable) never overwrites a
+    * queue saved here meanwhile, even an empty one */
+   music_queue_shutdown();
+   sqlite3 *qdb = NULL;
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_open(s_db_path, &qdb));
+   TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(qdb, "PRAGMA user_version = 0", NULL, NULL, NULL));
+   sqlite3_close(qdb);
+   TEST_ASSERT_EQUAL_INT(SUCCESS, music_queue_init(s_db_path, legacy));
+   uq = music_queue_acquire(5);
+   TEST_ASSERT_EQUAL_INT(0, uq->queue_length);
+   music_queue_release(uq);
+
+   unlink(legacy);
 }
 
 static void fill(user_music_queue_t *uq, int n) {
@@ -336,14 +437,16 @@ static void test_listener_hears_announce(void) {
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_shared_and_private);
-   RUN_TEST(test_add_dedups_and_fills);
+   RUN_TEST(test_add_keeps_repeats_and_fills);
    RUN_TEST(test_insert_top_drops_last_when_full);
    RUN_TEST(test_remove_and_nearest_copy);
    RUN_TEST(test_kept_across_restart);
+   RUN_TEST(test_delete_user_removes_saved_queue);
    RUN_TEST(test_two_users_save_at_once);
    RUN_TEST(test_places_follow_edits);
    RUN_TEST(test_place_on_dropped_track);
    RUN_TEST(test_replace_resets_places);
    RUN_TEST(test_listener_hears_announce);
+   RUN_TEST(test_imports_legacy_once);
    return UNITY_END();
 }

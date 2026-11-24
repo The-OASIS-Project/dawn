@@ -18,7 +18,7 @@
  *
  * Music queue: one shared queue per signed-in user (every tab and player of
  * that user sees the same tracks), a private one for anyone else, kept in
- * music.db across restarts.  Each player keeps its own position in it.
+ * music_queue.db across restarts.  Each player keeps its own position in it.
  */
 
 #ifndef MUSIC_QUEUE_H
@@ -88,16 +88,16 @@ struct user_music_queue {
 /** What music_queue_add() did with each track */
 typedef enum {
    MUSIC_QUEUE_ADDED = 0, /**< Appended */
-   MUSIC_QUEUE_DUPLICATE, /**< Already queued */
    MUSIC_QUEUE_NOT_FOUND, /**< No track (empty path) */
    MUSIC_QUEUE_FULL,      /**< Queue at MUSIC_QUEUE_MAX */
 } music_queue_outcome_t;
 
 /**
- * Open the queue store (music.db; its tables are created if missing).
+ * Open the queue store (its tables are created if missing), copying in once
+ * the queues saved in @p legacy_path (music.db, where they were kept before).
  * @return SUCCESS, or FAILURE: queues then work but aren't kept
  */
-int music_queue_init(const char *db_path);
+int music_queue_init(const char *db_path, const char *legacy_path);
 
 /** Free every queue no player holds and close the store (one still held at
  *  exit is left allocated for its last release) */
@@ -156,8 +156,9 @@ void music_queue_clear(user_music_queue_t *uq);
 void music_queue_changed(user_music_queue_t *uq, bool tracks);
 
 /**
- * Append @p tracks (all of them in place of the queue when @p replace),
- * skipping any already queued; an entry with an empty path is no track.
+ * Append @p tracks (all of them in place of the queue when @p replace); a
+ * track already queued is queued again.  An entry with an empty path is no
+ * track.
  * Takes queue_mutex, bumps generation, saves.
  * @param outcomes Optional, one per track
  * @param added_out Optional, tracks appended

@@ -34,13 +34,16 @@ struct user_music_queue;
 /**
  * @brief Initialize the music queue database
  *
- * Opens (or creates) the SQLite database and creates tables if needed.
- * Uses WAL mode and busy timeout for concurrency with music_db scans.
+ * Opens (or creates) the queue's own SQLite file, apart from the library's
+ * music.db so a library scan never holds up a queue save, and creates its
+ * tables if needed.  On a new file, queues saved in @p legacy_path are
+ * copied in once.
  *
- * @param db_path Path to the database file (e.g., "{data_dir}/music.db")
+ * @param db_path Path to the database file (e.g., "{data_dir}/music_queue.db")
+ * @param legacy_path File queues were kept in before (music.db), or NULL
  * @return 0 on success, non-zero on error
  */
-int music_queue_db_init(const char *db_path);
+int music_queue_db_init(const char *db_path, const char *legacy_path);
 
 /**
  * @brief Clean up the music queue database

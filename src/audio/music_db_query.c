@@ -209,6 +209,7 @@ typedef struct {
    music_source_t source_id;
    int min_score;         /* text score floor for this pass */
    const char *text_str;  /* free text to match: q->text, or text_buf */
+   const char *title_str; /* title to match: q->title, or text too short to search */
    const char *rank_text; /* term that orders results, or NULL for alpha order */
    char p_genre[AUDIO_METADATA_STRING_MAX * 2];
    char text_buf[AUDIO_METADATA_STRING_MAX * 2];
@@ -274,22 +275,33 @@ static bool resolve_query(const music_query_t *q, resolved_query_t *r) {
    r->text = text_chars >= 2 && folded_len > 0;
    r->artist = q->artist && q->artist[0];
    r->title = q->title && q->title[0];
+   r->title_str = q->title;
    r->album = q->album && q->album[0];
    /* A genre that's only wildcards/space would become '%' and match every row,
     * sidestepping the "no constraints → nothing" rule. */
    r->genre = q->genre && content_char_count(q->genre) >= 1;
    r->ymin = q->year_min > 0;
    r->ymax = q->year_max > 0;
+   /* Text too short to search every field still names a title within filters
+    * (artist:Prince "7"): matched as one, a whole word ("7", not "17 Days") */
+   bool short_title = !r->text && !r->title && folded_len > 0 &&
+                      (r->artist || r->album || r->genre || r->ymin || r->ymax);
+   if (short_title) {
+      r->title = true;
+      r->title_str = r->text_str;
+   }
    if (r->genre) {
       build_like_pattern(q->genre, r->p_genre, sizeof(r->p_genre));
    }
-   /* Rank by the most specific search term: free text if given, else the fielded
-    * artist/title/album value. Genre/year are pure filters and never rank. */
-   r->rank_text = r->text     ? r->text_str
-                  : r->artist ? q->artist
-                  : r->title  ? q->title
-                  : r->album  ? q->album
-                              : NULL;
+   /* Rank by the most specific search term: free text if given (short text as
+    * the title it names), else the fielded artist/title/album value. Genre/year
+    * are pure filters and never rank. */
+   r->rank_text = r->text       ? r->text_str
+                  : short_title ? r->title_str
+                  : r->artist   ? q->artist
+                  : r->title    ? q->title
+                  : r->album    ? q->album
+                                : NULL;
    bool other = r->text || r->artist || r->title || r->album || r->genre || r->ymin || r->ymax;
    /* The source alone lists it only where the caller shows results, and only
     * when nothing else was typed: "source:plex X" matches nothing, as "X" does */
@@ -361,7 +373,7 @@ static int bind_where(sqlite3_stmt *st, int i, const resolved_query_t *r) {
       sqlite3_bind_int(st, i++, MUSIC_RANK_FIELD_MIN);
    }
    if (r->title) {
-      sqlite3_bind_text(st, i++, q->title, -1, SQLITE_STATIC);
+      sqlite3_bind_text(st, i++, r->title_str, -1, SQLITE_STATIC);
       sqlite3_bind_int(st, i++, MUSIC_RANK_FIELD_MIN);
    }
    if (r->album) {
@@ -982,7 +994,7 @@ int music_db_album_find(const char *album,
 }
 
 static const char *SQL_ALBUM_TRACKS =
-    "SELECT " MUSIC_ROW_COLS " FROM music_metadata "
+    "SELECT " MUSIC_ROW_COLS ", COALESCE(disc_no, 1) FROM music_metadata "
     "WHERE album_id = (SELECT album_id FROM music_metadata WHERE id = ?1) "
     "AND " MUSIC_COPY_KEY " = (SELECT " MUSIC_COPY_KEY " FROM music_metadata WHERE id = ?1) "
     "AND " MUSIC_DEDUP_SAME_COPY "ORDER BY " MUSIC_COPY_ORDER " LIMIT ?2";
@@ -1009,7 +1021,8 @@ int music_db_album_tracks(int64_t id, music_search_result_t *results, int max, i
    int count = 0;
    int rc;
    while ((rc = sqlite3_step(st)) == SQLITE_ROW && count < max) {
-      music_db_populate_row(st, &results[count++]);
+      music_db_populate_row(st, &results[count]);
+      results[count++].disc_no = (uint32_t)sqlite3_column_int(st, 8);
    }
    sqlite3_finalize(st);
    pthread_mutex_unlock(&g_music_db_mutex);
