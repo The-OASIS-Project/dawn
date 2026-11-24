@@ -301,17 +301,24 @@ static void append_loop_note(struct json_object *history, const char *text) {
 
 /* One provider call: this attempt's outcome alone (the error reset), and while the
  * local LLM can still take the turn, a single short attempt with its transient error
- * frames held back (llm_provider_errors_quiet). */
+ * frames held back (llm_provider_errors_quiet).  A provider turns tools off for an
+ * iteration at the cap, so an @p answer_only call is sent as one and every other as
+ * an iteration below it: a save turn's last call keeps its tools, and its request
+ * reads as every one before it. */
 static int call_provider(const llm_tool_loop_params_t *params,
                          const char *input_text,
                          int iteration,
+                         bool answer_only,
                          llm_tool_response_t *result) {
+   const int sent = answer_only                                ? LLM_TOOLS_MAX_ITERATIONS
+                    : iteration < LLM_TOOLS_MAX_ITERATIONS - 1 ? iteration
+                                                               : LLM_TOOLS_MAX_ITERATIONS - 1;
    const bool was_quiet = llm_provider_errors_quiet();
    llm_set_provider_errors_quiet(params->fallback_available && !params->tools_ran);
    llm_set_last_error(LLM_ERR_NONE);
    const int rc = params->provider_fn(params->conversation_history, input_text, params->base_url,
                                       params->api_key, params->model, params->chunk_callback,
-                                      params->callback_userdata, iteration, result);
+                                      params->callback_userdata, sent, result);
    llm_set_provider_errors_quiet(was_quiet);
    return rc;
 }
@@ -330,7 +337,7 @@ static char *final_answer_without_tools(llm_tool_loop_params_t *params,
    llm_tool_response_t result;
    memset(&result, 0, sizeof(result));
    note_request(params, "");
-   const int rc = call_provider(params, "", LLM_TOOLS_MAX_ITERATIONS, &result);
+   const int rc = call_provider(params, "", iteration, true, &result);
    char *text = NULL;
    if (rc == 0 && result.text) {
       text = strdup(result.text);
@@ -485,8 +492,13 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
    const llm_interrupt_ctx_t ictx = { .session_flag = params->cancel_flag,
                                       .honor_global = !params->is_background };
 
+   /* The turn's last call: an answer (tools off), or with a save note, a save. */
+   const bool saves = params->save_note != NULL;
+
    for (int iteration = 0; iteration <= LLM_TOOLS_MAX_ITERATIONS; iteration++) {
       llm_cache_monitor_set_iteration(iteration); /* tags this iteration's provider call */
+      const bool last = iteration >= LLM_TOOLS_MAX_ITERATIONS;
+      const bool save_step = last && saves;
       /* Step 0: cumulative-session input-token ceiling (opt-in; 0 = unlimited).
        * Input tokens are recorded per provider response (session_record_query), so
        * at the top of this iteration the session total reflects spend through the
@@ -574,12 +586,20 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          }
       }
 
+      /* Step 2a: a save step is told what it is for.  After the stops above, so a
+       * turn that ends there appends nothing. */
+      if (save_step) {
+         const int note_at = json_object_array_length(params->conversation_history);
+         append_loop_note(params->conversation_history, params->save_note);
+         persist_appended_tool_turn(params, note_at, NULL, iteration, NULL);
+      }
+
       /* Step 3: Call provider single-shot */
       llm_tool_response_t result;
       memset(&result, 0, sizeof(result));
 
       note_request(params, params->input_text);
-      int rc = call_provider(params, params->input_text, iteration, &result);
+      int rc = call_provider(params, params->input_text, iteration, last && !saves, &result);
 
       /* Retry transient network failures (unreachable, HTTP 429, HTTP 5xx) with
        * exponential backoff before bubbling up.  Each retry is
@@ -623,7 +643,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          llm_tool_response_free(&result);
          memset(&result, 0, sizeof(result));
          note_request(params, params->input_text);
-         rc = call_provider(params, params->input_text, iteration, &result);
+         rc = call_provider(params, params->input_text, iteration, last && !saves, &result);
       }
 
       if (rc != 0) {
@@ -719,8 +739,9 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
                    result.tool_calls.calls[i].name, result.tool_calls.calls[i].arguments);
       }
 
-      /* Step 5: Check for duplicate tool calls (prevents infinite loops) */
-      if (result.tool_calls.count > 0 &&
+      /* Step 5: Check for duplicate tool calls (prevents infinite loops).  Not on a
+       * save step: nothing follows it to loop, and the check would cost a call. */
+      if (!save_step && result.tool_calls.count > 0 &&
           llm_tools_is_duplicate_call(params->conversation_history, result.tool_calls.calls[0].name,
                                       result.tool_calls.calls[0].arguments,
                                       params->history_format)) {
@@ -740,7 +761,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          OLOG_INFO("Tool loop: Making final call without tools to force text response");
          memset(&result, 0, sizeof(result));
          note_request(params, "");
-         rc = call_provider(params, "", LLM_TOOLS_MAX_ITERATIONS, &result);
+         rc = call_provider(params, "", iteration, true, &result);
 
          if (rc != 0) {
             keep_stopped_reply(params, &result);
@@ -778,9 +799,15 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          .session = view_session,
          .budget = &view_budget,
       };
+      /* A save step's batch runs only what saves (the policy's save-step caller):
+       * a lookup now would bring a result no call is left to read. */
+      if (view_session && save_step) {
+         atomic_store(&view_session->turn_save_step, true);
+      }
       llm_tools_execute_all(&result.tool_calls, results, finish_batch, (void *)&view_batch);
       params->tools_ran = true;
       if (view_session) {
+         atomic_store(&view_session->turn_save_step, false);
          tool_result_store_set_read_budget(view_session, 0);
          session_release(view_session);
       }
@@ -802,8 +829,13 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          OLOG_INFO("Tool loop: Skipping follow-up (tool requested no follow-up)");
          s_did_skip_followup = true;
 
+         /* A save turn has no reader: its tools' results are not a reply. */
+         if (saves) {
+            free(followup.direct_response);
+            followup.direct_response = strdup("");
+         }
          /* Send through chunk callback so TTS receives it */
-         if (followup.direct_response && params->chunk_callback) {
+         if (followup.direct_response && followup.direct_response[0] && params->chunk_callback) {
             void (*cb)(const char *, void *) = params->chunk_callback;
             cb(followup.direct_response, params->callback_userdata);
          }
@@ -849,8 +881,17 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
          return strdup(""); /* Empty = no TTS output */
       }
 
-      /* Step 9: Check iteration limit — force a final text response with what we have */
-      if (iteration >= LLM_TOOLS_MAX_ITERATIONS) {
+      /* Step 9: Check iteration limit.  A save turn ends here, its findings saved;
+       * an answer turn gets a final text response with what it has. */
+      if (save_step) {
+         OLOG_INFO("Tool loop: save step done at iteration %d; turn ends without a reply",
+                   iteration);
+         free_tool_result_resources(results);
+         free(results);
+         llm_tool_response_free(&result);
+         return strdup("");
+      }
+      if (last) {
          OLOG_WARNING("Tool loop: Max iterations (%d) reached, forcing text response",
                       LLM_TOOLS_MAX_ITERATIONS);
 

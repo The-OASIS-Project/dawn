@@ -51,6 +51,7 @@
 #include "core/user_tz.h"
 #include "llm/llm_cache_monitor.h"
 #include "llm/llm_command_parser.h"
+#include "llm/llm_tools.h" /* LLM_TOOLS_MAX_ITERATIONS */
 #include "logging.h"
 #include "memory/memory_note_bridge.h"
 #include "prompts.h"
@@ -591,7 +592,7 @@ const char *research_run_execute(struct session *s,
     * round_digest_max_chars is not silently clipped by a fixed stack buffer. */
    size_t dir_size = (b->round_digest_max_chars > 0 ? (size_t)b->round_digest_max_chars
                                                     : RESEARCH_DEFAULT_ROUND_DIGEST_MAX_CHARS) +
-                     256;
+                     512; /* room past the digest for the step-budget line */
    char *directive = malloc(dir_size);
    if (!directive) {
       return RESEARCH_STOP_FAILED;
@@ -641,13 +642,21 @@ const char *research_run_execute(struct session *s,
       session_set_research_context(s, run_id, round);
 
       research_render_round_digest(run_id, run0->brief, b, directive, dir_size);
+      const size_t dir_len = strlen(directive);
+      snprintf(directive + dir_len, dir_size - dir_len, RESEARCH_ROUND_STEP_BUDGET_TEMPLATE,
+               LLM_TOOLS_MAX_ITERATIONS);
 
       text_input_dispatch_opts_t opts = {
          .conversation_id = 0, /* rounds live in the ledger, not messages (§4a) */
          .auth_user_id = run0->user_id,
          .skip_prompt_rebuild = true, /* keep the per-turn builder (memory) OUT of the loop */
       };
+      /* A round has no reader for an answer: its last step saves what the step
+       * before it found.  Set for the round's dispatch alone; the critic,
+       * synthesis and completion take end as answers. */
+      session_set_turn_save_note(s, RESEARCH_ROUND_LAST_STEP_NOTE);
       char *resp = core_text_input_dispatch(s, directive, &opts);
+      session_set_turn_save_note(s, NULL);
       const bool round_failed = (resp == NULL);
       free(resp);
 

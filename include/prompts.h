@@ -75,6 +75,8 @@
  *     EMAIL_ATTACHED_NOTE_TEMPLATE
  *   DEEP RESEARCH
  *     RESEARCH_SYSTEM_PROMPT
+ *     RESEARCH_ROUND_STEP_BUDGET_TEMPLATE
+ *     RESEARCH_ROUND_LAST_STEP_NOTE
  *     RESEARCH_SYNTHESIS_PROMPT
  *     RESEARCH_CRITIC_PROMPT
  *     RESEARCH_COMMENTARY_PROMPT_TEMPLATE
@@ -984,6 +986,21 @@
    "research_conclude — do NOT keep opening near-empty rounds. If you are stuck on one hard "      \
    "question while the rest are done, research_mark_unanswerable it and conclude. Do not answer "    \
    "from prior knowledge; research, record, and cite. Be systematic."
+
+/* Appended to each round's directive: the round's step budget, as facts.  Arg:
+ * the steps that can look things up (LLM_TOOLS_MAX_ITERATIONS); the loop's last
+ * step after them only saves (research_run_loop.c). */
+#define RESEARCH_ROUND_STEP_BUDGET_TEMPLATE                                                \
+   "\nThis round has %d steps that can search, fetch and record, then one last step that " \
+   "only records. A step is one reply from you, and one reply can carry several tool "     \
+   "calls.\n"
+
+/* Appended before a round's last step, the one that only records. */
+#define RESEARCH_ROUND_LAST_STEP_NOTE                                                    \
+   "This is the last step of this round. Searches and page fetches will not run on it. " \
+   "Record every finding the results above support that you have not recorded yet, "     \
+   "each with its source and question_id. Anything still to look up can be looked up "   \
+   "next round. If everything is already recorded, reply with the one word Done."
 
 /* Synthesis-turn prompt (§8): a FINAL no-tools generation turn that turns the
  * recorded evidence into a written answer.  No tools are available on this turn

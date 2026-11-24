@@ -244,14 +244,32 @@ static void test_errors_are_marked(void) {
    free(out);
 }
 
+/* Concluding ends the round on its own step (no call follows it), and still
+ * answers, so the round reads as one that ran. */
+static void test_conclude_ends_the_round(void) {
+   const tool_metadata_t *m = find_tool("research_conclude");
+   TEST_ASSERT_NOT_NULL(m);
+   TEST_ASSERT_TRUE(m->skip_followup);
+   TEST_ASSERT_EQUAL_INT(TOOL_KIND_STATE, m->default_kind);
+   int respond = 0;
+   char *out = m->callback("research_conclude", NULL, &respond);
+   TEST_ASSERT_EQUAL_INT(1, respond);
+   TEST_ASSERT_NOT_NULL(out);
+   TEST_ASSERT_FALSE(tool_result_is_error(out));
+   TEST_ASSERT_TRUE(session_research_is_concluded(&s_session));
+   free(out);
+}
+
 int main(void) {
    research_plan_tool_register();
    research_record_tool_register();
+   research_conclude_tool_register();
    UNITY_BEGIN();
    RUN_TEST(test_plan_echoes_every_question);
    RUN_TEST(test_plan_neutralizes_question);
    RUN_TEST(test_record_neutralizes_claim_quote_and_url);
    RUN_TEST(test_record_keeps_honest_url);
    RUN_TEST(test_errors_are_marked);
+   RUN_TEST(test_conclude_ends_the_round);
    return UNITY_END();
 }

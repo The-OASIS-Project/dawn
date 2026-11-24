@@ -113,6 +113,12 @@ typedef struct {
    bool pinned;                              /**< Stay on this provider for the whole turn (don't
                                               *   follow a switch_llm made during it). */
    bool tools_ran;                           /**< Out: a tool batch ran in this loop. */
+   const char *save_note;                    /**< What the turn's last call is for.  NULL
+                                              *   (the default): an answer, tools off.  Set: a
+                                              *   save -- this note
+                                              *   is appended before the call, tools stay on,
+                                              *   only state-kind calls run, and the turn ends
+                                              *   after them with an empty reply. */
 } llm_tool_loop_params_t;
 
 /**

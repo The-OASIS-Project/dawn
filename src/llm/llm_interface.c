@@ -1170,6 +1170,8 @@ static char *run_tool_loop(struct json_object *conversation_history,
       .fallback_available = run->fallback_available,
       .pinned = run->pinned,
    };
+   /* A side call is none of the turn's: it ends as an answer. */
+   loop_params.save_note = loop_params.has_session ? session->turn_save_note : NULL;
 
    response = llm_tool_iteration_loop(&loop_params);
    run->tools_ran = loop_params.tools_ran;
