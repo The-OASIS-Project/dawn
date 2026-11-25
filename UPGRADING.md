@@ -12,6 +12,23 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-11-25 — The built-in model lists moved to the current generation
+
+**What changed.** The model lists DAWN uses when `dawn.toml` has none now name each vendor's
+current models: OpenAI `gpt-6-luna` (default), `gpt-6.1-terra`, `gpt-6.2-sol`, `gpt-6.2-astra`;
+Claude `claude-haiku-5-5` (default), `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-2`;
+Gemini `gemini-4-hydrogen` (default), `gemini-4-carbon`, `gemini-4-argon`; OpenRouter the same
+eleven, Claude Haiku 5.5 first. The older entries (GPT-5.x, Claude Haiku 4.5, Gemini 3.x) are no
+longer in the built-in lists.
+
+**What you need to do.** Nothing if your `dawn.toml` has its own `openai_models`,
+`claude_models`, `gemini_models` or `openrouter_models` (any save from the settings panel writes
+them): your lists are kept as they are. Without them, the model picker shows the new lists and
+a new conversation starts on the new default. To keep an older model, add it to the list
+(Settings → Language Model). Existing conversations keep the model they were using.
+
+---
+
 ## 2026-11-20 — The music library is read again once
 
 **What changed.** DAWN now stores each track's album artist, track number and disc number, so

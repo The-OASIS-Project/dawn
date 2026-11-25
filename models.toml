@@ -27,6 +27,8 @@
 [openai]
 # GPT-6 family — 1,050,000 each.  Listed one by one, no "gpt-6" catch-all: an
 # alias can have a smaller window than its family (gpt-5.6-cyber below).
+"gpt-6.2-astra" = 1050000
+"gpt-6.2-sol" = 1050000
 "gpt-6-astra" = 1050000
 "gpt-6-sol" = 1050000
 "gpt-6.1-sol" = 1050000
@@ -254,6 +256,8 @@
 # some take).  No "gpt-6" family row, so an unlisted gpt-6 model (gpt-6-cyber,
 # whose page lists no effort levels) gets the OpenAI default: no reasoning
 # parameters, the same guard "gpt-5." gives a newer gpt-5.x.
+"gpt-6.2-astra" = { modes = ["enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
+"gpt-6.2-sol" = { modes = ["enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
 "gpt-6-astra" = { modes = ["enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
 "gpt-6-sol" = { modes = ["disabled", "enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }
 "gpt-6.1-sol" = { modes = ["enabled"], efforts = ["low", "medium", "high", "xhigh", "max"], max_output = 128000 }

@@ -248,16 +248,16 @@ typedef struct {
  * ============================================================================= */
 /* Maximum models per provider in the configurable model list. 32 leaves ample
  * room for users curating a large OpenRouter shortlist to test many vendors.
- * Longest slug in use (~29 chars, "google/gemini-3.1-pro-preview") fits well
+ * Longest slug in use (~27 chars, "anthropic/claude-sonnet-5.5") fits well
  * inside NAME_MAX below, so that cap does not need to grow alongside it. */
 #define LLM_CLOUD_MAX_MODELS 32
 #define LLM_CLOUD_MODEL_NAME_MAX 64
 
 /* Default fallback models when no models are configured
- * Updated: 2026-08 - Update these when new model generations are released */
-#define LLM_DEFAULT_OPENAI_MODEL "gpt-5.6-luna"
+ * Updated: 2026-11 - Update these when new model generations are released */
+#define LLM_DEFAULT_OPENAI_MODEL "gpt-6-luna"
 #define LLM_DEFAULT_CLAUDE_MODEL "claude-haiku-5-5"
-#define LLM_DEFAULT_GEMINI_MODEL "gemini-3.8-flash"
+#define LLM_DEFAULT_GEMINI_MODEL "gemini-4-hydrogen"
 #define LLM_DEFAULT_OPENROUTER_MODEL "anthropic/claude-haiku-5.5"
 
 typedef struct {
