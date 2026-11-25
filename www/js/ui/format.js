@@ -118,6 +118,19 @@
    const CITED_TAG_CUT_RE =
       /<cited>[0-9MmIiDd:[\], \t\n]*(?:<(?:\/(?:c(?:i(?:t(?:e(?:d)?)?)?)?)?)?)?$/;
 
+   // What a rendered message may not carry, past DOMPurify's defaults (which
+   // allow all of it): a <style> block restyles the whole page; an inline
+   // style, or a class naming one of the app's own full-screen rules (a modal
+   // overlay), lays an element over it; an id shadows one the app looks up;
+   // and a <form> can post what is typed into it to another site.  A reply
+   // shaped by a fetched page or an email could otherwise blank or cover the
+   // UI.  Nothing rendered here needs a class or an id.
+   const SANITIZE_OPTS = {
+      ADD_ATTR: ['target'],
+      FORBID_TAGS: ['style', 'form'],
+      FORBID_ATTR: ['style', 'class', 'id'],
+   };
+
    /**
     * @param {string} text - Markdown to render
     * @param {{user?: boolean, inner?: boolean}} [opts] - user: text the user
@@ -145,7 +158,7 @@
          gfm: true,
          renderer: user ? userRenderer : renderer,
       });
-      return DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
+      return DOMPurify.sanitize(html, SANITIZE_OPTS);
    }
 
    // Strip memory-citation tags (bookkeeping — the server audits + persists

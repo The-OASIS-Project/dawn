@@ -34,7 +34,15 @@ const path = require('path');
 const vm = require('vm');
 
 const WWW = path.join(__dirname, '..', 'www', 'js');
-const ctx = { DOMPurify: { sanitize: (html) => html } };
+let sanitizeOpts = null; /* what the formatter last asked the sanitizer for */
+const ctx = {
+   DOMPurify: {
+      sanitize: (html, opts) => {
+         sanitizeOpts = opts;
+         return html;
+      },
+   },
+};
 ctx.window = ctx;
 vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(path.join(WWW, 'vendor', 'marked.min.js'), 'utf8'), ctx);
@@ -105,5 +113,11 @@ assert.strictEqual(
       'target="_blank" rel="noopener noreferrer">https://example.com</a>.</p>\n'
 );
 assert.strictEqual(md('a <b>bold</b> word'), '<p>a <b>bold</b> word</p>\n');
+
+/* A rendered message goes to the sanitizer with no <style>, <form>, inline
+ * style, class or id allowed (DOMPurify's defaults keep them all). */
+md('plain');
+assert.strictEqual(JSON.stringify(sanitizeOpts.FORBID_TAGS), '["style","form"]');
+assert.strictEqual(JSON.stringify(sanitizeOpts.FORBID_ATTR), '["style","class","id"]');
 
 console.log('test_format_markdown: OK');
