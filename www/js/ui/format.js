@@ -87,9 +87,10 @@
    }
 
    // A citation tag the strip left in a reply (a mention, or an example
-   // mid-reply) is text, not an element DOMPurify would drop; any other HTML
-   // in a reply takes the usual path.
-   const CITED_TAG_TOKEN_RE = /^<\s*\/?\s*cited\s*>/;
+   // mid-reply) and an <end_of_turn> a cloud model mentions are text, not
+   // elements DOMPurify would drop; any other HTML in a reply takes the usual
+   // path.
+   const CITED_TAG_TOKEN_RE = /^<\s*(?:\/?\s*cited|end_of_turn)\s*>/;
    const renderer = new marked.Renderer();
    renderer.link = renderLink;
    renderer.html = (token) =>

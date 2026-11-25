@@ -78,6 +78,12 @@ assert.strictEqual(md('Answer here.<cited>M2</cited>'), '<p>Answer here.</p>\n')
 assert.strictEqual(md('Answer.<cited>M1</cited> <cited>ID:5</cited>\n'), '<p>Answer.</p>\n');
 assert.strictEqual(md('Answer.<cited>M1,M'), '<p>Answer.</p>\n');
 
+/* An <end_of_turn> the server kept in a reply (a mention) shows. */
+assert.strictEqual(
+   md("Gemma's template closes a turn with <end_of_turn>, then the next."),
+   '<p>Gemma&#39;s template closes a turn with &lt;end_of_turn&gt;, then the next.</p>\n'
+);
+
 /* A piece of a message that isn't its end keeps a tag at its own end, and a tag
  * with more whitespace after it than the server allows stays, as on the server. */
 assert.strictEqual(
