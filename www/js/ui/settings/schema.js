@@ -460,7 +460,7 @@
                      type: 'model_list',
                      label: 'OpenAI Models',
                      rows: 8, // LLM_CLOUD_MAX_MODELS
-                     placeholder: 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna',
+                     placeholder: 'gpt-6-luna\ngpt-6.1-terra\ngpt-6.2-sol',
                      hint: 'Available models for quick controls (one per line)',
                   },
                   openai_default_model_idx: {
@@ -480,7 +480,7 @@
                      type: 'model_list',
                      label: 'Claude Models',
                      rows: 8, // LLM_CLOUD_MAX_MODELS
-                     placeholder: 'claude-sonnet-4-20250514\nclaude-opus-4-20250514',
+                     placeholder: 'claude-haiku-5-5\nclaude-sonnet-5-5\nclaude-opus-5-5',
                      hint: 'Available models for quick controls (one per line)',
                   },
                   claude_default_model_idx: {
@@ -493,8 +493,8 @@
                      type: 'model_list',
                      label: 'Gemini Models',
                      rows: 8, // LLM_CLOUD_MAX_MODELS
-                     placeholder: 'gemini-3.8-flash\ngemini-3.5-flash-lite\ngemini-3.1-pro-preview',
-                     hint: 'Available models for quick controls (one per line). 2.5+ and 3.x support reasoning.',
+                     placeholder: 'gemini-4-hydrogen\ngemini-4-carbon\ngemini-4-argon',
+                     hint: 'Available models for quick controls (one per line). 2.5 and later support reasoning.',
                   },
                   gemini_default_model_idx: {
                      type: 'model_default_select',
