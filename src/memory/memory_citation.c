@@ -202,7 +202,7 @@ void memory_citation_capture(session_t *session, const char *response_text) {
       memory_citation_csv_append(tool_surfaced, sizeof(tool_surfaced), &tool_len, canon);
    }
 
-   /* Parse EVERY <cited>…</cited> block and validate against BOTH sets (extracted
+   /* Parse each trailing <cited>…</cited> block and validate against BOTH sets (extracted
     * to memory_citation_resolve_cited so the tokenizer is unit-testable).
     * cited_all (focus + tool) feeds the audit; cited_focus (focus only) feeds the
     * Aurora broadcast — a tool fact has no Context-panel row, so it must NOT ride

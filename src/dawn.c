@@ -630,13 +630,15 @@ static void dawn_tts_sentence_callback(const char *sentence, void *userdata) {
    // removing it can join the text around it, which the later strips must see).
    // Then <end_of_turn> and the <cited> memory-citation tag — shared whole-string
    // strips, the same ones the response finalizer and WebUI-audio TTS use.  The
-   // cited strip truncates on an orphan opener so a sentence that breaks mid-tag
-   // can't leak a partial into TTS.
+   // cited strip drops a tag the sentence ends inside, so a reply cut off mid-tag
+   // can't leak a partial into TTS.  A tag counts only at the end of the text, here
+   // the sentence: an example tag that ends a sentence mid-reply is left out of
+   // speech only (the saved reply keeps it).
    char expression[EMOTE_NAME_MAX];
    if (text_filter_emote_strip(cleaned, expression, sizeof(expression))) {
       snprintf(s_pending_expression, sizeof(s_pending_expression), "%s", expression);
    }
-   text_filter_end_of_turn_strip(cleaned);
+   llm_response_end_of_turn_strip(session_get_local(), cleaned);
    text_filter_cited_strip(cleaned);
 
    // Remove special characters that cause problems

@@ -2666,10 +2666,10 @@ static void webui_emit_clean_delta(session_t *session, const char *text) {
    queue_response(&resp);
 }
 
-/* Longest piece of a delta webui_send_stream_delta filters at once: a held
- * partial <cited> opener (under CITED_TAG_BUF_SIZE bytes) can come out ahead of
- * it, and the result, with its NUL, must still fit a frame's text.  A thinking
- * delta has no tag filter: a piece is a frame's text less its NUL. */
+/* Longest piece of a delta webui_send_stream_delta filters at once: the bytes
+ * the <cited> filter held of what proved not to be a tag (under
+ * CITED_TAG_BUF_SIZE) can come out ahead of it, and the result, with its NUL, must still fit a
+ * frame's text.  A thinking delta has no tag filter: a piece is a frame's text less its NUL. */
 #define WEBUI_STREAM_DELTA_PIECE (WEBUI_STREAM_TEXT_SIZE - CITED_TAG_BUF_SIZE)
 #define WEBUI_THINKING_DELTA_PIECE (WEBUI_STREAM_TEXT_SIZE - 1)
 _Static_assert(WEBUI_STREAM_DELTA_PIECE <= TEXT_PIECE_MAX, "delta piece exceeds TEXT_PIECE_MAX");
@@ -2685,8 +2685,8 @@ static void webui_stream_delta_piece(const char *text, void *ctx) {
    /* Strip the live <cited> memory-citation tag on EVERY stream path.  The
     * finalizer only cleans the completed/persisted copy; the browser renders
     * deltas live, so an unstripped tag leaks its inner text.  Stateful: a tag
-    * may split across deltas; held-back partial-opener bytes surface on a later
-    * delta or the stream-end flush. */
+    * may split across deltas; held-back bytes that prove not to be a tag surface
+    * on a later delta or the stream-end flush. */
    char cited_clean[sizeof(((ws_response_t *)0)->stream.text)];
    text_filter_cited_tags_to_buffer(&session->cited_tag_filter, text, cited_clean,
                                     sizeof(cited_clean));
@@ -2708,22 +2708,34 @@ void webui_send_stream_delta(session_t *session, const char *text) {
    text_split_pieces(text, WEBUI_STREAM_DELTA_PIECE, webui_stream_delta_piece, session);
 }
 
+/* Resolve what the <cited> filter holds at the end of a model message's text: a
+ * trailing tag is dropped, held bytes that are text (a partial opener, a tag with
+ * one after it) go out as a final delta while the stream is still active, so they
+ * reach the browser + replay ring.  Emitted directly, NOT back through
+ * webui_send_stream_delta, which would re-filter the clean bytes. */
+static void webui_stream_flush_cited(session_t *session) {
+   char cited_flush[CITED_TAG_BUF_SIZE];
+   if (text_filter_cited_flush_to_buffer(&session->cited_tag_filter, cited_flush,
+                                         sizeof(cited_flush)) > 0) {
+      webui_emit_clean_delta(session, cited_flush);
+   }
+}
+
+void webui_stream_message_end(session_t *session) {
+   if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2 &&
+                    session->type != SESSION_TYPE_JOB)) {
+      return;
+   }
+   webui_stream_flush_cited(session);
+}
+
 void webui_send_stream_end(session_t *session, const char *reason) {
    if (!session || (session->type != SESSION_TYPE_WEBUI && session->type != SESSION_TYPE_DAP2 &&
                     session->type != SESSION_TYPE_JOB)) {
       return;
    }
 
-   /* Flush any held-back <cited> filter bytes as a final delta while the stream
-    * is still active.  A partial-opener that never completed is real trailing
-    * text and must reach the browser + replay ring; a mid-tag remainder (closer
-    * never arrived) is dropped inside the flush.  Emitted directly, NOT back
-    * through webui_send_stream_delta, which would re-filter the clean bytes. */
-   char cited_flush[CITED_TAG_BUF_SIZE];
-   if (text_filter_cited_flush_to_buffer(&session->cited_tag_filter, cited_flush,
-                                         sizeof(cited_flush)) > 0) {
-      webui_emit_clean_delta(session, cited_flush);
-   }
+   webui_stream_flush_cited(session); /* the turn's last message ends here */
 
    /* Mark streaming inactive */
    atomic_store(&session->llm_streaming_active, false);

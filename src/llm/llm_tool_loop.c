@@ -271,6 +271,21 @@ static void keep_stopped_reply(const llm_tool_loop_params_t *params,
    session_release(s);
 }
 
+/* The WebUI's (webui_server.c); without the WebUI there is no stream to end. */
+__attribute__((weak)) void webui_stream_message_end(struct session *session) {
+   (void)session;
+}
+
+/* The model's message before its tool calls has ended: its stream resolves a
+ * citation tag at its end (webui_stream_message_end). */
+static void end_message_stream(llm_tool_loop_params_t *params) {
+   session_t *s = call_session(params, false);
+   if (s) {
+      webui_stream_message_end(s);
+      session_release(s);
+   }
+}
+
 /* Fire the per-session iteration-boundary hook (if installed).  Called when an
  * iteration produced tool calls, just before the tools execute, so the WebUI can
  * close the current streaming bubble — the next iteration's text then opens a fresh
@@ -721,6 +736,7 @@ static char *tool_iteration_loop_body(llm_tool_loop_params_t *params) {
        * text, and the next iteration's response concatenates directly ("you.Alright")
        * without a sentence break. The paragraph break triggers the sentence buffer to
        * emit the pending sentence for TTS before the tool execution pause. */
+      end_message_stream(params); /* before the break: a tag ending it is dropped */
       if (params->chunk_callback) {
          typedef void (*text_chunk_cb)(const char *, void *);
          ((text_chunk_cb)params->chunk_callback)("\n\n", params->callback_userdata);

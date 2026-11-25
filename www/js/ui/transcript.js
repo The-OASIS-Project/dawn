@@ -594,13 +594,14 @@
       }
 
       // Create entry with first text segment
+      const mdOpts = { user: role === 'user' };
       const entry = document.createElement('div');
       entry.className = `transcript-entry ${role}`;
       const firstText =
          segments.length > 0 && segments[0].type === 'text' ? segments[0].content : '';
       entry.innerHTML = `
       <div class="role">${DawnFormat.escapeHtml(role)}</div>
-      <div class="text">${DawnFormat.markdown(firstText)}</div>
+      <div class="text">${DawnFormat.markdown(firstText, mdOpts)}</div>
     `;
       transcript.appendChild(entry);
       // Server-authoritative persistence (§6a/§12c): stamp the DB message_id on THIS
@@ -618,7 +619,7 @@
          } else if (segments[i].content) {
             const textDiv = document.createElement('div');
             textDiv.className = 'text';
-            textDiv.innerHTML = DawnFormat.markdown(segments[i].content);
+            textDiv.innerHTML = DawnFormat.markdown(segments[i].content, mdOpts);
             entry.appendChild(textDiv);
          }
       }

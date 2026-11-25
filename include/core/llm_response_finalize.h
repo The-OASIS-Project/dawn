@@ -22,12 +22,11 @@
  * WebUI, satellite, messaging, jobs, reinvoke) stores, delivers and sends back
  * to the model: the turn's final answer (llm_response_finalize) and what the
  * model said before a tool call (llm_response_clean).  It strips the tags DAWN
- * reads out of a reply (`[emote:…]` on the local voice surface, `<end_of_turn>`,
- * `<cited>…</cited>`), defuses text imitating DAWN's framing and masks the
- * conversation's tag, and trims trailing whitespace (Claude rejects assistant
- * turns ending in whitespace).  Finalize also audits which surfaced `[M#]` items
- * the answer cited (`memory_citation_capture`, self-gating on
- * `g_config.memory.citation_enabled`).
+ * reads out of a reply (`[emote:…]` on the local voice surface, `<end_of_turn>`
+ * from a model that writes it, a trailing `<cited>…</cited>`), defuses text imitating DAWN's
+ * framing and masks the conversation's tag, and trims trailing whitespace (Claude rejects assistant
+ * turns ending in whitespace).  Finalize also audits which surfaced `[M#]` items the answer cited
+ * (`memory_citation_capture`, self-gating on `g_config.memory.citation_enabled`).
  *
  * It does NOT execute anything and does NOT touch TTS-specific cleaning
  * (markdown `*`, emojis) — that stays on the spoken-output path.
@@ -51,6 +50,25 @@ typedef struct session session_t;
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * @brief Cut @p text at its first `<end_of_turn>` when @p session's model is one
+ *        that writes the marker as text, in place.
+ *
+ * Local models (and OpenRouter, which fronts them) can pass the marker through
+ * with more of the model's output after it; on the Claude, OpenAI and Gemini
+ * APIs at their own endpoints it is only ever a mention and is kept.  A custom
+ * endpoint (a local server speaking one of their protocols) or a NULL @p session
+ * cuts.  Text without the marker returns at once, without reading the session.  For the response
+ * cleanup here and the spoken-sentence paths (local voice, WebUI audio).
+ *
+ * @param session The turn's session (its resolved LLM selection), or NULL
+ * @param text    NUL-terminated, mutable C string; NULL is tolerated (no-op)
+ *
+ * @locks session->llm_config_mutex, then g_config_rwlock (not held together);
+ *        call with no session lock held
+ */
+void llm_response_end_of_turn_strip(session_t *session, char *text);
 
 /**
  * @brief Result of finalizing a completed LLM response.

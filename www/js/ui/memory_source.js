@@ -36,9 +36,9 @@
       return d.innerHTML;
    }
 
-   function markdownHtml(text) {
+   function markdownHtml(text, opts) {
       if (typeof DawnFormat !== 'undefined' && DawnFormat.markdown) {
-         return DawnFormat.markdown(text); // DOMPurify-sanitized
+         return DawnFormat.markdown(text, opts); // DOMPurify-sanitized
       }
       return escapeText(text); // fallback: plain escaped text, no markup
    }
@@ -113,7 +113,7 @@
       // markdownHtml returns DOMPurify-sanitized HTML — do NOT double-escape it.
       entry.innerHTML = `
       <div class="role">${roleLabel}${timeHtml}</div>
-      <div class="text">${markdownHtml(text)}</div>
+      <div class="text">${markdownHtml(text, { user: role === 'user' })}</div>
     `;
       const textEl = entry.querySelector('.text');
       const anchor = textEl || entry;

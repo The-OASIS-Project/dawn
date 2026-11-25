@@ -35,6 +35,7 @@
 #include "audio/resampler.h"
 #include "auth/auth_db.h"
 #include "core/conv_event.h"
+#include "core/llm_response_finalize.h"
 #include "core/session_manager.h"
 #include "core/session_prefix.h"
 #include "core/text_filter.h"
@@ -835,15 +836,21 @@ static void webui_tts_pace_after_send(ws_connection_t *conn,
    }
 }
 
-/* Clean one sentence for TTS synthesis: strip an end-of-turn marker + memory-citation
- * tags, drop '*' and emojis, trim trailing whitespace.  Returns a malloc'd string (possibly
- * empty for an all-markup sentence — caller checks length), or NULL on alloc failure.  Shared
- * by the single-target and multi-target (§Phase-4 fanout) callbacks so the strip rules can't
- * drift between them. */
-static char *webui_clean_sentence_for_tts(const char *sentence) {
+/* Clean one sentence of @p session's reply for TTS synthesis: strip an end-of-turn marker
+ * (from a model that writes it) + memory-citation tags, drop '*' and emojis, trim trailing
+ * whitespace.  Here "the end of the text" a tag counts at is the end of the sentence: the
+ * reply's trailing tag ends its last sentence, and an example tag that happens to end a
+ * sentence mid-reply is left out of speech only (the shown and saved text keep it).  A tag
+ * as the model is told to write it holds no sentence break, so a sentence that ends inside
+ * one is the reply's cut-off last sentence: the partial tag is dropped.
+ * Returns a malloc'd string (possibly empty for an all-markup sentence — caller checks
+ * length), or NULL on alloc failure.  Shared by the single-target and multi-target
+ * (§Phase-4 fanout) callbacks so the strip rules can't drift between them. */
+static char *webui_clean_sentence_for_tts(session_t *session, const char *sentence) {
    /* Fast path: skip the strips if the sentence has no special content */
    bool needs_cleaning = (strstr(sentence, END_OF_TURN_TAG) != NULL ||
-                          strstr(sentence, "<cited>") != NULL || strchr(sentence, '*') != NULL);
+                          strstr(sentence, CITED_TAG_OPEN) != NULL ||
+                          strchr(sentence, '*') != NULL);
 
    char *cleaned = strdup(sentence);
    if (!cleaned)
@@ -853,7 +860,7 @@ static char *webui_clean_sentence_for_tts(const char *sentence) {
       /* Strip the end-of-turn marker + the memory-citation tag from spoken text —
        * shared whole-string strips (the text stream path strips <cited> separately
        * via the streaming text_filter_cited_tags). */
-      text_filter_end_of_turn_strip(cleaned);
+      llm_response_end_of_turn_strip(session, cleaned);
       text_filter_cited_strip(cleaned);
       remove_chars(cleaned, "*");
    }
@@ -905,7 +912,7 @@ void webui_sentence_audio_callback(const char *sentence, void *userdata) {
       conn->tts_pace_stream_id = stream_id;
    }
 
-   char *cleaned = webui_clean_sentence_for_tts(sentence);
+   char *cleaned = webui_clean_sentence_for_tts(session, sentence);
    if (!cleaned)
       return;
    size_t len = strlen(cleaned);
@@ -1201,7 +1208,7 @@ void webui_sentence_audio_fanout_callback(const char *sentence, void *userdata) 
       ocon->tts_pace_stream_id = stream_id;
    }
 
-   char *cleaned = webui_clean_sentence_for_tts(sentence);
+   char *cleaned = webui_clean_sentence_for_tts(origin, sentence);
    if (!cleaned)
       return;
    if (cleaned[0] == '\0') {

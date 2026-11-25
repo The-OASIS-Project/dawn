@@ -74,19 +74,57 @@
          .replace(/</g, '&lt;')
          .replace(/>/g, '&gt;');
    }
-   const renderer = new marked.Renderer();
-   renderer.link = function ({ href, title, text }) {
+   function renderLink({ href, title, text }) {
       const titleAttr = title ? ` title="${escapeAttr(title)}"` : '';
       return `<a href="${escapeAttr(href)}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`;
+   }
+
+   // Raw HTML shown as the characters written (marked hands html() a token:
+   // { text, block }).  A block keeps its line breaks.
+   function htmlAsText({ text, block }) {
+      const shown = escapeAttr(text);
+      return block ? `<p>${shown.replace(/\n+$/, '').replace(/\n/g, '<br>')}</p>\n` : shown;
+   }
+
+   // A citation tag the strip left in a reply (a mention, or an example
+   // mid-reply) is text, not an element DOMPurify would drop; any other HTML
+   // in a reply takes the usual path.
+   const CITED_TAG_TOKEN_RE = /^<\s*\/?\s*cited\s*>/;
+   const renderer = new marked.Renderer();
+   renderer.link = renderLink;
+   renderer.html = (token) =>
+      CITED_TAG_TOKEN_RE.test(token.text) ? htmlAsText(token) : token.text;
+
+   // What a user typed shows as typed: HTML in it is text, Markdown still works.
+   const userRenderer = new marked.Renderer();
+   userRenderer.link = renderLink;
+   userRenderer.html = htmlAsText;
+   // marked hands over the text inside an inline <code>/<pre>/<script> as
+   // already escaped when it is not; escape it here.
+   userRenderer.text = function (token) {
+      if (token.tokens) {
+         return this.parser.parseInline(token.tokens);
+      }
+      return token.escaped
+         ? escapeAttr(token.text)
+         : marked.Renderer.prototype.text.call(this, token);
    };
 
-   function formatMarkdown(text) {
-      const cleanText = text
-         // Strip memory-citation tags (bookkeeping — the server audits + persists
-         // clean text; this keeps them out of the live stream too, incl. an
-         // orphan opener from a mid-stream break).
-         .replace(/<cited>[\s\S]*?<\/cited>/g, '')
-         .replace(/<cited>[\s\S]*$/g, '')
+   // The server's citation tag grammar (text_filter.h): CITED_TAG_CONTENT_CHARS,
+   // and a tag counts only at the end of the text, with the whitespace after
+   // it (or before another tag).
+   const CITED_TAG_RE = /<cited>[0-9MmIiDd:[\], \t\n]*<\/cited>\s*(?=$|<cited>)/g;
+   const CITED_TAG_CUT_RE =
+      /<cited>[0-9MmIiDd:[\], \t\n]*(?:<(?:\/(?:c(?:i(?:t(?:e(?:d)?)?)?)?)?)?)?$/;
+
+   /**
+    * @param {string} text - Markdown to render
+    * @param {{user?: boolean}} [opts] - user: text the user typed (no citation
+    *        tags to strip; HTML in it shows as typed)
+    */
+   function formatMarkdown(text, opts) {
+      const user = !!(opts && opts.user);
+      const cleanText = (user ? text : stripCitedTags(text))
          // Compact spelled-out factorial back to the symbol for the printed view
          // ("52 factorial" → "52!"). The LLM is prompted to write "N factorial"
          // so TTS reads it correctly; this restores compact notation on screen.
@@ -98,8 +136,20 @@
             pre || post ? m : `${n}!`
          );
       // Parse markdown to HTML, then sanitize
-      const html = marked.parse(cleanText, { breaks: true, gfm: true, renderer });
+      const html = marked.parse(cleanText, {
+         breaks: true,
+         gfm: true,
+         renderer: user ? userRenderer : renderer,
+      });
       return DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
+   }
+
+   // Strip memory-citation tags (bookkeeping — the server audits + persists
+   // clean text; this keeps them out of the live stream too, incl. a tag cut
+   // off by a mid-stream break).  A tag mid-reply is text and stays.  A run
+   // past the server's hold ended by prose isn't mirrored: the server removed it.
+   function stripCitedTags(text) {
+      return text.replace(CITED_TAG_RE, '').replace(CITED_TAG_CUT_RE, '');
    }
 
    /**

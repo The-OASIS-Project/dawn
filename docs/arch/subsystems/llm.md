@@ -368,7 +368,8 @@ User Query → LLM Provider (OpenAI/Claude/Local)
             Sentence Buffer → TTS (as sentences complete)
                     ↓ (complete response)
             Response finalizer (llm_response_finalize: <cited> audit, [emote:]
-              strip on the local surface, <end_of_turn> cut, <cited> strip,
+              strip on the local surface, <end_of_turn> cut unless the model
+              is Claude/OpenAI/Gemini at its own endpoint, trailing <cited> tag strip,
               neutralize + conversation-tag mask)
                     ↓ (canonical clean text)
             Saved to the conversation history → delivered to the surface
