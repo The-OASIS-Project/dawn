@@ -22,6 +22,7 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "memory/memory_citation_internal.h"
@@ -115,6 +116,47 @@ static void test_orphan_opener_still_parses(void) {
    run("text <cited>M2"); /* no closer */
    TEST_ASSERT_EQUAL_STRING("fact:20", g_focus);
    TEST_ASSERT_EQUAL_INT(1, g_fc);
+}
+
+static void test_bracketed_handles_parse(void) {
+   const char *ids[] = { "fact:10", "fact:20", "fact:30", "fact:40" };
+   set_stash(ids, 4);
+   set_tool(NULL, 0);
+   run("answer <cited>[M1],[M4]</cited>");
+   TEST_ASSERT_EQUAL_STRING("fact:10,fact:40", g_focus);
+   TEST_ASSERT_EQUAL_INT(2, g_fc);
+   TEST_ASSERT_EQUAL_INT(0, g_dr);
+}
+
+/* Example tags mid-reply are text, never citations; only the trailing one counts. */
+static void test_only_the_trailing_tag_counts(void) {
+   static const char reply[] =
+       "The tag in backticks: `<cited>M1,M4</cited>` and bare mid-sentence: <cited>M1,M4</cited>"
+       "\n\nIf you can read this line, the reply made it past both tags.";
+   const char *ids[] = { "fact:10", "fact:20", "fact:30", "fact:40" };
+   set_stash(ids, 4);
+   set_tool(NULL, 0);
+   run(reply);
+   TEST_ASSERT_EQUAL_STRING("", g_all);
+   TEST_ASSERT_EQUAL_INT(0, g_fc);
+   TEST_ASSERT_EQUAL_INT(0, g_dr);
+
+   char with_tag[512];
+   snprintf(with_tag, sizeof(with_tag), "%s<cited>M2</cited>", reply);
+   run(with_tag);
+   TEST_ASSERT_EQUAL_STRING("fact:20", g_focus);
+   TEST_ASSERT_EQUAL_INT(1, g_fc);
+   TEST_ASSERT_EQUAL_INT(0, g_dr);
+}
+
+static void test_opener_in_prose_is_no_citation(void) {
+   const char *ids[] = { "fact:10" };
+   set_stash(ids, 1);
+   set_tool(NULL, 0);
+   run("DAWN logs my `<cited>` tags; 1 of them, M1, counts.");
+   TEST_ASSERT_EQUAL_STRING("", g_all);
+   TEST_ASSERT_EQUAL_INT(0, g_fc);
+   TEST_ASSERT_EQUAL_INT(0, g_dr);
 }
 
 /* ── tool-sourced (Option B) ──────────────────────────────────────────────── */
@@ -390,6 +432,25 @@ static void test_named_items_resolve_and_audit_apart(void) {
    TEST_ASSERT_EQUAL_STRING("fact:20", referenced);
 }
 
+/* A tag citing every tool fact a turn can surface is read whole. */
+static void test_long_tag_of_tool_ids_parses(void) {
+   int64_t t[MAX_TOOL_CITED_FACTS];
+   char text[2048] = "answer <cited>";
+   for (int i = 0; i < MAX_TOOL_CITED_FACTS; i++) {
+      t[i] = 12000 + i;
+      char tok[16];
+      snprintf(tok, sizeof(tok), "%sID:%d", i ? "," : "", 12000 + i);
+      strcat(text, tok);
+   }
+   strcat(text, "</cited>");
+   set_stash(NULL, 0);
+   set_tool(t, MAX_TOOL_CITED_FACTS);
+   run(text);
+   TEST_ASSERT_EQUAL_INT(MAX_TOOL_CITED_FACTS, g_tc);
+   TEST_ASSERT_EQUAL_INT(0, g_dt);
+   TEST_ASSERT_EQUAL_INT(0, g_dr);
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_stable_and_earlier_handles);
@@ -399,6 +460,10 @@ int main(void) {
    RUN_TEST(test_ordinal_out_of_range_dropped);
    RUN_TEST(test_duplicate_ordinal_dropped);
    RUN_TEST(test_orphan_opener_still_parses);
+   RUN_TEST(test_bracketed_handles_parse);
+   RUN_TEST(test_opener_in_prose_is_no_citation);
+   RUN_TEST(test_only_the_trailing_tag_counts);
+   RUN_TEST(test_long_tag_of_tool_ids_parses);
    RUN_TEST(test_tool_id_only);
    RUN_TEST(test_tool_id_lowercase);
    RUN_TEST(test_tool_id_not_surfaced_dropped);

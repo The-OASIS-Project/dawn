@@ -797,6 +797,11 @@ typedef struct session {
    // cleared by the loop around the
    // batch, read on the tool worker threads that share the session's context.
    atomic_bool turn_save_step;
+   // This turn's reply comes from the local LLM though the session's selection is a
+   // cloud one (the cloud-to-local fallback): what reads the reply as the cloud
+   // model's (the <end_of_turn> cut) asks here first.  Set per turn by the
+   // completion entry point, read by the reply cleanup on the turn's threads.
+   atomic_bool turn_on_local_fallback;
 
    // Streaming metrics for UI visualization
    uint64_t stream_start_ms;     // Timestamp when LLM call started

@@ -594,13 +594,16 @@
       }
 
       // Create entry with first text segment
+      // Only the message's last piece ends the message (a trailing citation tag).
+      const lastIdx = segments.length - 1;
+      const mdOpts = (i) => ({ user: role === 'user', inner: i < lastIdx });
       const entry = document.createElement('div');
       entry.className = `transcript-entry ${role}`;
       const firstText =
          segments.length > 0 && segments[0].type === 'text' ? segments[0].content : '';
       entry.innerHTML = `
       <div class="role">${DawnFormat.escapeHtml(role)}</div>
-      <div class="text">${DawnFormat.markdown(firstText)}</div>
+      <div class="text">${DawnFormat.markdown(firstText, mdOpts(0))}</div>
     `;
       transcript.appendChild(entry);
       // Server-authoritative persistence (§6a/§12c): stamp the DB message_id on THIS
@@ -618,7 +621,7 @@
          } else if (segments[i].content) {
             const textDiv = document.createElement('div');
             textDiv.className = 'text';
-            textDiv.innerHTML = DawnFormat.markdown(segments[i].content);
+            textDiv.innerHTML = DawnFormat.markdown(segments[i].content, mdOpts(i));
             entry.appendChild(textDiv);
          }
       }

@@ -49,14 +49,57 @@ typedef void (*text_filter_output_fn)(const char *text, size_t len, void *ctx);
  * would reach the browser live (DOMPurify drops the unknown element but keeps
  * its inner text, leaking `M1,M5,M11`) before finalization runs.  This filter is
  * the live-stream strip seam — the streaming twin of the finalizer's strip.
- * There is no nesting: everything between the open and close is suppressed.
+ *
+ * A tag is the opener, a run of CITED_TAG_CONTENT_CHARS (the citation tokens
+ * `M<n>` / `ID:<n>`, the brackets the model sees them in, and the separators the
+ * capture parser reads), and the closer, which may carry a few spaces
+ * (`</cited >`, `</ cited>`, `< /cited>`).  The model is told to END its reply
+ * with the tag, so a tag counts only there: one followed by at most
+ * CITED_TAG_TRAIL_WS_MAX whitespace bytes and then the end of the text or another
+ * opener (a second trailing tag) is removed, with that whitespace, and its
+ * citations captured.  Anywhere else it is text, every byte kept and nothing
+ * captured: an example quoted mid-reply, or a mention ("my `<cited>` tags").  A
+ * tag the text ends inside (a truncated stream) is dropped.  One exception, for
+ * the stream's sake: a run longer than CITED_TAG_HOLD_MAX is more than the stream
+ * can hold to give back, so it is tag content wherever it sits and however it
+ * ends: the opener, the run and its closer (when one ends it) are removed and
+ * captured, and the text goes on from the byte after.  "The text" is what one
+ * call is given: a model message for the finalizer, a sentence for TTS, a
+ * model message's stream between flushes.  One byte step reads this grammar for
+ * the whole-string strip, the streaming filter and text_filter_cited_find() (the
+ * capture parser's way in, memory_citation_parse.c), so they agree on every
+ * input.
  * ============================================================================= */
 
 #define CITED_TAG_OPEN "<cited>"
 #define CITED_TAG_CLOSE "</cited>"
 #define CITED_TAG_OPEN_LEN 7
 #define CITED_TAG_CLOSE_LEN 8
-#define CITED_TAG_BUF_SIZE 16 /* Enough for "</cited>" (8) + margin */
+
+/* The bytes a tag's content may hold: digits, the `M` and `ID:` prefixes in
+ * either case, the brackets `[M1]` / `[ID:6432]` are shown in, and the
+ * separators (comma, space, tab, newline).  No '<': it starts the closer. */
+#define CITED_TAG_CONTENT_CHARS "0123456789MmIiDd:[], \t\n"
+
+/* How much of a tag's content the streaming filter keeps to give back word for
+ * word if it proves to be text: longer than any run of tag characters prose puts
+ * after the opener.  Past it the run is tag content and is dropped as it comes. */
+#define CITED_TAG_HOLD_MAX 320
+
+/* Spaces or tabs a malformed closer may carry in all. */
+#define CITED_TAG_CLOSE_PAD_MAX 4
+
+/* Whitespace a tag may be followed by and still end the text.  More, and it is
+ * text: the stream would have to hold it all to decide, and a tag left showing
+ * loses nothing, where one dropped could be an example mid-reply. */
+#define CITED_TAG_TRAIL_WS_MAX 32
+
+/* The streaming filter's held bytes: at most a whole tag within the hold (opener,
+ * run, padded closer), its trailing whitespace and all but the last byte of the
+ * opener after it. */
+#define CITED_TAG_BUF_SIZE                                                                    \
+   (CITED_TAG_OPEN_LEN + CITED_TAG_HOLD_MAX + CITED_TAG_CLOSE_LEN + CITED_TAG_CLOSE_PAD_MAX + \
+    CITED_TAG_TRAIL_WS_MAX + CITED_TAG_OPEN_LEN)
 
 /* Canonical spoken/written example of the citation tag for PROMPT text.  Single-
  * sourced from the same opener/closer the filter strips, so the prompt-builders
@@ -77,30 +120,50 @@ typedef void (*text_filter_output_fn)(const char *text, size_t len, void *ctx);
 /* Prompt example of citing a tool-surfaced fact by id (see SURFACED_ID_FMT). */
 #define CITED_TAG_ID_EXAMPLE CITED_TAG_OPEN "ID:6432" CITED_TAG_CLOSE
 
-/* The end-of-turn marker some local models emit; the reply ends there. */
+/* The Gemma chat template's turn end.  A local server whose template doesn't
+ * stop on it passes it through as text, with the model's next turn after it, so
+ * on a local model the reply ends there (llm_response_end_of_turn_strip). */
 #define END_OF_TURN_TAG "<end_of_turn>"
+
+/** @brief How far a candidate tag has been read (its byte step's state). */
+typedef struct {
+   size_t len;     /**< Bytes read, from its '<' (0 = no candidate) */
+   size_t content; /**< Of them, content bytes */
+   size_t close;   /**< Closer characters matched (its padding not counted) */
+   bool over;      /**< The content ran past CITED_TAG_HOLD_MAX: a tag however it ends */
+   bool trail;     /**< A whole tag within the hold was read: now what follows it */
+   size_t ws;      /**< Whitespace read after it */
+   size_t next;    /**< Bytes of a following opener matched */
+} cited_tag_scan_t;
 
 /**
  * @brief Memory-citation tag filter state.
  *
  * Tracks streaming state for stripping <cited>...</cited>. Must be zero-initialized
- * before first use. No nesting; `in_tag` marks "open seen, close pending."
+ * before first use.  While a candidate is read the filter holds its bytes, which
+ * go out as text the moment a byte proves it isn't a trailing tag; past the hold
+ * the content is dropped as it comes and only a closer being matched is held.
  */
 typedef struct {
-   char buffer[CITED_TAG_BUF_SIZE]; /**< Partial-tag holdback buffer */
-   unsigned char len;               /**< Current partial-tag buffer length */
-   bool in_tag;                     /**< true = between <cited> and </cited> (suppressing) */
+   char buffer[CITED_TAG_BUF_SIZE]; /**< The held bytes */
+   size_t held;                     /**< How many */
+   cited_tag_scan_t scan;           /**< The candidate being read */
 } cited_tag_filter_state_t;
 
 /**
  * @brief Strip <cited>...</cited> tags from streaming text.
  *
  * Character-by-character state machine tolerant of a tag split across chunk
- * boundaries (e.g. "<cit" then "ed>").  Non-tag text is emitted via callback;
- * held-back partial-opener bytes persist in @p state and surface on a later
- * chunk (if they prove not to be a tag) or via text_filter_cited_flush_to_buffer.
- * For already-assembled text (no cross-chunk splitting), use the whole-string
- * text_filter_cited_strip() instead.
+ * boundaries (e.g. "<cit" then "ed>").  Non-tag text is emitted via callback.
+ * From a '<' the bytes are held while they can still be a trailing tag (see the
+ * grammar above): a whole tag stays held with the whitespace after it until the
+ * next byte decides it (another opener drops it, anything else releases it as
+ * text, in order), a byte that can't be part of a tag releases what is held as
+ * text (past the hold the run is dropped instead, and text resumes at that byte),
+ * and text_filter_cited_flush_to_buffer, at the end of the model's message,
+ * resolves what is still held.  Output per call is at most the bytes held before
+ * it (under CITED_TAG_BUF_SIZE) plus the chunk's own.  For already-assembled
+ * text, use the whole-string text_filter_cited_strip() instead.
  *
  * @param state    Filter state (zeroed before first chunk)
  * @param text     Input chunk
@@ -126,9 +189,13 @@ int text_filter_cited_tags_to_buffer(cited_tag_filter_state_t *state,
 /**
  * @brief Flush held-back bytes at stream end into a buffer.
  *
- * A partial <cited> OPENER that never completed is real text and is emitted.
- * If mid-tag (open seen, close never arrived — truncated stream), the suppressed
- * remainder is DROPPED (citation bookkeeping, not user text).  Resets @p state.
+ * Call at the end of each model message (the end of its text).  A partial
+ * <cited> OPENER that never completed is real text and is emitted.  A whole tag
+ * with only whitespace after it ended the text: it is DROPPED with that
+ * whitespace; followed by a partial opener it is text, emitted.  A complete
+ * opener with tag content after it and no closer (truncated stream) is DROPPED
+ * (citation bookkeeping, not user text), as is a run past the hold.  Resets
+ * @p state.
  *
  * @return Length written (excluding NUL); 0 if nothing to flush.
  */
@@ -142,22 +209,40 @@ int text_filter_cited_flush_to_buffer(cited_tag_filter_state_t *state,
 void text_filter_cited_reset(cited_tag_filter_state_t *state);
 
 /**
- * @brief Strip every <cited>…</cited> tag from an already-assembled string, in place.
+ * @brief Strip the trailing <cited>…</cited> tag(s) from an already-assembled string, in place.
  *
  * The whole-string counterpart to the streaming text_filter_cited_tags: for text
  * that is complete (a finalized response, one TTS sentence), not arriving as
- * deltas. An orphan opener with no closer (truncated stream) drops from the opener
- * to end-of-string so a partial tag can never surface. The single shared strip for
- * every non-streaming surface — response finalizer, local-voice TTS, WebUI-audio
- * TTS — so the citation tag is never spoken or persisted.
+ * deltas, with the same result as the stream for any input (the grammar above):
+ * trailing tags go, with the whitespace after them; a tag anywhere else stays.
+ * A tag the string ends inside (truncated stream) drops from the opener to
+ * end-of-string so a partial tag can never surface; an opener in prose stays. The single shared
+ * strip for every non-streaming surface — response finalizer, local-voice TTS, WebUI-audio TTS — so
+ * the citation tag is never spoken or persisted.
  *
  * Opener-anchored, matching the streaming filter: a lone `</cited>` closer with no
  * preceding opener is left as literal text (it carries no citation content).
  *
- * @param text NUL-terminated, mutable C string (the body uses strstr/strlen and
- *             compacts in place). NULL is tolerated (no-op).
+ * @param text NUL-terminated, mutable C string (compacted in place). NULL is
+ *             tolerated (no-op).
  */
 void text_filter_cited_strip(char *text);
+
+/**
+ * @brief Find the next citation tag in @p text (the grammar above).
+ *
+ * Only a tag the grammar removes is found (a trailing tag, or a run past the
+ * hold); an opener in prose, or a whole tag mid-text, is passed over.
+ *
+ * @param text        NUL-terminated string to search
+ * @param content_len Receives the tag's content bytes (to the closer, the byte
+ *                    that ended a run past the hold, or the end of @p text)
+ * @param tag_len     Receives the bytes to remove: the tag, closer included, and
+ *                    for a trailing tag the whitespace after it; 0 when @p text
+ *                    ends inside the tag
+ * @return The tag's opener, or NULL when @p text has no tag (or is NULL)
+ */
+const char *text_filter_cited_find(const char *text, size_t *content_len, size_t *tag_len);
 
 /**
  * @brief Canonicalize whitespace-malformed citation tags in place.
@@ -182,8 +267,9 @@ void text_filter_cited_normalize(char *text);
 /**
  * @brief Truncate at the first <end_of_turn>, in place.
  *
- * The single shared cut for the response finalizer, local-voice TTS and
- * WebUI-audio TTS.
+ * For a reply from a model that writes the marker; whether one does is the
+ * session's call (llm_response_end_of_turn_strip), shared by the response
+ * finalizer, local-voice TTS and WebUI-audio TTS.
  *
  * @param text NUL-terminated, mutable C string. NULL is tolerated (no-op).
  */

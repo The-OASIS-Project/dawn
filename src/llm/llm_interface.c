@@ -1252,6 +1252,12 @@ static char *run_on_local(struct json_object *conversation_history,
                           bool note,
                           bool *answered) {
    metrics_record_fallback();
+   /* The reply is a local model's from here on, though the session selects a
+    * cloud one (the reply cleanup asks). */
+   session_t *session = session_get_command_context();
+   if (session) {
+      atomic_store(&session->turn_on_local_fallback, true);
+   }
    if (note && chunk_callback) {
       chunk_callback(LLM_LOCAL_FALLBACK_NOTE, callback_userdata);
    }
@@ -1284,6 +1290,9 @@ char *llm_chat_completion_streaming_with_config(struct json_object *conversation
 
    const cloud_provider_t provider = config->cloud_provider;
    session_t *session = session_get_command_context();
+   if (session && !llm_cache_monitor_in_side_call()) {
+      atomic_store(&session->turn_on_local_fallback, false); /* this turn: not yet */
+   }
    bool eligible = config->type == LLM_CLOUD && g_config.llm.local_fallback && session &&
                    !llm_cache_monitor_in_side_call() && !session_is_background(session) &&
                    !session_turn_is_background(session);

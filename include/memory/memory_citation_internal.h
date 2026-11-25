@@ -37,7 +37,7 @@ void memory_citation_csv_append(char *buf, size_t bufsz, size_t *len, const char
 
 
 /**
- * @brief Parse every <cited>…</cited> tag out of @p text and resolve the citations.
+ * @brief Parse the trailing <cited>…</cited> tag(s) of @p text and resolve the citations.
  *
  * Pure (no I/O) — the unit-testable core of memory_citation_capture().  Two token
  * shapes are recognized inside a tag: `M<n>` / bare `<n>` (a focus handle,

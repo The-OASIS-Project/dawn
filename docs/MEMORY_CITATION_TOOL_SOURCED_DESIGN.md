@@ -56,8 +56,8 @@ one, so Option B makes DAWN **more** RMM-faithful, not a departure.
   render `[M# source]`; published onto `session->citation_stash` under `history_mutex`; **cleared at
   dispatch entry** (`session_dispatch_user_turn`, `session_manager.c:2337`).
 - **Capture** (`memory_citation.c` `memory_citation_capture`): runs inside `llm_response_finalize`
-  (`:59`), **once per turn** on the final response (from `dawn.c:2662`, `session_manager_llm.c:310`).
-  Snapshots the stash under `history_mutex`, parses every `<cited>…</cited>` for **ordinals**, validates
+  (in its cleanup, after the emote and `<end_of_turn>` strips), **once per turn** on the final response (from `dawn.c:2662`, `session_manager_llm.c:310`).
+  Snapshots the stash under `history_mutex`, parses the reply's trailing `<cited>…</cited>` tag(s) for **ordinals**, validates
   `1 ≤ ord ≤ stash.count`, dedups (`seen[MAX_CITATION_STASH+1]`), writes a `memory_citation_audit` row
   (`injected_ids`, `cited_ids`, `injected_scores`, `dropped_count`) + broadcasts
   `webui_broadcast_context_citations(user_id, conv_id, msg_id, cited)`.
@@ -220,8 +220,9 @@ typedef struct {
   the cited fact **in the tool transcript**, or a distinct `tool_citations` frame. The tool result text
   (`[ID:x]`) persists, so the client can anchor either way. Gate on coordination, exactly like the Phase-1
   gold-frame.
-- The `<cited>` **strip** is unaffected — a tool-sourced `<cited>ID:x</cited>` is removed by the same
-  `text_filter_cited_strip` (strip keys on `<cited>`/`</cited>`, grammar unchanged for it).
+- The `<cited>` **strip** is unaffected — a tool-sourced `<cited>ID:x</cited>` at the end of the reply is
+  removed by the same `text_filter_cited_strip` (`ID:<digits>` is part of the tag grammar it accepts; a tag
+  anywhere but the end of the reply is text, shown and not counted).
 
 ---
 

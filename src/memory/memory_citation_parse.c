@@ -26,7 +26,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "core/text_filter.h" /* CITED_TAG_OPEN/CLOSE(_LEN) — single-sourced grammar */
+#include "core/text_filter.h" /* text_filter_cited_find: the single-sourced tag grammar */
 #include "memory/memory_citation_internal.h"
 #include "utils/string_utils.h" /* safe_strscpy */
 
@@ -101,10 +101,13 @@ void memory_citation_resolve_cited(const char *text,
 
    const char *scan = (text != NULL) ? text : "";
    const char *open;
-   while ((open = strstr(scan, CITED_TAG_OPEN)) != NULL) {
+   size_t content_len = 0;
+   size_t tag_len = 0;
+   /* The tags the strip removes, no others: an opener in prose isn't a citation.
+    * A tag the text ends inside is read to the end (orphan-tolerant). */
+   while ((open = text_filter_cited_find(scan, &content_len, &tag_len)) != NULL) {
       const char *inner = open + CITED_TAG_OPEN_LEN;
-      const char *close = strstr(inner, CITED_TAG_CLOSE);
-      const char *end = (close != NULL) ? close : (inner + strlen(inner)); /* orphan-tolerant */
+      const char *end = inner + content_len;
       const char *p = inner;
       while (p < end) {
          if (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n') {
@@ -218,10 +221,10 @@ void memory_citation_resolve_cited(const char *text,
          }
          p++; /* any other char */
       }
-      if (close == NULL) {
-         break; /* orphan opener — no further well-formed tags */
+      if (tag_len == 0) {
+         break; /* the text ended inside this tag */
       }
-      scan = close + CITED_TAG_CLOSE_LEN;
+      scan = open + tag_len;
    }
 
    /* Tool cites = distinct cited ids (n_seen = |cited_all|) minus the focus-cited

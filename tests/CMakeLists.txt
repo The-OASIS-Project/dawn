@@ -1479,6 +1479,7 @@ dawn_add_unit_test(test_recall_format
 dawn_add_unit_test(test_memory_citation_parse
    SOURCES test_memory_citation_parse.c
            ${SRC_ROOT}/src/memory/memory_citation_parse.c
+           ${SRC_ROOT}/src/core/text_filter.c
    LIBS    dawn_common unity pthread
    LABEL   ci)
 
