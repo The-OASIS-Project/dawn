@@ -24,8 +24,15 @@ longer in the built-in lists.
 **What you need to do.** Nothing if your `dawn.toml` has its own `openai_models`,
 `claude_models`, `gemini_models` or `openrouter_models` (any save from the settings panel writes
 them): your lists are kept as they are. Without them, the model picker shows the new lists and
-a new conversation starts on the new default. To keep an older model, add it to the list
-(Settings → Language Model). Existing conversations keep the model they were using.
+a new conversation starts on the new default. A conversation whose model you picked keeps it;
+one that follows the default moves to the new default with it. To keep an older model, add it to
+the list and make it the default (Settings → Language Model).
+
+If you keep your own `models.toml`, it also needs the two new GPT-6.2 models, or they show no
+reasoning control. A service install reads `/usr/local/etc/dawn/models.toml`, which the
+installer doesn't overwrite: it saves the shipped copy beside it as `models.toml.new`. Copy the
+`gpt-6.2-astra` and `gpt-6.2-sol` rows from its `[openai]` and `[thinking.openai]` tables into
+yours, then restart DAWN.
 
 ---
 
