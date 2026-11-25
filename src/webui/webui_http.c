@@ -151,6 +151,9 @@ static int s_static_security_headers_len = 0;
  * directive permission can be tightened without spelunking):
  *
  *   default-src 'self'           — fallback for any directive not below
+ *   form-action 'self'           — not covered by default-src: a form (one a
+ *                                  rendered message carried included) posts
+ *                                  only to DAWN
  *   script-src 'wasm-unsafe-eval'  — Opus decoder WebAssembly
  *   script-src 'unsafe-inline'   — small inline bootstrap blocks in index.html
  *   style-src 'unsafe-inline'    — inline style attributes set by JS modules
@@ -167,7 +170,8 @@ static const char s_csp_policy[] = "default-src 'self'; "
                                    "style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws:; "
                                    "img-src 'self' data: blob:; "
                                    "media-src 'self' blob:; "
-                                   "manifest-src 'self'; worker-src 'self' blob:";
+                                   "manifest-src 'self'; worker-src 'self' blob:; "
+                                   "form-action 'self'";
 
 int webui_add_security_headers(struct lws *wsi, unsigned char **p, unsigned char *end) {
    if (lws_add_http_header_by_name(wsi, (const unsigned char *)"Content-Security-Policy:",
