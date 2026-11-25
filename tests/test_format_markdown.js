@@ -78,6 +78,18 @@ assert.strictEqual(md('Answer here.<cited>M2</cited>'), '<p>Answer here.</p>\n')
 assert.strictEqual(md('Answer.<cited>M1</cited> <cited>ID:5</cited>\n'), '<p>Answer.</p>\n');
 assert.strictEqual(md('Answer.<cited>M1,M'), '<p>Answer.</p>\n');
 
+/* A piece of a message that isn't its end keeps a tag at its own end, and a tag
+ * with more whitespace after it than the server allows stays, as on the server. */
+assert.strictEqual(
+   md('Example: <cited>M1</cited>', { inner: true }),
+   '<p>Example: &lt;cited&gt;M1&lt;/cited&gt;</p>\n'
+);
+assert.ok(
+   md('Example: <cited>M1</cited>' + ' '.repeat(33)).startsWith(
+      '<p>Example: &lt;cited&gt;M1&lt;/cited&gt;'
+   )
+);
+
 /* Ordinary Markdown, a fenced block holding HTML, an autolink and other HTML in
  * a reply render as before. */
 assert.strictEqual(

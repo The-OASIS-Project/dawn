@@ -113,18 +113,21 @@
    // The server's citation tag grammar (text_filter.h): CITED_TAG_CONTENT_CHARS,
    // and a tag counts only at the end of the text, with the whitespace after
    // it (or before another tag).
-   const CITED_TAG_RE = /<cited>[0-9MmIiDd:[\], \t\n]*<\/cited>\s*(?=$|<cited>)/g;
+   const CITED_TAG_RE = /<cited>[0-9MmIiDd:[\], \t\n]*<\/cited>\s{0,32}(?=$|<cited>)/g;
    const CITED_TAG_CUT_RE =
       /<cited>[0-9MmIiDd:[\], \t\n]*(?:<(?:\/(?:c(?:i(?:t(?:e(?:d)?)?)?)?)?)?)?$/;
 
    /**
     * @param {string} text - Markdown to render
-    * @param {{user?: boolean}} [opts] - user: text the user typed (no citation
-    *        tags to strip; HTML in it shows as typed)
+    * @param {{user?: boolean, inner?: boolean}} [opts] - user: text the user
+    *        typed (no citation tags to strip; HTML in it shows as typed).
+    *        inner: a piece of a message that isn't its end (more of it follows),
+    *        so a tag ending the piece is not the message's trailing tag.
     */
    function formatMarkdown(text, opts) {
       const user = !!(opts && opts.user);
-      const cleanText = (user ? text : stripCitedTags(text))
+      const inner = !!(opts && opts.inner);
+      const cleanText = (user || inner ? text : stripCitedTags(text))
          // Compact spelled-out factorial back to the symbol for the printed view
          // ("52 factorial" → "52!"). The LLM is prompted to write "N factorial"
          // so TTS reads it correctly; this restores compact notation on screen.

@@ -50,12 +50,15 @@ static void rtrim(char *text) {
  * template that doesn't stop on it, the model's next turn after it).  A
  * first-party cloud API ends the turn itself and never sends the marker, so there
  * it is a mention (a reply about chat templates) and stays.  Anything else (a
- * local model, OpenRouter, a custom endpoint, no session) is cut, as before. */
+ * local model, OpenRouter, a custom endpoint, a turn the local LLM took over, no
+ * session) is cut, as before. */
 void llm_response_end_of_turn_strip(session_t *session, char *text) {
    if (text == NULL || strstr(text, END_OF_TURN_TAG) == NULL) {
       return; /* the common case: no marker, no need to know the model */
    }
-   if (session != NULL) {
+   /* A turn the local LLM took over answers as a local model does, whatever
+    * the session has selected. */
+   if (session != NULL && !atomic_load(&session->turn_on_local_fallback)) {
       session_llm_config_t config;
       session_get_llm_config(session, &config);
       if (config.type == LLM_CLOUD && (config.cloud_provider == CLOUD_PROVIDER_CLAUDE ||

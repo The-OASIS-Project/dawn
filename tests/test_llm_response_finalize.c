@@ -159,6 +159,15 @@ static void test_end_of_turn_cuts_on_a_custom_endpoint(void) {
    expect_clean_for(&s_webui, "Real answer.<end_of_turn>junk", "Real answer.");
 }
 
+/* A turn the local LLM took over is cut, whatever cloud model is selected. */
+static void test_end_of_turn_cuts_on_a_local_fallback_turn(void) {
+   s_llm = (session_llm_config_t){ .type = LLM_CLOUD, .cloud_provider = CLOUD_PROVIDER_CLAUDE };
+   atomic_store(&s_webui.turn_on_local_fallback, true);
+   expect_clean_for(&s_webui, "Real answer.<end_of_turn>junk", "Real answer.");
+   atomic_store(&s_webui.turn_on_local_fallback, false);
+   expect_clean_for(&s_webui, "Real answer.<end_of_turn>junk", "Real answer.<end_of_turn>junk");
+}
+
 /* A reply without the marker never reads the session's model. */
 static void test_end_of_turn_absent_reads_nothing(void) {
    char text[] = "No marker here.";
@@ -282,6 +291,7 @@ int main(void) {
    RUN_TEST(test_end_of_turn_mention_kept_on_cloud);
    RUN_TEST(test_end_of_turn_cuts_local_and_openrouter);
    RUN_TEST(test_end_of_turn_cuts_on_a_custom_endpoint);
+   RUN_TEST(test_end_of_turn_cuts_on_a_local_fallback_turn);
    RUN_TEST(test_end_of_turn_absent_reads_nothing);
    RUN_TEST(test_trailing_whitespace_trimmed);
    RUN_TEST(test_cited_tag_removed);
