@@ -125,7 +125,7 @@ The pentest suite (`tests/test_pentest.sh`) confirms that DAWN handles known att
 | **No DDoS mitigation** | A single Jetson can be trivially overwhelmed by connection flooding. Application-level rate limiting only protects against login brute-force. |
 | **No OS-level blocking** | No fail2ban or firewall integration. A distributed botnet bypasses per-IP rate limits. |
 | **Memory safety** | C codebase with no fuzzing of input parsers (JSON, WebSocket frames, audio streams, document upload). Memory corruption bugs = remote code execution. |
-| **24-hour sessions** | Long-lived session tokens increase the window for theft if TLS is somehow bypassed. |
+| **Week-long idle sessions** | A login lasts up to 7 days without use (30 days at most). Long-lived session tokens increase the window for theft if TLS is somehow bypassed. |
 | **No real-time alerting** | Security events go to log files only. No notification if someone is actively attacking. |
 
 ### Recommended approach for remote access
@@ -168,7 +168,7 @@ Even with all of the above, a custom C application serving directly to the inter
 |---------|---------|----------|
 | **Password hashing** | Argon2id via libsodium (16MB/3 iters on Jetson, 8MB/4 iters on RPi) | `src/auth/auth_crypto.c` |
 | **Hash concurrency limit** | Max 3 concurrent Argon2id operations, 5s timeout returns `AUTH_CRYPTO_BUSY` | `src/auth/auth_crypto.c` |
-| **Session tokens** | 256-bit random via `getrandom()`, 24h expiry (30d with Remember Me) | `src/auth/auth_db_session.c` |
+| **Session tokens** | 256-bit random via `getrandom()`, ends after 7 days without use, 30 days at most | `src/auth/auth_db_session.c` |
 | **CSRF protection** | HMAC-signed single-use tokens, 10-minute validity, nonce replay detection | `src/webui/webui_http.c` |
 | **Rate limiting** | 20 attempts/15min on login, IPv6 /64 prefix normalization | `src/core/rate_limiter.c` |
 | **Account lockout** | 5 failed attempts → 15-minute lock | `src/webui/webui_http.c` |

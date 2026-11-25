@@ -865,6 +865,8 @@ static int callback_websocket(struct lws *wsi,
             conn->auth_user_id = auth_session.user_id;
             safe_strscpy(conn->auth_session_token, auth_session.token);
             safe_strscpy(conn->username, auth_session.username);
+            conn->login_created_at = auth_session.created_at;
+            conn->login_expires_at = auth_session.expires_at;
             OLOG_INFO("WebUI: WebSocket authenticated as user '%s' (id=%d)", conn->username,
                       conn->auth_user_id);
          } else {

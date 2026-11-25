@@ -195,8 +195,8 @@ static void test_update_password(void) {
  * one it was made from. */
 static void test_update_password_ends_logins(void) {
    int user_id = create_and_get_id("pw_logins", "old_hash", false);
-   auth_db_create_session(user_id, "pwtok_keep_0123456789", NULL, NULL, false);
-   auth_db_create_session(user_id, "pwtok_other_0123456789", NULL, NULL, false);
+   auth_db_create_session(user_id, "pwtok_keep_0123456789", NULL, NULL);
+   auth_db_create_session(user_id, "pwtok_other_0123456789", NULL, NULL);
    auth_session_t session;
 
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
@@ -227,14 +227,13 @@ static void test_validate_username(void) {
 static void test_create_session(void) {
    int user_id = create_and_get_id("sess_user", "hash", false);
 
-   int rc = auth_db_create_session(user_id, "token_abc_1234567890", "127.0.0.1", "TestAgent",
-                                   false);
+   int rc = auth_db_create_session(user_id, "token_abc_1234567890", "127.0.0.1", "TestAgent");
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
 }
 
 static void test_get_session(void) {
    int user_id = create_and_get_id("sess_user2", "hash", false);
-   auth_db_create_session(user_id, "token_xyz_1234567890", "10.0.0.1", "Mozilla", false);
+   auth_db_create_session(user_id, "token_xyz_1234567890", "10.0.0.1", "Mozilla");
 
    auth_session_t session;
    memset(&session, 0, sizeof(session));
@@ -246,7 +245,7 @@ static void test_get_session(void) {
 
 static void test_delete_session(void) {
    int user_id = create_and_get_id("sess_del", "hash", false);
-   auth_db_create_session(user_id, "token_del_1234567890", NULL, NULL, false);
+   auth_db_create_session(user_id, "token_del_1234567890", NULL, NULL);
 
    int rc = auth_db_delete_session("token_del_1234567890");
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, rc);
@@ -259,7 +258,7 @@ static void test_delete_session(void) {
 
 static void test_expired_session(void) {
    int user_id = create_and_get_id("sess_exp", "hash", false);
-   auth_db_create_session(user_id, "token_exp_1234567890", NULL, NULL, false);
+   auth_db_create_session(user_id, "token_exp_1234567890", NULL, NULL);
 
    /* Force the session to have already expired */
    force_session_expiry("token_exp_1234567890", time(NULL) - 3600);
@@ -270,12 +269,54 @@ static void test_expired_session(void) {
    TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND, rc);
 }
 
+/* A new login lasts the idle time; use moves it on at most once a step and
+ * never past the cap; renew never moves an expiry back and reports a login
+ * that ended */
+static void test_session_idle_expiry(void) {
+   int user_id = create_and_get_id("sess_idle", "hash", false);
+   time_t before = time(NULL);
+   auth_db_create_session(user_id, "token_idle_1234567890", NULL, NULL);
+   auth_session_t session;
+   memset(&session, 0, sizeof(session));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_session("token_idle_1234567890", &session));
+   TEST_ASSERT_TRUE(session.expires_at >= before + AUTH_SESSION_IDLE_SEC);
+   TEST_ASSERT_TRUE(session.expires_at <= time(NULL) + AUTH_SESSION_IDLE_SEC);
+
+   /* The rule: a fresh login used at once gains less than a step */
+   time_t t0 = 1000000;
+   TEST_ASSERT_EQUAL_INT64(0, auth_session_renewed_expiry(t0, t0 + AUTH_SESSION_IDLE_SEC, t0 + 60));
+   time_t later = t0 + AUTH_SESSION_RENEW_STEP_SEC;
+   TEST_ASSERT_EQUAL_INT64((int64_t)(later + AUTH_SESSION_IDLE_SEC),
+                           (int64_t)auth_session_renewed_expiry(t0, t0 + AUTH_SESSION_IDLE_SEC,
+                                                                later));
+   /* Near the cap: held to it, then nothing more */
+   time_t cap = t0 + AUTH_SESSION_ABSOLUTE_CAP_SEC;
+   TEST_ASSERT_EQUAL_INT64((int64_t)cap, (int64_t)auth_session_renewed_expiry(
+                                             t0, cap - 2 * AUTH_SESSION_RENEW_STEP_SEC, cap - 60));
+   TEST_ASSERT_EQUAL_INT64(0, auth_session_renewed_expiry(t0, cap, cap - 60));
+
+   /* renew: forward works, back is ignored */
+   time_t ahead = session.expires_at + AUTH_SESSION_RENEW_STEP_SEC;
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_renew_session("token_idle_1234567890", ahead));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
+                         auth_db_renew_session("token_idle_1234567890", ahead - 3600));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_get_session("token_idle_1234567890", &session));
+   TEST_ASSERT_EQUAL_INT64((int64_t)ahead, (int64_t)session.expires_at);
+
+   /* An ended login isn't brought back */
+   force_session_expiry("token_idle_1234567890", time(NULL) - 60);
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND,
+                         auth_db_renew_session("token_idle_1234567890", time(NULL) + 3600));
+   TEST_ASSERT_EQUAL_INT(AUTH_DB_NOT_FOUND,
+                         auth_db_renew_session("token_none_1234567890", time(NULL) + 3600));
+}
+
 /* A login's public prefix: found while unexpired, not after expiry or
  * deletion, and a short prefix is refused (never "any login"). */
 static void test_session_prefix_exists(void) {
    int user_id = create_and_get_id("sess_prefix", "hash", false);
-   auth_db_create_session(user_id, "prefixA_0123456789abcdef", NULL, NULL, false);
-   auth_db_create_session(user_id, "prefixB_0123456789abcdef", NULL, NULL, false);
+   auth_db_create_session(user_id, "prefixA_0123456789abcdef", NULL, NULL);
+   auth_db_create_session(user_id, "prefixB_0123456789abcdef", NULL, NULL);
 
    bool exists = false;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS,
@@ -303,10 +344,10 @@ static void test_session_prefix_exists(void) {
  * login alone; a prefix two logins share revokes neither. */
 static void test_delete_session_by_prefix(void) {
    int user_id = create_and_get_id("sess_byprefix", "hash", false);
-   auth_db_create_session(user_id, "revokeA_01234567_tail_one", NULL, NULL, false);
-   auth_db_create_session(user_id, "revokeB_01234567_tail_one", NULL, NULL, false);
-   auth_db_create_session(user_id, "sharedP_01234567_tail_one", NULL, NULL, false);
-   auth_db_create_session(user_id, "sharedP_01234567_tail_two", NULL, NULL, false);
+   auth_db_create_session(user_id, "revokeA_01234567_tail_one", NULL, NULL);
+   auth_db_create_session(user_id, "revokeB_01234567_tail_one", NULL, NULL);
+   auth_db_create_session(user_id, "sharedP_01234567_tail_one", NULL, NULL);
+   auth_db_create_session(user_id, "sharedP_01234567_tail_two", NULL, NULL);
 
    auth_session_t session;
    TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, auth_db_delete_session_by_prefix("revokeA_01234567"));
@@ -328,8 +369,8 @@ static void test_delete_session_by_prefix(void) {
 
 static void test_delete_user_sessions(void) {
    int user_id = create_and_get_id("multi_sess", "hash", false);
-   auth_db_create_session(user_id, "token_ms1_1234567890", NULL, NULL, false);
-   auth_db_create_session(user_id, "token_ms2_1234567890", NULL, NULL, false);
+   auth_db_create_session(user_id, "token_ms1_1234567890", NULL, NULL);
+   auth_db_create_session(user_id, "token_ms2_1234567890", NULL, NULL);
 
    int deleted = 0;
    int rc = auth_db_delete_user_sessions(user_id, &deleted);
@@ -1674,6 +1715,7 @@ int main(void) {
    RUN_TEST(test_get_session);
    RUN_TEST(test_delete_session);
    RUN_TEST(test_expired_session);
+   RUN_TEST(test_session_idle_expiry);
    RUN_TEST(test_delete_user_sessions);
    RUN_TEST(test_session_prefix_exists);
    RUN_TEST(test_delete_session_by_prefix);

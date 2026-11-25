@@ -941,8 +941,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
    }
 
    /* Create session in database */
-   if (auth_db_create_session(user.id, session_token, client_ip, user_agent, remember_me) !=
-       AUTH_DB_SUCCESS) {
+   if (auth_db_create_session(user.id, session_token, client_ip, user_agent) != AUTH_DB_SUCCESS) {
       OLOG_ERROR("WebUI: Failed to create session for user: %s", username);
       snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"Server error\"}");
       send_auth_response(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, response, NULL, 0);
@@ -1374,8 +1373,10 @@ static int handle_auth_status(struct lws *wsi) {
    }
    if (login == WEBUI_LOGIN_VALID) {
       snprintf(response, sizeof(response),
-               "{\"authenticated\":true,\"username\":\"%s\",\"is_admin\":%s%s%s}", session.username,
-               session.is_admin ? "true" : "false", sep, protocol);
+               "{\"authenticated\":true,\"username\":\"%s\",\"is_admin\":%s,"
+               "\"expires_at\":%lld%s%s}",
+               session.username, session.is_admin ? "true" : "false", (long long)session.expires_at,
+               sep, protocol);
    } else {
       snprintf(response, sizeof(response), "{\"authenticated\":false%s%s}", sep, protocol);
    }

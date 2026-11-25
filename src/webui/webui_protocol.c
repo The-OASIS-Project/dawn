@@ -79,6 +79,11 @@ static const char *const s_features[] = {
     * stream_end has reason "stopped" (will_persist when it is saved), its
     * message_appended and its rows wherever they are read carry stopped: true. */
    "stopped_replies_saved",
+   /* A login ends after 7 days with no use (what the user's own actions send;
+    * heartbeats, reconnects and automatic requests don't count), never more
+    * than 30 days after sign-in; expires_at is on the session frame, every
+    * pong and /api/auth/status. */
+   "login_expiry",
 };
 
 /* The email panel's check (webui_email_panel.c); a build without the panel has

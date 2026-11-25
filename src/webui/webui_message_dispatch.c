@@ -83,6 +83,7 @@
 #include "webui/webui_protocol.h"
 #include "webui/webui_reasoning.h"
 #include "webui/webui_server.h"
+#include "webui/webui_user_action.h"
 
 /* handle_cancel_message and handle_ping are defined at the bottom of this TU. */
 static void handle_cancel_message(ws_connection_t *conn);
@@ -347,6 +348,9 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
 
 /* Handlers return early freely: handle_json_message owns the parsed frame. */
 static void dispatch_message(ws_connection_t *conn, const char *type, struct json_object *payload) {
+   if (webui_is_user_action(type)) {
+      conn_login_used(conn);
+   }
    if (strcmp(type, "text") == 0) {
       /* Text input from user, with the images attached to it by id */
       dispatch_text_frame(conn, payload);
@@ -1831,7 +1835,9 @@ static void handle_cancel_message(ws_connection_t *conn) {
  * call, so a revoked or expired session receives an UNAUTHORIZED error and NO
  * pong — precisely the "session no longer alive" signal the client keys off to
  * fall back to re-authentication.  A valid session gets a pong (with any echoed
- * seq + server_time_ms) and has its last_activity refreshed by webui_send_pong.
+ * seq, server_time_ms and the login's expires_at) and has its last_activity
+ * refreshed by webui_send_pong.  A ping is not use: it moves the login's expiry
+ * only for an "always on" login.
  */
 static void handle_ping(ws_connection_t *conn, struct json_object *payload) {
    auth_session_t session;
@@ -1839,26 +1845,20 @@ static void handle_ping(ws_connection_t *conn, struct json_object *payload) {
       return;
    }
 
-   /* Session-keepalive (always-on): slide the auth token's expiry forward while
-    * this browser actively heartbeats — but only if the user enabled keepalive
-    * (persisted DB flag, not the connect-time hint), and only when within half a
-    * window of expiry so we write at most ~once per 12h rather than every ping.
-    * The absolute cap bounds a stolen token's worst-case lifetime.
+   /* Always on: the heartbeat moves the expiry on as use does (at most once a
+    * day, never past the absolute cap).  Only the persisted DB flag counts, not
+    * the connect-time hint.
     * TODO(security): downgrade renewal (fall back to fixed window) on an IP/UA
     * mismatch vs the stored session, and keep step-up re-auth on sensitive ops. */
+   time_t expires_at = session.expires_at;
    if (session.keepalive_enabled) {
-      time_t now = time(NULL);
-      if (session.expires_at - now < AUTH_SESSION_TIMEOUT_SEC / 2) {
-         time_t slid = session.expires_at > now + AUTH_SESSION_TIMEOUT_SEC
-                           ? session.expires_at
-                           : now + AUTH_SESSION_TIMEOUT_SEC;
-         time_t capped = session.created_at + AUTH_SESSION_ABSOLUTE_CAP_SEC;
-         time_t new_expires = slid < capped ? slid : capped;
-         if (new_expires > session.expires_at) {
-            auth_db_renew_session(conn->auth_session_token, new_expires);
-         }
+      time_t renewed = auth_session_renewed_expiry(session.created_at, session.expires_at,
+                                                   time(NULL));
+      if (renewed && auth_db_renew_session(conn->auth_session_token, renewed) == AUTH_DB_SUCCESS) {
+         expires_at = renewed;
       }
    }
+   conn->login_expires_at = expires_at; /* another tab's use may have moved it */
 
-   webui_send_pong(conn, "pong", payload);
+   webui_send_pong(conn, "pong", payload, expires_at);
 }

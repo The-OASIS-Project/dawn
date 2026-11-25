@@ -64,22 +64,42 @@
 #define AUTH_IP_MAX 64
 
 /**
- * @brief Session timeout in seconds (24 hours)
+ * @brief Idle timeout in seconds (7 days)
+ *
+ * A login ends about this long after its last real use (a message the user
+ * sent, not the client's own heartbeat or reconnect requests), or at the
+ * absolute cap, whichever is first.  6 to 7 days in practice: use moves the
+ * expiry at most once per AUTH_SESSION_RENEW_STEP_SEC.  An "always on" (keepalive) login is moved
+ * on by its heartbeat instead.  "Remember me" changes only the cookie, not this.
  */
-#define AUTH_SESSION_TIMEOUT_SEC (24 * 60 * 60)
+#define AUTH_SESSION_IDLE_SEC (7 * 24 * 60 * 60)
 
 /**
- * @brief "Remember me" session timeout in seconds (30 days)
+ * @brief Smallest move of a login's expiry worth a database write (1 day)
+ *
+ * Use moves expires_at to now + AUTH_SESSION_IDLE_SEC only once that gains at
+ * least this much, so an active login costs one auth.db write a day, not one a
+ * message.
+ */
+#define AUTH_SESSION_RENEW_STEP_SEC (24 * 60 * 60)
+
+/**
+ * @brief How long an expired login's row is kept before cleanup deletes it (1 day)
+ */
+#define AUTH_SESSION_PURGE_AFTER_SEC (24 * 60 * 60)
+
+/**
+ * @brief "Remember me" cookie lifetime in seconds (30 days, the absolute cap)
  */
 #define AUTH_REMEMBER_ME_TIMEOUT_SEC (30 * 24 * 60 * 60)
 
 /**
  * @brief Absolute maximum session lifetime in seconds (30 days)
  *
- * Hard cap on total session age measured from created_at, enforced when a
- * "session keepalive" (always-on) session slides its expires_at forward. Bounds
- * the worst-case blast radius of a stolen token: even an actively-heartbeating
- * keepalive session cannot outlive this, after which the user must re-authenticate.
+ * Hard cap on total session age measured from created_at, however the login is
+ * used. Bounds the worst-case blast radius of a stolen token: even a login in
+ * daily use or an "always on" one cannot outlive this, after which the user
+ * must sign in again.
  */
 #define AUTH_SESSION_ABSOLUTE_CAP_SEC (30 * 24 * 60 * 60)
 
@@ -491,14 +511,15 @@ int auth_db_set_user_identity(int user_id, const auth_user_identity_t *id);
  * @param token Pre-generated token from auth_generate_token()
  * @param ip_address Client IP address (can be NULL)
  * @param user_agent Client user agent (can be NULL, truncated to AUTH_USER_AGENT_MAX)
- * @param remember_me If true, session expires in 30 days; otherwise 24 hours
+ *
+ * The login expires AUTH_SESSION_IDLE_SEC from now; use moves it on.
+ *
  * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
  */
 int auth_db_create_session(int user_id,
                            const char *token,
                            const char *ip_address,
-                           const char *user_agent,
-                           bool remember_me);
+                           const char *user_agent);
 
 /**
  * @brief Get session by token
@@ -520,11 +541,27 @@ int auth_db_get_session(const char *token, auth_session_t *session_out);
  * (The caller should still compute a bounded value; this is defense-in-depth.)
  * Pass the AUTH-DB token (auth_session_token), not the WebUI reconnect token.
  *
+ * The expiry never moves back: a row already past @p new_expires_at keeps its own.
+ *
  * @param token Auth session token
  * @param new_expires_at New expiry (absolute unix time)
- * @return AUTH_DB_SUCCESS or AUTH_DB_FAILURE
+ * @return AUTH_DB_SUCCESS, AUTH_DB_NOT_FOUND (no live row for @p token: ended,
+ *         revoked or expired), or AUTH_DB_FAILURE
  */
 int auth_db_renew_session(const char *token, time_t new_expires_at);
+
+/**
+ * @brief The expiry a use at @p now moves a login to, if worth writing
+ *
+ * now + AUTH_SESSION_IDLE_SEC, held to the absolute cap, when that is at least
+ * AUTH_SESSION_RENEW_STEP_SEC past @p expires_at; otherwise 0 (leave it).
+ *
+ * @param created_at The login's created_at
+ * @param expires_at Its current expires_at
+ * @param now Current time
+ * @return The new expires_at, or 0
+ */
+time_t auth_session_renewed_expiry(time_t created_at, time_t expires_at, time_t now);
 
 /**
  * @brief Enable/disable session-keepalive (always-on) on a session row

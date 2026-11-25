@@ -91,6 +91,24 @@ bool conn_require_auth_ex(ws_connection_t *conn, auth_session_t *session_out) {
    return true;
 }
 
+void conn_login_used(ws_connection_t *conn) {
+   if (!conn->authenticated || conn->login_expires_at <= 0) {
+      return;
+   }
+   time_t renewed = auth_session_renewed_expiry(conn->login_created_at, conn->login_expires_at,
+                                                time(NULL));
+   if (!renewed) {
+      return;
+   }
+   int rc = auth_db_renew_session(conn->auth_session_token, renewed);
+   if (rc == AUTH_DB_SUCCESS) {
+      conn->login_expires_at = renewed;
+   } else if (rc == AUTH_DB_NOT_FOUND) {
+      conn->login_expires_at = 0; /* ended: the next auth check says so */
+   }
+   /* AUTH_DB_FAILURE (busy): tried again on the next use */
+}
+
 bool conn_require_auth(ws_connection_t *conn) {
    return conn_require_auth_ex(conn, NULL);
 }

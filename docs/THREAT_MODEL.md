@@ -100,11 +100,14 @@ separate service account.
 
 - **Passwords**: Argon2id (16 MB / 3 iterations; 8 MB / 4 on a Pi). Constant-time comparison,
   and a dummy hash for unknown usernames so timing doesn't reveal accounts.
-- **Sessions**: 256-bit random tokens, 24 h (30 days with "Remember me"), re-validated against
-  the live user on every request, so a deleted user or a revoked session stops at once.
-- **"Always on" keepalive** (opt-in per browser, with a consent prompt) slides expiry while the
-  browser heartbeats, clamped in the database to **30 days from creation**
-  (`AUTH_SESSION_ABSOLUTE_CAP_SEC`). It can only be turned on by an authenticated message.
+- **Sessions**: 256-bit random tokens, re-validated against the live user on every request, so a
+  deleted user or a revoked session stops at once. A login ends after 7 days with no use, counting
+  only messages the user's own actions send (heartbeats, reconnects and the client's automatic
+  requests don't count, so an unattended tab ends), and never later than **30 days from creation**
+  (`AUTH_SESSION_ABSOLUTE_CAP_SEC`, clamped in the database). "Remember me" only keeps the cookie
+  past the browser closing.
+- **"Always on" keepalive** (opt-in per browser, with a consent prompt) moves the expiry on while
+  the browser heartbeats, up to the same 30-day cap. It can only be turned on by an authenticated message.
   Accepted residual: an unlocked kiosk browser stays signed in until closed.
 - **Rate limits**: 20 login attempts per 15 min per IP (IPv6 by /64); 5 failures lock the
   account for 15 min.

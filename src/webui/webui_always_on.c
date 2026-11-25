@@ -672,6 +672,7 @@ static void always_on_spec_maybe_arm(always_on_ctx_t *ctx,
  * Must be called with ctx->mutex held.
  */
 static void dispatch_cmd_transcribe(always_on_ctx_t *ctx, ws_connection_t *conn) {
+   conn_login_used(conn); /* a command after the wake word is the user's use */
    /* Adaptive-dwell shadow: snapshot the speculative slot BEFORE set_state wipes
     * it. take_if_current detaches a ready + current speculative transcript (else
     * NULL). Shadow mode NEVER uses it ("on" isn't available; config_clamp_vad runs it
@@ -1014,6 +1015,7 @@ void always_on_consume_wake_result(always_on_ctx_t *ctx, void *conn_ptr) {
          char *cmd = ctx->wake_command;
          ctx->wake_command = NULL;
          pthread_mutex_unlock(&ctx->mutex);
+         conn_login_used(conn); /* the wake word and command in one breath */
 
          /* Capitalize first letter of the extracted command */
          if (cmd[0] >= 'a' && cmd[0] <= 'z') { /* cmd non-NULL: checked above */

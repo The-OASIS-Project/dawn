@@ -81,6 +81,9 @@
             case 'pong':
                // Liveness heartbeat reply — route to the watchdog (seq-matched).
                if (DawnWS.handlePong) DawnWS.handlePong(msg.payload && msg.payload.seq);
+               if (window.DawnLoginExpiry && msg.payload) {
+                  DawnLoginExpiry.note(msg.payload.expires_at);
+               }
                break;
             case 'state':
                // A background turn's state (thinking/speaking/idle for a conversation
@@ -339,6 +342,9 @@
                   DawnMusicPlayback.reconnectMusicStream();
                }
                // Auth state is now included in session response (avoids extra config fetch)
+               if (window.DawnLoginExpiry) {
+                  DawnLoginExpiry.note(msg.payload.expires_at);
+               }
                if (msg.payload.authenticated !== undefined) {
                   DawnState.authState.authenticated = msg.payload.authenticated;
                   DawnState.authState.isAdmin = msg.payload.is_admin || false;
