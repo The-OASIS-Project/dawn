@@ -37,7 +37,7 @@
 #include "logging.h"
 #include "utils/string_utils.h" /* sanitize_utf8_for_json */
 
-/* Room for the completion message's own words around the brief and the take
+/* Room for the completion message's own words around the label and the take
  * (its longest form is under 200 bytes, plus a count). */
 #define RESEARCH_COMPLETION_FIXED_MAX 256
 
@@ -851,11 +851,11 @@ int research_render_report(int64_t run_id, const char *brief, char **out_markdow
    return AUTH_DB_SUCCESS;
 }
 
-char *research_completion_message(const char *brief,
+char *research_completion_message(const char *label,
                                   const char *summary,
                                   int claim_count,
                                   bool has_report) {
-   const char *b = brief ? brief : "";
+   const char *b = label ? label : "";
    const bool have_summary = summary != NULL && summary[0] != '\0';
    const char *plural = claim_count == 1 ? "" : "s";
    const size_t size = strlen(b) + (have_summary ? strlen(summary) : 0) +
