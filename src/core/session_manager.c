@@ -409,6 +409,50 @@ static int find_free_slot(void) {
    return -1;
 }
 
+/* Caller holds session_manager_rwlock.  The browser session that can give up
+ * its slot: its client is gone and no turn runs on it (what the idle sweep
+ * would end at its timeout), the one idle longest.  Its conversation is
+ * saved, so a tab that comes back for it gets a new session on the same
+ * conversation.  0 when there is none. */
+static uint32_t detached_webui_session_locked(void) {
+   uint32_t id = 0;
+   time_t oldest = 0;
+   for (int i = 1; i < MAX_SESSIONS; i++) { /* never the local session (0) */
+      const session_t *s = sessions[i];
+      if (!s || s->type != SESSION_TYPE_WEBUI || s->idle_timeout_exempt ||
+          !atomic_load(&s->disconnected) || atomic_load(&s->turn_in_flight) > 0) {
+         continue;
+      }
+      if (id == 0 || s->last_activity < oldest) {
+         id = s->session_id;
+         oldest = s->last_activity;
+      }
+   }
+   return id;
+}
+
+/* A slot for a new session.  Caller holds session_manager_rwlock for write and
+ * gets it back held; it is released while a session is ended, so anything the
+ * caller looked up before must not be relied on across the call.  With the
+ * table full, a browser session nobody is attached to gives up its slot:
+ * closed tabs and one-off clients otherwise keep every new client out until
+ * the idle timeout.  A negative value when every slot is in use. */
+static int free_slot_evicting(void) {
+   int slot = find_free_slot();
+   if (slot >= 0) {
+      return slot;
+   }
+   const uint32_t victim = detached_webui_session_locked();
+   if (victim == 0) {
+      return slot;
+   }
+   pthread_rwlock_unlock(&session_manager_rwlock);
+   OLOG_INFO("Session %u ended to make room: no client is attached to it", victim);
+   session_destroy(victim);
+   pthread_rwlock_wrlock(&session_manager_rwlock);
+   return find_free_slot();
+}
+
 static session_t *find_session_by_uuid_unlocked(const char *uuid) {
    /* Prefer a LIVE (connected) session.  During reconnect churn (e.g. an OTA that
     * reboots the device several times) a stale, disconnected session for the same
@@ -548,7 +592,7 @@ session_t *session_create(session_type_t type, int client_fd) {
 
    pthread_rwlock_wrlock(&session_manager_rwlock);
 
-   int slot = find_free_slot();
+   int slot = free_slot_evicting();
    if (slot < 0) {
       pthread_rwlock_unlock(&session_manager_rwlock);
       OLOG_WARNING("Max sessions reached (%d), rejecting new client", MAX_SESSIONS);
@@ -677,8 +721,10 @@ session_t *session_create_dap2(int client_fd,
       /* Fall through to create new session */
    }
 
-   /* NEW SESSION */
-   int slot = find_free_slot();
+   /* NEW SESSION.  The lock may be released here to end a browser session
+    * nobody is attached to; the lookup above still holds, since satellites
+    * register on one thread (the WebSocket service thread). */
+   int slot = free_slot_evicting();
    if (slot < 0) {
       pthread_rwlock_unlock(&session_manager_rwlock);
       OLOG_WARNING("Max sessions reached (%d), rejecting DAP2 client", MAX_SESSIONS);

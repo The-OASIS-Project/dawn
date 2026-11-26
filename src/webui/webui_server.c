@@ -748,25 +748,32 @@ static bool webui_conn_create_session(ws_connection_t *conn);
 
 /* Note a whole JSON text frame as the request being handled (see
  * webui_protocol_request_begin); a binary frame, a fragment or anything that
- * doesn't parse notes nothing.  The caller ends it. */
-static void request_note_frame(ws_connection_t *conn, struct lws *wsi, const char *in, size_t len) {
+ * doesn't parse notes nothing.  The caller ends it.  True when the frame is a
+ * `reconnect` naming a token: its handler attaches that session or makes one. */
+static bool request_note_frame(ws_connection_t *conn, struct lws *wsi, const char *in, size_t len) {
    if (lws_frame_is_binary(wsi) || !lws_is_final_fragment(wsi) || conn->text_buffer_len != 0 ||
        len > INT_MAX) {
-      return;
+      return false;
    }
+   bool reconnect = false;
    struct json_tokener *tok = json_tokener_new();
    struct json_object *root = tok ? json_tokener_parse_ex(tok, in, (int)len) : NULL;
-   struct json_object *type_obj = NULL, *payload = NULL;
+   struct json_object *type_obj = NULL, *payload = NULL, *token = NULL;
    if (root && json_object_object_get_ex(root, "type", &type_obj) &&
        json_object_is_type(type_obj, json_type_string) &&
        strlen(json_object_get_string(type_obj)) == (size_t)json_object_get_string_len(type_obj)) {
       json_object_object_get_ex(root, "payload", &payload);
       webui_protocol_request_begin(wsi, json_object_get_string(type_obj), payload);
+      reconnect = strcmp(json_object_get_string(type_obj), "reconnect") == 0 && payload &&
+                  json_object_object_get_ex(payload, "token", &token) &&
+                  json_object_is_type(token, json_type_string) &&
+                  json_object_get_string_len(token) > 0;
    }
    json_object_put(root);
    if (tok) {
       json_tokener_free(tok);
    }
+   return reconnect;
 }
 
 /* Connections still in the registry: every socket is registered when it's
@@ -1022,10 +1029,16 @@ static int callback_websocket(struct lws *wsi,
                return LWS_CLOSE_CONNECTION;
             }
             if (conn->authenticated) {
-               OLOG_INFO("WebUI: Session expired for authenticated connection, auto-creating");
                /* A refusal here drops the message: name it, as dispatch would. */
-               request_note_frame(conn, wsi, (const char *)in, len);
-               bool created = webui_conn_create_session(conn);
+               const bool reconnect = request_note_frame(conn, wsi, (const char *)in, len);
+               /* A reconnect gets its session from its handler (the one its token
+                * names, or a new one).  One made here first would, with every
+                * slot in use, end a session nobody is attached to: the very
+                * one this client is coming back for, when it is the oldest. */
+               if (!reconnect) {
+                  OLOG_INFO("WebUI: authenticated connection has no session; creating one");
+               }
+               bool created = reconnect || webui_conn_create_session(conn);
                webui_protocol_request_end();
                if (!created) {
                   break; /* Error already sent to client */
@@ -1062,80 +1075,6 @@ static int callback_websocket(struct lws *wsi,
 
                OLOG_INFO("WebUI: Init message received, type=%s", type ? type : "(null)");
                webui_protocol_note_client(payload, &conn->client_noted);
-
-               bool is_reconnect = false;
-               session_t *existing_session = NULL;
-
-               /* Check for reconnection token */
-               if (type && strcmp(type, "reconnect") == 0 && payload) {
-                  struct json_object *token_obj;
-                  if (json_object_object_get_ex(payload, "token", &token_obj)) {
-                     const char *token = json_object_get_string(token_obj);
-                     if (token && strlen(token) > 0) {
-                        existing_session = lookup_session_by_token(token);
-                        if (existing_session &&
-                            (!webui_session_owned_by(existing_session, conn->auth_user_id) ||
-                             !webui_conn_may_resume(conn, existing_session) ||
-                             !webui_conn_attach_session(conn, existing_session))) {
-                           /* Another user's or another login's session (a token that
-                            * outlived a user switch or a logout), or one being
-                            * destroyed: never attach to it; start a fresh one. */
-                           OLOG_WARNING("WebUI: reconnect token's session isn't this "
-                                        "login's (or is ending); not attaching");
-                           session_release(existing_session); /* the lookup's reference */
-                           existing_session = NULL;
-                        }
-                        if (existing_session) {
-                           is_reconnect = true;
-                           /* Evict any other connection that still owns this session
-                            * BEFORE taking ownership, so the superseded tab backs off
-                            * (WS 4001) instead of fighting to re-steal it.  (This
-                            * connection is attached already; the session's owner,
-                            * client_data, is still the other one.) */
-                           webui_evict_session_owner(existing_session, conn);
-                           conn->session_was_reconnected = true;
-                           existing_session->client_data = conn;
-                           webui_conn_publish_view(
-                               conn); /* the session shows what this connection does */
-                           existing_session->disconnected = false;
-                           safe_strscpy(conn->session_token, token);
-
-                           /* Check for Opus codec support */
-                           conn->use_opus = check_opus_capability(payload);
-
-                           /* Check for TTS preference (default off) */
-                           conn->tts_enabled = false;
-                           struct json_object *tts_obj;
-                           if (json_object_object_get_ex(payload, "tts_enabled", &tts_obj)) {
-                              conn->tts_enabled = json_object_get_boolean(tts_obj);
-                           }
-
-                           /* Capability: does this client render its own tool steps from the
-                            * tool_step frame? (default off = stock-www origin-excluded behavior) */
-                           conn->tool_step_origin = false;
-                           struct json_object *tso_obj;
-                           if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
-                              conn->tool_step_origin = json_object_get_boolean(tso_obj);
-                           }
-
-                           /* Reconnections still count against client limit */
-                           pthread_mutex_lock(&s_mutex);
-                           s_client_count++;
-                           pthread_mutex_unlock(&s_mutex);
-                           conn->counted = true;
-
-                           OLOG_INFO(
-                               "WebUI: Reconnected to session %u with token %.4s... (total: %d, "
-                               "opus: %s, tts: %s)",
-                               existing_session->session_id, token, s_client_count,
-                               conn->use_opus ? "yes" : "no", conn->tts_enabled ? "yes" : "no");
-
-                           /* Queue init messages (one lws_write per callback) */
-                           queue_init_messages(conn, token);
-                        }
-                     }
-                  }
-               }
 
                /* Check for satellite registration (DAP2 Tier 1) */
                if (type && strcmp(type, "satellite_register") == 0 && payload) {
@@ -1179,91 +1118,24 @@ static int callback_websocket(struct lws *wsi,
                   break;
                }
 
-               /* If not reconnecting, create new session (with client limit check) */
-               if (!is_reconnect) {
-                  pthread_mutex_lock(&s_mutex);
-                  if (s_client_count >= g_config.webui.max_clients) {
-                     pthread_mutex_unlock(&s_mutex);
-                     OLOG_WARNING("WebUI: Connection rejected - max clients reached (%d)",
-                                  g_config.webui.max_clients);
-                     send_error_impl(wsi, "MAX_CLIENTS",
-                                     "Maximum WebUI clients reached. Please try again later.");
-                     json_object_put(root);
-                     return LWS_CLOSE_CONNECTION;
-                  }
-                  s_client_count++;
-                  pthread_mutex_unlock(&s_mutex);
-                  conn->counted = true;
-
-                  conn->session = session_create(SESSION_TYPE_WEBUI, -1);
-                  if (!conn->session) {
-                     OLOG_ERROR("WebUI: Failed to create session");
-                     send_error_impl(wsi, "SESSION_LIMIT", "Maximum sessions reached");
-                     pthread_mutex_lock(&s_mutex);
-                     s_client_count--;
-                     pthread_mutex_unlock(&s_mutex);
-                     conn->counted = false;
-                     json_object_put(root);
-                     return LWS_CLOSE_CONNECTION;
-                  }
-
-                  /* Set user_id for metrics and memory extraction */
-                  session_set_metrics_user(conn->session, conn->auth_user_id);
-                  /* A new context: its first turn freezes the prompt it runs under. */
-                  session_clear_history(conn->session);
-                  conn->session->client_data = conn;
-                  webui_conn_publish_view(conn); /* the session shows what this connection does */
-                  conn->session_was_reconnected = false; /* brand-new session, not a reconnect */
-
-                  /* Check for Opus codec support */
-                  conn->use_opus = check_opus_capability(payload);
-
-                  /* Check for TTS preference (default off) */
-                  conn->tts_enabled = false;
-                  struct json_object *tts_obj;
-                  if (json_object_object_get_ex(payload, "tts_enabled", &tts_obj)) {
-                     conn->tts_enabled = json_object_get_boolean(tts_obj);
-                  }
-
-                  /* Capability: does this client render its own tool steps from the tool_step
-                   * frame? (default off = stock-www origin-excluded behavior) */
-                  conn->tool_step_origin = false;
-                  struct json_object *tso_obj;
-                  if (json_object_object_get_ex(payload, "tool_step_origin", &tso_obj)) {
-                     conn->tool_step_origin = json_object_get_boolean(tso_obj);
-                  }
-
-                  if (generate_session_token(conn->session_token) != 0) {
-                     OLOG_ERROR("WebUI: Failed to generate session token");
-                     session_destroy(conn->session->session_id);
-                     conn->session = NULL;
-                     pthread_mutex_lock(&s_mutex);
-                     s_client_count--;
-                     pthread_mutex_unlock(&s_mutex);
-                     conn->counted = false;
-                     json_object_put(root);
-                     return LWS_CLOSE_CONNECTION;
-                  }
-                  register_token(conn->session_token, conn->session->session_id);
-
-                  OLOG_INFO("WebUI: New session %u created (token %.4s..., total: %d, opus: %s, "
-                            "tts: %s)",
-                            conn->session->session_id, conn->session_token, s_client_count,
-                            conn->use_opus ? "yes" : "no", conn->tts_enabled ? "yes" : "no");
-
-                  queue_init_messages(conn, conn->session_token);
-               }
-
+               /* A browser with no login gets no session: it has nothing to run on
+                * one, and each would hold a slot until the idle timeout.  The page
+                * sends it to the login. */
+               OLOG_INFO("WebUI: first message from a connection with no login; refusing");
+               (void)request_note_frame(conn, wsi, (const char *)in, len); /* names the refusal */
+               send_error_impl(wsi, "UNAUTHORIZED", "Authentication required");
+               webui_protocol_request_end();
                json_object_put(root);
-               break; /* Don't process this message further - it was just the init */
-            }         /* end else (not authenticated — init message) */
+               return LWS_CLOSE_CONNECTION;
+            } /* end else (not authenticated — init message) */
          }
 
          session_touch(conn->session);
 
          /* Deliver any queued missed notifications once the session is ready and
           * the user is authenticated. One-shot per connection. */
-         if (!conn->missed_notif_delivered && conn->authenticated && conn->auth_user_id > 0) {
+         if (!conn->missed_notif_delivered && conn->session && conn->authenticated &&
+             conn->auth_user_id > 0) {
             deliver_missed_notifications(conn);
             conn->missed_notif_delivered = true;
          }
