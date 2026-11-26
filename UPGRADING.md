@@ -12,6 +12,22 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-11-25 — WebUI logins end a week after you last use them
+
+**What changed.** A login no longer ends 24 hours after you sign in (30 days with "Remember
+me") however much you use it. It now ends about **a week after you last use it**, and never more than
+30 days after sign-in. Using DAWN (a message, voice, a music control, a settings change) keeps
+it going; a tab left open by itself doesn't, because the browser's own heartbeat and
+reconnects don't count. "Remember me" now only decides whether the login survives closing the
+browser. "Always on" logins work as before, up to the same 30 days. The WebUI warns about ten
+minutes before a login ends.
+
+**What you need to do.** On a shared or public browser, sign out when you're done: the login
+no longer ends by itself after a day. A login you have now follows the new rule the next time you
+use it, except a "Remember me" one, which keeps its old end date 30 days after sign-in.
+
+---
+
 ## 2026-11-25 — The built-in model lists moved to the current generation
 
 **What changed.** The model lists DAWN uses when `dawn.toml` has none now name each vendor's

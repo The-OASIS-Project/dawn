@@ -71,7 +71,7 @@ int auth_db_run_cleanup(void) {
    }
 
    time_t now = time(NULL);
-   time_t session_cutoff = now - AUTH_SESSION_TIMEOUT_SEC;
+   time_t session_cutoff = now - AUTH_SESSION_PURGE_AFTER_SEC;
    time_t attempt_cutoff = now - LOGIN_ATTEMPT_RETENTION_SEC;
    time_t log_cutoff = now - AUTH_LOG_RETENTION_SEC;
 

@@ -33,6 +33,19 @@ WebUI browser clients, and DAP2 satellite devices. All connections use the
   So the WebUI and another front-end
   open in the same browser keep separate logins: logging out of or into one never
   touches the other.
+- **How long a login lasts** (feature `login_expiry`): it ends about **a week after its
+  last use** (6 to 7 days: use moves the expiry at most once a day), and never more than
+  **30 days** after sign-in. Use means a message the user's
+  own action sent (a turn, push-to-talk or an always-on voice command, a music control, a
+  settings save, and the like); the
+  client's `ping`, `init`/`reconnect` and the requests it makes by itself on connect
+  don't count, so an unattended tab still ends. An "always on" login
+  (`session_keepalive_enable`) is moved on by its `ping` instead. "Remember me" only
+  keeps the cookie past the browser closing. The expiry, `expires_at` (epoch seconds),
+  is on the `session` frame, every `pong`, `GET /api/auth/status` when logged in, and a
+  `login_expiry` frame each time use moves it;
+  use moves it at most once a day, so a client warning shortly before it ends sees the
+  real time.
 - **Logging out**: `POST /api/auth/logout` (with `?app=<app>` for another front-end;
   same-origin: `Origin`, or a `Referer` whose `scheme://host[:port]` is exactly this
   server's or on `[webui] allowed_origins`) **with the socket open**. It ends that app's
@@ -95,6 +108,7 @@ When to add what:
 
 | Flag | Since | Meaning |
 |------|-------|---------|
+| `login_expiry` | 2026-11-25 | A login ends about a week (6 to 7 days) after its last use (a message the user's own action sent; heartbeats, reconnects and automatic requests don't count), never more than 30 days after sign-in; `expires_at` (epoch seconds) is on the `session` frame, every `pong`, `GET /api/auth/status` and a `login_expiry` frame when use moves it. See How long a login lasts. |
 | `stopped_replies_saved` | 2026-11-18 | A reply the user stops (`cancel`, or `stop_other_reply` from another of their clients when the stopped turn is a WebUI client's) while it streams is saved as far as it had streamed: its `stream_end` has `reason` `"stopped"`, with `will_persist: true` when the row is saved (nothing is saved when nothing of the reply was left), and the row comes back with `stopped: true` on `message_appended`, `load_conversation_response` rows, `get_memory_fact_source_response` messages and exports. Show the saved text (it can differ from what was drawn: tags removed) and mark it stopped. Only the user's Stop does this; any other end of a turn is as before. Without it, a Stop mid-stream ends with `reason` `"error"` and saves nothing. |
 | `memory_batches` | 2026-11-03 | The daemon records what memory learned per batch and answers `list_memory_batches`, `undo_memory_batch` and `keep_memory_op`, and pushes `memory_batch` (see Memory Management, Consolidation). Advertised while memory is enabled; a build without the WebUI never advertises it. Without it, offer no marker, Learned tab or undo. |
 | `email_refs` | 2026-10-09 | A `text` frame may carry `email_refs`: one email the user attached, by account and message id. The model reads it with the email tool, and the question row comes back with `email_ref` on every frame that delivers it (see Email, Email in chat). Advertised with `email_client`. Without it, send no `email_refs` (an older daemon ignores them, and the model never sees the email). |
@@ -273,8 +287,9 @@ Reconnect to an existing session using a stored token.
   client has session-keepalive enabled. **Hint only** — it is NOT the authorization to extend the
   session (an attacker holding a token could otherwise set it). The authoritative state is the
   server-persisted `keepalive_enabled` flag, set only by the authenticated `session_keepalive_enable`
-  message (see Session Management). When that flag is set, the server slides this session's expiry
-  forward on each authenticated heartbeat `ping` (up to a 30-day absolute cap from session creation).
+  message (see Session Management). When that flag is set, the authenticated heartbeat `ping` moves
+  this session's expiry on as use does (at most once a day, up to a 30-day absolute cap from session
+  creation).
 - **Single-connection-per-session:** if the target session is already held by another
   live connection, that connection is **evicted** — it receives a `session_superseded`
   frame + a `4001` close (see below). Last deliberate reconnect wins; the reconnecting
@@ -760,8 +775,9 @@ Response: `revoke_session_response`
 
 #### `session_keepalive_enable`
 Opt this browser's session into **keepalive** ("always on"). While the session actively heartbeats
-(`ping`), the server slides its `expires_at` forward on renewal (within ~12h of expiry) instead of
-letting it expire at the normal 24h — up to a **30-day absolute cap** measured from session creation.
+(`ping`), the server moves its `expires_at` on as use does (to 7 days ahead, at most once a day)
+instead of letting it end after 7 idle days — up to the **30-day absolute cap** measured from session
+creation.
 The decision is persisted as the `keepalive_enabled` flag on the session row (survives reconnects on
 the **same** token; a **fresh** session starts with it off, so the client re-sends this on landing a
 fresh session). This is the authorization gate — the `session_keepalive` connect-payload hint above
@@ -773,8 +789,8 @@ Requires an authenticated session. No response frame; takes effect on the next h
 The enable/disable events are audit-logged (`SESSION_KEEPALIVE_ENABLE`/`_DISABLE`).
 
 #### `session_keepalive_disable`
-Turn keepalive back off for this session; its expiry reverts to the normal fixed lifetime and is no
-longer slid forward.
+Turn keepalive back off for this session: it then ends a week after its last use, like any other
+login (see How long a login lasts), and the heartbeat no longer moves it.
 ```json
 {"type": "session_keepalive_disable"}
 ```
@@ -2093,8 +2109,9 @@ Response: `pong` — but **only** for a valid, authenticated session
 (`conn_require_auth`). A revoked/expired/unauthenticated connection receives an
 `UNAUTHORIZED` `error` and no `pong`; that absence is the client's staleness
 signal. When the login can't be checked (the database is down), it receives
-`SERVICE_UNAVAILABLE` and no `pong`, and stays logged in. The reply carries `{seq?, server_time_ms}` (same payload shape as
-[`satellite_pong`](#satellite_pong)).
+`SERVICE_UNAVAILABLE` and no `pong`, and stays logged in. The reply carries `{seq?, server_time_ms,
+expires_at}` (the shape of [`satellite_pong`](#satellite_pong) plus the login's expiry; see How long
+a login lasts).
 
 #### OTA (over-the-air updates)
 Server→satellite firmware updates. Control plane is on this WebSocket; the image
@@ -2473,10 +2490,12 @@ Session token and auth state (sent on connect/reconnect).
       "is_admin": false,
       "reconnected": true,
       "session_id": 42,
-      "timezone": "America/Los_Angeles"
+      "timezone": "America/Los_Angeles",
+      "expires_at": 1795000000
    }
 }
 ```
+- `expires_at` — when the login ends (epoch seconds; logged in only). See How long a login lasts.
 - `reconnected` — `true` when the connection adopted its **own** existing session via a
   valid reconnect token; `false` when it landed on a **fresh** session (server restart,
   idle-expiry, or a reconnect that was evicted onto a new session). Clients use it to
@@ -2489,6 +2508,13 @@ Session token and auth state (sent on connect/reconnect).
   server's (`[localization] timezone`, else the system's). The server reads and speaks times in it; show times in
   it too (format with this `timeZone`, not the browser's), so the user sees what Friday says.
   Authenticated frame only; older servers omit it (use the browser's zone).
+
+#### `login_expiry`
+Sent to a connection when its user's action moved the login's expiry on (at most once a day), so a
+client warning of the end sees the new time without waiting for a `pong`.
+```json
+{"type": "login_expiry", "payload": {"expires_at": 1795000000}}
+```
 
 #### `timezone_changed`
 Sent after every My Settings save to each browser connection of that user, so it may repeat the

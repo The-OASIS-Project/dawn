@@ -55,6 +55,10 @@
 #include "memory/memory_stem.h"
 #include "utils/string_utils.h"
 
+/* How long a login lasted when v10 gave existing rows an expiry (24 hours);
+ * fixed here because the migration must keep doing what it did then */
+#define V10_SESSION_LIFETIME_SEC (24 * 60 * 60)
+
 /* Apply the per-version migration ladder on top of SCHEMA_SQL.  Bumps
  * schema_version to AUTH_DB_SCHEMA_VERSION only when every gating step
  * succeeded; otherwise holds the version for retry on next boot.  Called by
@@ -198,11 +202,12 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
          sqlite3_free(errmsg);
          errmsg = NULL;
       } else {
-         /* Set default expires_at for existing sessions (last_activity + 24h) */
+         /* Set default expires_at for existing sessions (last_activity + the
+          * 24 hours a login lasted then) */
          char update_sql[128];
          snprintf(update_sql, sizeof(update_sql),
                   "UPDATE sessions SET expires_at = last_activity + %d WHERE expires_at IS NULL",
-                  AUTH_SESSION_TIMEOUT_SEC);
+                  V10_SESSION_LIFETIME_SEC);
          rc = sqlite3_exec(s_db.db, update_sql, NULL, NULL, &errmsg);
          if (rc != SQLITE_OK) {
             OLOG_WARNING("auth_db: v10 migration (set defaults): %s", errmsg ? errmsg : "ok");

@@ -86,8 +86,7 @@ static void extract_session_summary(sqlite3_stmt *stmt, auth_session_summary_t *
 int auth_db_create_session(int user_id,
                            const char *token,
                            const char *ip_address,
-                           const char *user_agent,
-                           bool remember_me) {
+                           const char *user_agent) {
    if (!token) {
       return AUTH_DB_INVALID;
    }
@@ -95,8 +94,7 @@ int auth_db_create_session(int user_id,
    AUTH_DB_LOCK_OR_FAIL();
 
    time_t now = time(NULL);
-   time_t expires_at = now +
-                       (remember_me ? AUTH_REMEMBER_ME_TIMEOUT_SEC : AUTH_SESSION_TIMEOUT_SEC);
+   time_t expires_at = now + AUTH_SESSION_IDLE_SEC;
 
    sqlite3_reset(s_db.stmt_create_session);
    sqlite3_bind_text(s_db.stmt_create_session, 1, token, -1, SQLITE_STATIC);
@@ -220,11 +218,24 @@ int auth_db_renew_session(const char *token, time_t new_expires_at) {
    sqlite3_bind_int64(s_db.stmt_renew_session, 4, (int64_t)time(NULL));
 
    int rc = sqlite3_step(s_db.stmt_renew_session);
+   int changed = sqlite3_changes(s_db.db);
    sqlite3_reset(s_db.stmt_renew_session);
 
    AUTH_DB_UNLOCK();
 
-   return (rc == SQLITE_DONE) ? AUTH_DB_SUCCESS : AUTH_DB_FAILURE;
+   if (rc != SQLITE_DONE) {
+      return AUTH_DB_FAILURE;
+   }
+   return changed > 0 ? AUTH_DB_SUCCESS : AUTH_DB_NOT_FOUND;
+}
+
+time_t auth_session_renewed_expiry(time_t created_at, time_t expires_at, time_t now) {
+   time_t target = now + AUTH_SESSION_IDLE_SEC;
+   time_t cap = created_at + AUTH_SESSION_ABSOLUTE_CAP_SEC;
+   if (target > cap) {
+      target = cap;
+   }
+   return target - expires_at >= AUTH_SESSION_RENEW_STEP_SEC ? target : 0;
 }
 
 int auth_db_set_session_keepalive(const char *token, bool enabled) {

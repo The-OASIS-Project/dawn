@@ -587,17 +587,20 @@ void send_session_token_impl(ws_connection_t *conn, const char *token) {
       /* Fetch is_admin from DB (not cached to prevent stale state) */
       auth_session_t auth_session;
       bool is_admin = false;
+      long long expires_at = 0;
       if (auth_db_get_session(conn->auth_session_token, &auth_session) == AUTH_DB_SUCCESS) {
          is_admin = auth_session.is_admin;
+         expires_at = (long long)auth_session.expires_at;
       }
       /* The zone the client shows this user's times in, as Friday says them:
        * their own setting, else the server's.  Zone names are [A-Za-z0-9_+-/]. */
       snprintf(json, sizeof(json),
                "{\"type\":\"session\",\"payload\":{\"token\":\"%s\","
                "\"authenticated\":true,\"username\":\"%s\",\"is_admin\":%s,"
-               "\"reconnected\":%s,\"session_id\":%u,\"timezone\":\"%s\"}}",
+               "\"reconnected\":%s,\"session_id\":%u,\"timezone\":\"%s\","
+               "\"expires_at\":%lld}}",
                token, conn->username, is_admin ? "true" : "false", reconnected, session_id,
-               tz_name(user_tz(conn->auth_user_id)));
+               tz_name(user_tz(conn->auth_user_id)), expires_at);
    } else {
       /* Unauthenticated clients don't drive reconnect/load_conversation logic (it's
        * auth-gated), so omit reconnected/session_id here — no reason to hand the

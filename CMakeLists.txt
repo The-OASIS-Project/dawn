@@ -805,6 +805,7 @@ if(ENABLE_WEBUI)
         src/webui/webui_login_sweep.c
         src/webui/webui_origin.c
         src/webui/webui_protocol.c
+        src/webui/webui_user_action.c
         src/webui/webui_login_cookie.c
         src/webui/webui_settings.c
         src/webui/webui_tools.c

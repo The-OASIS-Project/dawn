@@ -1969,6 +1969,8 @@ void handle_binary_message(ws_connection_t *conn, const uint8_t *data, size_t le
                send_error_impl(conn->wsi, "PROCESSING_ERROR", "Audio processing failed");
             }
             audio_turn_free(work); /* frees work + audio_data AND releases the session retain */
+         } else {
+            conn_login_used(conn); /* push-to-talk: always-on returned above */
          }
          break;
       }

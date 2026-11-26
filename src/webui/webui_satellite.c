@@ -935,7 +935,8 @@ void handle_satellite_query(ws_connection_t *conn, struct json_object *payload) 
  */
 void webui_send_pong(ws_connection_t *conn,
                      const char *pong_type,
-                     struct json_object *req_payload) {
+                     struct json_object *req_payload,
+                     time_t expires_at) {
    if (!conn || !pong_type) {
       return;
    }
@@ -955,6 +956,9 @@ void webui_send_pong(ws_connection_t *conn,
    json_object_object_add(out, "server_time_ms",
                           json_object_new_int64((int64_t)now.tv_sec * 1000 +
                                                 now.tv_nsec / 1000000));
+   if (expires_at > 0) {
+      json_object_object_add(out, "expires_at", json_object_new_int64((int64_t)expires_at));
+   }
    json_object_object_add(response, "payload", out);
 
    /* Deliver the pong DIRECTLY to this connection's socket — NOT via
@@ -982,7 +986,7 @@ void webui_send_pong(ws_connection_t *conn,
 void handle_satellite_ping(ws_connection_t *conn) {
    /* Gate already applied at dispatch (conn->is_satellite).  Satellites send no
     * seq today; the uniform pong shape stays forward-compatible if they add one. */
-   webui_send_pong(conn, "satellite_pong", NULL);
+   webui_send_pong(conn, "satellite_pong", NULL, 0);
 }
 
 /* =============================================================================

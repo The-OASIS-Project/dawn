@@ -146,6 +146,10 @@ typedef struct {
    int auth_user_id;
    char auth_session_token[AUTH_TOKEN_LEN]; /* For DB re-validation */
    char username[AUTH_USERNAME_MAX];
+   /* The login's created_at and expires_at as last read or written, for
+    * conn_login_used (lws thread only); expires_at 0 = don't move it */
+   time_t login_created_at;
+   time_t login_expires_at;
    /* Session-keepalive (always-on): connection-time intent hint only, stored for
     * diagnostics. It is deliberately NOT READ by any renewal/authorization logic
     * (renewal reads the DB keepalive_enabled flag, set by the authenticated
@@ -804,6 +808,18 @@ bool conn_require_auth(ws_connection_t *conn);
  * @return true if authenticated with valid session, false otherwise (error sent)
  */
 bool conn_require_auth_ex(ws_connection_t *conn, auth_session_t *session_out);
+
+/**
+ * @brief The user did something on @p conn: move its login's expiry on
+ *
+ * Call for messages the user's own action sent, never for the client's
+ * heartbeat, reconnect or automatic refreshes (those would keep an unattended
+ * tab signed in).  Writes at most once a day per login, and sends the
+ * connection the new expiry (login_expiry) when it does; lws thread only.
+ *
+ * @param conn WebSocket connection (unauthenticated: nothing happens)
+ */
+void conn_login_used(ws_connection_t *conn);
 
 /**
  * @brief Check if WebSocket connection has admin privileges

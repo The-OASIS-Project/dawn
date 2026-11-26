@@ -111,15 +111,17 @@ static const auth_db_stmt_def_t s_stmts[] = {
      "FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.token = ?",
      &s_db.stmt_get_session },
 
-   /* Slide expires_at forward for a session-keepalive (always-on) session.
+   /* Slide expires_at forward on use, or on an always-on session's heartbeat (never back).
     * `MIN(?new_expires, created_at + ?cap)` clamps to the 30-day absolute lifetime
     * cap INSIDE the primitive (defense-in-depth: a future second caller can't write
-    * an unbounded expiry even if it forgets to clamp). The WHERE guard
+    * an unbounded expiry even if it forgets to clamp). `MAX(expires_at, ...)` keeps
+    * a later expiry already written (another tab's use, or a login from before
+    * the 7-day rule) rather than pulling it in. The WHERE guard
     * (expires_at IS NOT NULL AND expires_at >= ?now) prevents renewing an
     * already-expired or revoked-by-time row. Binds: 1=new_expires, 2=cap_seconds,
     * 3=token, 4=now. */
    { "renew_session",
-     "UPDATE sessions SET expires_at = MIN(?, created_at + ?) "
+     "UPDATE sessions SET expires_at = MAX(expires_at, MIN(?, created_at + ?)) "
      "WHERE token = ? AND expires_at IS NOT NULL AND expires_at >= ?",
      &s_db.stmt_renew_session },
    { "set_session_keepalive", "UPDATE sessions SET keepalive_enabled = ? WHERE token = ?",

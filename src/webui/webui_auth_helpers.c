@@ -27,6 +27,7 @@
 #include "auth/auth_db.h"
 #include "logging.h"
 #include "webui/webui_internal.h"
+#include "webui/webui_send.h"
 #include "webui/webui_server.h"
 
 /* =============================================================================
@@ -89,6 +90,30 @@ bool conn_require_auth_ex(ws_connection_t *conn, auth_session_t *session_out) {
       *session_out = session;
    }
    return true;
+}
+
+void conn_login_used(ws_connection_t *conn) {
+   if (!conn->authenticated || conn->login_expires_at <= 0) {
+      return;
+   }
+   time_t renewed = auth_session_renewed_expiry(conn->login_created_at, conn->login_expires_at,
+                                                time(NULL));
+   if (!renewed) {
+      return;
+   }
+   int rc = auth_db_renew_session(conn->auth_session_token, renewed);
+   if (rc == AUTH_DB_SUCCESS) {
+      conn->login_expires_at = renewed;
+      /* Told now: while music plays the client skips its pings, so a pong
+       * could be a while coming, and an earlier warning would stand */
+      char json[96];
+      snprintf(json, sizeof(json), "{\"type\":\"login_expiry\",\"payload\":{\"expires_at\":%lld}}",
+               (long long)renewed);
+      send_json_message(conn->wsi, json);
+   } else if (rc == AUTH_DB_NOT_FOUND) {
+      conn->login_expires_at = 0; /* ended: the next auth check says so */
+   }
+   /* AUTH_DB_FAILURE (busy): tried again on the next use */
 }
 
 bool conn_require_auth(ws_connection_t *conn) {

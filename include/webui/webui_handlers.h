@@ -832,8 +832,12 @@ void handle_satellite_ping(ws_connection_t *conn);
  * @param conn        Connection to reply on
  * @param pong_type   Response "type" string ("pong" or "satellite_pong")
  * @param req_payload Inbound message "payload" object, or NULL
+ * @param expires_at  The login's expiry, sent as expires_at; 0 omits it
  */
-void webui_send_pong(ws_connection_t *conn, const char *pong_type, struct json_object *req_payload);
+void webui_send_pong(ws_connection_t *conn,
+                     const char *pong_type,
+                     struct json_object *req_payload,
+                     time_t expires_at);
 
 /**
  * @brief Handle volume_state message from satellite

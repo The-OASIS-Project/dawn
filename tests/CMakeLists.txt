@@ -2393,6 +2393,13 @@ dawn_add_unit_test(test_webui_protocol
    LIBS    dawn_common unity ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# What counts as use of a login: user actions, not automatic client messages.
+dawn_add_unit_test(test_webui_user_action
+   SOURCES test_webui_user_action.c
+           ${SRC_ROOT}/src/webui/webui_user_action.c
+   LIBS    unity
+   LABEL   ci)
+
 # Stored tool results: who may read one, binding, cascades (real auth_db).
 dawn_add_unit_test(test_tool_result_store
    SOURCES test_tool_result_store.c
