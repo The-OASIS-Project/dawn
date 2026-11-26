@@ -881,6 +881,12 @@ static void dispatch_message(ws_connection_t *conn, const char *type, struct jso
                   OLOG_INFO("WebUI: Token %.4s... not found, creating new session", token);
                   if (!conn->session) {
                      conn->session = session_create(SESSION_TYPE_WEBUI, -1);
+                     if (!conn->session) {
+                        /* Every slot in use by a client: say so, as a first
+                         * message that isn't a reconnect is told. */
+                        send_error_impl(conn->wsi, "SESSION_LIMIT", "Maximum sessions reached");
+                        return;
+                     }
                      if (conn->session) {
                         webui_conn_own_session(conn, conn->session);
                         /* Set user_id for metrics and memory extraction */
