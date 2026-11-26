@@ -612,6 +612,9 @@ int oauth_exchange_code(const oauth_provider_config_t *provider,
    }
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+   /* Decode a compressed reply: Schwab gzips its token endpoint's errors
+    * unasked, and an undecoded body can't be read for the reason. */
+   curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
    curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)OAUTH_CURL_TIMEOUT);
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
@@ -852,6 +855,9 @@ int oauth_refresh(const oauth_provider_config_t *provider, oauth_token_set_t *to
    }
    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_buffer_write_callback);
    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+   /* Decode a compressed reply: Schwab gzips its token endpoint's errors
+    * unasked, and an undecoded body can't be read for the reason. */
+   curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
    curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)OAUTH_CURL_TIMEOUT);
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
