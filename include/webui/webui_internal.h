@@ -814,7 +814,8 @@ bool conn_require_auth_ex(ws_connection_t *conn, auth_session_t *session_out);
  *
  * Call for messages the user's own action sent, never for the client's
  * heartbeat, reconnect or automatic refreshes (those would keep an unattended
- * tab signed in).  Writes at most once a day per login; lws thread only.
+ * tab signed in).  Writes at most once a day per login, and sends the
+ * connection the new expiry (login_expiry) when it does; lws thread only.
  *
  * @param conn WebSocket connection (unauthenticated: nothing happens)
  */

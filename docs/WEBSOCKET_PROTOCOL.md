@@ -42,7 +42,8 @@ WebUI browser clients, and DAP2 satellite devices. All connections use the
   don't count, so an unattended tab still ends. An "always on" login
   (`session_keepalive_enable`) is moved on by its `ping` instead. "Remember me" only
   keeps the cookie past the browser closing. The expiry, `expires_at` (epoch seconds),
-  is on the `session` frame, every `pong` and `GET /api/auth/status` when logged in;
+  is on the `session` frame, every `pong`, `GET /api/auth/status` when logged in, and a
+  `login_expiry` frame each time use moves it;
   use moves it at most once a day, so a client warning shortly before it ends sees the
   real time.
 - **Logging out**: `POST /api/auth/logout` (with `?app=<app>` for another front-end;
@@ -107,7 +108,7 @@ When to add what:
 
 | Flag | Since | Meaning |
 |------|-------|---------|
-| `login_expiry` | 2026-11-25 | A login ends about a week (6 to 7 days) after its last use (a message the user's own action sent; heartbeats, reconnects and automatic requests don't count), never more than 30 days after sign-in; `expires_at` (epoch seconds) is on the `session` frame, every `pong` and `GET /api/auth/status`. See How long a login lasts. |
+| `login_expiry` | 2026-11-25 | A login ends about a week (6 to 7 days) after its last use (a message the user's own action sent; heartbeats, reconnects and automatic requests don't count), never more than 30 days after sign-in; `expires_at` (epoch seconds) is on the `session` frame, every `pong`, `GET /api/auth/status` and a `login_expiry` frame when use moves it. See How long a login lasts. |
 | `stopped_replies_saved` | 2026-11-18 | A reply the user stops (`cancel`, or `stop_other_reply` from another of their clients when the stopped turn is a WebUI client's) while it streams is saved as far as it had streamed: its `stream_end` has `reason` `"stopped"`, with `will_persist: true` when the row is saved (nothing is saved when nothing of the reply was left), and the row comes back with `stopped: true` on `message_appended`, `load_conversation_response` rows, `get_memory_fact_source_response` messages and exports. Show the saved text (it can differ from what was drawn: tags removed) and mark it stopped. Only the user's Stop does this; any other end of a turn is as before. Without it, a Stop mid-stream ends with `reason` `"error"` and saves nothing. |
 | `memory_batches` | 2026-11-03 | The daemon records what memory learned per batch and answers `list_memory_batches`, `undo_memory_batch` and `keep_memory_op`, and pushes `memory_batch` (see Memory Management, Consolidation). Advertised while memory is enabled; a build without the WebUI never advertises it. Without it, offer no marker, Learned tab or undo. |
 | `email_refs` | 2026-10-09 | A `text` frame may carry `email_refs`: one email the user attached, by account and message id. The model reads it with the email tool, and the question row comes back with `email_ref` on every frame that delivers it (see Email, Email in chat). Advertised with `email_client`. Without it, send no `email_refs` (an older daemon ignores them, and the model never sees the email). |
@@ -788,8 +789,8 @@ Requires an authenticated session. No response frame; takes effect on the next h
 The enable/disable events are audit-logged (`SESSION_KEEPALIVE_ENABLE`/`_DISABLE`).
 
 #### `session_keepalive_disable`
-Turn keepalive back off for this session; its expiry reverts to the normal fixed lifetime and is no
-longer slid forward.
+Turn keepalive back off for this session: it then ends a week after its last use, like any other
+login (see How long a login lasts), and the heartbeat no longer moves it.
 ```json
 {"type": "session_keepalive_disable"}
 ```
@@ -2507,6 +2508,13 @@ Session token and auth state (sent on connect/reconnect).
   server's (`[localization] timezone`, else the system's). The server reads and speaks times in it; show times in
   it too (format with this `timeZone`, not the browser's), so the user sees what Friday says.
   Authenticated frame only; older servers omit it (use the browser's zone).
+
+#### `login_expiry`
+Sent to a connection when its user's action moved the login's expiry on (at most once a day), so a
+client warning of the end sees the new time without waiting for a `pong`.
+```json
+{"type": "login_expiry", "payload": {"expires_at": 1795000000}}
+```
 
 #### `timezone_changed`
 Sent after every My Settings save to each browser connection of that user, so it may repeat the

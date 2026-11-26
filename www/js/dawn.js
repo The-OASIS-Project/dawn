@@ -78,6 +78,11 @@
          console.log('Received:', msg);
 
          switch (msg.type) {
+            case 'login_expiry':
+               if (window.DawnLoginExpiry && msg.payload) {
+                  DawnLoginExpiry.note(msg.payload.expires_at);
+               }
+               break;
             case 'pong':
                // Liveness heartbeat reply — route to the watchdog (seq-matched).
                if (DawnWS.handlePong) DawnWS.handlePong(msg.payload && msg.payload.seq);

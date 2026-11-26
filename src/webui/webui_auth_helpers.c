@@ -27,6 +27,7 @@
 #include "auth/auth_db.h"
 #include "logging.h"
 #include "webui/webui_internal.h"
+#include "webui/webui_send.h"
 #include "webui/webui_server.h"
 
 /* =============================================================================
@@ -103,6 +104,12 @@ void conn_login_used(ws_connection_t *conn) {
    int rc = auth_db_renew_session(conn->auth_session_token, renewed);
    if (rc == AUTH_DB_SUCCESS) {
       conn->login_expires_at = renewed;
+      /* Told now: while music plays the client skips its pings, so a pong
+       * could be a while coming, and an earlier warning would stand */
+      char json[96];
+      snprintf(json, sizeof(json), "{\"type\":\"login_expiry\",\"payload\":{\"expires_at\":%lld}}",
+               (long long)renewed);
+      send_json_message(conn->wsi, json);
    } else if (rc == AUTH_DB_NOT_FOUND) {
       conn->login_expires_at = 0; /* ended: the next auth check says so */
    }
