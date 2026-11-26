@@ -133,7 +133,8 @@ connection (and warns on a protocol it doesn't speak); nothing is enforced on it
 ### WebUI Client Flow
 
 1. HTTP login → cookie set → WebSocket connect
-2. First message must be `reconnect` (with token) or any message (new session created)
+2. First message must be `reconnect` (with token) or any message (new session created).
+   A connection with no login gets `UNAUTHORIZED` for it and is closed
 3. Server responds with `session` + `config` + `state` messages
 4. Client is ready for interaction
 
@@ -272,7 +273,8 @@ Reconnect to an existing session using a stored token.
 }
 ```
 - If token is valid, session is restored with conversation history
-- If token is invalid/expired, a new session is created
+- If token is invalid/expired, a new session is created. A session no client is attached to
+  may also be ended early, when every session slot is in use and another client needs one
 - `audio_codecs` is optional, used to detect Opus support
 - `tts_enabled` (optional, default false): server synthesizes and streams TTS audio to this connection
 - `tool_step_origin` (optional, default false): a **client capability** — set it if this client
@@ -2498,7 +2500,8 @@ Session token and auth state (sent on connect/reconnect).
 - `expires_at` — when the login ends (epoch seconds; logged in only). See How long a login lasts.
 - `reconnected` — `true` when the connection adopted its **own** existing session via a
   valid reconnect token; `false` when it landed on a **fresh** session (server restart,
-  idle-expiry, or a reconnect that was evicted onto a new session). Clients use it to
+  idle-expiry, a session ended to make room for another client, or a reconnect that was
+  evicted onto a new session). Clients use it to
   decide recovery: `reconnected:false` → issue `load_conversation` to rebuild LLM
   context; `true` → the lightweight `set_active_conversation` re-anchor suffices.
   Feature-detect it (older servers omit it → treat as "load").
