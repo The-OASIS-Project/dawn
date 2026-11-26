@@ -80,6 +80,7 @@ static const char *const s_user_action_types[] = {
    "doc_library_note_update",
    "doc_library_toggle_global",
    "doc_library_version_restore",
+   "set_document_own",
 };
 
 bool webui_is_user_action(const char *type) {

@@ -44,7 +44,8 @@ static void test_user_actions_count(void) {
                           "job_action",
                           "coding_reply",
                           "watch_add",
-                          "watch_remove" };
+                          "watch_remove",
+                          "set_document_own" };
    for (size_t i = 0; i < sizeof(used) / sizeof(used[0]); i++) {
       TEST_ASSERT_TRUE_MESSAGE(webui_is_user_action(used[i]), used[i]);
    }
