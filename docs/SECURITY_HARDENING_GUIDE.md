@@ -68,9 +68,9 @@ chmod 600 secrets.toml
 
 This file contains API keys and the satellite registration key. It should be readable only by the user running DAWN.
 
-### 5. Enable MQTT TLS (If Using Smart Home)
+### 5. Secure MQTT (If Using Smart Home)
 
-If DAWN controls smart home devices via MQTT, encrypt that traffic:
+Anything that can publish on the broker can make DAWN act as the local user. So broker authentication (username/password, with ACLs) is required whenever the broker is reachable by anything other than the DAWN daemon itself, and TLS is required when that traffic crosses a network. Put the credentials in `secrets.toml` (`[secrets]` `mqtt_username` / `mqtt_password`) and turn on TLS in `dawn.toml`:
 
 ```toml
 [mqtt]
@@ -79,7 +79,7 @@ tls = true
 tls_ca_cert = "ssl/ca.crt"
 ```
 
-See [GETTING_STARTED.md — MQTT TLS](../GETTING_STARTED.md#mqtt-tls-encrypted-smart-home-commands) for full setup.
+DAWN logs a warning at startup when TLS is off and the broker isn't localhost. See [GETTING_STARTED.md — MQTT Security](../GETTING_STARTED.md#mqtt-security-authentication--tls) for full setup.
 
 ### 6. Review Network Exposure
 
@@ -124,7 +124,7 @@ The pentest suite (`tests/test_pentest.sh`) confirms that DAWN handles known att
 |---------|---------|
 | **No DDoS mitigation** | A single Jetson can be trivially overwhelmed by connection flooding. Application-level rate limiting only protects against login brute-force. |
 | **No OS-level blocking** | No fail2ban or firewall integration. A distributed botnet bypasses per-IP rate limits. |
-| **Memory safety** | C codebase with no fuzzing of input parsers (JSON, WebSocket frames, audio streams, document upload). Memory corruption bugs = remote code execution. |
+| **Memory safety** | C codebase. libFuzzer covers some parsers of outsiders' bytes (email, HTML, CalDAV, iCalendar; see [TESTING.md](TESTING.md#fuzzing)), not JSON, WebSocket frames, audio streams or document upload. Memory corruption bugs = remote code execution. |
 | **Week-long idle sessions** | A login lasts up to 7 days without use (30 days at most). Long-lived session tokens increase the window for theft if TLS is somehow bypassed. |
 | **No real-time alerting** | Security events go to log files only. No notification if someone is actively attacking. |
 
@@ -168,7 +168,7 @@ Even with all of the above, a custom C application serving directly to the inter
 |---------|---------|----------|
 | **Password hashing** | Argon2id via libsodium (16MB/3 iters on Jetson, 8MB/4 iters on RPi) | `src/auth/auth_crypto.c` |
 | **Hash concurrency limit** | Max 3 concurrent Argon2id operations, 5s timeout returns `AUTH_CRYPTO_BUSY` | `src/auth/auth_crypto.c` |
-| **Session tokens** | 256-bit random via `getrandom()`, ends after 7 days without use, 30 days at most | `src/auth/auth_db_session.c` |
+| **Session tokens** | 256-bit random via libsodium `randombytes_buf()`, ends after 7 days without use, 30 days at most | `src/auth/auth_crypto.c` (generated), `src/auth/auth_db_session.c` (stored) |
 | **CSRF protection** | HMAC-signed single-use tokens, 10-minute validity, nonce replay detection | `src/webui/webui_http.c` |
 | **Rate limiting** | 20 attempts/15min on login, IPv6 /64 prefix normalization | `src/core/rate_limiter.c` |
 | **Account lockout** | 5 failed attempts → 15-minute lock | `src/webui/webui_http.c` |
@@ -205,13 +205,14 @@ All authentication and security events via `auth_db_audit.c`:
 | Event Type | Details Captured |
 |-----------|-----------------|
 | `LOGIN_SUCCESS` | Username, IP address |
-| `LOGIN_FAILED` | Username, IP address, reason |
-| `LOGOUT` | Username, IP address |
+| Failed login (a `login_attempts` row, `auth_db_log_attempt()`, not an event) | Username, IP address |
+| `logout` | Username, IP address |
 | `ACCOUNT_LOCKED` | Username, IP address, failed attempt count |
-| `CSRF_FAILED` | IP address, reason (expired, replayed, invalid) |
+| `CSRF_FAILED` | IP address (invalid or expired token) |
+| `CSRF_REPLAY` | IP address (a token used twice) |
 | `RATE_LIMITED` | IP address, endpoint |
-| `SESSION_CREATED` | Username, IP address, token prefix |
-| `SESSION_EXPIRED` | Username, token prefix |
+| `SESSION_REVOKED` | Username or token prefix |
+| `SESSION_KEEPALIVE_ENABLE` / `_DISABLE` | Username, IP address |
 | `PASSWORD_CHANGED` | Username, changed by (self or admin) |
 | `USER_CREATED` | Username, created by |
 | `USER_DELETED` | Username, deleted by |
@@ -220,7 +221,7 @@ All authentication and security events via `auth_db_audit.c`:
 
 | Event | Location | Log Level |
 |-------|----------|-----------|
-| Tool execution (name, arguments, result summary) | `llm_tools.c` via `notify_tool_execution()` | INFO |
+| Tool execution (name, device, action, value) | `llm_tools.c` (`llm_tools_execute_from_treg()`) | INFO |
 | LLM API calls (provider, model, token usage) | `llm_interface.c` | INFO |
 | Satellite connect/disconnect | `webui_satellite.c` | INFO |
 | ASR transcriptions | `dawn.c` | INFO |
@@ -260,7 +261,7 @@ git clone --depth 1 https://github.com/drwetter/testssl.sh.git
 - [ ] No known vulnerabilities (BEAST, POODLE, Heartbleed, ROBOT, etc.)
 - [ ] Certificate chain valid and complete
 - [ ] Strong cipher suites (no RC4, DES, 3DES, NULL, EXPORT)
-- [ ] HSTS header present (once implemented)
+- [ ] HSTS header present
 
 ### Web Application Scanning
 
@@ -353,7 +354,7 @@ These headers should be present on all HTTP responses. Check with browser dev to
 
 | Header | Expected Value | Status |
 |--------|---------------|--------|
-| `Content-Security-Policy` | `default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws:; img-src 'self' data: blob:; manifest-src 'self'; worker-src 'self' blob:` | |
+| `Content-Security-Policy` | `default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws:; img-src 'self' data: blob:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self' blob:; form-action 'self'` | |
 | `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` (HTTPS only) | |
 | `X-Frame-Options` | `DENY` | |
 | `X-Content-Type-Options` | `nosniff` | |

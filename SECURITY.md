@@ -18,7 +18,7 @@ not be.
 
 ## Supported versions
 
-DAWN doesn't publish versioned releases yet; fixes land on `main`. Run a current
+DAWN publishes tagged releases on GitHub, and fixes land on `main`. Run a current
 `main` and update when an advisory is published.
 
 ## Scope

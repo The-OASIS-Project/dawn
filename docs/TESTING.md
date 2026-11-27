@@ -27,10 +27,10 @@ and complexity, and the test counts.
 | Layer | What | Runs |
 |---|---|---|
 | Unit tests | one standalone program per suite (Unity) | every commit (hook) and every push (CI) |
-| Invariant checks | 9 build-time rules + 2 source checks | every build, every push |
+| Invariant checks | 11 build-time rules + 2 source checks | every build, every push |
 | Sanitizers | the unit tests under ASan + UBSan, and under TSan | every push |
 | Static analysis | clang-tidy (bugprone, cert, the clang static analyzer), CodeQL, `-Wall -Werror` at `-O2` | every push and pull request; CodeQL weekly too |
-| Fuzzing | 5 libFuzzer harnesses over parsers that read outsiders' bytes | every push |
+| Fuzzing | 7 libFuzzer harnesses over parsers that read outsiders' bytes | every push |
 | Integration scripts | a running daemon: security, admin CLI, satellite protocol | by the developer, before a release |
 | Benchmarks | memory retrieval, LLM quality and latency, ASR | by the developer |
 
@@ -53,7 +53,7 @@ libgit2 1.6 or later, which Ubuntu 22.04 doesn't package.
 ## Build-time invariant checks
 
 Some rules can't be expressed in C types, so scripts in `scripts/` enforce them. Each is a CMake target
-the daemon depends on, so every build runs them and fails if one breaks. The nine rules are listed in
+the daemon depends on, so every build runs them and fails if one breaks. The eleven rules are listed in
 [ARCHITECTURE.md](../ARCHITECTURE.md#build-time-invariant-checks); among them, every WebSocket frame goes
 through one send queue, every messaging send through one formatting funnel, and stored LLM turn blocks are
 read only to rebuild a request.
@@ -101,6 +101,8 @@ bytes an outsider controls. Each is built with ASan and UBSan.
 | `neutralize` | text DAWN shows the model but didn't write (`llm_context_neutralize`) | tool results, web pages, messages |
 | `tts_text` | a reply before it's spoken (number, date, currency, URL and Markdown handling) | whatever the model repeats |
 | `caldav` | a calendar-query REPORT (XML with iCalendar inside) and a sync-collection page | the calendar server |
+| `calendar_ical` | an event's iCalendar text, read and edited in place | the calendar server |
+| `calendar_rrule` | a recurrence rule, expanded (all-day or zoned) | the calendar server |
 
 Each starts from tracked seeds in `tests/fuzz/corpus_<harness>/`, with a token dictionary for CalDAV.
 CI runs each for 60 seconds on every push; a crash, leak, timeout or sanitizer report fails the job and
@@ -137,8 +139,8 @@ Benchmarks measure quality, not correctness, and are run by hand.
 - **Memory retrieval** (`benchmarks/`): LongMemEval, LoCoMo and ConvoMem. Several metrics are reported and
   only one is comparable to published systems; [benchmarks/README.md](../benchmarks/README.md) explains
   which, and a run labels itself `LEADER-COMPARABLE: YES|NO`.
-- **LLM quality and latency** (`llm_testing/`): local and cloud models on DAWN's prompts and tools
-  (`test_llm_quality.py`), and local inference speed (`test_llama_performance.sh`).
+- **LLM quality and latency** (`llm_testing/`): local and cloud models on DAWN's captured requests and tools
+  (the quality suite, `llm_testing/quality/`), and local inference speed (`test_llama_performance.sh`).
 - **ASR** (`test_recordings/`): word error rate and speed on recorded commands
   ([BENCHMARK_RESULTS.md](../test_recordings/BENCHMARK_RESULTS.md)).
 
@@ -179,11 +181,13 @@ On every push and pull request (`.github/workflows/ci.yml`), in parallel:
 |---|---|
 | `format-check` | clang-format and Prettier over the whole tree |
 | `source-checks` | invariants that need no build |
+| `agent-gateway-tests` | the agent gateway's Python tests (`services/agent-gateway`) |
 | `unit-tests` | the `ci` preset: build the suites, run `ctest -L ci` |
 | `sanitizers` | the same suites under `asan` and under `tsan` |
 | `clang-tidy` | the pinned clang-tidy over the DAWN sources the `ci` build (WebUI on) compiles; any finding fails |
 | `fuzz` | each libFuzzer harness for 60 seconds |
 | `docker-build` | the full image, `-Wall -Werror` at `-O2`; the daemon links and runs `--help` |
+| `deb-package` | the Ubuntu 24.04 and 26.04 `.deb` packages: built, linted, installed, started, upgraded and purged |
 | `satellite-build` | the Raspberry Pi satellite, headless |
 | `esp32-build` | the ESP32 satellite firmware |
 | `coverage` | pushes to `main` only: instrumented suites and the gcovr report |

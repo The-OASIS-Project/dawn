@@ -7,7 +7,7 @@ This guide explains how to create new tools for DAWN using the modular tool regi
 The tool registry provides:
 - **Compile-time exclusion**: Tools can be disabled via `-DDAWN_ENABLE_X_TOOL=OFF`
 - **Self-contained modules**: Each tool owns its config, parser, callback, and LLM schema
-- **Bridge mode**: New tools work alongside legacy callbacks during migration
+- **One dispatch path**: every device callback, including MQTT commands in `mosquitto_comms.c`, resolves through the registry
 - **Capability flags**: Security classifications for dangerous, network, filesystem, and secrets access
 
 ## Architecture
@@ -213,6 +213,7 @@ typedef struct {
    void *config;                                      /* Pointer to tool's config struct */
    size_t config_size;                                /* sizeof() the config struct */
    tool_config_parser_fn config_parser;               /* Parser for TOML section */
+   tool_config_writer_fn config_writer;               /* Writer for TOML section */
    const char *config_section;                        /* TOML section name */
 
    /* Secret Requirements */
@@ -229,6 +230,7 @@ typedef struct {
    /* Lifecycle */
    tool_init_fn init;                                 /* Called after config parse */
    tool_start_fn start;                               /* Called once the daemon is up */
+   tool_stop_fn stop;                                 /* Called early in shutdown */
    tool_cleanup_fn cleanup;                           /* Called at shutdown */
 
    /* Callback */
@@ -304,6 +306,7 @@ static const tool_device_map_t audio_device_map[] = {
 | `config` | No | Pointer to your static config struct (NULL if no config needed) |
 | `config_size` | No | `sizeof(your_config_struct)` - used for validation |
 | `config_parser` | No | Function to parse TOML config section (NULL if no config) |
+| `config_writer` | With `config_parser` | Writes every key the parser reads back to `dawn.toml` on a settings save; the registry refuses a tool with a section and parser but no writer |
 | `config_section` | No | TOML section name, e.g., `"weather"` for `[weather]` section |
 
 **Config parser signature:**
@@ -332,12 +335,14 @@ typedef struct {
 |-------|----------|-------------|
 | `init` | No | Called once after config parsing, with the database open. Return 0 for success, non-zero to fail. |
 | `start` | No | Called once the daemon has finished starting (LLM, TTS, MQTT, the WebUI). Start here anything that can start a turn or deliver to the user, such as a listener that answers messages. Work that needs only storage and the tool's own state may start in `init`. Not called if `init` failed. |
+| `stop` | No | Called early in shutdown; stops what `start` started. |
 | `cleanup` | No | Called once at shutdown, whether or not `start` ran. Free any resources. |
 
 **Function signatures:**
 ```c
 int my_init(void);      /* Return 0 on success */
 int my_start(void);     /* Return 0 on success */
+void my_stop(void);     /* No return value */
 void my_cleanup(void);  /* No return value */
 ```
 
@@ -458,6 +463,9 @@ Can be combined with bitwise OR (`|`):
 | `TOOL_CAP_FILESYSTEM` | 4 | Accesses filesystem | Informational |
 | `TOOL_CAP_SECRETS` | 8 | Uses secrets.toml credentials | Must declare `secret_requirements` |
 | `TOOL_CAP_ARMOR_FEATURE` | 16 | OASIS armor-specific feature | Informational |
+| `TOOL_CAP_SCHEDULABLE` | 32 | Safe for scheduled task execution | See `validate_schedulable_action` |
+| `TOOL_CAP_REQUIRES_VALUE` | 64 | Every action needs a non-empty value | Only for tools with no sensible default |
+| `TOOL_CAP_INFORMATIONAL` | 128 | Read-only output meant for the user | A scheduled task on it becomes a briefing |
 
 Example combining flags:
 ```c
@@ -566,7 +574,9 @@ int mytool_tool_register(void);
 
 #include "tools/mytool_tool.h"
 #include "tools/tool_registry.h"
+#include "config/config_env.h" /* config_write_toml_string */
 #include "logging.h"
+#include "utils/string_utils.h" /* safe_strscpy */
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -621,8 +631,7 @@ static void mytool_parse_config(toml_table_t *table, void *config) {
    /* Parse string - TOML library allocates, we must free */
    toml_datum_t endpoint = toml_string_in(table, "api_endpoint");
    if (endpoint.ok) {
-      strncpy(cfg->api_endpoint, endpoint.u.s, sizeof(cfg->api_endpoint) - 1);
-      cfg->api_endpoint[sizeof(cfg->api_endpoint) - 1] = '\0';
+      safe_strscpy(cfg->api_endpoint, endpoint.u.s); /* raw strncpy fails the build */
       free(endpoint.u.s);
    }
 
@@ -670,8 +679,8 @@ static char *mytool_callback(const char *action, char *value, int *should_respon
    *should_respond = 1;  /* Default: return result to LLM */
 
    if (s_config.verbose_logging) {
-      LOG_INFO("mytool: action='%s', value='%s'", action ? action : "(null)",
-               value ? value : "(null)");
+      OLOG_INFO("mytool: action='%s', value='%s'", action ? action : "(null)",
+                value ? value : "(null)");
    }
 
    /* Validate input */
@@ -691,7 +700,7 @@ static char *mytool_callback(const char *action, char *value, int *should_respon
 
    } else if (strcmp(action, "set") == 0) {
       /* Set action */
-      LOG_INFO("mytool: setting value to '%s'", value);
+      OLOG_INFO("mytool: setting value to '%s'", value);
       return strdup("Value set successfully.");
 
    } else if (strcmp(action, "status") == 0) {
@@ -716,8 +725,8 @@ static char *mytool_callback(const char *action, char *value, int *should_respon
  * ============================================================================= */
 
 static int mytool_init(void) {
-   LOG_INFO("mytool: initialized (endpoint=%s, timeout=%ds)",
-            s_config.api_endpoint, s_config.timeout_seconds);
+   OLOG_INFO("mytool: initialized (endpoint=%s, timeout=%ds)",
+             s_config.api_endpoint, s_config.timeout_seconds);
 
    /* Perform any one-time setup here */
    /* Return non-zero to indicate failure (tool won't be available) */
@@ -725,7 +734,7 @@ static int mytool_init(void) {
 }
 
 static void mytool_cleanup(void) {
-   LOG_INFO("mytool: cleanup");
+   OLOG_INFO("mytool: cleanup");
    /* Free any resources allocated in init */
 }
 
@@ -851,7 +860,7 @@ Add registration call in `tools_register_all()`:
 ```c
 #ifdef DAWN_ENABLE_MYTOOL_TOOL
    if (mytool_tool_register() != 0) {
-      LOG_WARNING("Failed to register mytool");
+      OLOG_WARNING("Failed to register mytool");
    }
 #endif
 ```
@@ -977,15 +986,15 @@ static int constant_time_compare(const char *a, const char *b) {
 
 ## Migration Checklist
 
-When migrating an existing callback from `mosquitto_comms.c`:
+When moving an existing feature into a tool module (`mosquitto_comms.c` keeps no callbacks of its own: it looks every device up in the registry):
 
-1. [ ] Identify the callback function and its entry in `deviceCallbackArray`
+1. [ ] Identify the callback function
 2. [ ] Identify any config in `dawn_config.h` and parser in `config_parser.c`
 3. [ ] Create header file with registration function declaration
 4. [ ] Create implementation file with:
    - [ ] Config struct (copy from dawn_config.h)
    - [ ] Config parser (copy/adapt from config_parser.c)
-   - [ ] Callback function (copy from mosquitto_comms.c)
+   - [ ] Callback function (copy from its current source file)
    - [ ] Parameter definitions
    - [ ] Tool metadata
    - [ ] Registration function
@@ -1069,14 +1078,10 @@ Do NOT use this pattern for simple tools where the function calling schema is su
 
 ```
 tool_instructions/              ← Project root (alongside www/, models/)
-├── render_visual/              ← One directory per tool
-│   ├── _core.md                ← Always loaded (shared rules for all modules)
-│   ├── diagram.md              ← Module: loaded on demand
-│   └── chart.md                ← Module: loaded on demand
-└── test_greeter/               ← Test/demo tool
-    ├── _core.md
-    ├── formal.md
-    └── casual.md
+└── render_visual/              ← One directory per tool
+    ├── _core.md                ← Always loaded (shared rules for all modules)
+    ├── diagram.md              ← Module: loaded on demand
+    └── chart.md                ← Module: loaded on demand
 ```
 
 The `instruction_loader` module (`src/tools/instruction_loader.c`) provides a single generic function that any two-step tool can use:
