@@ -5,7 +5,8 @@
 the one deferred P0 surface, the **WebUI Watches panel**, is built + reviewed + live-verified
 and committed (`ee84e14`). **SAGE work is now deliberately paused at the end of P0** — the
 proactive layer is functional end-to-end (voice- and WebUI-managed watches → gate → real-time
-spoken/banner alerts → `attention_log`); **P1 onward remain PROPOSED** and resume on the trigger
+spoken/banner alerts → `attention_log`); two post-P0 evolutions have since shipped (§16
+multi-named watches, §17 network-transition watches); **P1 onward remain PROPOSED** and resume on the trigger
 in §11 (P0 has run in the field, precision reviewed). Per the design-doc commit policy this file
 is committable. Shipped commits: dawn `d495feb`/`805bc22`/`ee84e14`, mirage `4342147`, aura
 `1463ecd`. See "PRE — as-built" (§11.1) and "P0 — as-built" (§11.2) for what was actually built
@@ -73,7 +74,7 @@ subsystems that must be built on their own:
 |---|-----|----------------------|--------|
 | 1 | **Suit-state ingestion** (DAWN blind to AURA sensors; SPARK absent; MIRAGE a load-bearing serial↔MQTT router) | **Absorbed** — SAGE's PRE phase (`suit_service.c` + §9.2 transport decision). Ships standalone value before any attention logic | **SHIPPED (PRE, 2026-07-06)** |
 | 2 | **Continuous perception** (MIRAGE detection hard-disabled/deprecated; vision = snapshot-on-request only; zero home cameras) | **Bolt-on at the interface** — a future low-fps local VLM/detector loop's entire output contract is "emit `sage_event_t`s" (person entered view, vehicle approaching, text visible). The loop itself (camera pipeline, model on Orin, frame budget) is independent infrastructure with its own design pass | not designed |
-| 3 | **Durable background jobs** ("research this and get back to me"; DAWN's LLM model is interrupt+rollback, the opposite) | **Peer trunk** — its own subsystem (registry, detached workers, reconnect-replay, cancel; see `project_durable_background_jobs_idea.md`). Composes at both ends: watch-jobs terminate in SAGE events; job completions deliver through SAGE policy tiers. SAGE = when to speak; jobs = how to work unattended | concept only |
+| 3 | **Durable background jobs** ("research this and get back to me"; DAWN's LLM model is interrupt+rollback, the opposite) | **Peer trunk** — its own subsystem (registry, detached workers, reconnect-replay, cancel; see `docs/BACKGROUND_JOBS_DESIGN.md`). Composes at both ends: watch-jobs terminate in SAGE events; job completions deliver through SAGE policy tiers. SAGE = when to speak; jobs = how to work unattended | shipped (`docs/BACKGROUND_JOBS_DESIGN.md`) |
 | 4 | **Conversational fluidity** (no barge-in — DAP2 stub, AEC-blocked; no post-response hot-mic window; no speaker ID; flat TTS) | **Supplier** — voice-pipeline work SAGE consumes: INTERRUPT tier is degraded (queue-front + chime) until TTS preemption exists (§13 Q5); audience gating sharpens with speaker ID. All three wanted for the reactive experience regardless. Hot-mic window is cheap (the SMS `active_window_sec` pattern applied to voice); barge-in is the hard one | on TODO (speaker ID, barge-in §3) |
 | 5 | **Presence/room model** (which human is in which room; paused `satellite_mappings` work, 2026-04-21) | **Supplier** — SAGE created its 2nd and 3rd consumers: warmest-surface routing (§8) and privacy/audience gating (deliberately conservative until presence exists). Phone-ring routing (TODO) was the 1st. Three customers now strengthen the unpause case | paused |
 | 6 | **Attention/salience** | **This document** | designed |
@@ -399,7 +400,7 @@ NOTICE entry (CLAUDE.md §Third-party attribution).
 **Surface routing (mitigating, F8)**: warmest-surface heuristic v1 — HUD online && recent
 suit activity ⇒ HUD+voice; else most-recently-active session's surface; else DIGEST.
 Full presence-based routing depends on the paused `satellite_mappings` work
-(memory: `project_local_speaker_satellite.md`) — design accommodates it, doesn't block on it.
+— design accommodates it, doesn't block on it.
 
 **Budgets**: global/hour cap, per-category/day cap, quiet hours (INTERRUPT exempt),
 minimum spacing between voice interjections.
@@ -510,7 +511,8 @@ expiry rate, judge-invocation count.
     practice; `suit_service.c` is identical under either option, so switching later
     wastes no DAWN-side work.
 9.3 **Delivery reuse**: `session_broadcast_system_message()` (Layer 1, in
-    `session_manager`) for context fan-out; scheduler briefing infra for DIGEST;
+    `session_manager`; as built (2026-11-27) it is `session_broadcast_notice()` /
+    `session_broadcast_notice_for_user()`; attention uses the latter, for `[attention] inject_into_sessions`, default off) for context fan-out; scheduler briefing infra for DIGEST;
     `webui_broadcast_*` weak-symbol pattern for WebUI cards (consider this the 7th weak
     symbol — strengthens the case for the planned `scheduler_broadcasts_t` consolidation);
     MQTT `hud` notification path for HUD badges.
@@ -518,10 +520,9 @@ expiry rate, judge-invocation count.
     "commitment detected" source hooks `memory_extraction.c` post-extraction (new facts
     tagged as commitments/watch-items feed ingest).
 9.5 **Config**: `[attention]` section in `dawn.toml` + `SETTINGS_SCHEMA` entries in
-    `www/js/ui/settings.js`. Master default OFF.
+    `www/js/ui/settings/schema.js`. Master default OFF.
 9.6 **Schema**: `attention_log` (+ later `attention_category_stats`) via the standard
-    migration path — dependent indexes in the migration file, never the base schema
-    (invariant: `project_schema_base_vs_migration_ordering.md`).
+    migration path — dependent indexes in the migration file, never the base schema.
 9.7 **Testing**: Unity tests for gate hysteresis/backoff/TTL expiry (pure logic, very
     unit-testable), policy breakpoint detection, DB round-trip. Judge prompt gets a small
     fixture bench (feed synthetic candidates, assert score ordering) before any live use.
@@ -670,7 +671,7 @@ available immediately — STAT, ECHO, scheduler, component-status, and suit.
 
 Live-verified on the real suit (set watches by voice, spoken ATTENTION alerts fired on
 threshold crossings, silent banners for ambient watches, `list`/`ignore`/`set` all working).
-Plan: `~/.claude/plans/sparkling-purring-pony.md`. Reviewed by 6 agents across two passes
+Reviewed by 6 agents across two passes
 (architecture / embedded-efficiency / security on the core; ui-design-architect /
 reuse-pattern-reviewer on the delivery channel) — all findings applied.
 
@@ -798,6 +799,8 @@ allows — none of it is believed load-bearing:
    "to be open-sourced" — if that lands, it's the P3 training recipe off the shelf.
 7. **The perception loop and durable-jobs designs** (§1.1 gaps 2 and 3) are cross-
    referenced but undesigned — each needs its own design doc before implementation.
+   *As built (2026-11-27): durable jobs are designed and shipped (`docs/BACKGROUND_JOBS_DESIGN.md`);
+   the perception loop is still undesigned.*
 
 ## 15. OASIS Proactivity Roadmap (all six gaps, dependency-ordered)
 
@@ -816,6 +819,8 @@ interleave. Effort in agent terms per project convention.
 | A6 (P3) | Learned gate distilled from `attention_log` | ≥hundreds of outcomes; beats rules AND P2.5 |
 
 **Track B — Durable background jobs** (peer trunk; concept → needs its own design doc)
+*As built (2026-11-27): B1 and B2 shipped — `docs/BACKGROUND_JOBS_DESIGN.md` (job pool, `job` tool)
+and deep research as the first consumer (`docs/DEEP_RESEARCH_DESIGN.md`); B3 is not built.*
 B1 design pass (registry, detached worker, reconnect-replay, cancel, briefing delivery) →
 B2 v1 + first consumer (deep research) → B3 watch-condition jobs terminating in SAGE
 events (the A×B integration; requires A2+).

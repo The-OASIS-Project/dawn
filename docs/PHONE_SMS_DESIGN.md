@@ -428,7 +428,7 @@ Single tool, multiple actions — follows `email_tool.c` pattern.
 {"device":"phone","action":"sms_received","event_id":"ph-003","number":"+15555678","name":"Jane","initials":"J","preview":"Hey are you free tom...","body_length":142,"priority":"normal","ttl":15}
 ```
 
-**Rate limiting** (UX layer): Track last N outbound actions with timestamps. Defaults: max 5 SMS/minute, max 3 dial attempts/minute, max 30 SMS/day. Configurable. Refuse and log when exceeded. (ECHO has its own hard limits as defense in depth.)
+**Rate limiting** (UX layer): Track last N outbound actions with timestamps. Defaults: max 10 SMS/minute, max 3 dial attempts/minute, max 30 SMS/day. These are compiled-in defaults; the `[phone]` rate-limit keys in `dawn.toml.example` are not read yet. Refuse and log when exceeded. (ECHO has its own hard limits as defense in depth.)
 
 **Cross-topic ordering**: Must handle `call_connected` event arriving before `dial` response (different MQTT topics, no ordering guarantee).
 
@@ -525,7 +525,7 @@ wrapper), resolves a name, number or address without guessing:
 
 ### Overview
 
-A dedicated `phone_audio_bridge` thread in `phone_service.c` handles bidirectional PCM streaming between the **modem's USB audio port** (`/dev/ttyUSB4`, raw 16 kHz S16LE mono) and the active client. There is no USB sound card and no analog path — the modem PCM port is a raw byte stream DAWN reads/writes directly.
+A dedicated `phone_audio_bridge` thread in `phone_audio_bridge.c` (started and stopped by `phone_service.c`) handles bidirectional PCM streaming between the **modem's USB audio port** (`/dev/ttyUSB4`, raw 16 kHz S16LE mono) and the active client. There is no USB sound card and no analog path — the modem PCM port is a raw byte stream DAWN reads/writes directly.
 
 ### Audio Flow
 
@@ -626,12 +626,12 @@ phone_tool.c, phone_service.c, phone_db.c, config, systemd. MIRAGE LTE signal ba
 - DAWN: Iron Man ringtone (NES pulse synthesis via audio_backend), ring event forwarding to HUD, LLM context injection for all phone events, SMS delete fire-and-forget (fixes MQTT callback self-deadlock), configurable phone service user_id
 - MIRAGE: notification system (state machine, config-driven elements, base64 photo decode, fade in/out), contact photo display from MQTT
 
-### Phase 5: Audio Bridge + End-to-End — **local handset FUNCTIONAL** 2026-07-06 (pending commit)
+### Phase 5: Audio Bridge + End-to-End — **local handset FUNCTIONAL** 2026-07-06 (shipped)
 Audio bridge thread over `/dev/ttyUSB4` (raw 16 kHz S16LE USB PCM — **no crossover cable / USB sound card**; hardware path verified 2026-07-06), ECHO per-call `CPCMFRM=1`+`CPCMREG=1` + `pcm_ready` handshake.
 
 **Shipped (local helmet handset):** `src/tools/phone_audio_bridge.c` — a **single lockstep thread** (the SIM7600 USB PCM is synchronous full-duplex; two independent threads drift and the modem stops draining uplink) bridging the local mic ↔ ttyUSB4 ↔ speaker at 16 kHz mono via PulseAudio; tanh soft-limiter gains for level (modem CRXVOL/CTXVOL don't affect the USB PCM tap, so gain is digital). Live-verified two-way on a real 3rd-party call (`up_short=0` across the whole call). Started on `pcm_ready` (call-state-guarded), stopped on `call_ended`/`modem_lost`.
 
-**Remaining for full Phase 5:** (a) **audio quality** — uplink AGC/noise-gate + downlink level (uplink reads "microphone-y/inconsistent" = room mic + cellular AMR AGC/VAD); (b) **WebUI/satellite routing** — the bridge currently targets only the local handset, not the browser/DAP2 Opus paths (the `webui_broadcast_phone_call` banner can *answer* a call but there's no browser call audio yet); (c) SMS end-to-end, rate limiting, edge cases already covered by earlier phases.
+**Remaining for full Phase 5:** (a) **audio quality** — uplink AGC/noise-gate + downlink level (uplink reads "microphone-y/inconsistent" = room mic + cellular AMR AGC/VAD; *as built (2026-11-27): the WebRTC APM chain on both directions shipped, see the APM design linked at the top*); (b) **WebUI/satellite routing** — the bridge currently targets only the local handset, not the browser/DAP2 Opus paths (the `webui_broadcast_phone_call` banner can *answer* a call but there's no browser call audio yet); (c) SMS end-to-end, rate limiting, edge cases already covered by earlier phases.
 
 ### Phase 5.5: PDU Mode + Concatenated SMS ✓ (April 2026)
 
@@ -679,6 +679,8 @@ Receive and send multimedia messages (images, video, contacts). The SIM7600G-H s
 **Complexity**: High. MMS involves HTTP transactions over the modem's data connection, MIME parsing, carrier-specific MMSC configuration, and image storage lifecycle. Consider as a separate project phase after audio bridge is complete.
 
 ### Phase 7: Smart Contact Resolution (Future)
+
+*As built (2026-11-27): built as `src/tools/contact_resolve.c`, shared by phone and email; see [Who a Call or Text Goes To](#who-a-call-or-text-goes-to-contact-resolution). It differs from the plan below: no `select_contact` action (the model calls again with name plus label or the number), and a name no contact has returns the top memory facts for the model to retry with, rather than resolving relations itself. `resolve_number()` no longer exists.*
 
 Improve contact resolution to support natural language references ("my daughter", "the electrician") and multi-result disambiguation.
 
@@ -782,7 +784,7 @@ The original tech-debt gap (no way for the LLM to delete SMS/call records) is re
 - **MQTT auth mandatory**: TLS + username/password. Mosquitto ACL restricts `echo/cmd` to DAWN's identity only.
 - **AT command injection**: Phone number validation (`^[+*#0-9]{1,20}$`) at both ECHO and DAWN.
 - **SMS body Ctrl-Z injection**: ECHO strips bytes 0x00-0x1F (except newline), rejects 0x1A/0x1B. Max 800 bytes.
-- **Rate limiting (two layers)**: DAWN limits for UX (5 SMS/min, 3 calls/min). ECHO limits for abuse prevention (5 calls/hour, 20 SMS/hour).
+- **Rate limiting (two layers)**: DAWN limits for UX (10 SMS/min, 3 calls/min). ECHO limits for abuse prevention (5 calls/hour, 20 SMS/hour).
 - **Serial port security**: `flock(LOCK_EX)` for exclusive access. Validate port path matches `/dev/ttyUSB*` or `/dev/ttyACM*`.
 - **SMS content safety**: Incoming SMS body prefixed with `[Incoming SMS - external content]` for LLM.
 - **CLIP sanitization**: Strip control chars, validate format, cap lengths before use in TTS/MQTT/DB.

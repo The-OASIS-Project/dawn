@@ -1,6 +1,6 @@
 # Memory Citation — Tool-Sourced Facts (Option B)
 
-**Status:** design / unstarted. Working doc — do **not** commit until in-flight.
+**Status:** B1 (log/audit signal) shipped 2026-08-24 (`d41e4173`, audit schema v79); B2 (wire/Aurora surface, reinforcement) not built.
 **Date:** 2026-08-23 · **Rev 2** (folds in master-plan-reviewer + architecture-reviewer)
 **Related:** [MEMORY_CITATION_DESIGN.md](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/memory/MEMORY_CITATION_DESIGN.md) (Phase 1/2), `atlas/dawn/memory/`.
 

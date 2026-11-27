@@ -1,6 +1,6 @@
 # models.toml — model reference data: context windows, pricing, capabilities
 
-**Status:** context windows and capabilities shipped (Aug–Nov 2026); `[pricing]` in-flight (Nov 2026). Replaces the hard-coded per-model context tables
+**Status:** context windows, capabilities and `[pricing]` shipped (Aug–Nov 2026; prices read by `src/llm/llm_pricing.c`). Replaces the hard-coded per-model context tables
 in `src/llm/llm_context.c` with an editable data file.
 
 ## Problem
@@ -71,6 +71,13 @@ first-match-in-array C tables had.
 - There is **no** compiled per-model table any more — `models.toml` is the single
   place those numbers live, which is the whole point. The only compiled numbers
   are the per-provider catch-all defaults.
+- *As built (2026-10-07): the committed `models.toml` is also compiled into the binary
+  (`cmake/embed_text.cmake` → `models_toml_builtin.h`), and `src/llm/llm_models_toml.c`
+  reads each table from the disk copy when it has that table, else from the built-in copy.
+  So a missing file, or an older copy without a newer table, uses the built-in numbers, not
+  the provider default. `scripts/install.sh` does not copy the file (the server
+  installer, `services/dawn-server/install.sh`, does); the daemon looks in the working directory, then
+  `~/.config/dawn/`, then `/etc/dawn/`.*
 
 ### Load path
 

@@ -31,7 +31,7 @@ what it is, how to set it up, and how to use it.
    enabled = true
    source_root = "/var/lib/dawn/source"   # where imported repos are cloned
    import_user_required = "admin"          # "" = any user, "admin" = operator-only
-   allowed_host_pattern = "([a-z0-9-]+\\.)?(github\\.com|gitlab\\.com|codeberg\\.org)"
+   allowed_host_pattern = "^([a-z0-9-]+\\.)?(github\\.com|gitlab\\.com|codeberg\\.org|bitbucket\\.org)$"
    # For linked local checkouts (section 4) only:
    # allowed_local_roots = ["/home/you/code"]
    ```
@@ -88,7 +88,7 @@ Once the project is `ready`, ask Friday to make it active and ask about its code
   your reply code.
 
 ### WebUI
-Click the **Coding** icon in the header (visible to authenticated users when the
+Click the **Code Projects** icon in the header (visible to authenticated users when the
 feature is enabled). The popover has:
 - a segmented **Import URL / Link local** toggle (Link is admin-only),
 - the project list with each repo's status, tracked branch, and a `local`/`global`
@@ -156,7 +156,7 @@ things set up:
    ```
    That writes a drop-in at `/etc/systemd/system/cbm-mcp.service.d/10-local-roots.conf`
    (`ProtectHome=tmpfs` + `BindReadOnlyPaths=…` per root), runs the traverse ACLs
-   (`setfacl -u dawn:--x` on the ancestors), and reloads the service. Re-run with new
+   (`setfacl -m u:dawn:--x` on the ancestors), and reloads the service. Re-run with new
    roots to update it. Keep these in sync with `allowed_local_roots` above.
 
    *Manual fallback* (if you're not using the installer): `sudo systemctl edit cbm-mcp`,

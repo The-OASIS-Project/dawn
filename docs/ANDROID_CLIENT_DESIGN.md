@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Date | May 2026 |
-| Status | Design / Pre-implementation — **DO NOT COMMIT** until shipping |
+| Status | Design / Pre-implementation — no Android client exists yet (checked 2026-11-27) |
 | Target | Android phone (Android 8+) acting as a DAP2 satellite client |
 | MVP Tier | Tier 2 (raw PCM streaming, server does ASR/LLM/TTS) |
 | Future | Tier 1 path (on-device ASR/TTS via Sherpa-ONNX) — same app, swappable pipeline |
@@ -373,13 +373,13 @@ For verification in the next session — these are the key spots in the existing
 | What | Where |
 |---|---|
 | DAP2 wire protocol spec | `docs/WEBSOCKET_PROTOCOL.md` |
-| Binary frame types (0x01 AUDIO_IN, 0x02 AUDIO_IN_END) | `docs/WEBSOCKET_PROTOCOL.md` line 18-19 |
-| `satellite_register` message shape | `docs/WEBSOCKET_PROTOCOL.md` lines 824-849 |
-| `satellite_query` text message (Tier 1 path) | `docs/WEBSOCKET_PROTOCOL.md` lines 851-862 |
-| `satellite_ping` keep-alive | `docs/WEBSOCKET_PROTOCOL.md` lines 864-869 |
+| Binary frame types (0x01 AUDIO_IN, 0x02 AUDIO_IN_END) | `docs/WEBSOCKET_PROTOCOL.md` binary frame table (~line 74) |
+| `satellite_register` message shape | `docs/WEBSOCKET_PROTOCOL.md` § `satellite_register` |
+| `satellite_query` text message (Tier 1 path) | `docs/WEBSOCKET_PROTOCOL.md` § `satellite_query` |
+| `satellite_ping` keep-alive | `docs/WEBSOCKET_PROTOCOL.md` § `satellite_ping` |
 | Satellite subsystem overview | `docs/arch/subsystems/satellite.md` |
-| Tier 2 server-side audio handling | `src/webui/webui_audio.c:1050-1079` |
-| Tier 2 server-side TTS encoding (22050 Hz native) | `src/webui/webui_audio.c:910-919` |
+| Tier 2 server-side audio handling | `src/webui/webui_audio.c` (`DAP2_TIER_2` branches, ASR input ~line 1459) |
+| Tier 2 server-side TTS encoding (22050 Hz native) | `src/webui/webui_audio.c` (~line 969) |
 | ESP32 reference client (Arduino/C++) | `dawn_satellite_arduino/` |
 | Pi reference client (C/C++, Tier 1) | `dawn_satellite/` |
 
@@ -403,4 +403,4 @@ These are details I didn't fully chase down before context handed off:
 
 **Pre-implementation.** Architecture agreed in design session 2026-05-07/08. Next step: spin up the Gradle skeleton on the laptop and start Phase 1.
 
-This document is **not committed** to the dawn repo — it is a working design artifact. Following the project's design-doc commit policy, it can be committed when implementation matches it substantially (likely after Phase 1 ships and the Android client is in active use).
+As of 2026-11-27 no Android client has been built; this document is the design only.

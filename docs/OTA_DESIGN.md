@@ -1,6 +1,7 @@
 # Server→Satellite OTA Update System — Design
 
-**Status:** Phases 1–2 SHIPPED (server side). Branch `satellite_ota`.
+**Status:** Phases 1–4 SHIPPED (server, Tier 1 RPi apply, Tier 2 ESP32 apply) and merged to `main`;
+Phase 5 (hardening) partly shipped (`push all` canary rollout). See *Implementation status* below.
 **Date:** 2026-06-06 (design); implementation status updated 2026-06-08. Reviewed by architecture /
 embedded-efficiency / security agents (v2 folds in their criticals: sign-raw-bytes,
 verify-before-parse, offline signing, ESP32 reboot-to-clean OTA, TOCTOU, server-push spine).
@@ -163,6 +164,8 @@ triggered** (dawn-admin / WebUI) to device/tier/all; **Tier 1 = binary(+libs) on
 - `dawn-admin ota keygen` (offline) emits the device keyring header (`ota_pubkey.h`, current+next)
   + writes the private key to operator-controlled storage; `dawn-admin ota sign` produces
   manifest+sig. Private keys split-custody, off the daemon.
+  *As built (2026-11-27): keygen/sign/verify/pubkey-header live in the standalone `ota-keytool`
+  (`tools/ota_keytool.c`, `make ota-keytool`), not in `dawn-admin`.*
 
 ### 3. Server module split (engine + adapters)
 - **`src/core/ota_manifest.c`** — pure: build/verify the binary manifest (libsodium

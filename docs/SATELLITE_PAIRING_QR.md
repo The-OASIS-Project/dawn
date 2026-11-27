@@ -1,6 +1,6 @@
 # Satellite Pairing QR Protocol
 
-This document specifies the `dawn://provision` URI scheme that DAWN's admin WebUI encodes into a QR code, and what a satellite client (currently Android) must do to consume it during onboarding.
+This document specifies the `dawn://provision` URI scheme that DAWN's admin WebUI encodes into a QR code, and what a satellite client (the planned Android client, `docs/ANDROID_CLIENT_DESIGN.md`; not built yet) must do to consume it during onboarding.
 
 The QR replaces the manual transcription of two values that an operator would otherwise have to type into the phone: the WebSocket server URL and the 64-character hex registration key. Username and password are NOT in the QR — the user still authenticates after scanning.
 

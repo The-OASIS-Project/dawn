@@ -1,6 +1,7 @@
 # Calendar Pull + Push (WebSocket) — Design
 
-**Status:** in-flight (backend only; no `www/js` legacy-WebUI wiring yet — deferred by request).
+**Status:** shipped. Backend as designed here; the WebUI calendar tab (`www/js/ui/calendar.js`,
+`calendar-data.js`) was added later (2026-07-31) as a consumer of both the pull and the push.
 **Origin:** `aurora/docs/DAWN_UI_SIGNAL_MAP.md §9` item #4 (pull half; the *content push* half
 here is the signal-only refetch, **not** the SAGE proactive-notice feed, which stays deferred).
 
