@@ -7,7 +7,7 @@ Production-ready systemd service for running `dawn_satellite` on Raspberry Pi.
 ```bash
 # Build the satellite (on RPi)
 cd dawn_satellite && mkdir -p build && cd build
-cmake .. -DENABLE_VOICE=ON -DENABLE_VOSK_ASR=ON
+cmake ..   # default: VAD + Vosk ASR + Piper TTS
 make -j$(nproc)
 cd ../..
 

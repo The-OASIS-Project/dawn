@@ -14,7 +14,7 @@ dawn-admin log show
 dawn-admin log show --last 100
 
 # Filter by event type
-dawn-admin log show --type LOGIN_FAILED
+dawn-admin log show --type ACCOUNT_LOCKED
 dawn-admin log show --type RATE_LIMITED
 dawn-admin log show --type PASSWORD_CHANGED
 
@@ -22,10 +22,10 @@ dawn-admin log show --type PASSWORD_CHANGED
 dawn-admin log show --user jon
 
 # Combine filters
-dawn-admin log show --last 200 --type LOGIN_FAILED --user guest
+dawn-admin log show --last 200 --type ACCOUNT_LOCKED --user guest
 ```
 
-**Event types logged**: `LOGIN_SUCCESS`, `LOGIN_FAILED`, `ADMIN_AUTH_FAILED`, `USER_CREATED`, `USER_DELETED`, `PASSWORD_CHANGED`, `USER_UNLOCKED`, `SESSION_REVOKED`, `USER_SESSIONS_REVOKED`, `SETTINGS_UPDATED`, `PERMISSION_DENIED`, `RATE_LIMITED`, `CSRF_FAILED`, `IP_UNBLOCKED`, `DB_COMPACT`, `DB_BACKUP`, `CONVERSATION_DELETED`
+**Event types logged**: `LOGIN_SUCCESS`, `ACCOUNT_LOCKED`, `ADMIN_AUTH_FAILED`, `USER_CREATED`, `USER_DELETED`, `PASSWORD_CHANGED`, `USER_UNLOCKED`, `SESSION_REVOKED`, `USER_SESSIONS_REVOKED`, `SETTINGS_UPDATED`, `PERMISSION_DENIED`, `RATE_LIMITED`, `CSRF_FAILED`, `CSRF_REPLAY`, `IP_UNBLOCKED`, `DB_COMPACT`, `DB_BACKUP`, `CONVERSATION_CREATED`, `CONVERSATION_CONTINUED`, `CONVERSATION_DELETED`, `MEMORY_REEXTRACT`, `MEMORY_EXTRACT_RANGE`, `LLM_CAPTURE`, `LLM_CAPTURE_STOP`, `SESSION_KEEPALIVE_ENABLE`, `SESSION_KEEPALIVE_DISABLE`, `SECURITY_EVENT`, `logout`. A single failed login isn't an audit event; failed attempts by address show in `dawn-admin ip list`.
 
 ### How do I manage users?
 
@@ -97,7 +97,7 @@ dawn-admin ip unblock --all
 
 ### Which tools can be scheduled?
 
-Tools with `TOOL_CAP_SCHEDULABLE`: `weather`, `calendar`, `search`, `email`, `url_fetch`, `homeassistant`, `volume`, `music`
+Tools with `TOOL_CAP_SCHEDULABLE`: `weather`, `calendar`, `search`, `email`, `url_fetch`, `home_assistant`, `volume`, `music`, `calculator`, `messaging` (read actions only), `stocks`, `system_status`, `suit_status`
 
 ### Where does TTS play when a scheduled event fires?
 
@@ -171,7 +171,8 @@ The daemon must be running for `dawn-admin` to connect. It communicates via a Un
 ps aux | grep dawn
 
 # Check the socket exists
-ls -la /tmp/dawn-admin.sock
+# Linux uses an abstract socket (@dawn-admin), so there is no file to look for:
+ss -xl | grep dawn-admin
 ```
 
 ### A scheduled briefing said "tool disabled"
@@ -184,16 +185,11 @@ This was fixed — the thinking signature buffer is now dynamic. Update to the l
 
 ## Architecture
 
-### Why doesn't DAWN support MCP (Model Context Protocol)?
+### Does DAWN support MCP (Model Context Protocol)?
 
-DAWN does not implement MCP. While MCP has become an industry standard for connecting LLMs to external tools, DAWN's architecture serves different goals:
+As a client, yes. The MCP bridge (`DAWN_ENABLE_MCP_BRIDGE_TOOL`, on in the `default`, `full`, `debug` and `server` presets) connects to MCP servers you run yourself, declared as `[[mcp.server]]` blocks under `[mcp]` in `dawn.toml` (with `[mcp] enabled = true`; it is off by default), and offers their tools to the model; `dawn-admin mcp grant <user> <alias>` decides who gets each server. DAWN never launches an MCP server process; [services/cbm-mcp/README.md](../services/cbm-mcp/README.md) is a worked example.
 
-- **Native C/C++**: DAWN is implemented entirely in C/C++ for reliability, deterministic timing, and single-binary deployment. MCP's ecosystem is built around TypeScript and Python. No C implementation exists, and embedding a managed runtime would negate the architectural benefits.
-- **Voice-first responsiveness**: MCP's process-per-server model with JSON-RPC introduces latency. Voice assistants require sub-second response times. DAWN's direct function calls and shared-memory architecture eliminate IPC overhead entirely.
-- **Integrated tool system**: DAWN's native tool execution provides parallel thread-pool execution, automatic schema generation for multiple LLM providers (OpenAI, Claude, Gemini, llama.cpp), session-scoped filtering, and built-in iterative tool loops. MCP defines a transport protocol — these capabilities remain the host's responsibility.
-- **Self-contained design**: DAWN is a complete voice assistant, not a plugin framework. All tools are compiled into the binary and audited at the source level. There is no extension marketplace, no third-party plugins, no arbitrary code execution.
-
-See `ARCHITECTURE.md` for the full discussion.
+DAWN's own tools are not MCP servers: they are native C modules registered in-process, so a voice turn's tool calls involve no IPC.
 
 ### Why doesn't DAWN use Wyoming or ESPHome protocols?
 
@@ -220,4 +216,4 @@ DAWN uses its own DAP2 WebSocket protocol instead of Home Assistant's Wyoming or
 | Language | C/C++ throughout | Python | C++ (device) + Python (HA) |
 | Server dependency | Standalone | Home Assistant | Home Assistant |
 
-**Ideas adopted from them**: mDNS discovery (planned), audio ducking (planned), timer lifecycle (shipped as scheduler system).
+**Ideas adopted from them**: mDNS discovery (planned), audio ducking (shipped), timer lifecycle (shipped as scheduler system).

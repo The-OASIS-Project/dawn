@@ -172,7 +172,7 @@ ONNX Runtime is required for TTS (Piper), VAD (Silero), and the embedding engine
 
 **CPU-only** — install the prebuilt x86_64 package:
 
-> **Have an NVIDIA GPU?** If you want GPU-accelerated Whisper ASR, build ONNX Runtime from source with CUDA instead. See [GETTING_STARTED.md — Option B](../GETTING_STARTED.md#step-3-install-onnx-runtime) for build instructions. The install script (`scripts/install.sh`) detects CUDA automatically and handles the source build, including the GCC 14 workaround.
+> **Have an NVIDIA GPU?** If you want GPU-accelerated Whisper ASR, build ONNX Runtime from source with CUDA instead. See [GETTING_STARTED.md — Option B](../GETTING_STARTED.md#2-install-core-libraries) for build instructions. The install script (`scripts/install.sh`) detects CUDA automatically and handles the source build, including the GCC 14 workaround.
 
 ```bash
 # Microsoft's NuGet package carries the Linux libraries and headers
@@ -374,6 +374,7 @@ won't allow the microphone. Menu names vary between versions.
 Create `secrets.toml` in the project root with your API keys:
 
 ```toml
+[secrets]
 claude_api_key = "sk-ant-..."
 # openai_api_key = "sk-..."
 # gemini_api_key = "..."
@@ -394,7 +395,7 @@ ai_name = "friday"
 mode = "server"       # Equivalent to --server CLI flag
 
 [webui]
-enabled = true        # Default: true
+enabled = true        # Default: false
 bind_address = "0.0.0.0"
 port = 3000
 https = true
@@ -505,7 +506,7 @@ setup guide — the common ones:
 
 ### WebUI not accessible
 
-- Check `[webui] enabled = true` in dawn.toml (default is true)
+- Check `[webui] enabled = true` in dawn.toml (default is false)
 - If using HTTPS, ensure `ssl_cert_path` and `ssl_key_path` are set
 - For browser mic access, HTTPS is required (or use `localhost`)
 

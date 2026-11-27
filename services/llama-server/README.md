@@ -448,7 +448,7 @@ huggingface-cli download unsloth/Qwen3-4B-Thinking-2507-GGUF \
   --local-dir /var/lib/llama-cpp/models/
 
 # Copy thinking template
-sudo cp qwen3_thinking.jinja /var/lib/llama-cpp/templates/
+sudo cp qwen3_official.jinja /var/lib/llama-cpp/templates/
 
 # Edit config before install (or after, see Switching Modes)
 nano llama-server.conf
@@ -475,7 +475,7 @@ REASONING_FORMAT=none
 ### For Thinking Mode:
 ```bash
 MODEL="/var/lib/llama-cpp/models/Qwen3-4B-Thinking-2507-Q4_K_M.gguf"
-TEMPLATE="/var/lib/llama-cpp/templates/qwen3_thinking.jinja"
+TEMPLATE="/var/lib/llama-cpp/templates/qwen3_official.jinja"
 REASONING_FORMAT=deepseek
 MMPROJ=
 ```
@@ -566,7 +566,8 @@ When using Thinking mode, also update `dawn.toml`:
 ```toml
 [llm.thinking]
 mode = "enabled"
-budget_tokens = 5000
+reasoning_effort = "medium"
+budget_medium = 5000   # token budget for the effort chosen above
 ```
 
 ---
@@ -645,7 +646,7 @@ The script will:
    ```bash
    sudo cp /path/to/model.gguf /var/lib/llama-cpp/models/
    sudo cp qwen3_chatml.jinja /var/lib/llama-cpp/templates/
-   sudo cp qwen3_thinking.jinja /var/lib/llama-cpp/templates/  # Optional
+   sudo cp qwen3_official.jinja /var/lib/llama-cpp/templates/  # Optional
    ```
 
 4. Install config and service:
@@ -794,7 +795,7 @@ sudo journalctl -u llama-server -n 100
 | `llama-server.service` | `/etc/systemd/system/` | Systemd service unit |
 | `llama-server` | `/etc/logrotate.d/` | Log rotation config |
 | `qwen3_chatml.jinja` | `/var/lib/llama-cpp/templates/` | Instruct chat template |
-| `qwen3_thinking.jinja` | `/var/lib/llama-cpp/templates/` | Thinking chat template |
+| `qwen3_official.jinja` | `/var/lib/llama-cpp/templates/` | Thinking chat template |
 
 ---
 

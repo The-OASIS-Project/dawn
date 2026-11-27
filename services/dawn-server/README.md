@@ -66,7 +66,7 @@ The script will:
 sudo ./install.sh --symlink-models --symlink-www
 
 # Specify paths explicitly
-sudo ./install.sh --binary ./build-release/dawn --config ./dawn.toml --secrets ./secrets.toml
+sudo ./install.sh --binary ./build/dawn --config ./dawn.toml --secrets ./secrets.toml
 ```
 
 ### Manual Installation
@@ -136,17 +136,20 @@ ai_name = "friday"
 type = "cloud"        # "cloud" or "local"
 
 [llm.cloud]
-provider = "openai"   # "openai" or "claude"
-model = "gpt-4o"
+provider = "openai"   # "openai", "claude", "gemini" or "openrouter"
+openai_models = ["gpt-6-luna", "gpt-6.1-terra"]   # models to choose from
+openai_default_model_idx = 0                      # the one used by default
 
 [webui]
+enabled = true
 bind_address = "0.0.0.0"
 port = 3000
-ssl_cert = "ssl/server.crt"    # Relative to WorkingDirectory
-ssl_key = "ssl/server.key"
+https = true
+ssl_cert_path = "ssl/dawn-chain.crt"    # Relative to WorkingDirectory
+ssl_key_path = "ssl/dawn.key"
 
 [mqtt]
-host = "localhost"
+broker = "localhost"
 port = 1883
 ```
 
@@ -155,6 +158,7 @@ port = 1883
 API keys at `/usr/local/etc/dawn/secrets.toml` (mode 0600):
 
 ```toml
+[secrets]
 openai_api_key = "sk-..."
 claude_api_key = "sk-ant-..."
 ```
@@ -265,7 +269,7 @@ ls /var/lib/dawn/www/
 
 # Check SSL certificates
 ls -la /var/lib/dawn/ssl/
-openssl x509 -in /var/lib/dawn/ssl/server.crt -noout -dates
+openssl x509 -in /var/lib/dawn/ssl/dawn.crt -noout -dates
 ```
 
 ### Satellites Can't Connect

@@ -31,7 +31,7 @@ Verify it's running:
 systemctl status mosquitto
 ```
 
-By default, Mosquitto listens on `127.0.0.1:1883` with no authentication. This is fine for a single-machine setup where all OASIS components run on the same Jetson. The steps below add authentication and encryption for hardened deployments.
+By default, Mosquitto listens on `127.0.0.1:1883` with no authentication. Anything that can publish on the broker can make DAWN act as the local user, so authentication (a username and password, with ACLs) is required as soon as anything other than the DAWN daemon itself can reach the broker (other OASIS components, other accounts on the machine, other hosts), and TLS is required when that traffic crosses a network. The steps below add both.
 
 ---
 
@@ -421,4 +421,4 @@ For localhost-only deployments where encryption isn't needed, use port 1883 with
 | `hud/discovery/request` | DAWN | MIRAGE | Trigger capability republish |
 | `shoulder/*`, `chest`, etc. | SPARK | MIRAGE | Armor component status |
 
-For the full protocol specification, see [OASIS Communications Protocol (OCP v1.3)](OASIS_COMMUNICATIONS_PROTOCOL.md).
+For the full protocol specification, see [OASIS Communications Protocol (OCP v1.5)](OASIS_COMMUNICATIONS_PROTOCOL.md).
