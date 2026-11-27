@@ -144,7 +144,7 @@ typedef enum {
 } session_type_t;
 
 /**
- * @brief DAP2 satellite tier (see DAP2_DESIGN.md Section 4)
+ * @brief DAP2 satellite tier (see atlas/dawn/archive/DAP2_DESIGN.md Section 5)
  */
 typedef enum {
    DAP2_TIER_1 = 1,  // Full satellite (RPi) - sends TEXT, receives TEXT

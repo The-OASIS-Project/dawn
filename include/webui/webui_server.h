@@ -76,7 +76,7 @@ extern "C" {
 #define WEBUI_ERROR_THREAD 4
 
 /* =============================================================================
- * WebSocket Binary Message Types (match WEBUI_DESIGN.md protocol spec)
+ * WebSocket Binary Message Types (match atlas/dawn/archive/WEBUI_DESIGN.md protocol spec)
  * ============================================================================= */
 
 #define WS_BIN_AUDIO_IN 0x01          /* Client -> Server: Opus audio chunk */

@@ -2,7 +2,7 @@
 
 **Status:** design / unstarted. Working doc — do **not** commit until in-flight.
 **Date:** 2026-08-23 · **Rev 2** (folds in master-plan-reviewer + architecture-reviewer)
-**Related:** `MEMORY_CITATION_DESIGN.md` (Phase 1/2), `atlas/dawn/memory/`, TODO.md "Memory citation signal — Phase 2".
+**Related:** [MEMORY_CITATION_DESIGN.md](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/memory/MEMORY_CITATION_DESIGN.md) (Phase 1/2), `atlas/dawn/memory/`.
 
 > **Rev-2 review verdict:** both reviewers say **build it** — the spine is solid and field-current, Approach
 > B is sealed, the B1/B2 phasing is right. Two HIGH gaps (the `recall` tool marker; the empty-stash capture
@@ -299,7 +299,7 @@ search path. No reinforcement code ships here. Tie-in verified clean (no retriev
 - **Signal honesty depends on the surfaced-set being complete** — every **retrieval** render path (both
   files) must record, or a real citation looks hallucinated. Mitigate with the single record helper + the
   stated inclusion rule (retrieval records, creation doesn't) so the invariant is *checkable*, not vibes.
-  This is a small instance of the "hand-carried invariant across N sites" debt already in TODO.md.
+  This is a small instance of a known "hand-carried invariant across N sites" debt.
 - **Grammar creep** — the `<cited>` tokenizer must stay tolerant and not let a malformed `ID:` corrupt
   adjacent focus ordinals. Fuzz it.
 - **Cross-provenance double-count** if dedup is on the token instead of the resolved `fact:x`.
@@ -344,7 +344,7 @@ failure-direction asymmetry that sealed Approach B, §4).
 
 Re-ran the same query (*"Tell me what you know about my Mark 47 build"*) on **gpt-5.6-luna** after the
 OpenAI Responses prompt-cache reorder (volatile block moved out of `instructions` to a user item just
-before the question — see `docs/RESPONSES_CACHE_REORDER_PLAN.md`). The concern was that repositioning the
+before the question — see [PROMPT_CACHE_DESIGN.md §3.3](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/archive/PROMPT_CACHE_DESIGN.md#33-openai-responses-vs-chat-completions)). The concern was that repositioning the
 `[M#]`-bearing block could corrupt the ordinal→item mapping and spike hallucinated ordinals. It did not:
 
 | | cited_tool | cited_focus | dropped (focus) | dropped_tool |

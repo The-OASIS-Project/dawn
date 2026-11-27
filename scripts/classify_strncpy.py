@@ -16,8 +16,8 @@
 ###############################################################################
 # classify_strncpy.py - inventory raw strncpy()/strncat() call sites
 #
-# Standardizing the codebase on safe_strncpy() (see
-# docs/SAFE_STRNCPY_STANDARDIZATION_DESIGN.md) requires knowing which of the
+# Standardizing the codebase on safe_strncpy() (see CODING_STYLE_GUIDE.md,
+# "String Safety") requires knowing which of the
 # hundreds of raw strncpy() sites are mechanically convertible and which need a
 # hand review.  The signal is the 3rd (bound) argument:
 #

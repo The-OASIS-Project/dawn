@@ -39,7 +39,7 @@
  * (Bearer xapp-... for apps.connections.open, Bearer xoxb-... for
  * chat.postMessage).  Tokens never appear in URLs or logged content.
  *
- * See docs/MESSAGING_CHANNELS_DESIGN.md §8 (Slack).
+ * See atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §8 (Slack).
  */
 #include "messaging/messaging_slack.h"
 

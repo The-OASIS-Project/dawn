@@ -1295,7 +1295,7 @@
     * separate globals loaded before this file).  Adding a pane tab is one
     * entry here instead of editing the four sites below (applyPaneVisibility,
     * close, render, the ticker) — this is the local answer to the N-pane
-    * hand-wiring smell filed in TODO.md. */
+    * hand-wiring smell. */
    const PANES = {
       watches: {
          pane: () => els.watchesPane,

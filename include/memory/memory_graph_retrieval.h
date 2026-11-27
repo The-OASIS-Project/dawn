@@ -38,7 +38,7 @@
  * of extraction linking facts to peripheral entities, not genuine
  * graph-distance multi-hop questions on LoCoMo.  Production scaffolding
  * was stripped; the design (and the rationale for the strip) is captured
- * in docs/PHASE_2_GRAPH_RETRIEVAL_DESIGN.md.  Phase 2 production code
+ * in atlas/dawn/memory/PHASE_2_GRAPH_RETRIEVAL.md.  Phase 2 production code
  * will re-land if a benchmark surfaces genuine multi-hop test cases.
  *
  * Pipeline:

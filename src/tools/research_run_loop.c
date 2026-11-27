@@ -533,8 +533,8 @@ static char *research_commentary_context(const research_run_t *run0) {
 
 /* Completion-commentary turn (§8): the JARVIS report-back.  A no-tools GENERATION turn
  * (it writes a take; it needs no tools — same shape as synthesis, NOT a security posture:
- * the report's safety for later tool-enabled turns is the capability mask's job, see
- * docs/CAPABILITY_MASK_DESIGN.md).  Speaks AS the user's assistant (persona-carrying,
+ * how later tool-enabled turns treat the report's text is decided where they call tools,
+ * not here).  Speaks AS the user's assistant (persona-carrying,
  * unlike the persona-less synthesis/critic turns) and is seeded with the originating
  * conversation so the take ties back to what the user was doing.  Returns the take
  * (caller frees) or NULL on failure — caller falls back to the mechanical excerpt. */

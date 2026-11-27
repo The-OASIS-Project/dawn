@@ -23,8 +23,9 @@
  * NULL-query safety, item_id opacity, calendar event-time recency,
  * and the network-call invariant are all exercised here.
  *
- * Email adapter is DEFERRED to v2 — see docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md
- * §"API Audit (Phase 1d)" for the missing-cache rationale.  No tests
+ * Email adapter is DEFERRED to v2 — see
+ * atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md §"Phase 1d" for the
+ * missing-cache rationale.  No tests
  * cover an email path because there is no email path to cover.
  */
 

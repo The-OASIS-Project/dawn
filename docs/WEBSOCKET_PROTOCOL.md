@@ -2042,6 +2042,248 @@ A `text` frame may name one email the user attached (flag `email_refs`):
   sends it on `load_conversation_response` rows, `message_appended` and
   `get_memory_fact_source_response` messages, and in exports.
 
+### Stocks Panel
+
+A live view of the logged-in user's Charles Schwab portfolio, and a watchlist of tickers they
+don't hold. Built only with the Schwab tool (`DAWN_ENABLE_SCHWAB_TOOL`); a daemon without it
+answers these types with `UNKNOWN_TYPE`. No feature flag. Every request needs a login (else
+`UNAUTHORIZED`); each user sees only their own Schwab link, and a user with none gets
+`status: "not_connected"`. Satellites never receive the pushes.
+
+The server keeps one snapshot per user and pushes it to every subscribed connection of that user;
+requests never fetch from Schwab themselves. A fetch happens when a connection of the user is
+subscribed and either nothing is cached yet or the regular session is open and the snapshot is
+older than 30 s, at most once per 30 s. Outside regular hours a panel therefore shows the snapshot
+of its last fetch, labelled by `as_of`. The portfolio and the watchlist are separate
+subscriptions with separate caches.
+
+**Lifecycle.** Subscriptions belong to the socket and aren't stored: a new or reconnected socket
+starts unsubscribed, so send the subscribe again after `init` / `reconnect`. Subscribe while the
+panel is visible and unsubscribe when it's hidden. When the user has nothing cached yet, subscribe
+sends no frame at once; the first update follows the fetch it triggers. When none of a user's
+connections is subscribed, their cache is dropped at the refresher's next pass (within 30 s);
+a subscribe after that starts with a fresh fetch.
+
+**`status`** (both updates):
+
+| `status` | Meaning | Numbers in the frame |
+|---|---|---|
+| `ok` | The last fetch succeeded | Yes |
+| `rate_limited` | Schwab answered 429; retried after 60 s, doubling to 10 min | Last-known, if any |
+| `error` | Network, Schwab or parse failure; retried after 60 s | Last-known, if any |
+| `not_connected` | The user has no Schwab link; retried every 5 min | Last-known, if any |
+| `token_expired` | The Schwab login expired (weekly); relink with `dawn-admin schwab auth`; retried every 5 min | Never |
+
+Last-known numbers keep their original `as_of`, so show them dimmed with "as of …" rather than
+blanking. Before the first fetch completes, a frame built for the user says `not_connected` with no
+numbers.
+
+**`market`** (both updates): `regular`, `pre` (07:00–09:30 ET), `post` (the close to 20:00 ET; the
+close is 13:00 on NYSE half-days) or `closed` (nights, weekends, NYSE holidays). Worked out when
+the frame is built, not when the numbers were fetched.
+
+**`ext {price, change, change_pct}`**, on a position or watchlist row, is the extended-hours
+price, per share, and its move against the regular-session close. Present only when one of the
+user's subscribed connections asked for `ext_hours` (it then reaches all of them), `market` is `pre` or `post`, the snapshot was fetched in a pre or post window (not necessarily the current one; check `as_of`), and
+the symbol has an extended-hours trade; feature-detect on its presence. On the portfolio, `value`
+and `day_change` already reflect the extended-hours price after the close (Schwab's own
+valuation), so `ext.change` is the after-hours move alone; multiply by `qty` for a position's
+dollar figure.
+
+Percent fields (`*_pct`) are percentages (`18.82` is +18.82 %), signed. Day change is against the
+prior close and unrealized P/L against cost; account and total percents use the summed position
+values, not the account value (which includes cash). Amounts are numbers in dollars; format them
+client-side.
+
+#### `stocks_portfolio_subscribe`
+Start the portfolio push for this socket.
+```json
+{ "type": "stocks_portfolio_subscribe", "payload": { "ext_hours": true } }
+```
+- `ext_hours` (bool, optional, default false): include the extended-hours overlay in pre/post.
+  Sending subscribe again replaces it.
+- Replies with the cached `stocks_portfolio_update` when the user has one, and wakes the
+  refresher.
+
+#### `stocks_portfolio_unsubscribe`
+Stop the portfolio push for this socket. No payload, no reply.
+
+#### `stocks_portfolio_get`
+Send the cached `stocks_portfolio_update` to this socket once.
+```json
+{ "type": "stocks_portfolio_get" }
+```
+- Sends nothing when the user has nothing cached, and causes a fetch only while one of the user's
+  connections is subscribed. A panel should subscribe rather than poll with this.
+- `ext_hours` is accepted and ignored: the overlay follows the subscriptions.
+
+#### `stocks_portfolio_update` (push)
+Sent to every subscribed connection of the user after each fetch (success or failure), and as the
+reply to subscribe and get.
+```json
+{
+   "type": "stocks_portfolio_update",
+   "payload": {
+      "status": "ok",
+      "market": "regular",
+      "ext_hours": false,
+      "as_of": 1790000000,
+      "link_expires_at": 1790400000,
+      "total_value": 100000.00,
+      "total_day_change": -250.00,
+      "total_day_change_pct": -0.31,
+      "total_unrealized_pl": 12000.00,
+      "total_unrealized_pl_pct": 17.65,
+      "accounts": [
+         {
+            "label": "…1234",
+            "acct_type": "MARGIN",
+            "value": 100000.00,
+            "cash": 20000.00,
+            "day_change": -250.00,
+            "unrealized_pl": 12000.00,
+            "unrealized_pl_pct": 17.65,
+            "positions": [
+               {
+                  "symbol": "XYZ",
+                  "description": "EXAMPLE CORP",
+                  "asset_type": "equity",
+                  "qty": 100,
+                  "price": 800.00,
+                  "value": 80000.00,
+                  "unrealized_pl": 12000.00,
+                  "unrealized_pl_pct": 17.65,
+                  "day_change": -250.00,
+                  "day_change_pct": -0.31
+               }
+            ]
+         }
+      ]
+   }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `status` | string | See the table above |
+| `market` | string | See above |
+| `ext_hours` | bool | Whether this snapshot was fetched with the extended-hours overlay (in a frame without numbers, the opt-in of the last fetch) |
+| `as_of` | integer | Epoch seconds when the numbers were fetched; `0` in a frame without numbers |
+| `link_expires_at` | integer, optional | Epoch seconds when the Schwab link will need relinking (link time + 7 days), so a panel can warn ahead; on every frame, `token_expired` included, when known |
+| `total_value` | number | Sum of the accounts' `value` |
+| `total_day_change`, `total_day_change_pct` | number | Sum of every position's day change, and its percent |
+| `total_unrealized_pl`, `total_unrealized_pl_pct` | number | Sum of every position's unrealized P/L (long positions), and its percent |
+| `accounts` | array | One per Schwab account |
+
+`total_*` and `accounts` are present only in a frame with numbers (see `status`); test for
+`accounts`.
+
+Account:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `label` | string | The account number masked to its last four digits (`…1234`); the full number is never sent |
+| `acct_type` | string | Schwab's account type as reported (e.g. `MARGIN`, `CASH`) |
+| `value` | number | Schwab's liquidation value: the account total, cash included. Rows reconcile to it |
+| `cash` | number | Cash balance |
+| `day_change` | number | Sum of the account's positions' day change (no account-level percent is sent) |
+| `unrealized_pl`, `unrealized_pl_pct` | number | Sum of the positions' unrealized P/L, and its percent of their cost |
+| `positions` | array | Every holding, never filtered |
+
+Position:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `symbol` | string | Ticker, or an OCC option symbol (up to 21 characters, with spaces) |
+| `description` | string, optional | Company or fund name; absent when Schwab gives none. Schwab cuts names at about 20 characters, upper case |
+| `asset_type` | string | `equity`, `etf`, `option`, `mutual_fund`, `cash_equivalent` or `other`. Schwab reports most ETFs as equities |
+| `qty` | number | Net quantity (long minus short); fractional or negative possible |
+| `price` | number | Price per unit held (`value / qty`): per share, or per contract for an option, sent so the client needn't divide and round |
+| `value` | number | Market value |
+| `unrealized_pl`, `unrealized_pl_pct` | number | Unrealized P/L on the long position, and its percent of cost |
+| `day_change`, `day_change_pct` | number | The position's change today (a total, not per share), and its percent of the prior close |
+| `ext` | object, optional | Extended-hours overlay, per share (see above) |
+
+#### `stocks_watch_subscribe`
+Start the watchlist push for this socket.
+```json
+{ "type": "stocks_watch_subscribe", "payload": { "ext_hours": true } }
+```
+- `ext_hours` (bool, optional, default false), as for the portfolio.
+- Replies with the cached `stocks_watch_update` when the user has one, and wakes the refresher.
+
+#### `stocks_watch_unsubscribe`
+Stop the watchlist push for this socket. No payload, no reply.
+
+#### `stocks_watch_get`
+Send the cached `stocks_watch_update` to this socket once. No payload. Same limits as
+`stocks_portfolio_get`.
+
+#### `stocks_watch_set`
+Add tickers to the user's watchlist and remove others.
+```json
+{ "type": "stocks_watch_set", "payload": { "add": ["xyz", "ABC"], "remove": ["OLD"] } }
+```
+- `add`, `remove` (arrays of strings, optional): at most the first 25 entries of each are read.
+  Symbols are upper-cased; only `A–Z`, `0–9` and `.`, at most 23 characters.
+- Subscribes this socket to the watchlist push.
+- Removes apply at once; removing a symbol that isn't there does nothing.
+- Adds are checked with Schwab first, off the socket's thread, and only symbols Schwab doesn't
+  reject are stored. The `stocks_watch_set_response` comes when that's done and goes to **every**
+  watch-subscribed connection of the user (the sender included); a `stocks_watch_update` with the
+  new list follows. If Schwab can't be reached, well-formed symbols are stored unchecked.
+- When no add was queued (only removes, or adds already waiting from an earlier request), the
+  response comes at once to the sender only, and an update follows.
+- The list holds at most 25 symbols. The `stocks` tool's `watch_add` / `watch_remove` edit the same
+  list, and a voice edit pushes a `stocks_watch_update` to subscribed panels.
+
+#### `stocks_watch_set_response`
+```json
+{
+   "type": "stocks_watch_set_response",
+   "payload": {
+      "success": true,
+      "added": ["XYZ"],
+      "rejected": [ { "symbol": "ABC", "reason": "unknown" } ]
+   }
+}
+```
+- `success` is always true; per-symbol outcomes are in the arrays.
+- `added`: symbols now on the list, upper-cased, including ones that already were.
+- `rejected[].reason`: `invalid` (characters or length not allowed, or it couldn't be stored;
+  `symbol` is then as sent for a malformed symbol, upper-cased when it could not be stored), `unknown` (Schwab says it isn't a ticker), `limit` (the list already
+  holds 25), `busy` (the server couldn't take the request just then; try again).
+
+#### `stocks_watch_update` (push)
+Sent to every watch-subscribed connection of the user after each watchlist fetch (success or
+failure; an edit triggers one at once), and as the reply to subscribe and get.
+```json
+{
+   "type": "stocks_watch_update",
+   "payload": {
+      "status": "ok",
+      "market": "post",
+      "as_of": 1790000000,
+      "symbols": [
+         { "symbol": "XYZ", "description": "EXAMPLE CORP", "asset_type": "equity",
+           "price": 50.00, "day_change": 1.25, "day_change_pct": 2.56,
+           "ext": { "price": 50.40, "change": 0.40, "change_pct": 0.80 } },
+         { "symbol": "QQQX", "quotable": false }
+      ]
+   }
+}
+```
+- `as_of`: epoch seconds of the last successful fetch; `0` before the first.
+- `symbols` is always present: the whole stored list in the order it was added, after a
+  successful fetch; the last-known rows after a failure; empty for `token_expired` or before the
+  first fetch. No `ext_hours` echo and no `link_expires_at` here.
+- A row Schwab returned: `symbol`, `description` (optional, as for positions), `asset_type`,
+  `price` (last), `day_change` and `day_change_pct` (**per share**, against the prior close,
+  unlike a position's total), and `ext` (optional).
+- A stored symbol a successful fetch didn't return: `{symbol, quotable: false}` only. Show it dimmed
+  and keep its remove control. `quotable` is absent on every other row (absent means quotable). A
+  valid symbol outside market hours still comes back, with its last price.
+
 ### DAP2 Satellite Messages
 
 These messages are only accepted from satellite connections (identified by
@@ -2994,7 +3236,7 @@ Server-initiated pushes from the proactive-attention (SAGE), focus, and memory
 subsystems. These are **WebUI-only UI primitives** (satellites do not render them)
 and are routed to the owning user's browser sessions. A read-mostly dashboard
 consumes them as ambient notices; see the consumer-facing map in
-`dawn-nextgen/docs/DAWN_UI_SIGNAL_MAP.md`.
+`aurora/docs/DAWN_UI_SIGNAL_MAP.md`.
 
 #### `attention_alert`
 The SAGE proactive-attention banner. Its own channel (not `scheduler_notification`)
@@ -3114,7 +3356,7 @@ client that ignores it stays correct via the entity poll backstop. **Bind these 
 ```
 The HA request verbs (`ha_list_entities` / `ha_refresh_entities` / `ha_call_service` etc.)
 and the `ha_entities_response` per-domain `attributes` shape are documented consumer-side in
-`dawn-nextgen/docs/DAWN_UI_SIGNAL_MAP.md §9.4`.
+`aurora/docs/DAWN_UI_SIGNAL_MAP.md §9.4`.
 
 ---
 

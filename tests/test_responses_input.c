@@ -19,7 +19,7 @@
  * Unit tests for the OpenAI Responses prompt-cache layout: the stable/volatile
  * split and the "volatile as a user item immediately before the current question"
  * repositioning that makes [instructions][tools][history] a cacheable prefix.
- * See docs/RESPONSES_CACHE_REORDER_PLAN.md.
+ * See atlas/dawn/archive/PROMPT_CACHE_DESIGN.md §3.3.
  */
 
 #include <stdbool.h>

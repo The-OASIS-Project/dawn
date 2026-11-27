@@ -41,8 +41,8 @@
  * message-level cache (only `email_accounts`); DB-direct access is
  * impossible without first building an email message cache layer.
  * The cache layer is its own workstream prerequisite to the v2 email
- * focus adapter.  See `docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md`
- * §"API Audit (Phase 1d)" for the audit trail.
+ * focus adapter.  See `atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md`
+ * §"Phase 1d" for the audit trail.
  */
 
 #ifndef EXTERNAL_FOCUS_ADAPTERS_H

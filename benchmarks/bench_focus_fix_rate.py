@@ -85,7 +85,7 @@ DEFAULT_DAWN_TOML = DAWN_ROOT / "dawn.toml"
 #
 # Regression detection: (candidate_fix_count < baseline_fix_count)
 # is a FAIL on that provider.  See atlas/dawn/memory/PHASE_1J_TUNING_LOG.md
-# and docs/RERANKER_PHASE_A_DESIGN.md for the full bench history.
+# and atlas/dawn/memory/RERANKER_HEURISTIC.md for the full bench history.
 HEAD_BASELINE_FIX_COUNT = {
     "anthropic": 18,
     "openai": 18,

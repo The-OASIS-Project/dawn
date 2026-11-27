@@ -84,8 +84,8 @@ _Static_assert(sizeof(" " MEMORY_FACT_KIND_WORD_LONGEST) <= PROMPT_FOCUS_KIND_LE
  * Constants
  *
  * All file-static so 1j tuning lands here without touching configs.  See
- * `docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md` §"Phase 1 — Per-Turn Focus"
- * for the bench-driven tuning plan.
+ * `atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md` §"Phase 1j — Fixture hardening +
+ * weight tuning" for the bench-driven tuning.
  *
  * Phase 1d extracted the previously-local recency / candidate-helper
  * primitives to `focus_recency.{c,h}` + `focus_candidate_helpers.{c,h}`

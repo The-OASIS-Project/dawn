@@ -84,6 +84,13 @@ The backends hand over the message in different forms:
     whatever the line looks like). It also caps one header's folded length and a
     line's length. GMime builds a message's whole tree before anything can stop it,
     and a few MB of tiny parts or headers can cost hundreds of MB to parse.
+    Measured on a Jetson AGX Orin with GMime 3.2.7, without the pre-scan: 200,000
+    tiny parts in 1.95 MB took 262 MB of RSS, a million header lines in 5.9 MB took
+    492 MB, and a deep nest about 2 s of CPU. GMime's own nesting limit is 1,024
+    levels; the walk over the parsed tree stops at 16 (`EMAIL_MIME_MAX_DEPTH`), but
+    by then the tree is built, so only the pre-scan bounds what a parse costs. Its
+    limits are in `email_mime.h` (1,024 boundary lines, 5,000 header lines, 64 KB
+    for one header, 1 MB for one line).
   - **Address headers.** GMime's address parsing costs time quadratic in the
     entries without an '@' (and group colons), and it re-parses every header of an
     address type when another arrives. The pre-scan counts such entries across all
@@ -92,7 +99,10 @@ The backends hand over the message in different forms:
     Gmail's header values, which skip the pre-scan, are each cut at 1,000 such
     entries (`email_mime_addr_list`).
   - **No-copy parse.** GMime reads over the fetched buffer with `persist_stream` on,
-    so a part's content is a window on that buffer, not a copy.
+    so a part's content is a window on that buffer, not a copy. The buffer outlives
+    the parse because the parse is synchronous. Measured on a 25 MB message: 29 MB
+    of RSS and 24 ms, against 79 MB and 65 ms with persist off over a copying
+    stream.
 - **Gmail** reads `format=full`. That gives the MIME tree with each text part's
   bytes inline and every attachment behind an `attachmentId`, so a read never
   downloads attachment bytes. `gmail_parts.c` (pure, no network) turns the tree
@@ -101,6 +111,12 @@ The backends hand over the message in different forms:
   Nothing is cached between reads. (Attachment download, which would map a part
   id back to its `attachmentId` the same way, is planned for the email panel and
   not built.)
+  - **Why not `format=raw`.** Raw downloads every attachment on every read: the
+    LLM tool reading a thread with a 20 MB invoice would pull ~27 MB to say two
+    lines. It needs a response buffer of ~40 MB; a raw read as first written cost
+    100-150 MB of memory, and a hostile multipart could push one past 3 GB. And it
+    loses the per-part `attachmentId` that fetching one part later needs. The
+    structured fetch keeps reads small, which matters most on voice.
 
 The part list includes the multiparts as nodes, so the policy (`email_mime_apply`)
 sees the message's structure. It does the rest:
@@ -145,6 +161,20 @@ sees the message's structure. It does the rest:
 Part ids are IMAP section numbers ("2", "2.1") on both backends, so a later
 per-part fetch can use them directly.
 
+**Read state.** The backends mark a read differently, and the read option `mark`
+(`email_types.h`) evens them out. IMAP's body fetch goes through libcurl's URL form,
+a plain `BODY[]` (`BODY.PEEK` can't be reached through it), so the server sets
+`\Seen`; a Gmail read marks nothing. The tool's read leaves each as its backend does.
+The mail panel's `email_read` (`mark_read`, default true) marks a Gmail message read
+with a label change. With `mark_read: false` on IMAP it reads the flags first, on the
+same login, and when the message was unread clears `\Seen` again right after the fetch
+(`email_imap_restore_unseen`). The restore runs whatever became of the fetch (failed,
+cut or stopped: it may have set the flag before it ended), with the cancel dropped and
+a 10 s timeout of its own. Known side effects: it also clears a `\Seen` another client
+set in that moment; after an aborted transfer libcurl may have dropped the connection,
+so the restore can cost a second login; and if it fails the message stays read. The
+response's `unread` says what actually happened, not what was asked.
+
 The email tool's read, recent, search and digest results reach the model framed as `EMAIL CONTENT`
 (third-party text, after the neutralizer; see [llm.md](llm.md), Tool results), from the shared
 formatter `email_render.c` for a read, and memory extraction never learns from them.
@@ -180,6 +210,39 @@ dropped: the tool says the list is incomplete, the panel marks the account parti
 (RATE_LIMITED), the digest notes it, and reply states stay unknown. Search terms
 lose quotes and currency signs, with which Gmail matches nothing.
 
+## The mail panel: lease, executor and cursor
+
+- **The lease is IMAP only.** IMAP servers cap connections per account, so every
+  caller (the tool, the digest, the panel) takes the account's lease around a whole
+  operation (`email_account_lease.c`). Gmail is HTTP with per-user quotas and no
+  connection cap, so its tasks run in parallel without one (moves are paced, below).
+- **Why tickets and FIFO handover.** A design in which a multi-account request waited
+  for its per-account tasks, and workers blocked waiting for a lease, could tie up all
+  four executor workers waiting on work only a free worker could run. The fix has
+  three properties:
+  - A request across N accounts is N tasks sharing a join; the task that brings the
+    join's count to zero merges and delivers. No task ever waits on another.
+  - A release hands the lease straight to the head waiter, so no waiter misses a
+    release and a blocking thread can't always beat a queued task.
+  - An executor task that can't have the lease parks as a ticket in the lease's FIFO
+    and the worker moves on. The release hook (called with no lease lock held) queues
+    it again, already holding the lease. Only callers outside the executor (the tool,
+    the digest) block, in 250 ms slices that check their cancel and deadline.
+- **The first inbox page carries the unread counts**, so opening the panel costs one
+  login per account, not two (the target: one login per account to open the panel,
+  one per read). IMAP sends `STATUS INBOX (UNSEEN)` on the list's own login before any
+  mailbox is selected: RFC 3501 advises against STATUS on the selected mailbox. Gmail
+  reads `labels/INBOX`. Searches don't carry counts.
+- **IMAP rows have no preview.** libcurl's custom-request FETCH passes response lines
+  through but discards literals, and message text comes back as a literal, so the
+  list can't read it on the same command.
+- **The cursor is the client's and untrusted.** Its filter hash is deliberately
+  unkeyed: it only says which request the cursor belongs to. Trust comes from
+  rechecking at run time: every account id against the user's enabled accounts (again
+  inside the task, which resolves the account afresh), every position through its
+  parser. The hash binds the account set, so an account the request covers but the
+  cursor leaves out is done, never "start over".
+
 ## Moving messages (trash, archive) and undo
 
 `email_service_move.c` moves up to 50 messages of one account per call, to the
@@ -198,17 +261,45 @@ caches the roles). It never uses another user's or a shared namespace.
   Stopping is honoured between groups only.
 - **Where each message landed** comes from COPYUID (RFC 4315), read only while
   the MOVE or COPY is in flight and only from its own tagged reply or untagged
-  lines, mapped only onto UIDs DAWN sent.
+  lines, mapped only onto UIDs DAWN sent. The window matters because libcurl hands
+  the debug callback the lines inside IMAP literals too: outside it, a subject
+  carrying CRLF and `* OK [COPYUID ...]` in a FETCH could say where messages went.
+  UIDVALIDITY is read by the same rule, only while a SELECT's answer comes in.
+- **A refused SELECT looks like a refused login.** libcurl reports a SELECT the
+  server refuses (a folder that's gone) as `CURLE_LOGIN_DENIED`. On a connection
+  already logged in no LOGIN goes out, so an unchanged on-wire login count across
+  the command means it was the folder (`email_imap_select_failed`): that group's ids
+  are NOT_FOUND, not an auth failure.
 - **Gmail** (`gmail_move.c`): per message, labels read first (already there, or
   an archive from Trash/Spam, is answered without moving), paced to 40 calls a
-  second per account.
+  second per account from one bucket the tool and the panel share (Gmail takes no
+  lease), so a 50-message move takes about 2.5 s instead of bursting past Gmail's
+  per-user rate.
 - **No folder for the role.** The move is refused, never guessed; a role folder
-  removed since (TRYCREATE) is forgotten and refused the same way.
+  removed since (TRYCREATE) is forgotten and refused the same way. Only those
+  forget the cached roles: a transient MOVE or COPY failure leaves them, since
+  wiping them made the account's trash and archive buttons flap.
 - **Undo** (`email_undo.c`): a move from the panel gets a token per message,
   random, single use, bound to the user, the account and its server and login,
   kept 60 s in memory. An undo checks the message is still where it went, moves it
   back, and reads its new row. Every move and undo is told to the user's panels
   once (`email_changed_notify`).
+  - An unknown, expired, foreign or in-flight token all answer `UNDO_EXPIRED`,
+    alike on purpose, so a token can't be probed for whose it is. The store is
+    memory only: after a restart every token answers the same. At most 128 per
+    user and 512 in all; a full store gives the move no undo rather than evict
+    another user's.
+  - A Gmail trash's record keeps the labels an undo can add back: INBOX, UNREAD,
+    STARRED, IMPORTANT, `CATEGORY_*` and user labels, never TRASH, SPAM, SENT,
+    DRAFT or CHAT (they would put the message where it wasn't moved from, or the
+    API can't add them), packed into at most 384 bytes (labels past it are dropped
+    and logged). The undo untrashes, then adds them back; on a 400 (a user label
+    deleted since) it retries with the system labels only. An archive's undo adds
+    INBOX.
+  - Decisions: a 60 s window. No undo on an IMAP server without UIDPLUS (no
+    COPYUID says where the message went), and no Message-ID search to find it
+    instead. Rapid clicks are batched by the client into one call; the server never
+    merges requests.
 - **What an account can do.** The panel's account list says whether each account
   can trash and archive (`email_service_account_caps`). Gmail always can; for
   IMAP it's whether the server has a folder for the role, learned from a move or,
@@ -223,6 +314,16 @@ caches the roles). It never uses another user's or a shared namespace.
   message (Gmail) with no stop armed, so it always acts and always sends
   `email_changed`; a stop waits at most for that, and a stop between folders
   leaves the rest where they were.
+
+### Not built yet: live changes
+
+The panel refreshes by hand; pushing changes made elsewhere (another mail client,
+new mail) is future work, and three things wait for it. IMAP list rows get a preview
+then, from the snapshot that work keeps, since the list itself can't read one. The
+error `CANNOT_CALCULATE` (the changes since a given state can't be worked out) is
+reserved for it and sent by nothing today. And `email_changed` goes to every browser
+tab of the user, the one that asked included, until tabs can subscribe to the
+accounts and folders they show.
 
 ## Email in chat
 

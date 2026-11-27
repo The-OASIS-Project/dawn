@@ -21,7 +21,7 @@
  * The in-memory channel row -> session_t* slot table: LRU
  * eviction, get-or-create with post-restart history restore + per-turn name
  * refresh, and the self-reset deferral probe.  Split out of messaging_engine.c; see
- * messaging_engine_internal.h and docs/MESSAGING_ENGINE_SPLIT_PLAN.md.
+ * messaging_engine_internal.h.
  */
 #define MESSAGING_ENGINE_INTERNAL_ALLOWED
 

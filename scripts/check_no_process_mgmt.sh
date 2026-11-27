@@ -101,7 +101,7 @@ if [ "$violations" -gt 0 ]; then
    echo ""
    echo "check_no_process_mgmt: FAILED -- $violations harness file(s) contain forbidden"
    echo "process-management calls. The MCP bridge must be socket-only and git must use"
-   echo "libgit2 in-process. nftw() is allowed. See docs/CODING_HARNESS_DESIGN.md."
+   echo "libgit2 in-process. nftw() is allowed. See atlas/dawn/archive/CODING_HARNESS_DESIGN.md."
    exit 1
 fi
 

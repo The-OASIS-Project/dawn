@@ -22,7 +22,7 @@
  * libwebsockets client mode and sends outbound via REST chat.postMessage.
  * Same forever-conversation semantics as SMS / Telegram / Discord.
  * Single-workspace token install for v1; OAuth-per-workspace install is
- * deferred to a follow-up.  See docs/MESSAGING_CHANNELS_DESIGN.md §8
+ * deferred to a follow-up.  See atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §8
  * (Slack) and §13 Phase 4.
  *
  * Required Slack App configuration (operator one-time):

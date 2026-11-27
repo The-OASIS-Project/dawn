@@ -332,7 +332,7 @@
 # Background observations DAWN makes about itself — calendar events, scheduled
 # tasks, satellite registrations, etc.  Calls are non-streaming, no tools, no
 # TTS, schema-validated, and audit-logged.  See
-# docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md.
+# atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md.
 # provider = "local"              # "local"|"ollama"|"openai"|"claude"|"anthropic"|"gemini"|"openrouter"
                                   # Env: DAWN_LLM_SILENT_OBSERVE_PROVIDER
 # model = ""                      # Model name; empty = let provider pick a default. A

@@ -38,7 +38,7 @@
  *   - memory_alias_canonical_priority_compare() — order-independent canonical
  *                                                 selection rule (§9)
  *
- * See docs/ENTITY_MERGE_DESIGN.md §6 (cascade), §7 (composite formula), §9
+ * See atlas/dawn/memory/ENTITY_MERGE_DESIGN.md §6 (cascade), §7 (composite formula), §9
  * (order-independence), §10 (relation re-pointing), §13 (audit trail).
  *
  * Threshold defaults (first-ship, conservative — Phase 2 calibration may
@@ -176,7 +176,7 @@ typedef struct {
 /**
  * @brief Resolve a surface form against existing canonical entities.
  *
- * Stage 1-6 cascade per docs/ENTITY_MERGE_DESIGN.md §6.  Used at extraction
+ * Stage 1-6 cascade per atlas/dawn/memory/ENTITY_MERGE_DESIGN.md §6.  Used at extraction
  * time, BEFORE memory_db_entity_upsert(), to short-circuit duplicate
  * variants of an already-known canonical.
  *
@@ -392,7 +392,7 @@ int memory_db_entity_alias_unlink(int user_id, int64_t link_id, const char *unli
  * temporal filtering.
  *
  * The implementation form (IN-subquery vs UNION ALL) was chosen after
- * EXPLAIN QUERY PLAN verification — see docs/ENTITY_MERGE_DESIGN.md §15.
+ * EXPLAIN QUERY PLAN verification — see atlas/dawn/memory/ENTITY_MERGE_DESIGN.md §15.
  *
  * @param user_id User ID
  * @param canonical_id Canonical entity id (must have canonical_id IS NULL)

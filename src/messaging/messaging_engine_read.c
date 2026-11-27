@@ -23,7 +23,7 @@
  * by send), pulls the most-recent messages via the driver's optional
  * read_history hook, runs each body through the injection filter, and shapes
  * a chronological, [DATA]-wrapped transcript for the LLM to summarize.
- * Discord-only in v1.  See docs/MESSAGING_CHANNELS_DESIGN.md (read path).
+ * Discord-only in v1.  See atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md (read path).
  */
 #define _GNU_SOURCE /* strdup under strict std */
 #define MESSAGING_ENGINE_INTERNAL_ALLOWED

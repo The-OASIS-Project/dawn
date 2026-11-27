@@ -1600,8 +1600,9 @@ static void parse_memory(toml_table_t *table, memory_config_t *config) {
    }
 
    /* Parse [memory.recall] sub-table — unified cross-source recall tool
-    * (docs/CROSS_TOOL_RECALL_DESIGN.md).  Deep-gather trim limits, separate
-    * from the per-turn focus_injection block above. */
+    * (atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md, "Explicit recall tool").
+    * Deep-gather trim limits, separate from the per-turn focus_injection block
+    * above. */
    toml_table_t *recall = toml_table_in(table, "recall");
    if (recall) {
       static const char *const recall_keys[] = { "top_k", "budget_bytes", "min_score",

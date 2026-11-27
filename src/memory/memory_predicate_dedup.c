@@ -40,10 +40,9 @@
 /* =============================================================================
  * Standard vocabulary — Schema.org Person properties + ConceptNet abstractions.
  *
- * See dawn/docs/PHASE_0_EXTRACTION_PROMPT_DRAFT.md §"Two-tier vocabulary"
- * for the mapping table from each entry to its Schema.org / ConceptNet
- * source.  Predicates in this list have semantic guarantees in the
- * memory subsystem:
+ * Where an entry has a Schema.org / ConceptNet source, it is noted beside it.
+ * Predicates in this list have semantic guarantees in the memory
+ * subsystem:
  *
  *   - Some are one-at-a-time (married_to, born_in, ...) or identifying
  *     (email_is, works_at, ...) — see SPECIAL_RELATIONS[] in
@@ -56,8 +55,8 @@
  *
  * `is_not` is intentionally omitted (unused in observed extraction
  * data; negation handled via `is` with negated object or via
- * dislikes/cannot analogs).  If the prompt change post-Phase 0 starts
- * emitting `is_not` again, add it back here.
+ * dislikes/cannot analogs).  If extraction starts emitting `is_not`
+ * again, add it back here.
  * ============================================================================= */
 static const char *const STANDARD_RELATIONS[] = {
    /* Schema.org Person properties */

@@ -27,8 +27,7 @@
  * Statements are prepared ad-hoc (prepare/step/finalize) rather than cached in
  * s_db: every path here is low-frequency (spawn, a handful of status
  * transitions per job, the once-per-second-when-dirty monitor scan, the boot
- * scan).  Caching into s_db.stmt_* is a documented follow-up if profiling ever
- * shows it (mirrors the memory_db_alias.c note in TODO.md).
+ * scan).  Cache them in s_db.stmt_* only if profiling ever shows the cost.
  *
  * SECURITY: All SQL is constant or parameterized — never sqlite3_mprintf with
  * user input.  System-caller setters take no user_id (internal daemon

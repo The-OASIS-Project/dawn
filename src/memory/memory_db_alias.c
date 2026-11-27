@@ -23,7 +23,7 @@
  * DB-accessing helpers (load_entity_full / find_user_self_id / overlap
  * signals / user_self_bonus) that ALL three sibling TUs (scorer / cascade
  * / writes) call into.  See memory_db_alias_internal.h for the cross-TU
- * surface and docs/ENTITY_MERGE_DESIGN.md §2 for the design.
+ * surface and atlas/dawn/memory/ENTITY_MERGE_DESIGN.md §2 for the design.
  */
 
 #define AUTH_DB_INTERNAL_ALLOWED

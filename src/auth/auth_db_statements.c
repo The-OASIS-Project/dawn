@@ -927,7 +927,7 @@ static const auth_db_stmt_def_t s_stmts[] = {
     * excluded from the entity-embedding cache so the resolver / focus
     * adapter pools do not double-count surface-form variants of the same
     * real-world entity.  Bind position 2 = include_aliases (0 = filter
-    * aliases out, 1 = include).  See docs/ENTITY_MERGE_DESIGN.md §15.
+    * aliases out, 1 = include).  See atlas/dawn/memory/ENTITY_MERGE_DESIGN.md §15.
     * Position 4 = the embedding's size in bytes: only the current model's
     * embeddings count toward the LIMIT (after a model swap, rows not yet
     * recomputed would otherwise fill it). */

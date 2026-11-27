@@ -38,7 +38,7 @@
  * which has no secrets in it.  REST log lines that include headers
  * MUST omit the Authorization line — the driver logs the URL only.
  *
- * See docs/MESSAGING_CHANNELS_DESIGN.md §8 (Discord).
+ * See atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §8 (Discord).
  */
 #include "messaging/messaging_discord.h"
 

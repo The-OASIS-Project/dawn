@@ -17,13 +17,17 @@
  * the project author(s).
  *
  * Pure request-input shaping for the OpenAI Responses API: converts DAWN's
- * chat-completions-shaped history into a Responses `input` array, and splits the
- * two-segment system prompt into a byte-stable `instructions` string (stable) plus a
- * repositioned volatile block. Dependency-free (json-c + libc only) so the
- * prompt-cache layout can be unit-tested in isolation.
+ * chat-completions-shaped history into a Responses `input` array. A conversation's
+ * request is append-only (core/session_prefix.h): its frozen leading system message
+ * becomes a byte-stable `instructions` string, and each turn's context arrives as part
+ * of its question, so [instructions][tools][history] caches across turns. Only a
+ * history without a frozen prefix (a research run) has a second leading system
+ * message, a per-turn volatile block, which is repositioned as a user item just before
+ * the current question. Dependency-free (json-c + libc only) so the prompt-cache
+ * layout can be unit-tested in isolation.
  *
- * See docs/RESPONSES_CACHE_REORDER_PLAN.md for the caching rationale and the
- * cross-module invariant on the leading system run.
+ * See atlas/dawn/archive/PROMPT_CACHE_DESIGN.md §3.3 for the caching rationale, and
+ * the layout note in llm_openai_responses_input.c for the leading-system-run rule.
  */
 
 #ifndef LLM_OPENAI_RESPONSES_INPUT_H
@@ -38,7 +42,9 @@ extern "C" {
 #endif
 
 /* Count the leading contiguous run of role:"system" messages from index 0 (the
- * stable+volatile pair; anything after the run is a mid-history broadcast). */
+ * frozen prefix, plus a research run's volatile block).  A conversation-scoped
+ * message (a directive, instruction or tool-set change) ends the run, so it and
+ * any later system message stay at their position in the history. */
 int llm_responses_count_leading_system_run(struct json_object *history);
 
 /* STABLE instructions = the FIRST system message (leading run [0]). Heap string

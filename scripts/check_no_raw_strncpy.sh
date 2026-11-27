@@ -4,8 +4,8 @@
 # check_no_raw_strncpy.sh - ratcheting guard for the safe_strscpy migration
 #
 # The project is standardizing bounded string copies on safe_strscpy() (arrays)
-# and safe_strncpy() (pointer + explicit size); see
-# docs/SAFE_STRNCPY_STANDARDIZATION_DESIGN.md. This guard keeps raw strncpy() /
+# and safe_strncpy() (pointer + explicit size); see CODING_STYLE_GUIDE.md,
+# "String Safety". This guard keeps raw strncpy() /
 # strncat() from creeping back into directories that have already been swept.
 #
 # It runs at -O0 on every dawn build (unlike -Wstringop-truncation, which only
