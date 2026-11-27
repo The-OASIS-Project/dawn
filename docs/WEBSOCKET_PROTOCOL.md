@@ -684,7 +684,7 @@ Delete a user account.
 {
    "type": "delete_user",
    "payload": {
-      "user_id": 2
+      "username": "alice"
    }
 }
 ```
@@ -696,7 +696,7 @@ Change a user's password.
 {
    "type": "change_password",
    "payload": {
-      "user_id": 2,
+      "username": "alice",
       "new_password": "newpass123"
    }
 }
@@ -709,7 +709,7 @@ Unlock a locked-out user account.
 {
    "type": "unlock_user",
    "payload": {
-      "user_id": 2
+      "username": "alice"
    }
 }
 ```
@@ -769,10 +769,12 @@ Revoke (terminate) a specific session.
 {
    "type": "revoke_session",
    "payload": {
-      "session_token": "abc123..."
+      "token_prefix": "abc123def4567890"
    }
 }
 ```
+`token_prefix` is the 16-character prefix `list_my_sessions` returns; a shorter value is refused.
+
 Response: `revoke_session_response`
 
 #### `session_keepalive_enable`
@@ -821,7 +823,7 @@ Create a new conversation (clears current session context).
 {
    "type": "new_conversation",
    "payload": {
-      "save_current": true
+      "title": "New Title"
    }
 }
 ```
@@ -991,9 +993,7 @@ persist the **assistant's final answer** (role `assistant`).
    "payload": {
       "conversation_id": 42,
       "role": "assistant",
-      "content": "The weather is sunny.",
-      "thinking": "...",
-      "tool_results": "[...]"
+      "content": "The weather is sunny."
    }
 }
 ```
@@ -1560,7 +1560,7 @@ Subscribe to music streaming for this connection.
    "type": "music_subscribe",
    "payload": {
       "quality": "high",
-      "audio_codecs": ["opus"]
+      "bitrate_mode": "vbr"
    }
 }
 ```
@@ -1578,12 +1578,13 @@ Control music playback.
 {
    "type": "music_control",
    "payload": {
-      "action": "play|pause|resume|stop|next|previous|seek",
+      "action": "play|pause|stop|next|previous|seek",
       "position_sec": 30.0
    }
 }
 ```
-- `action`: `play`, `pause`, `resume`, `stop`, `next`, `previous`, `seek`
+- `action`: `play`, `pause`, `stop`, `next`, `previous`, `seek`, `play_index`, `add_to_queue`,
+  `remove_from_queue`, `clear_queue`, `add_artist`, `add_album`, `toggle_shuffle`, `cycle_repeat`, `volume`
 - `position_sec`: only for `seek` action
 - `play` behaviour depends on the payload and current state:
   - with `path` or `query` — plays that specific track / search hit (adds to top of queue)
@@ -1615,7 +1616,7 @@ Browse the music library (artists, albums, tracks).
 {
    "type": "music_library",
    "payload": {
-      "view": "artists|albums|tracks",
+      "type": "stats|tracks|artists|albums|tracks_by_artist|tracks_by_album",
       "artist": "Queen",
       "album": "A Night at the Opera"
    }
@@ -1637,13 +1638,13 @@ Manage the playback queue.
 {
    "type": "music_queue",
    "payload": {
-      "action": "add|clear|remove|play_index",
+      "action": "list|add|clear|remove",
       "path": "/path/to/song.flac",
       "index": 0
    }
 }
 ```
-Response: `music_queue_response`
+Response: `music_queue_response` for `list`; `music_state` for `add`, `clear` and `remove`.
 
 ---
 
@@ -3188,7 +3189,7 @@ Notification that conversation context was reset (via tool).
 ```
 
 #### `context_citations`
-Memory-citation signal (feature-gated on `[memory] citation_enabled`). Emitted at turn
+Memory-citation signal (feature-gated on `[memory.decay] citation_enabled`). Emitted at turn
 end when the model cited ≥1 injected memory, so a "Context for this turn" panel can
 gold-highlight the rows the model actually used. Delivered only to the WEBUI session on
 the matching active conversation.
@@ -3712,7 +3713,8 @@ All `*_response` messages follow a common pattern:
 
 | File | Purpose |
 |------|---------|
-| `src/webui/webui_server.c` | Main message dispatch, streaming, state |
+| `src/webui/webui_server.c` | WebSocket server, streaming, state |
+| `src/webui/webui_message_dispatch.c` | Main message dispatch |
 | `src/webui/webui_broadcasts.c` | Push broadcasts: attention, silent-observation, context-injection, memory, job/conversation notices |
 | `src/core/attention/attention_core.c` | Proactive-attention engine (drives `attention_alert`) |
 | `src/webui/webui_scheduler.c` | Scheduler events + notifications |
@@ -3720,7 +3722,8 @@ All `*_response` messages follow a common pattern:
 | `src/webui/webui_homeassistant.c` | Home Assistant entity list/state |
 | `src/webui/webui_config.c` | Config get/set, audio devices, models |
 | `src/webui/webui_satellite.c` | DAP2 satellite registration and queries |
-| `src/webui/webui_music.c` | Music streaming, search, library, queue |
+| `src/webui/webui_music.c` | Music streaming |
+| `src/webui/webui_music_handlers.c` | Music control, search, library, queue |
 | `src/webui/webui_history.c` | Conversation CRUD, search, context |
 | `src/webui/webui_email.c` | Email account settings, test connection |
 | `src/webui/webui_email_panel.c` | The mail panel's verbs (list, search, read, flags, counts) |

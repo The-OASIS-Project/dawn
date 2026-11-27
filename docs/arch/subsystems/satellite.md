@@ -101,7 +101,7 @@ Tier 1 satellites handle speech recognition and text-to-speech locally and send 
    - Registration with DB lookup for persistent user mapping
    - Query routing, streaming response relay
    - Session management with UUID-based identification
-   - HA area + room context injection into LLM system prompt
+   - HA area + room sent with the satellite's standing directions (`append_satellite_context`, `src/core/prompt_builder.c`)
    - Satellite auth whitelist for music WebSocket messages
 
 - **webui_admin_satellite.c**: Admin satellite management (CRUD)
@@ -117,15 +117,15 @@ Tier 1 satellites handle speech recognition and text-to-speech locally and send 
 
 - **common/src/asr/**: ASR engine abstraction (Whisper batch, Vosk streaming)
 - **common/src/tts/**: Piper TTS with preprocessing and emoji stripping
-- **common/src/vad/**: Silero VAD with ONNX runtime
-- **common/src/logging/**: `DAWN_LOG_INFO/ERROR/WARNING` macros
+- **common/src/asr/vad_silero.c**: Silero VAD with ONNX runtime
+- **common/src/logging_common.c**, `common/include/logging_common.h`: `DAWN_LOG_INFO/ERROR/WARNING` macros
 
 ## DAP2 Protocol Messages
 
 | Type                     | Direction          | Purpose                                  |
 | ------------------------ | ------------------ | ---------------------------------------- |
 | `satellite_register`     | Satellite → Daemon | Registration with UUID, name, location   |
-| `satellite_register_ack` | Daemon → Satellite | Session ID, memory enabled flag          |
+| `satellite_register_ack` | Daemon → Satellite | Session ID, reconnect secret, music token |
 | `satellite_query`        | Satellite → Daemon | User's transcribed text                  |
 | `stream_start`           | Daemon → Satellite | Streaming response begins                |
 | `stream_delta`           | Daemon → Satellite | Partial response text                    |

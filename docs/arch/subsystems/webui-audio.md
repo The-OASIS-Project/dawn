@@ -57,7 +57,7 @@ The WebUI uses Opus audio compression for efficient bidirectional audio streamin
 - **Codec configuration**:
    - Sample rate: 48kHz (Opus native rate)
    - Channels: mono
-   - Bitrate: adaptive (typically 24-32 kbps for voice)
+   - Bitrate: 24 kbps for the browser's mic (`BITRATE` in `www/js/opus-worker.js`); 48 kbps for server TTS (`WEBUI_OPUS_BITRATE`)
    - Frame size: 20ms (960 samples at 48kHz)
 
 - **Capability negotiation**:
@@ -161,7 +161,7 @@ DISABLED → LISTENING → WAKE_CHECK → WAKE_PENDING → PROCESSING → LISTEN
 ```
 
 - **LISTENING**: VAD monitors for speech onset (Silero VAD, 32ms chunks at 16kHz)
-- **WAKE_CHECK**: Speech detected — buffer audio, wait for 1.5s silence, then dispatch ASR
+- **WAKE_CHECK**: Speech detected — buffer audio, wait for `[vad] end_of_speech_duration` of silence (default 1.0s), then dispatch ASR
 - **WAKE_PENDING**: ASR running on worker thread (async)
 - **RECORDING**: Wake word confirmed but no inline command — record follow-up command
 - **PROCESSING**: Command sent to LLM; audio muted to prevent TTS echo
@@ -217,7 +217,8 @@ webui_server.c sends as role:"visual" + stashes pending_visual on session
     ↓
 dawn.js renders immediately into streaming entry (splits text around visual)
     ↓
-streaming.js finalize saves pre-visual + <dawn-visual> + post-visual to DB
+webui_persist_final_answer (webui_broadcasts.c) saves the reply with the
+<dawn-visual> appended at its end
     ↓
 On replay, transcript.js extractVisuals splits and renders inline
 ```
@@ -228,4 +229,4 @@ On replay, transcript.js extractVisuals splits and renders inline
 - **render_visual_tool.c**: two tool registrations (`render_visual_load_guidelines` + `render_visual`). Title sanitization, `</dawn-visual>` tag breakout prevention, JSON parsing of `details` parameter.
 - **visual-render.js**: sandboxed iframe rendering (`sandbox="allow-scripts"`), theme CSS injection from computed parent variables, 9 color ramps with automatic light/dark mode, vendor script inlining (Chart.js cached and embedded), ResizeObserver height auto-sizing via debounced postMessage, `sendPrompt()` bridge with WeakSet source validation, download button.
 - **Guideline modules** (`tool_instructions/render_visual/`): `_core.md` (universal design system), `diagram.md`, `chart.md`, `interactive.md`, `art.md`, `mockup.md`.
-- **History persistence**: server stashes `pending_visual` on session (protected by `tools_mutex`), client interleaves visual content between pre/post text in streaming save, replay splits at tag boundary for inline positioning.
+- **History persistence**: server accumulates `pending_visual` on the session (protected by `tools_mutex`); the server's persist of the final answer (`webui_persist_final_answer`) appends it to the end of the saved reply, and replay splits at the tag boundary.

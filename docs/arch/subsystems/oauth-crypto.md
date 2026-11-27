@@ -11,7 +11,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 ## Key Components
 
 - **oauth_client.c/h**: OAuth 2.0 client with PKCE S256
-   - Provider-agnostic design (currently Google, extensible to Microsoft 365)
+   - Provider-agnostic design (currently Google and Charles Schwab, `oauth_build_schwab_provider`)
    - Authorization URL generation with PKCE challenge
    - Code exchange and token refresh
    - Token storage in `oauth_tokens` SQLite table (encrypted via crypto_store)

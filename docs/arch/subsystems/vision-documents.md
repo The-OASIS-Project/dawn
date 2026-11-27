@@ -50,8 +50,9 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 │  │                                                               │    │
 │  │  Files: <data_dir>/images/<id>.<ext>                          │    │
 │  │  Table: images (id, user_id, source, retention_policy, ...)   │    │
-│  │  Sources: upload, generated, search, MMS, document            │    │
-│  │  Retention: default (age-based), permanent, cache (LRU)       │    │
+│  │  Sources: upload, generated, search, MMS, document, capture   │    │
+│  │  Retention: default (age-based), permanent, cache (LRU),      │    │
+│  │             unbound (until a row names it)                    │    │
 │  │  - Thread-safe: file I/O outside mutex, metadata ops inside   │    │
 │  │  - Atomic writes (tmp + fsync + rename + O_NOFOLLOW)          │    │
 │  │  - Zero-copy HTTP serving via kernel sendfile                 │    │
@@ -68,7 +69,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 
 ### Key Components
 
-- **vision.js**: client-side image handling (1,400+ lines)
+- **vision.js**: client-side image handling (~1,300 lines)
    - Input methods: file picker, clipboard paste, drag-and-drop, camera capture
    - Camera API with front/rear switching (`navigator.mediaDevices.getUserMedia`)
    - Client-side compression via Canvas API (configurable max dimension, default 1024px, JPEG 85%)
@@ -80,10 +81,10 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 - **image_store.c/h**: server-side image storage
    - Filesystem-backed: images stored as files in `<data_dir>/images/`, SQLite holds metadata only
    - Image ID format: `img_` + 12 alphanumeric characters (getrandom)
-   - Source tracking: `IMAGE_SOURCE_UPLOAD`, `_GENERATED`, `_SEARCH`, `_MMS`, `_DOCUMENT`
-   - Retention policies: `IMAGE_RETAIN_DEFAULT` (age-based), `_PERMANENT` (never delete), `_CACHE` (LRU at size cap)
+   - Source tracking: `IMAGE_SOURCE_UPLOAD`, `_GENERATED`, `_SEARCH`, `_MMS`, `_DOCUMENT`, `_CAPTURE` (an image a tool returned)
+   - Retention policies: `IMAGE_RETAIN_DEFAULT` (age-based), `_PERMANENT` (never delete), `_CACHE` (LRU at size cap), `_UNBOUND` (no row names it yet; reclaimed after `IMAGE_UNBOUND_GRACE_SEC`)
    - Atomic file writes: O_NOFOLLOW tmp + fsync + rename, file I/O outside auth_db mutex
-   - Source-aware access control: UPLOAD/MMS require ownership, SEARCH/GENERATED/DOCUMENT accessible to any auth'd user
+   - Source-aware access control: UPLOAD/MMS/CAPTURE require ownership, SEARCH/GENERATED/DOCUMENT accessible to any auth'd user
    - Configurable limits: max size, max per user, retention days, cache size (MB)
 
 - **webui_images.c/h**: HTTP endpoint handlers
@@ -144,15 +145,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 
 ### Vision Model Support
 
-The system auto-detects vision capability based on model name:
-
-| Model Pattern                           | Provider  | Vision Support       |
-| --------------------------------------- | --------- | -------------------- |
-| `gpt-4o`, `gpt-4-vision`, `gpt-4-turbo` | OpenAI    | Yes                  |
-| `claude-3-*`                            | Anthropic | Yes                  |
-| `gemini-*`                              | Google    | Yes                  |
-| `llava-*`, `qwen-vl-*`, `cogvlm-*`      | Local     | Yes                  |
-| Other models                            | Various   | No (button disabled) |
+Vision is on or off per LLM type, by `vision_enabled` in `[llm.cloud]` (default on) or `[llm.local]` (default off). The camera options follow the setting of the session's LLM type (`refreshVisionSupport()` in `vision.js`): when it is off they are disabled and images are refused; documents can still be attached.
 
 ### Security Measures
 
@@ -222,7 +215,7 @@ Source: `src/webui/webui_documents.c`, `www/js/ui/documents.js`
 │  │  Supported: .txt, .md, .csv, .json, .xml, .yaml, .toml,     │    │
 │  │             .c, .h, .py, .js, .html, .css, .sh, .log, etc.  │    │
 │  │             .pdf (MuPDF), .docx (libzip+libxml2)             │    │
-│  │  Configurable limits (default: 512 KB, up to 5 files)        │    │
+│  │  Configurable limits (default: 10 MB, up to 5 files)         │    │
 │  └───────────────────────────────────────────────────────────────┘    │
 │                                                                        │
 │  Document text injected into LLM message as:                          │
@@ -240,7 +233,7 @@ Source: `src/webui/webui_documents.c`, `www/js/ui/documents.js`
    - Input chip UI: filename, extension badge, size, remove button
    - `parseDocumentMarkers(text)`: regex extraction of document markers from transcript text
    - `openDocumentViewer(filename, content)`: modal viewer with focus trap, Escape/backdrop close
-   - Allowed extensions: `.txt`, `.md`, `.csv`, `.json`, `.xml`, `.yaml`, `.yml`, `.toml`, `.ini`, `.cfg`, `.conf`, `.log`, `.c`, `.h`, `.cpp`, `.py`, `.js`, `.ts`, `.html`, `.css`, `.sh`, `.sql`, `.env`, `.pdf`, `.docx`
+   - Allowed extensions: `.txt`, `.md`, `.csv`, `.json`, `.xml`, `.yaml`, `.yml`, `.toml`, `.ini`, `.cfg`, `.conf`, `.log`, `.c`, `.h`, `.cpp`, `.py`, `.js`, `.ts`, `.rs`, `.go`, `.java`, `.rb`, `.html`, `.htm`, `.css`, `.sh`, `.sql`, `.mk`, `.cmake`, `.pdf`, `.docx`
    - PDF and DOCX sent to server for extraction (no client-side read); text files read client-side
    - Toast feedback for unsupported file types on drop
 
@@ -250,14 +243,14 @@ Source: `src/webui/webui_documents.c`, `www/js/ui/documents.js`
       - PDF: MuPDF extraction (`fz_try`/`fz_catch` for error safety, page count cap)
       - DOCX: libzip + libxml2 parse of `word/document.xml` (XXE prevention, ZIP bomb limits)
       - HTML: routed through `html_parser.c` to markdown
-   - `POST /api/documents/summarize`: TF-IDF auto-summarize for documents > 8,000 chars
-   - Returns `{filename, content, size, estimated_tokens}` JSON response; large docs include `auto_summary`
+   - `POST /api/documents/summarize`: TF-IDF summarize, offered by the client when a document won't fit the context's remaining token budget
+   - Returns `{filename, content, size, type, estimated_tokens}` JSON response
    - Authentication required (uses session validation)
 
 - **transcript.js** (document integration):
    - Document markers stripped BEFORE routing logic in `addTranscriptEntry()` to prevent misrouting when document content contains `[Tool Result:` text
    - `createDocumentChips()`: renders clickable chips in conversation entries
-   - History replay: `prependTranscriptEntry()` also parses markers for saved conversations
+   - History replay: saved conversations go through the same `addTranscriptEntry()`, so their markers are parsed too
 
 - **documents.css**: styling for input chips, transcript chips, and viewer modal
    - Transcript chips: squarer (6px radius) document-like appearance
@@ -269,7 +262,7 @@ Source: `src/webui/webui_documents.c`, `www/js/ui/documents.js`
 - **DOMPurify**: markdown-rendered message text sanitized before DOM insertion
 - **CSP header**: `script-src 'self'` blocks any inline scripts in document content
 - **Extension allowlist**: only known text extensions accepted; binary files rejected
-- **Size limit**: configurable per file (default 512 KB, max 10 MB) enforced at both client and server
+- **Size limit**: configurable per file (`[documents] max_file_size_kb`, default and max 10 MB) enforced at both client and server
 - **PDF safety**: `fz_try`/`fz_catch` wraps all MuPDF calls; page count capped to prevent DoS on large documents
 - **DOCX safety**: XXE prevention (no external entity resolution in libxml2); ZIP bomb protection via entry size limits
 - **Magic bytes validation**: PDF (`%PDF-`) and DOCX (ZIP `PK\x03\x04`) headers verified before extraction

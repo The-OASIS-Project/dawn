@@ -140,12 +140,12 @@ Each row points to a detail doc in [`docs/arch/subsystems/`](docs/arch/subsystem
 | **CalDAV Calendar** | Multi-account RFC 4791 client with offline-first SQLite cache, pre-expanded RRULE occurrences (cancelled dates and moved instances applied, each keyed by its original start), and background sync. Edits read the event fresh, change only what was asked in the server's own iCalendar (`calendar_ical.c`, the only file that reads or writes iCalendar), and write it back with If-Match. Tested with Google, iCloud, Nextcloud, Radicale. | [calendar.md](docs/arch/subsystems/calendar.md) |
 | **Email** | Dual backend — IMAP/SMTP for anything, Gmail REST API for OAuth accounts — read through one MIME reader (`email_mime.c`, GMime): bounded fetches, a pre-scan against parser bombs, charsets to UTF-8, attachments listed, sender text sanitized. Trash/archive move batches (one IMAP login, Gmail per message and paced) to the server-marked folder, never a bare EXPUNGE, with a 60 s undo; IMAP ids are pinned to their mailbox's UIDVALIDITY. Two-step confirmation on send and trash. Recipients resolved against the contacts system. | [email.md](docs/arch/subsystems/email.md) |
 | **Messaging Channels** (`src/messaging/`) | Bidirectional text chat over Telegram, Discord, Slack, and SMS. Each provider is a `messaging_driver_t` with its own background listener thread; a channel answers only the person who linked it (the provider's sender id; several DAWN users can each link one group chat, each with their own session), an SMS link completes with a code texted to the number, and inbound messages bind to a per-channel "forever conversation" (`SESSION_TYPE_MESSAGING`, exempt from idle cleanup) with per-conversation LLM settings, and scheduler briefings can deliver to a channel via `deliver_to`. Discord additionally supports read-only channel read/summarize (`list_readable_channels`/`read_history`, `messaging_engine_read.c`). Engine split into core + `_session`/`_channels`/`_link`/`_inbound`/`_codes`/`_read` behind `messaging_engine_internal.h`. WebUI channel-management panel + `dawn-admin messaging` CLI. | [MESSAGING_CHANNELS_SETUP.md](docs/MESSAGING_CHANNELS_SETUP.md) |
-| **Phone & SMS** (`src/tools/phone_*.c`) | Cellular calls and SMS via the external **ECHO** modem daemon (SIM7600G-H) over MQTT. `phone_tool.c` is the LLM interface; `phone_service.c` runs the call state machine (RINGING/ANSWERING/ACTIVE, atomic first-wins answer claim) + TTS announcements + HUD/WebUI banner; `phone_db.c` logs calls/SMS. Incoming-call context is posted to every interactive session via `session_broadcast_notice()` (rendered into each turn's volatile prompt block for 10 minutes, never written into a conversation history); a WebUI incoming-call banner + persistent in-call panel let any surface answer/reject/hang up. Two-way call **audio** bridge (Phase 5) is not yet shipped. | [PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md) |
+| **Phone & SMS** (`src/tools/phone_*.c`) | Cellular calls and SMS via the external **ECHO** modem daemon (SIM7600G-H) over MQTT. `phone_tool.c` is the LLM interface; `phone_service.c` runs the call state machine (RINGING/ANSWERING/ACTIVE, atomic first-wins answer claim) + TTS announcements + HUD/WebUI banner; `phone_db.c` logs calls/SMS. Incoming-call context is posted to the phone owner's interactive sessions (the local device's user) via `session_broadcast_notice_for_user()` (kept on each session for 10 minutes and put into its next turn's context, never written into a history by the posting thread); a WebUI incoming-call banner + persistent in-call panel let any surface answer/reject/hang up. Two-way call **audio** runs between the modem and the local handset (`phone_audio_bridge.c`); routing it to the WebUI or satellites is not built. | [PHONE_SMS_DESIGN.md](docs/PHONE_SMS_DESIGN.md) |
 | **OAuth 2.0 & Crypto** | Shared OAuth client with PKCE S256 and `crypto_store.c` (libsodium `crypto_secretbox`) for encrypted token and password storage. Used by email and calendar. | [oauth-crypto.md](docs/arch/subsystems/oauth-crypto.md) |
 | **Robot body (Reachy Mini)** (`src/core/dawn_events.c`, `src/core/component_status.c`, `services/reachy-bridge/`) | Gives the local voice surface a body. DAWN publishes what the voice loop is doing on MQTT `dawn/events` (state, wake word, speaking start/end, and the expression the model chose with an inline `[emote:name]` tag, stripped before speech and storage). It never drives the robot: a separate Python bridge does, through Pollen's SDK. While the bridge reports `reachy/status` online, the local session's standing directions add the expression directive, and the session is told in a notice when the body goes or comes back. | [OASIS_COMMUNICATIONS_PROTOCOL.md](docs/OASIS_COMMUNICATIONS_PROTOCOL.md), [services/reachy-bridge/README.md](services/reachy-bridge/README.md) |
 | **Coding agents** (`services/agent-gateway/`) | Lets DAWN hand coding work to Claude Code without running it. A separate Python gateway (user `dawn`, MCP on 127.0.0.1 with a bearer token) runs each task as the less privileged `dawn-agent` user in Claude Code's bubblewrap sandbox, in its own clone of a gateway-owned mirror. The gateway never runs git in the agent's clone outside a jail; work comes back as a bundle, and publishing (push of `agent/*`, PR) happens from the mirror on the user's confirmation. Questions, hosts and tools the agent needs are requests the operator answers (per task, per repo or always); whether to ask is decided in code. Events are read by long-poll from any sequence number. In DAWN, the `coding_agent` tool starts and checks tasks (each a job of kind `coding`) and answers what they wait on (allowing a host or tool needs the user's yes to a preview DAWN renders), one watcher thread (`coding_agent_watch.c`) carries the gateway's events onto those jobs, and a job's end is reported back into the conversation it came from (`coding_agent_report.c`, with deep research's helpers in `core/job_report.c`); the tool and the watcher reach the gateway through `coding_agent_gateway.c`. A pull request on any repo the gateway's token reaches can be read too (its state and checks, its review threads, a failing check's log; `coding_agent_github.c`, framed as web content), and, on the user's yes to a preview DAWN renders, replied on (signed by default, its thread resolved) or put to Copilot for another review (`coding_agent_github_post.c`); a revise of a job whose pull request is open hands the agent that pull request's open feedback through a read-only tool of its own (`pr_feedback`), never in the instructions. Finished work is published (push of its branch and a pull request, on a preview DAWN renders and the user's yes) or closed (its clone and branch dropped; asked first when unpublished commits or uncommitted edits would be lost); the gateway closes a task itself once its pull request merges with everything published. In the WebUI, a coding job's view shows its steps and report, and a card on its jobs-panel row and in its view answers what it waits on with a click (`webui_coding.c`, `www/js/ui/coding-events.js`), checked by the server against the live request; the jobs panel lists the standing approvals with Revoke (`coding-grants.js`), and a changes viewer shows a job's files and diffs from the gateway's mirror, never through the model (`coding-viewer.js`); its Publish and Close buttons, where the click is the confirm on what DAWN shows, live in `coding-viewer-actions.js`, with the handlers in `webui_coding.c`. | [services/agent-gateway/README.md](services/agent-gateway/README.md) |
-| **Scheduler** | Timers, alarms, reminders, and scheduled tool execution. Background thread polls every second, fires with chime audio + WebUI banner notifications, supports recurrence and snooze/dismiss. | [scheduler.md](docs/arch/subsystems/scheduler.md) |
-| **Home Assistant** | REST API client with entity cache, fuzzy name matching, and satellite area-awareness (a satellite's Home Assistant area sent with its standing directions). 16 tool actions spanning lights, climate, locks, covers, media, scenes, scripts, automations. | [homeassistant.md](docs/arch/subsystems/homeassistant.md) |
+| **Scheduler** | Timers, alarms, reminders, and scheduled tool execution. Background thread sleeps until its next event, fires with chime audio + WebUI banner notifications, supports recurrence and snooze/dismiss. | [scheduler.md](docs/arch/subsystems/scheduler.md) |
+| **Home Assistant** | REST API client with entity cache, fuzzy name matching, and satellite area-awareness (a satellite's Home Assistant area sent with its standing directions). 17 tool actions spanning lights, climate, locks, covers, media, scenes, scripts, automations, and the confirm for an unlock or open. | [homeassistant.md](docs/arch/subsystems/homeassistant.md) |
 | **Per-User Settings** | Persona, location, timezone, units, theme — stored in `user_settings` and injected into the LLM system prompt at session start so every session is personalized to the authenticated user. | [user-settings.md](docs/arch/subsystems/user-settings.md) |
 
 ---
@@ -582,7 +582,7 @@ Global daemon locks (src/dawn.c):
   llm_mutex              — LLM worker thread ↔ main thread buffer transfer
   tts_mutex              — TTS engine (Piper) serialization
   conversation_mutex     — conversation history list
-  g_config_rwlock        — the live dawn.toml settings.  Readers include the LLM-settings getters
+  g_config_rwlock        — (src/config/config_defaults.c) the live dawn.toml settings.  Readers include the LLM-settings getters
                            (session_get_llm_config, llm_resolve_config, llm_selection_problem),
                            taken with no session lock held; a writer (a settings save) never calls
                            into session LLM state
@@ -760,17 +760,16 @@ Per-module locks (scoped to a single subsystem):
 
 4. **Keep critical sections minimal.** Copy data, release the lock, *then* process. Avoid I/O while holding locks.
 
-5. **Prefer lock-free patterns for high-frequency updates.** The audio ring buffer uses volatile read/write pointers; state flags use `volatile` booleans or C11 atomics; `llm_processing` and `llm_interrupt_requested` are `volatile sig_atomic_t`.
+5. **Prefer lock-free patterns for high-frequency updates.** The audio ring buffer uses volatile read/write pointers; state flags use `volatile` booleans or C11 atomics; `llm_processing` is a `volatile int` (`src/dawn.c`) and `llm_interrupt_requested` an `_Atomic sig_atomic_t` (`src/llm/llm_interface.c`).
 
 ### Testing Lock Discipline
 
-Use **ThreadSanitizer** during development:
+Use **ThreadSanitizer** during development (the `tsan` preset builds the CI unit tests with it):
 
 ```bash
-cd build
-cmake -DCMAKE_C_FLAGS="-fsanitize=thread -g" ..
-make
-./dawn
+cmake --preset tsan
+make -C build-tsan tests-ci
+ctest --test-dir build-tsan -L ci
 ```
 
 ThreadSanitizer detects data races, lock order inversions, and use-after-free in threaded code.
@@ -951,12 +950,13 @@ The internal header contains `extern` declarations for shared state (defined in 
 ### Configuration File Hierarchy
 
 ```
-~/.config/dawn/     # User-specific (highest priority)
-./                  # Project root (fallback)
-/etc/dawn/          # System-wide (lowest priority, future)
+--config <path>                  # Explicit path (highest priority; dawn.toml only)
+./dawn.toml, ./secrets.toml      # Current directory
+~/.config/dawn/config.toml, ~/.config/dawn/secrets.toml   # User-specific
+/etc/dawn/config.toml, /etc/dawn/secrets.toml             # System-wide (lowest priority)
 ```
 
-Higher-priority files override lower.
+The first file found is the one loaded; files are not merged.
 
 ### Configuration Files
 
@@ -965,27 +965,30 @@ Higher-priority files override lower.
 ```toml
 [general]
 ai_name = "friday"
+
+[localization]
 timezone = "America/New_York"
 
 [llm]
 type = "cloud"                    # "cloud" or "local"
 
 [llm.cloud]
-provider = "openai"               # "openai", "anthropic", "gemini", "openrouter"
-model = "gpt-4o"
+provider = "openai"               # "openai", "claude", "gemini", "openrouter"
+openai_models = ["gpt-6-luna", "gpt-6.2-sol"]   # one list per provider (claude_models, ...)
+openai_default_model_idx = 0      # the provider's default model, by index into its list
 
 [llm.local]
 endpoint = "http://localhost:8080"
 model = "qwen3-4b"
 
 [asr]
-model_path = "models/whisper.cpp/ggml-base.en.bin"
-language = "en"
+model = "base"                    # Whisper model, under models_path
+models_path = "models/whisper.cpp"
 dedup_window_sec = 4              # cross-device utterance dedup (0 disables)
 
 [tts]
-model_path = "models/en_GB-alba-medium.onnx"
-sample_rate = 22050
+models_path = "models"
+voice_model = "en_GB-alba-medium"
 
 [webui]
 bind_address = "0.0.0.0"
@@ -1002,6 +1005,7 @@ release_dir = "/var/lib/dawn/ota"
 **`secrets.toml`** — API keys and sensitive credentials (gitignored):
 
 ```toml
+[secrets]
 openai_api_key = "sk-..."
 claude_api_key = "sk-ant-..."
 gemini_api_key = "..."
@@ -1023,19 +1027,19 @@ The WebUI settings panel (`www/js/ui/settings.js`) defines a `SETTINGS_SCHEMA` t
 | ------------------ | ------------------------------------- | ----------------------------------------------- |
 | Default Persona    | `[persona]`                           | `values`, `voice`; the older `description` (a whole persona) shown only while set |
 | Language Model     | `[llm]`, `[llm.cloud]`, `[llm.local]` | Provider (incl. OpenRouter) + model selection |
-| Speech Recognition | `[asr]`                               | Model, language, cross-device dedup window      |
+| Speech Recognition | `[asr]`                               | Model, cross-device dedup window, ASR hint      |
 | Text-to-Speech     | `[tts]`                               | Voice model, rate                               |
 | Audio              | `[audio]`                             | Backend, devices                                |
-| Tool Calling       | `[llm.tools]`                         | Mode, per-tool toggles                          |
-| Network            | `[webui]`, `[dap]`, `[mqtt]`          | Ports, addresses                                |
+| Tool Calling       | `[llm.tools]`                         | Enable switch, per-tool toggles                 |
+| Network            | `[webui]`, `[mqtt]`                   | Ports, addresses                                |
 | Images & Vision    | `[images]`, `[vision]`                | Storage retention, upload size/dimension limits |
 | Documents          | `[documents]`                         | Upload size, page/index limits, chunking, hybrid-search weights |
-| Messaging          | `[messaging.sms]` (+ tokens in `secrets.toml`) | Channel link/unlink/rename, per-channel reasoning/effort |
-| OTA / Fleet        | `[ota]`                               | Release dir, download-token TTL, TLS requirement; fleet rollout lives in the OTA panel, not Settings |
+| Messaging          | `[messaging.sms]` (+ tokens in `secrets.toml`) | Not in the Settings panel: channel link/unlink/rename and per-channel reasoning/effort are in the My Channels panel (`www/js/admin/my-channels.js`) |
+| OTA / Fleet        | `[ota]`                               | Not in the Settings panel (release dir, download-token TTL, TLS requirement are set in `dawn.toml`); fleet rollout lives in the satellites panel (`www/js/admin/satellites.js`) |
 | Code Projects      | `[code_projects]`                     | Coding harness: enable, source root, import permissions, clone caps, and `allowed_local_roots` (link-local allowlist). Compiled in only with `DAWN_ENABLE_CODE_PROJECTS`. |
 | Scheduler & Watches | `[scheduler]`, `[attention]`         | Snooze/alarm defaults, per-user + global event caps, missed-task policy, retention; SAGE watch budgets (watch *rules* are DB-backed, not config) |
-| Background Jobs    | `[jobs]`                              | Master enable, global/per-user/per-provider concurrency caps, per-job runtime reap, reinvoke caps. Job create/list/cancel/resume is conversational (the `job` tool + WebUI), never config. Four Phase-2/3 knobs are parsed and round-tripped but not yet enforced, so they are deliberately **not** surfaced in the panel |
-| Deep Research      | `[research]`                          | Master enable (opt-in; the `deep_research` tool refuses until on) + per-run budgets (rounds, tool calls, input-token ceiling, round-digest cap, sources-to-answer, saturation-stop dry-round count, stale-question retire count, completeness-critic re-arm cap). A research run IS a background job, so it also obeys `[jobs]` caps. One debug knob (`capture_revisions`) is parsed + round-tripped but not yet enforced, so it is deliberately **not** surfaced in the panel |
+| Background Jobs    | `[jobs]`                              | Master enable, global/per-user/per-provider concurrency caps, per-job runtime reap, reinvoke caps, event retention and chunk cap. Job create/list/cancel/resume is conversational (the `job` tool + WebUI), never config. Three knobs (`max_queued_per_user`, `max_spawn_depth`, `max_children_per_tree`) are parsed and round-tripped but not yet enforced, so they are deliberately **not** surfaced in the panel (nor is `monitor_followups_per_tick`) |
+| Deep Research      | `[research]`                          | Master enable (opt-in; the `deep_research` tool refuses until on) + per-run budgets (rounds, input-token ceiling, round-digest cap, sources-to-answer, saturation-stop dry-round count, stale-question retire count, completeness-critic re-arm cap). A research run IS a background job, so it also obeys `[jobs]` caps. One debug knob (`capture_revisions`) is parsed + round-tripped but not yet enforced, so it is deliberately **not** surfaced in the panel |
 
 ### Adding a setting — read [docs/CONFIGURATION_GUIDE.md](docs/CONFIGURATION_GUIDE.md) first
 

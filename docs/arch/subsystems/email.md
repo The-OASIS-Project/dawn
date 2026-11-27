@@ -15,9 +15,9 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 │   LLM TOOL INTERFACE              │  WEBUI MAIL PANEL (Aurora)        │
 │  email_tool.c                     │  webui_email_panel.c: email_list, │
 │  recent | read | search | folders │   _search, _read, _set_flags,     │
-│  | send | confirm_send | accounts │   _unread_counts (email_cursor.c, │
-│  | trash | confirm_trash | archive│   email_wire.c: paging, frames)   │
-│                                   │  webui_email_panel_move.c:        │
+│  | digest | send | confirm_send   │   _unread_counts (email_cursor.c, │
+│  | accounts | trash | archive     │   email_wire.c: paging, frames)   │
+│  | confirm_trash                  │  webui_email_panel_move.c:        │
 │                                   │   _archive, _trash, _undo         │
 │  → TOOL_CAP_DANGEROUS gates       │  webui_email_exec.c: 4 workers,   │
 │                                   │   one task per account            │

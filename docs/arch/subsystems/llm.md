@@ -16,10 +16,10 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 ## Key Components
 
 - **llm_interface.c/h**: LLM abstraction layer
-   - `LLMContext` struct: provider-agnostic context
+   - `llm_resolved_config_t` struct: provider-agnostic config for one call
    - `llm_init()`: initialize selected provider
-   - `llm_send_message()`: send message, get complete response (blocking)
-   - `llm_send_message_streaming()`: send message, stream response chunks
+   - `llm_chat_completion_with_config()`: send message, get complete response (blocking)
+   - `llm_chat_completion_streaming_with_config()`: send message, stream response chunks
    - Sends a request to the provider its resolved config names (see [Provider selection](#provider-selection); `llm_selection.c` decides which)
 
 - **llm_openai.c/h**: OpenAI API implementation
@@ -169,7 +169,7 @@ A conversation's request is **append-only**: nothing already sent to the model i
 
 - **`sections[]`** — the system prompt in named sections (`prompt_sections_add`, `src/core/prompt_sections.c`): `identity_override`, `persona`, `rules`, `tool_defaults` (guests only), `user_context`, `user_identity`, `memory_rules`, `citation_rules`, `tool_discipline`, `recall_routing`, `background_deliveries`, `context_rules`. `stable_prefix` is their join. The base prompt is **surface-neutral**: one command prompt (`get_command_prompt_dup()`) for every surface; nothing about the room, voice or channel is in it.
 - **`directives`** — the surface's standing directions, the full set every turn (`build_directives`): tools unavailable here right now (`llm_tools_build_disabled_hint`), a satellite's or the local mic's room, a messaging channel, spoken output + speech-to-text input (local mic, satellites, WebUI with voice on), a background job's headless mode. A detached reinvoke turn sets `session->keeps_directions` and sends none, so the conversation's stay in force.
-- **`tool_names` / `tool_schemas`** — the tool set to freeze (every registered tool except the research-only ones, independent of what is enabled right now: `llm_tools_freeze_names`) and a hash of each schema (`llm_tools_schema_hashes`).
+- **`tool_defs` / `tool_def_hashes` / `tool_schemas`** — the tool set to freeze, as definitions (every registered tool except the research-only ones, independent of what is enabled right now: `llm_tools_definitions_hashed`), each definition's hash, and each schema's hash as an older build recorded it (`llm_tools_schema_hashes`, for converting a conversation frozen by name).
 - **`memory_body`** — preferences + recent conversation summaries (`memory_build_context`, unframed).
 - **`context_head`** — the turn context's first line, `[system_time]` (`prompt_turn_head`; never empty, so the head is always that line).
 - **`focus_items`** — the ranked retrieved items as data (`build_focus_block`): source, item id, date, one-line text with DAWN's markers defused, score, and each held item's handle `[M<n>]` for the whole conversation (`focus_handles.c`; the date is when the item was learned, saved or happens). Which of them the turn sends is decided at the seam (below).
@@ -400,7 +400,7 @@ Other specifics: OpenRouter never routes to `/v1/responses`
 (`should_dispatch_to_responses_api` skips `openrouter.ai`); requests carry optional
 `HTTP-Referer` + `X-Title` attribution headers; a `provider="openrouter"` config with no key
 is refused with the reason, as any selected provider without its key is, and an aux purpose
-with no key **errors honestly** rather than silently switching providers; and `get_context_size()` best-effort-strips the `vendor/`
+with no key **errors honestly** rather than silently switching providers; and `llm_context_get_size()` reads the slug's window from OpenRouter's `/api/v1/models` catalog (fetched hourly), else strips the `vendor/`
 prefix to reuse the known context-window tables, else a conservative 128K default.
 
 > **History:** OpenRouter was originally a `[llm.cloud] use_openrouter` gateway *toggle* that

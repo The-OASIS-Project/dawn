@@ -23,14 +23,14 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Per-user preferences editable from the browser
    - Theme selection syncs immediately
 
-- **build_user_prompt()**: System prompt personalization
+- **`user_persona()`, `user_context_text()`** (`src/core/prompt_builder.c`): System prompt personalization
    - Injects user preferences (persona, location, units) into LLM system prompt at session start
    - Each session is personalized to the authenticated user
    - The persona composes the same way at both levels: each half is the server's (`[persona] values`
      / `voice`, else the built-in; while the older `[persona] description` is set it is the values
      half and the voice half is empty), then the user's text for that half is added after a blank
      line or replaces it; the halves join with a blank line (`llm_persona_half`,
-     `prompt_persona_half`, `prompt_persona_join`)
+     `prompt_persona_half`)
    - Preferred address is a comma-separated choice the model uses now and then
 - **user_tz()** (`src/core/user_tz.c`): the user's time zone, else the server's
    - Named in each turn's `[system_time]` line; the date, time, calendar and scheduler tools read and

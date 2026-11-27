@@ -271,8 +271,8 @@ Components must echo the exact `request_id` received - no modification.
 | `echo/events` | Unsolicited events from Echo (calls, SMS) | Echo | Dawn |
 | `echo/response` | Command responses from Echo | Echo | Dawn |
 | `echo/status` | Echo presence (online/offline) | Echo | Dawn |
-| `echo/telemetry` | Modem metrics (signal, registration) | Echo | Dawn, Mirage |
-| `stat/telemetry` | System telemetry (battery, CPU, fan) | Stat | Mirage |
+| `echo/telemetry` | Modem metrics (signal, registration) | Echo | none yet |
+| `stat/telemetry` | System telemetry (battery, CPU, fan) | Stat | Dawn, Mirage |
 | `stat/status` | Stat presence (online/offline) | Stat | Dawn, Mirage |
 | `reachy/status` | Reachy Mini bridge presence (online/offline) | Reachy bridge | Dawn |
 | `oasis/broadcast` | System-wide announcements | Any | All components |
@@ -619,7 +619,7 @@ Both Dawn and Mirage publish their status, enabling mutual awareness:
   "status": "online",
   "timestamp": 1706644800000,
   "version": "2.0.0",
-  "capabilities": ["voice", "vision", "tools"]
+  "capabilities": ["voice", "tools"]
 }
 ```
 
@@ -854,9 +854,9 @@ These fields are reserved for future use:
 - [ ] Timestamps in Unix milliseconds
 
 ### Discovery (HUD)
-- [ ] Mirage: Publish `hud/discovery/elements` on startup (retained)
-- [ ] Mirage: Publish `hud/discovery/modes` on startup (retained)
-- [ ] Mirage: Subscribe to `hud/discovery/request`, republish on receive
+- [x] Mirage: Publish `hud/discovery/elements` on startup (retained)
+- [x] Mirage: Publish `hud/discovery/modes` on startup (retained)
+- [x] Mirage: Subscribe to `hud/discovery/request`, republish on receive
 - [x] Dawn: Subscribe to `hud/discovery/#`
 - [x] Dawn: Update tool parameters from discovery messages
 - [x] Dawn: Publish discovery request on connect
@@ -864,24 +864,24 @@ These fields are reserved for future use:
 - [x] Dawn: Disable armor tools until discovery succeeds
 
 ### Component Status / Keepalive (Mirage → Dawn)
-- [ ] Mirage: Set LWT on MQTT connect (`hud/status` offline, retained)
-- [ ] Mirage: Publish online status after connect (retained)
-- [ ] Mirage: Publish heartbeat every 30 seconds
-- [ ] Mirage: Publish offline status before graceful disconnect
-- [ ] Dawn: Subscribe to `hud/status`
-- [ ] Dawn: Enable armor tools on "online" status
-- [ ] Dawn: Disable armor tools on "offline" status
-- [ ] Dawn: Track heartbeat timestamp, timeout after 90s
-- [ ] Dawn: Integrate status with discovery (only use discovery if online)
+- [x] Mirage: Set LWT on MQTT connect (`hud/status` offline, retained)
+- [x] Mirage: Publish online status after connect (retained)
+- [x] Mirage: Publish heartbeat every 30 seconds
+- [x] Mirage: Publish offline status before graceful disconnect
+- [x] Dawn: Subscribe to `hud/status`
+- [x] Dawn: Enable armor tools on "online" status
+- [x] Dawn: Disable armor tools on "offline" status
+- [x] Dawn: Track heartbeat timestamp, timeout after 90s
+- [x] Dawn: Integrate status with discovery (only use discovery if online)
 
 ### Component Status / Keepalive (Dawn → Mirage)
-- [ ] Dawn: Set LWT on MQTT connect (`dawn/status` offline, retained)
-- [ ] Dawn: Publish online status after connect (retained)
-- [ ] Dawn: Publish heartbeat every 30 seconds
-- [ ] Dawn: Publish offline status before graceful disconnect
-- [ ] Mirage: Subscribe to `dawn/status`
+- [x] Dawn: Set LWT on MQTT connect (`dawn/status` offline, retained)
+- [x] Dawn: Publish online status after connect (retained)
+- [x] Dawn: Publish heartbeat every 30 seconds
+- [x] Dawn: Publish offline status before graceful disconnect
+- [x] Mirage: Subscribe to `dawn/status`
 - [ ] Mirage: Show "AI Online/Offline" indicator on HUD
-- [ ] Mirage: Track heartbeat timestamp, timeout after 90s
+- [x] Mirage: Track heartbeat timestamp, timeout after 90s
 
 ## Version History
 

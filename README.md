@@ -52,13 +52,13 @@ Everything is GPLv3. Cloud LLMs are optional — DAWN runs fully local if you wa
 ### Voice Intelligence
 
 - **Speech Recognition** — Whisper ASR with GPU acceleration on Jetson (2.3x–5.5x faster than real-time). Intelligent voice activity detection knows when you're speaking and when you've stopped.
-- **Multi-Provider LLM** — Cloud: OpenAI GPT-6 (Astra, Sol, 6.1 Sol, 6.1 Terra, Luna) and GPT-5.x, Anthropic Claude (Fable 5.2, Opus 5.5, Sonnet 5.5, Haiku 5.5 and earlier; Mythos for verified organizations), Google Gemini 4 (Carbon, Argon, Hydrogen), 3 and 2.5, or any model via OpenRouter (one key, many vendors; its Claude models go through OpenRouter's Anthropic endpoint, so they get the same caching and thinking as direct Claude). Local: llama.cpp or Ollama for fully offline operation. Runtime model switching via WebUI or voice.
+- **Multi-Provider LLM** — Cloud: OpenAI GPT-6 (6.2 Astra, 6.2 Sol, Astra, Sol, 6.1 Sol, 6.1 Terra, Luna) and GPT-5.x, Anthropic Claude (Fable 5.2, Opus 5.5, Sonnet 5.5, Haiku 5.5 and earlier; Mythos for verified organizations), Google Gemini 4 (Carbon, Argon, Hydrogen), 3 and 2.5, or any model via OpenRouter (one key, many vendors; its Claude models go through OpenRouter's Anthropic endpoint, so they get the same caching and thinking as direct Claude). Local: llama.cpp or Ollama for fully offline operation. Runtime model switching via WebUI or voice.
 - **Text-to-Speech** — Piper TTS with ONNX Runtime. Multiple voices included. Text preprocessing for natural phrasing.
 - **Speech-Shaped Replies** — On voice interfaces (satellites, local mic, WebUI voice) DAWN tells the model its reply will be read aloud, so answers stay concise and skip on-screen-only formatting; it also warns the model that speech-transcribed input may contain homophone mishearings to interpret from context. All three directives are editable in Settings (Text-to-Speech / Speech Recognition), and the WebUI voice variant keeps the screen free for visuals.
 - **Reasoning, Per Model** — Deep reasoning for complex queries, with each model offered exactly the controls it supports (the WebUI shows only those):
    - Claude: adaptive thinking with effort from low to max (older models: a fixed thinking budget), in collapsible blocks
-   - OpenAI: reasoning effort for GPT-5.x (up to xhigh) and the o-series
-   - Gemini: thinking levels for Gemini 2.5 and 3
+   - OpenAI: reasoning effort for GPT-6 (up to max), GPT-5.x (up to xhigh) and the o-series
+   - Gemini: thinking levels for Gemini 2.5, 3 and 4
    - Local: Qwen3 thinking mode with native template support
 - **Cloud Rate Limiting** — Built-in throttling prevents you from getting rate-limited by cloud providers.
 - **Prompt Caching** — Each conversation is sent append-only: its opening instructions and tools stay fixed, and anything that changes is added at the end. Providers that cache (Claude, OpenAI, OpenRouter, llama.cpp) reuse everything before your new message instead of processing it again, so long conversations and tool-heavy turns answer faster and cost a fraction as much. Very long conversations are summarized between turns, never mid-answer. `dawn-admin cache stats` shows how well caching is working.
@@ -192,7 +192,7 @@ DAWN remembers facts, preferences, and relationships about its users across sess
 - **Confidence Decay** — Unused memories naturally fade; accessed memories are reinforced.
 - **Contacts** — Store email addresses, phone numbers, and addresses for people DAWN knows. Upload contact photos (compressed and circular-cropped in the WebUI) that appear as thumbnails in the contact list and are sent as base64 in HUD notifications for incoming calls and SMS. Linked to the entity graph. Used by the email and phone systems for contact resolution. Managed via voice ("Save Bob's email") or the WebUI Contacts tab.
 - **Entity Merge** — Combine duplicate entities ("Dawn" + "Dawn Smith"), transferring all relations and contacts. Available via voice or WebUI.
-- **Memory Viewer** — Browse, search, and manage all memory types in the WebUI. Five tabs: Facts, Preferences, Summaries, Graph, Contacts.
+- **Memory Viewer** — Browse, search, and manage all memory types in the WebUI. Six tabs: Facts, Preferences, Summaries, Graph, Contacts, Learned (what each conversation taught).
 - **Import / Export** — Export memories as DAWN JSON (lossless backup) or human-readable text (portable). Import from Claude, ChatGPT, or other AIs — paste text or upload a file. Preview before committing with automatic duplicate detection.
 - **Per-User Isolation** — Each user's memory is separate in multi-user households.
 

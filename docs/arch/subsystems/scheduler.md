@@ -14,12 +14,12 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 ┌───────────────────────────────────────────────────────────────────────┐
 │                     LLM TOOL INTERFACE                                │
 │  scheduler_tool.c                                                    │
-│  Actions: create | list | cancel | query | snooze | dismiss          │
+│  Actions: create | list | cancel | query | update | snooze | dismiss │
 │  → "Set a 10 minute timer", "Remind me at 3pm", "Cancel all timers" │
 ├───────────────────────────────────────────────────────────────────────┤
 │                     SCHEDULER ENGINE                                  │
 │  scheduler.c                                                         │
-│  → Background thread polls every second                              │
+│  → Background thread sleeps until the next event is due              │
 │  → Fires events when time arrives (chime audio + WebSocket notify)   │
 │  → Recurrence: daily, weekdays, weekends, weekly, custom days        │
 │  → Snooze (configurable duration) and dismiss                        │
@@ -27,7 +27,8 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 ├───────────────────────────────────────────────────────────────────────┤
 │                     SQLITE STORAGE                                    │
 │  scheduler_db.c                                                      │
-│  Table: scheduler_events (user_id, type, label, fire_at, recurrence) │
+│  Table: scheduled_events (user_id, event_type, name, fire_at,        │
+│         recurrence)                                                  │
 │  → Shares auth_db SQLite handle                                      │
 │  → Prepared statements for CRUD and time-range queries               │
 └───────────────────────────────────────────────────────────────────────┘
@@ -36,8 +37,8 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 ## Key Design Points
 
 - **Event types**: timer (countdown), alarm (absolute time), reminder (absolute + label), task (absolute + tool invocation), briefing (multi-step tool run + one LLM summarization at fire time).
-- **Briefings**: a briefing runs its `briefing_steps` on a detached thread, concatenates the output, and makes one LLM summarization call under a `<briefing_data>` block. An optional per-briefing `instructions` field (schema v84, `sched_event_t.instructions`) steers *how* that summary is written (emphasis, structure, length, tone); it is emitted as a fenced `<briefing_instructions>` block that precedes an absolute security rule, so instructions can shape format but can never reclassify the data as commands. The field is LLM-editable in place via the scheduler `update` action (replace-wholesale semantics). Legacy briefings with no instructions use the fixed default prompt.
+- **Briefings**: a briefing runs its `briefing_steps` on a detached thread, concatenates the output, and makes one LLM summarization call under a `<briefing_data>` block. An optional per-briefing `instructions` field (schema v84, `sched_event_t.instructions`, column `briefing_instructions`) steers *how* that summary is written (emphasis, structure, length, tone); it is emitted as a fenced `<briefing_instructions>` block that precedes an absolute security rule, so instructions can shape format but can never reclassify the data as commands. The field is LLM-editable in place via the scheduler `update` action (replace-wholesale semantics). Legacy briefings with no instructions use the fixed default prompt.
 - **Chime audio**: built-in chime WAV played via audio subsystem at configurable volume.
-- **WebUI notifications**: `scheduler_fire` WebSocket message triggers banner with snooze/dismiss buttons.
+- **WebUI notifications**: `scheduler_notification` WebSocket message triggers banner with snooze/dismiss buttons.
 - **Recurrence**: events auto-reschedule after firing based on recurrence pattern. Each occurrence is placed at its time of day (`original_time`) on its owner's clock, and the row records that zone (`zone`, schema v111). When an owner's zone differs from the one a pending repeating event was placed in (a settings save, or the server's zone changed across a restart), `scheduler_rezone` moves it to the same date and time on the new clock, or the next occurrence when that has passed. One-time and snoozed events keep their instant.
 - **Unit tests**: `tests/test_scheduler.c` (the database layer) and `tests/test_scheduler_recur.c` (repeat and zone-change times).
