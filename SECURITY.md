@@ -18,8 +18,10 @@ not be.
 
 ## Supported versions
 
-DAWN publishes tagged releases on GitHub, and fixes land on `main`. Run a current
-`main` and update when an advisory is published.
+DAWN publishes tagged releases on GitHub. A release is never changed after it is tagged, so a
+fix lands on `main` and ships in the next release; an advisory names the release that carries
+it. Run the latest release and move to the next one when an advisory is published. Running a
+current `main` is also supported, and gets a fix as soon as it lands.
 
 ## Scope
 

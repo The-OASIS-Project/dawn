@@ -243,17 +243,20 @@ Requests can also include data payloads:
 
 ## Request ID Format
 
-Request IDs should be unique and include enough context for debugging:
+A request ID is chosen by the requester and is opaque to everyone else. It must be unique among
+that requester's outstanding requests, and should carry enough context to read in a log:
 
 ```
-<component>_<context>_<sequence>
+<context>_<sequence>
 ```
 
 Examples:
-- `dawn_worker0_42` - Dawn worker thread 0, sequence 42
-- `dawn_main_1` - Dawn main thread, sequence 1
-- `webui_session5_3` - WebUI session 5, sequence 3
-- `mirage_hud_12` - Mirage HUD, sequence 12
+- `worker_0_42` - what Dawn sends: worker thread 0, sequence 42
+- `hud_12` - a HUD request, sequence 12
+
+A requester whose responses arrive on a topic it shares with another requester should add its
+own name in front (`mirage_hud_12`) so the two can't collide. Dawn's responses arrive on its own
+topic, so it sends no prefix.
 
 Components must echo the exact `request_id` received - no modification.
 
