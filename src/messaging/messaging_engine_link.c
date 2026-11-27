@@ -22,7 +22,7 @@
  * handshake), the link-attempt audit log, and the detached async-send helper
  * used to confirm /link and /new from the mosquitto callback thread without
  * self-deadlocking.  Split out of messaging_engine.c; see
- * messaging_engine_internal.h and docs/MESSAGING_ENGINE_SPLIT_PLAN.md.
+ * messaging_engine_internal.h.
  */
 #define AUTH_DB_INTERNAL_ALLOWED
 #define MESSAGING_ENGINE_INTERNAL_ALLOWED

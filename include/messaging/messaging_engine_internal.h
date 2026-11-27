@@ -22,8 +22,7 @@
  * the cross-file types, module-state externs, and helper prototypes that the
  * engine was split across (core / session / channels / link / inbound) when
  * messaging_engine.c outgrew the 2,500-line hard limit.  NOT a public API —
- * external consumers use include/messaging/messaging_engine.h.  See
- * docs/MESSAGING_ENGINE_SPLIT_PLAN.md for the decomposition rationale.
+ * external consumers use include/messaging/messaging_engine.h.
  *
  * Each engine .c that includes this header must first
  *   #define MESSAGING_ENGINE_INTERNAL_ALLOWED

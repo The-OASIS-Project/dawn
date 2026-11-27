@@ -22,10 +22,9 @@ early-terminated research harness recovered the dropped sources worth having (Hu
 architecture → R13, bounded deferral → R14). Remaining minor claims are direct extractions
 from primary sources; 0 refuted anywhere.
 **Working name**: SAGE is a placeholder; final OASIS component name TBD by the developer.
-**Supersedes/absorbs**: the `docs/TODO.md` item "Proactive background observation (memory
-Phase 2)" — that item framed proactivity as a memory feature; this design reframes it as an
-ecosystem-level subsystem that the memory graph *feeds* (see §9.4). Update TODO.md when this
-ships.
+**Supersedes/absorbs**: the earlier "Proactive background observation (memory Phase 2)"
+plan — that plan framed proactivity as a memory feature; this design reframes it as an
+ecosystem-level subsystem that the memory graph *feeds* (see §9.4).
 
 ---
 
@@ -57,11 +56,11 @@ memory-extraction outputs, calendar, and (future) vision/perception events.
   conversation turns instead of external events, and interacts with always-on voice mode.
   Deliberately out of scope for SAGE v1; revisit at P2+ when the judge exists.
 
-**Relationship to the durable-background-jobs keystone** (Odysseus roadmap Tier 1, TODO.md):
+**Relationship to durable background jobs** ([`BACKGROUND_JOBS_DESIGN.md`](BACKGROUND_JOBS_DESIGN.md)):
 complementary, not competing — watch-condition jobs *terminate in SAGE events* ("watch the
 build; if it breaks, interrupt me"), and SAGE's DIGEST delivery reuses the same briefing
 infra jobs deliver through. Neither blocks the other: PRE+P0 are small and can land before or
-alongside the jobs work. TODO.md should state which program leads when both go active.
+alongside the jobs work.
 
 ### 1.1 Position among the six JARVIS gaps (session analysis, 2026-07-03)
 
@@ -276,7 +275,7 @@ typedef struct {
 | AURA | `helmet/telemetry` MQTT — **EXISTS (PRE shipped 2026-07-06)**: MIRAGE `suit_telemetry.c` republishes the parsed Enviro/Motion/GPS; DAWN `suit_service.c` ingests | CO2 slope, air-quality band change, heat index, GPS geofence enter/leave |
 | SPARK | `armor/telemetry` MQTT — **EXISTS (PRE shipped)**: per-piece temp/voltage republished (SPARK reaches MIRAGE via AURA's ESP-NOW→serial relay); DAWN keeps a bounded armor roster | armor-piece voltage low, temp high, telemetry timeout (piece offline) |
 | ECHO | `echo/events` — **exists** (`src/tools/phone_service.c`) | missed call, SMS from VIP contact, modem lost, signal degraded |
-| Home Assistant | REST polling / webhooks (`homeassistant_service.c`). The `state_changed` WS subscription that would feed this is also **signal-map #3** — it doubles as the real-time push for the shipped interactive HA board (see `PROACTIVE_ALERTS_SCOPE.md` §3 + `DAWN_UI_SIGNAL_MAP.md §9.4`) | entity state changes matching watch rules (door open, device offline) |
+| Home Assistant | REST polling / webhooks (`homeassistant_service.c`). The `state_changed` WS subscription that would feed this is also **signal-map #3** — it doubles as the real-time push for the shipped interactive HA board (see `aurora/docs/DAWN_UI_SIGNAL_MAP.md §9.4`) | entity state changes matching watch rules (door open, device offline) |
 | Scheduler | in-process (`src/core/scheduler.c`) | overdue task, upcoming event T-15min (calendar via CalDAV cache) |
 | Messaging | in-process (`messaging_engine_inbound.c`) | unanswered inbound past threshold on a channel the user isn't watching |
 | Memory | extraction pipeline (`memory_extraction.c`) | new fact contradicting an active plan; commitment detected ("I need to X by Friday") |
@@ -513,8 +512,8 @@ expiry rate, judge-invocation count.
 9.3 **Delivery reuse**: `session_broadcast_system_message()` (Layer 1, in
     `session_manager`) for context fan-out; scheduler briefing infra for DIGEST;
     `webui_broadcast_*` weak-symbol pattern for WebUI cards (consider this the 7th weak
-    symbol — strengthens the case for the planned `scheduler_broadcasts_t` consolidation,
-    TODO.md); MQTT `hud` notification path for HUD badges.
+    symbol — strengthens the case for the planned `scheduler_broadcasts_t` consolidation);
+    MQTT `hud` notification path for HUD badges.
 9.4 **Memory graph**: judge context queries via existing `memory_db` retrieval; the
     "commitment detected" source hooks `memory_extraction.c` post-extraction (new facts
     tagged as commitments/watch-items feed ingest).
@@ -753,8 +752,7 @@ push sources; `attention_rules.muted_until` for P1 timed snooze ("ignore that fo
 
 Internal references: session gap-analysis (2026-07-03, this repo's Claude session "Fable's
 Take on JARVIS"); agent deep-read reports on MIRAGE/AURA/SPARK/STAT/ECHO integration seams
-(same session); `docs/TODO.md` §"Proactive background observation (memory Phase 2)";
-`atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md` (Phase 1 focus injection — the reactive
+(same session); `atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md` (Phase 1 focus injection — the reactive
 sibling of this work); `src/core/stat_service.c` (the ingest pattern to copy).
 
 ## 13. Open Questions (resolve during PRE/P0)
@@ -840,8 +838,7 @@ GPU budget analysis alongside Whisper.
 A1 → A2 → B1 (parallelizable with A) → A3 → C1/C2 → A4/A5 → B2/B3 → C3/C4 → D1 → A6 → D2.
 
 Anticipation (ProAct-style idle-time prepare-before-asked, §11 note) slots after B2 as a
-jobs-side feature. TODO.md should absorb this section as the program-of-record when SAGE
-work starts, replacing the "Proactive background observation (memory Phase 2)" item.
+jobs-side feature.
 
 ---
 
@@ -855,8 +852,7 @@ addressing ("ignore the temperature") unambiguous. It blocked three real pattern
 alerts** (min AND max), **tiered thresholds** ("warm at 75, *we're going to die* at 120"), and
 **named, specifically-spoken alerts**. This evolution lifts it to **N named watches per metric**.
 
-Full design + the plan-/arch-review resolution log lived in the working doc
-`docs/ATTENTION_MULTI_WATCH_DESIGN.md` (untracked; retired once this section landed). Summary:
+Summary:
 
 - **Model.** `name` becomes the user-facing identity and primary conversational address,
   **unique per user** (case-insensitive). A metric is now a *group*. `event_key` stays per-watch

@@ -858,7 +858,7 @@ int memory_db_entity_merge(int user_id, int64_t source_id, int64_t target_id) {
     * phantom entries for the deleted source row.  The invalidator is an
     * atomic dirty-bit flip — no auth_db lock involvement, no self-deadlock
     * risk — so it fires safely after AUTH_DB_UNLOCK() per the contract in
-    * docs/ENTITY_MERGE_DESIGN.md §12.  Rollback path skips invalidation
+    * atlas/dawn/memory/ENTITY_MERGE_DESIGN.md §12.  Rollback path skips invalidation
     * because ROLLBACK reverses the in-progress UPDATEs and the cache state
     * is consistent with the pre-merge DB. */
    memory_embeddings_invalidate_entity_cache_for_user(user_id);

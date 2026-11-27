@@ -228,8 +228,7 @@ static bool entity_has_canonical_dependents(int user_id, int64_t entity_id) {
  * canonical and the existing short form becomes the alias.  Direction is
  * otherwise determined incidentally by extraction order — "Jon" arriving
  * first locks itself in as canonical, and a later "Jonathan Smith"
- * collapses *into* it.  See dawn/docs/TODO.md "Entity merge: prefer longer
- * canonical name for person/pet/place" for rationale.
+ * collapses *into* it.
  *
  * Guard against orphaning a subtree: only swap when the target has no
  * aliases pointing at it AND no open identifying relations as subject.  Hard-

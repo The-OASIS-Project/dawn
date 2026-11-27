@@ -1351,7 +1351,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
     *                                   gate.
     * Both ALTER ADD COLUMNs use literal-constant defaults (NULL and 0) so SQLite
     * takes the O(1) metadata-only path — no full-table rewrite under the auth_db
-    * lock at startup.  See docs/ENTITY_MERGE_DESIGN.md §3. */
+    * lock at startup.  See atlas/dawn/memory/ENTITY_MERGE_DESIGN.md §3. */
    if (current_version >= 1 && current_version < 43) {
       rc = sqlite3_exec(s_db.db,
                         "ALTER TABLE memory_entities ADD COLUMN canonical_id INTEGER DEFAULT NULL "
@@ -1526,14 +1526,13 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
     * fact to the entity it's about.  Backfill from existing memory_relations
     * rows where fact_id is set — that captures the ~17% of facts that already
     * have a linked relation.  The remaining ~83% stay NULL until a re-extract
-    * under the new Phase 0 prompt populates them at insert time.  A follow-up
-    * migration tightens NOT NULL once backfill + re-extract complete.
+    * under the current extraction prompt populates them at insert time.  A
+    * follow-up migration tightens NOT NULL once backfill + re-extract complete.
     *
-    * Phase 0 design: facts MUST carry an entity FK so graph traversal can
-    * go fact → entity directly without the relations table hop, AND so the
-    * Phase 2 entity-merge resolver's cascading effects automatically apply
-    * to facts the same way they apply to relations.  See
-    * docs/PHASE_0_EXTRACTION_PROMPT_DRAFT.md §"C-side changes required" #3.
+    * Why: facts carry an entity FK so graph traversal can go fact → entity
+    * directly without the relations table hop, AND so the entity-merge
+    * resolver's cascading effects apply to facts the same way they apply to
+    * relations.
     *
     * NULLABLE during the migration window — re-extract uses the new prompt
     * which fills subject_entity_id at insert time via the existing entity
@@ -1972,7 +1971,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
     * flow), messaging_link_attempts (audit log for /link attempts).
     * Single BEGIN IMMEDIATE wrapping CREATE TABLE + CREATE INDEX.  No
     * data backfill (all new tables — empty on first boot).  See
-    * docs/MESSAGING_CHANNELS_DESIGN.md §5. */
+    * atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §5. */
    bool v51_ok = (current_version >= 51) || (current_version == 0);
    if (current_version > 0 && current_version < 51) {
       rc = sqlite3_exec(s_db.db, "BEGIN IMMEDIATE", NULL, NULL, &errmsg);
@@ -2052,7 +2051,7 @@ int auth_db_apply_migrations(int current_version, const char *db_path) {
     * path.  Schema v51 just shipped (2026-05-26); no /link binding
     * predating that needs backfill — every existing row has
     * conversation_id = NULL on first read, which means "create a fresh
-    * conv on next inbound."  See docs/MESSAGING_CHANNELS_DESIGN.md
+    * conv on next inbound."  See atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md
     * §13 Phase 2.5 — forever-conversation model.
     *
     * Duplicate-column handling mirrors the v47 pattern: SCHEMA_SQL

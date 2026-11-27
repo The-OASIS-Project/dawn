@@ -464,7 +464,7 @@ static const char *SCHEMA_SQL =
      * NULLABLE during the migration window (existing rows backfill from
      * linked relations; re-extraction under the new prompt populates the
      * rest).  Tightens to NOT NULL in a follow-up migration once backfill
-     * completes.  See PHASE_0_EXTRACTION_PROMPT_DRAFT.md. */
+     * completes. */
     "   subject_entity_id      INTEGER DEFAULT NULL,"
     /* v58: expires_at — fact-lifecycle expiry (ephemerality / C3).  NULL =
      * durable (the default for every existing and most new rows).  When set
@@ -1062,7 +1062,7 @@ static const char *SCHEMA_SQL =
                                   /* Messaging channels (v51) — per-user binding of an external chat
                                    * platform identity (Telegram chat_id / Discord channel_id /
                                    * Slack channel_id / SMS E.164) to a DAWN user.  See
-                                   * docs/MESSAGING_CHANNELS_DESIGN.md §5. */
+                                   * atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §5. */
                                   "CREATE TABLE IF NOT EXISTS messaging_channels ("
                                   "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
                                   "  user_id INTEGER NOT NULL,"

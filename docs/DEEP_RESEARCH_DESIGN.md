@@ -61,7 +61,7 @@ whitelist fails closed).
 unused `quote`/`source_kind` columns (was ~512 KB of `quote` over-read per report snapshot); and a distinct
 `research_round` marker glyph (`.agent-event-round`) so a round header anchors the claims beneath it.
 
-**Deferred (tracked in TODO.md "Deep Research full-review (2026-08-15)"), each with a trigger:**
+**Deferred from the 2026-08-15 full review, each with a trigger:**
 
 - `research_db_question_coverage` and its count siblings use ad-hoc `prepare/finalize` (not cached into
   `s_db.stmt_*` like `auth_db_jobs.c`), compounding the already-deferred per-round coverage `COUNT(DISTINCT)`
@@ -251,8 +251,7 @@ injection disabled/mode-scoped** because the output path re-enters privileged se
 **To start building:** jump to [§15 — Implementation kickoff (P0 build order)](#15-implementation-kickoff-p0-build-order). Read
 [`BACKGROUND_JOBS_DESIGN.md`](BACKGROUND_JOBS_DESIGN.md) §5/§8/§14 first — this feature is a sibling of that substrate.
 
-**Reviewer note.** `docs/TODO.md` and `docs/DONE.md` are gitignored local working files. **This design
-doc is tracked** (committed on the `deep_research` branch per the design-doc commit policy — it describes
+**Reviewer note.** This design doc is tracked (committed on the `deep_research` branch per the design-doc commit policy — it describes
 shipped code) and is kept in sync as the feature lands; treat it as the source of truth, not scratch.
 
 ---
@@ -612,7 +611,7 @@ its own spawn path** (arch MED-2), not `job_worker`'s `handle_spawn`:
    run, plan HIGH-2); ledger-resume in P1.
 6. **Cancel**: keyed on the **session** cancel flag, not the global `llm_interrupt_requested` — otherwise one
    run's cancel or a local wake-word aborts *every* concurrent research run and records each as a model failure
-   (the TODO.md per-session-cancel debt). This makes the shared-loop session-cancel fix a **P0 prerequisite**
+   (the per-session-cancel debt in the shared tool loop). This makes the shared-loop session-cancel fix a **P0 prerequisite**
    (sec LOW-1, plan) — deep research makes concurrent long loops the common case.
 
 ---
@@ -646,6 +645,36 @@ self-assessment (a model deep in a polluted context is unreliable about whether 
 > with an empty reply and no further call. So the last lookup step's results can still be recorded, and a round
 > never pays for an answer nothing reads. A round that hits its input-token ceiling at that step stops before
 > the save, as at any step.
+>
+> **Why a round ends on a save step (2026-11-24).** Before it, a round's last call went out with
+> `tool_choice: none` so the shared loop could answer a chat turn, but a research round has no reader for that
+> answer: the call saved nothing, and whatever the step before it looked up was lost. One run (claude-opus-5-5,
+> 5 rounds) made that call in 4 of 5 rounds and lost 3 lookups to it (a search and a page fetch in round 1, a
+> search in round 2); the call after `research_conclude` cost about 26.6 s and 2,793 output tokens across
+> rounds 4 and 5, all discarded, which is why `research_conclude` now ends the round itself.
+>
+> - **A record call can't be forced.** Anthropic returns HTTP 400 for `tool_choice` `any`/`tool` on the
+>   current models, so the save step stays on `auto` with a note, and the narrowing is done in code.
+> - **The cache cost of switching to `none` was smaller than the vendor docs predict.** They say a
+>   `tool_choice` change invalidates the cached message blocks; on that run the three round-ending `none` calls
+>   still read 88–96% of their prompt from cache. Staying on `auto` is still what the docs make safe, but
+>   expect no measurable saving from it on Opus.
+> - **Rejected: carrying the last unrecorded tool result into the next round's digest** (as IterResearch
+>   rebuilds its workspace from the last action and its response). It would put web text in the user
+>   directive (§11) and unbound the digest (§4a).
+> - **Rejected: a used/remaining step countdown after every step** (BATS's budget tracker). Each would be a
+>   user-text block per step, which on older Claude models strips thinking blocks from the cached prefix; with
+>   the save step a cap hit loses nothing, so the budget is stated once, up front (below, under Effort scaling).
+> - **OpenAI's `tool_choice: {type: "allowed_tools"}`** restricts callable tools while keeping the tool list
+>   stable, the vendor form of the same idea. Not used: chat-completions servers need the refusal in code
+>   anyway, and every provider path then just keeps its tools on.
+> - **What the save step can run.** The research allowlist intersected with kind `state` is exactly the four
+>   ledger tools: `research_record`, `research_plan` (its plan-freeze check still applies), `research_conclude`
+>   and `research_mark_unanswerable`. `search`, `url_fetch` and `result_read` are refused. The duplicate-call
+>   check is skipped on that step, and `research_claims` has no dedupe, so a re-recorded finding is a second
+>   row (coverage counts distinct URLs, so it is unaffected).
+> - **Watch:** a stated budget may lead the model to spend every step of every round. If tokens per run rise
+>   with no gain in claims or sources, the budget line's wording is what to change.
 
 Layered stopping stack, outermost first:
 
@@ -913,8 +942,8 @@ Wall-clock ceiling reuses the `[jobs]` runtime reap rather than a duplicate knob
    (`CONV_MAX_PER_USER = 1000`, `auth_db.h:1006`, enforced in `conv_db_create_job`). Bumping the cap to 5000
    only *delays* automation evicting chat history; the structural call is that **research/job conversations get
    their own retention accounting** separate from chat. P0 ships the pragmatic floor — **bump to 5000 + add the
-   index below** — and records the separate-lane decision as the real fix (TODO.md "partial index for the job
-   list readers" measured the exact trigger: raising the cap past ~2000).
+   index below** — and records the separate-lane decision as the real fix (measurements of the job list
+   readers put the trigger at raising the cap past ~2000).
 5. **Index (locked, rides with the cap bump).** Add
    `CREATE INDEX idx_conv_jobs_user ON conversations(user_id, created_at DESC, id DESC) WHERE job_status IS NOT NULL`
    **and** rewrite the job/research list cursor to the sargable `(created_at, id) < (?,?)` form — they only pay
@@ -1110,9 +1139,8 @@ hard-budget + all-closed stopping.
   ([§7a](#7a-invocation-routing--confirmation)), generated in a persona-carrying context, not the bare research session.
 
 **Still open:**
-- **Per-session cancel** (TODO.md debt): the shared tool loop still honors the *global* interrupt; research must key
-  on the session cancel flag. The 2026-08-17 network-dead-run disposition fix is adjacent but distinct; the
-  global-vs-session cancel item is still tracked in TODO.md.
+- **Per-session cancel**: the shared tool loop now honors the session's cancel flag. What remains is a
+  turn stuck inside a synchronous tool call, which runs until the call returns.
 - **`worker_pool` is not a task pool** — P2 parallel fetch would need the detached-thread pattern or new bounded
   infra. **Investigated & DECLINED 2026-08-17 for latency:** fetch is ~2% of a run's wall-clock (runs are
   LLM-inference-bound) and the model already batches fetches through the existing intra-turn parallel executor
@@ -1221,8 +1249,7 @@ comp-max tune → 0.505) and **[§18](#18-search-backend--tavily-vs-searxng-meas
 The architecture is sound and the security posture is strong, but the **report quality claim is currently
 unfalsifiable**: evidence is ~9 field runs on self-chosen briefs and zero standard-benchmark numbers. The
 design's own named mediocrity risk ([§14](#14-open-items--known-gaps)) is digest/synthesis compression quality,
-and it is exactly the thing smoke-eyeballing cannot measure. The competitive read
-([`DEEP_RESEARCH_COMPARISON.md`](DEEP_RESEARCH_COMPARISON.md)) reaches the same conclusion from the outside: DAWN
+and it is exactly the thing smoke-eyeballing cannot measure. A comparison against published deep-research systems reaches the same conclusion from the outside: DAWN
 sits ahead of the published field on evidence-retention + deterministic stopping, but "how good are the reports"
 has no number under it. This section closes that. **(Closed 2026-08-17: the number is now RACE 0.498→0.505 /
 FACT 0.852 — reference parity on the gpt-5.5 axis; see [§17](#17-synthesis-ab--comprehensiveness-max-shipped-2026-08-17).)**

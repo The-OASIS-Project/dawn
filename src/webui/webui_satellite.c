@@ -63,8 +63,7 @@ atomic_int g_active_satellite_workers = 0;
  * with LRU eviction (no hash buckets, so no hash-collision bypass), IPv6
  * /64 normalization, and fail-closed on truncation.
  *
- * Migrated from a per-file FNV-bucket reimplementation 2026-05-19 — see
- * docs/TODO.md "Extract shared webui_rate_limit.{c,h}".
+ * Migrated from a per-file FNV-bucket reimplementation 2026-05-19.
  * ============================================================================= */
 
 #define REG_RATE_LIMIT_SLOTS 64

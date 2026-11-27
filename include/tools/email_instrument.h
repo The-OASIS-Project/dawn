@@ -18,15 +18,13 @@
  * enhancements, or additions to the project. These contributions become
  * part of the project and are adopted by the project author(s).
  *
- * Email IMAP login instrumentation + guarded circuit breaker (Phase 0 of the
- * IMAP connection-reuse work — see docs/IMAP_CONNECTION_REUSE_DESIGN.md).
+ * Email IMAP login instrumentation + guarded circuit breaker.
  *
  * This is diagnostic scaffolding that answers the "test-connection succeeds but
  * search gets Login denied" mystery on HostGator shared hosting: it captures the
  * server's actual tagged rejection text on CURLE_LOGIN_DENIED, counts on-wire
  * logins per account (ground truth — a reused connection skips LOGIN), and adds
  * a cPHulk-safe single retry that fires ONLY for capacity/temporary rejections.
- * Phase 2 (the warm connection pool) subsumes these counters + retry policy.
  *
  * Thread-safety: the per-account counter/breaker store is guarded by an internal
  * leaf mutex (no other lock is acquired while it is held, and no I/O or sleep
@@ -88,7 +86,7 @@ typedef struct {
 void email_instrument_attach(CURL *curl, email_instrument_ctx_t *ctx);
 
 /**
- * @brief Perform an auth-bearing, READ-ONLY IMAP op with the Phase-0 breaker.
+ * @brief Perform an auth-bearing, READ-ONLY IMAP op with the guarded breaker.
  *
  * On CURLE_LOGIN_DENIED: logs the captured rejection + account at WARNING,
  * classifies it, and permits at most ONE guarded retry (2-4 s jitter) — only

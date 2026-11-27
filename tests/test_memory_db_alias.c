@@ -18,7 +18,7 @@
  *
  * Unit tests for memory_db_alias.c — entity-merge alias surface (v43).
  *
- * Coverage (per docs/ENTITY_MERGE_IMPL_BRIEF.md Ckpt 2 §10):
+ * Coverage:
  *   - pure helpers: name_jaccard, name_substring, composite formula,
  *     canonical_priority lexicographic comparison
  *   - cascade stages 1-3 (Stage 4/5 are exercised indirectly via score_pair

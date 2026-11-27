@@ -276,7 +276,7 @@ static void test_command_with_commas(void) {
  * Critical: voice ASR semantics use substring match (wake word can appear
  * mid-utterance).  Text input from arbitrary senders requires prefix-only
  * match — substring semantics are exploitable when the input is
- * attacker-controlled (see docs/MESSAGING_CHANNELS_DESIGN.md §7).
+ * attacker-controlled (see atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §7).
  * ============================================================================ */
 
 static void test_prefix_simple_hey_friday(void) {

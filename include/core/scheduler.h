@@ -236,7 +236,7 @@ void scheduler_send_tts_to_session(session_t *session, const char *text);
  * (user_id, channel_name) ownership check + per-channel + provider-
  * global rate limits; the scheduler.c stub is the no-op default for
  * messaging-disabled builds.  Sixth scheduler weak symbol — see
- * docs/MESSAGING_CHANNELS_DESIGN.md §9.
+ * atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §9.
  *
  * Returns SUCCESS only if the message actually went out, so a caller that owes
  * an at-least-once delivery (background-job completion notices) can retry rather

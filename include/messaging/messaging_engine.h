@@ -21,7 +21,7 @@
  * Driver registry, per-user channel resolution, link-code issuance, rate
  * limiters (inbound + outbound), worker-drain dispatch.  Public API for
  * the LLM tool and the WebUI link-code endpoint.  See
- * docs/MESSAGING_CHANNELS_DESIGN.md.
+ * atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md.
  */
 #ifndef MESSAGING_ENGINE_H
 #define MESSAGING_ENGINE_H

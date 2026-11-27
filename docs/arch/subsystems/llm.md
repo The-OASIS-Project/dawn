@@ -74,6 +74,89 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Gates all cloud LLM call paths; local providers bypass
    - Interrupt-aware blocking (wakes on shutdown signal)
 
+## Provider selection
+
+A cloud API key is used for chat only for the provider the user selected
+(`src/llm/llm_selection.c`). DAWN never substitutes another vendor and never guesses
+one; when a selection can't run, the user is told why.
+
+| `[llm] type` | `[llm.cloud] provider` | Its key | Result |
+|---|---|---|---|
+| `local` | any | any | The local LLM |
+| `cloud` | named | present | That provider |
+| `cloud` | named | missing | Refused: "Gemini is selected, but it has no API key. Add one in Settings, or pick another provider." |
+| `cloud` | empty (not selected) | any | The local LLM; no key is used |
+
+The same rule holds for a conversation's own selection (the WebUI picker,
+`switch_llm`, a channel's panel, the TUI), for briefings and for jobs. Which providers
+have a key may be shown (`llm_provider_has_key`), never used to choose one.
+
+- **No selection is a value, not a flag.** A session or conversation with no
+  selection of its own carries `type = LLM_UNDEFINED` and follows the default; its
+  conversation row stores empty `llm_type`, `cloud_provider` and `model` (its
+  reasoning settings are kept). A separate "follows the default" flag was tried and
+  failed three ways: the setters' read-modify-write copied it, the per-turn config
+  overwrote it, and the row writers froze concrete values over it. A value has
+  nothing to copy, fill or clear. A stored `cloud` row whose provider is empty or
+  unknown, and whose model names no vendor, reads back as no selection
+  (`llm_selection_from_row`).
+- **A selection is type, provider and model.** A reasoning-only change (thinking
+  mode, effort) never makes one, so a conversation that follows the default keeps
+  following it. A change naming any of the three first puts the default in place of
+  an unset base, then applies; a changed type or provider clears the model
+  (`llm_selection_set_target`), so one vendor's model id never goes to another.
+- **Read raw only to modify.** `session_get_llm_config()` returns the config
+  resolved; `session_get_llm_config_raw()` is for the settings writers that store it
+  back, so an unset selection stays unset. `scripts/check_llm_selection_resolved.sh`
+  enforces this at build time.
+- **One resolution per turn.** The turn's snapshot (`turn_llm_config`) is resolved
+  when the turn begins, so a settings save mid-turn never switches vendor between
+  tool rounds: the turn's check, its calls and its compaction see one selection.
+- **One snapshot of the default.** `llm_default_selection()` reads type, provider and
+  the default model together under the config read lock, so a save can't be seen
+  half applied (cloud paired with the previous provider).
+- **Explicit or inherited.** A selection the user makes now (the picker, `switch_llm`,
+  the TUI, a channel's panel, a Settings save, a job's Resume) is checked when made:
+  a problem is reported at once and nothing is stored. An inherited one (`dawn.toml`,
+  a stored row, a channel, a job's stored selection) is applied as it is and refused
+  per turn (`session_turn_selection_problem`), with the reason told on every surface:
+  shown in text, spoken on voice surfaces, the reply on a chat channel, the card of a
+  briefing.
+- **Jobs and research** store the spawning conversation's resolved selection on the
+  job's conversation (`job_selection_of_spawner`), so a job runs where it was checked
+  and its capacity class matches.
+- **Conversations from before this** stored the resolved provider at creation, and
+  would all have looked like selections nobody made. A one-time startup migration
+  (`conv_db_unpin_default_llm`, marked done in `system_metadata`) emptied the cloud
+  rows equal to the default at that moment, so they follow it. Local rows stay local
+  (one may have been kept off the cloud on purpose, and following a default that
+  later moves to the cloud would send its history there), and messaging rows hold a
+  selection only when one was made. A wrong guess costs one re-pick.
+- **Open: a turn freezes the provider, not its URL.** `llm_cloud_url()` is read per
+  call, and `[llm.cloud] endpoint` applies only to the provider `[llm.cloud] provider`
+  names, so a settings save mid-turn that changes that provider sends the rest of a
+  turn on a custom endpoint to the provider's own URL. The fix is to snapshot the URL
+  into the turn's config.
+
+**Cloud-to-local fallback** (`[llm] local_fallback`, off by default). An interactive
+turn (the local mic, the WebUI, satellites, messaging; not a background job, research
+or a job's re-engagement, which fail and can be resumed) whose cloud provider can't be
+reached, or keeps failing with 429/5xx, before any tool ran is answered by
+`[llm.local]` instead, saying so in its first words. It is per turn, not sticky: the
+conversation keeps its cloud selection. It falls back only when local is usable (the
+endpoint answers a 2 s check and the history fits the local window). While a fallback
+is still possible a provider makes one attempt with a 4 s connect timeout
+(`LLM_FALLBACK_CONNECT_TIMEOUT_MS`, 10 s otherwise), and the tool loop skips its
+retries on `LLM_ERR_UNREACHABLE` (DNS, connect, TLS handshake or connect timeout,
+before the request went out). A provider unreachable while local answered is skipped
+for a window, 60 s at first and doubling while it stays unreachable up to 600 s
+(`llm_local_fallback.h`), so the next turns don't wait on it, and the note is said once
+per outage; a 429/5xx falls back for that turn only. A connection lost partway through
+a streamed reply is not re-answered. Before the setting, the fallback lived only on the
+call path with no session config; every session turn carries a resolved per-session
+config, so it had become unreachable, and an offline turn got the retry ladder and an
+error.
+
 ## Prompt construction (append-only, cache-aware)
 
 A conversation's request is **append-only**: nothing already sent to the model is rewritten. That keeps the provider's prompt cache valid across the whole conversation, and keeps a model's signed reasoning replayable (Anthropic refuses reasoning whose earlier prompt changed). The design record (the evidence, per-provider measurements, phases and decisions) is in ATLAS: `dawn/archive/PROMPT_CACHE_DESIGN.md`. It is built in three layers:
@@ -227,6 +310,9 @@ A/B that measured it, is in ATLAS (`dawn/archive/TOOL_RESULT_VIEWS_DESIGN.md`).
   own. `result_read` frames a slice of a stored result the same way when the tool that stored it
   returns third-party text, and `context_expand` frames its result when a stored row it brings back
   was framed. A new frame is listed in `TOOL_FRAMES_ALL` (`tool_registry.h`), which a test walks.
+  Frame names are two words (`EMAIL CONTENT`, `WEB CONTENT`) because the neutralizer
+  defuses whatever imitates a frame: a one-word `EMAIL` would defuse ordinary signature
+  lines (`-- ` then `Email: ...`).
   Memory extraction reads a framed result as a stub, so an email or a page
   can't plant a "fact". An email a user attaches to a question arrives this way too: the model
   reads it with the tool (see the turn's context above).
@@ -296,8 +382,8 @@ something was dropped) and replayed thinking blocks.
   tag), so a conversation moving between OpenRouter and direct Claude thinks fresh; text and tool
   calls carry over.
 
-**One authority — the provider enum.** `provider` (a `CLOUD_PROVIDER_*` enum resolved by the
-init/refresh ladder) is the single source of truth for the active provider; there is no
+**One authority — the provider enum.** `provider` (a `CLOUD_PROVIDER_*` enum, the one
+selected; see [Provider selection](#provider-selection)) is the single source of truth for the active provider; there is no
 separate mode flag. A stored bare model name is canonically remapped to its OpenRouter
 `vendor/model` slug at the single request choke point (`llm_resolve_config`), so a legacy
 conversation's bare id is never sent verbatim.

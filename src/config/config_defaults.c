@@ -485,7 +485,7 @@ void config_set_defaults(dawn_config_t *config) {
     * 2026-05-13).  Bench-validated at canonical params on focus_probe_cases.json
     * cases 16-18: 18/18 quorum across all three providers, parameter-robust
     * across threshold ∈ {0.50, 0.60, 0.70} × base_penalty ∈ {0.30, 0.40,
-    * 0.50}.  See docs/RERANKER_PHASE_A_DESIGN.md for the full bench
+    * 0.50}.  See atlas/dawn/memory/RERANKER_HEURISTIC.md for the full bench
     * methodology and decision rationale.  Default-on because the bench
     * shows zero regression on existing 15 cases and clean rescue of the
     * three severe-pathology probes. */
@@ -493,7 +493,8 @@ void config_set_defaults(dawn_config_t *config) {
    config->memory.focus_injection.dominant_token_heuristic.threshold = 0.60f;
    config->memory.focus_injection.dominant_token_heuristic.base_penalty = 0.40f;
 
-   /* Unified cross-source `recall` tool (docs/CROSS_TOOL_RECALL_DESIGN.md §4.5).
+   /* Unified cross-source `recall` tool (atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md,
+    * "Explicit recall tool").
     * Deep gather: bigger than per-turn (top_k 12 / 10240 / 0.4) but bounded —
     * 24 KB ≈ 6 K tokens fed back, deliberately NOT the 64 KB cap (no reranker to
     * defend a long tail).  min_score lower so weaker-but-relevant hits surface.

@@ -23,8 +23,7 @@
  * channel management (reset / unlink / rename / re-enable, by-name and by-id);
  * the outbound send + per-channel rate limit; the JSON/text channel listings
  * and link-attempt audit table; and the per-provider address_json builder.
- * Split out of messaging_engine.c; see messaging_engine_internal.h and
- * docs/MESSAGING_ENGINE_SPLIT_PLAN.md.
+ * Split out of messaging_engine.c; see messaging_engine_internal.h.
  */
 #define AUTH_DB_INTERNAL_ALLOWED
 #define MESSAGING_ENGINE_INTERNAL_ALLOWED
@@ -229,7 +228,7 @@ static char *lookup_channel_address(int user_id,
  * failure).  Callers MUST handle the 0 case as "no DB persistence this
  * turn" — the conversation still works in memory, but messages won't
  * survive daemon restart and the recovery worker won't extract from
- * them.  See docs/MESSAGING_CHANNELS_DESIGN.md §13 Phase 2.5. */
+ * them.  See atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §13 Phase 2.5. */
 int64_t resolve_channel_conversation_id(channel_ref_t *ref,
                                         const char *provider,
                                         const char *provider_address,

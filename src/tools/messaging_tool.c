@@ -18,7 +18,7 @@
  *
  * Messaging LLM tool — actions: list_channels / send / read_channel /
  * read_server / list_discord_channels / link_status / reset_conversation.
- * Delegates to messaging_engine.  See docs/MESSAGING_CHANNELS_DESIGN.md §3.
+ * Delegates to messaging_engine.  See atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §3.
  */
 #include "tools/messaging_tool.h"
 

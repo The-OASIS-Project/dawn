@@ -640,9 +640,7 @@ When results change meaningfully (>0.5 pp on any benchmark):
    - Comparison-to-published-baselines table (update the DAWN row and SOTA margin)
    - LoCoMo category breakdown table
    - Analysis bullet points
-2. **`docs/TODO.md`** — update the shipped-section entry that tracks the
-   latest retrieval baseline numbers.
-3. **This file** — update the "Current Baselines" table above.
+2. **This file** — update the "Current Baselines" table above.
 
 Atlas is the primary record; the table here is a fast-reference copy that
 should match.

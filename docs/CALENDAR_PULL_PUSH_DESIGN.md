@@ -1,7 +1,7 @@
 # Calendar Pull + Push (WebSocket) — Design
 
 **Status:** in-flight (backend only; no `www/js` legacy-WebUI wiring yet — deferred by request).
-**Origin:** `dawn-nextgen/docs/DAWN_UI_SIGNAL_MAP.md §9` item #4 (pull half; the *content push* half
+**Origin:** `aurora/docs/DAWN_UI_SIGNAL_MAP.md §9` item #4 (pull half; the *content push* half
 here is the signal-only refetch, **not** the SAGE proactive-notice feed, which stays deferred).
 
 ## Goal
@@ -213,7 +213,7 @@ tail, after `sodium_memzero`/`account_update_sync`).
 | `src/tools/calendar_service.c` | (a) all-day merge + sort in `calendar_service_range` (shared fix); (b) `#ifndef ENABLE_WEBUI` weak no-op def; (c) change-gated unconditional emit in `sync_now` |
 | `src/webui/webui_broadcasts.c` | strong `calendar_broadcast_events_changed` (copy scheduler sibling) |
 | `docs/WEBSOCKET_PROTOCOL.md` | document request/response + broadcast |
-| `dawn-nextgen/docs/DAWN_UI_SIGNAL_MAP.md` | mark #4 pull shipped; note the signal-only push |
+| `aurora/docs/DAWN_UI_SIGNAL_MAP.md` | mark #4 pull shipped; note the signal-only push |
 
 ## Security / correctness notes (for review)
 

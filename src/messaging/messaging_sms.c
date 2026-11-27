@@ -20,7 +20,7 @@
  * inbound is driven by phone_service.c calling
  * messaging_engine_handle_sms_inbound on every received SMS, so this
  * driver has no listener thread.  See
- * docs/MESSAGING_CHANNELS_DESIGN.md §7.
+ * atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §7.
  */
 #include "messaging/messaging_sms.h"
 

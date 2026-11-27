@@ -1114,8 +1114,8 @@ int auth_db_backup(const char *dest_path);
  * conversation slot, so automation was evicting chat history against the old
  * 1000 cap.  The bump ships WITH the v75 `idx_conv_jobs_user` partial index —
  * a 5000-row scan without it is the regression (see DEEP_RESEARCH_DESIGN §10.4/.5).
- * Separate retention accounting for job/research conversations is the real fix,
- * tracked in TODO.md; this is the pragmatic P0 floor.
+ * Separate retention accounting for job/research conversations is the real fix
+ * and is not built yet; until then this cap is the floor.
  * Users can archive old conversations to free up slots.
  */
 #define CONV_MAX_PER_USER 5000
@@ -1248,8 +1248,8 @@ typedef enum {
  * `conversation_list_changed` WS frame carrying {conversation_id, reason}. Callers
  * fire it AFTER releasing the auth_db lock (leaf-lock rule).
  *
- * Phase-7 consolidation candidate — see docs/TODO.md (the six→seven weak-symbol
- * scheduler_broadcasts_t merge); mirrors calendar_broadcast_events_changed.
+ * A candidate for folding, with the scheduler's weak-symbol broadcasts, into one
+ * registered broadcast table; mirrors calendar_broadcast_events_changed.
  *
  * @param user_id Owner of the conversation
  * @param conv_id Conversation that changed

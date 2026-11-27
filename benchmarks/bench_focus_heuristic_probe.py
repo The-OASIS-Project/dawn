@@ -46,7 +46,7 @@
 #   --judge             paid LLM judge with chosen params
 #   --cases X,Y         filter to specific cases during dev
 #
-# Phase A's design doc (RERANKER_PHASE_A_DESIGN.md) frames this as the
+# Phase A's design doc (atlas/dawn/memory/RERANKER_HEURISTIC.md) frames this as the
 # first candidate in Phase B's decision matrix.  If it passes all 18
 # cases at clean threshold/penalty, Phase B-ii is greenlit.
 

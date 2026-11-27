@@ -434,7 +434,7 @@ int focus_compose_ex(int user_id,
     * mutation lands before compute_score_breakdown reads semantic_score.
     *
     * Bench-validated at default params via cases 16-18 in
-    * focus_probe_cases.json — see docs/RERANKER_PHASE_A_DESIGN.md.
+    * focus_probe_cases.json — see atlas/dawn/memory/RERANKER_HEURISTIC.md.
     * Function self-no-ops when disabled / query is empty / pool < 2,
     * so this is safe to call unconditionally.
     * ===================================================================== */

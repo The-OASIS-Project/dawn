@@ -48,7 +48,7 @@
  * │   1. HA_BOARD_SERVICES below            — permits the write (this file).    │
  * │   2. serialize_entity_attributes()      — emits the widget's values (below).│
  * │   3. the client widget/service map      — DAWN_UI_SIGNAL_MAP.md §9.4        │
- * │      (dawn-nextgen), which the browser sends from.                          │
+ * │      (aurora), which the browser sends from.                                │
  * │ A service the UI sends but is absent here is refused with "Service not      │
  * │ permitted"; an attribute emitted here but not consumed there is ignored.    │
  * └──────────────────────────────────────────────────────────────────────────┘

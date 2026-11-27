@@ -66,8 +66,7 @@
  * Allowlisted source categories
  *
  * Per the design spec, the LLM-emitted category field MUST be one of these
- * 10 values.  Anything else → schema rejection.  Keep this list in lockstep
- * with the allowlist documented in DYNAMIC_CONTEXT_INJECTION_DESIGN.md.
+ * 10 values.  Anything else → schema rejection.
  * --------------------------------------------------------------------------- */
 static const char *const SILENT_OBSERVE_CATEGORIES[] = {
    "notification", "calendar",  "scheduled", "conversation", "music",
