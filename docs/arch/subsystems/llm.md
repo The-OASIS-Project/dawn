@@ -20,7 +20,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - `llm_init()`: initialize selected provider
    - `llm_send_message()`: send message, get complete response (blocking)
    - `llm_send_message_streaming()`: send message, stream response chunks
-   - Provider selection based on configuration (`OPENAI_MODEL`, `ANTHROPIC_MODEL`)
+   - Sends a request to the provider its resolved config names (see [Provider selection](#provider-selection); `llm_selection.c` decides which)
 
 - **llm_openai.c/h**: OpenAI API implementation
    - Supports the GPT-6 family, the GPT-5 series, GPT-4o, GPT-4 (gpt-5.4 and later, and gpt-6, on
@@ -409,10 +409,11 @@ prefix to reuse the known context-window tables, else a conservative 128K defaul
 > then dropped). The three per-purpose `*_openrouter_model` shadow fields were retired with
 > it — each purpose's normal model field now carries the slug.
 
-> **Tech debt note:** each provider still has its own `(URL, key)` branch across the resolvers
-> (`llm_resolve_config`, `llm_chat_completion_with_config`, `build_compaction_config`,
-> `memory_extraction_resolve_config`, silent-observe, scheduler). Consolidating these into one
-> resolver is a worthwhile future cleanup.
+> **Tech debt note:** a conversation's provider is resolved in one place (`llm_selection.c`), and
+> every provider's URL comes from `llm_cloud_url()`. The three side-task resolvers still each
+> carry their own per-provider `(URL, key)` branch: `build_compaction_config` (`llm_context.c`),
+> `memory_extraction_resolve_config` and `resolve_silent_observe_config`. Folding those into the
+> same resolver is a worthwhile future cleanup.
 
 ## LLM Worker Thread
 
