@@ -1338,8 +1338,8 @@ static void scheduler_tts_sentence_callback(const char *sentence, void *userdata
  * Bypasses the tts_enabled check (scheduler notifications are unsolicited)
  * and brackets the audio with speaking/idle state transitions.
  *
- * The opus-worker root cause is filed separately in docs/TODO.md
- * ("long-briefing TTS truncation"); this fix makes the pipeline robust
+ * The underlying fault in the opus worker ("long-briefing TTS truncation")
+ * is not fixed here; this fix makes the pipeline robust
  * to it regardless of where the corruption originates — even if a single
  * sentence's segment hits the bug, the briefing degrades to "missing one
  * sentence" instead of "truncated mid-summary, rest silently lost."

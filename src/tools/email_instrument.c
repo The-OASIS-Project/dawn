@@ -18,8 +18,8 @@
  * enhancements, or additions to the project. These contributions become
  * part of the project and are adopted by the project author(s).
  *
- * Email IMAP login instrumentation + guarded circuit breaker (Phase 0).
- * See docs/IMAP_CONNECTION_REUSE_DESIGN.md §7 and include/tools/email_instrument.h.
+ * Email IMAP login instrumentation + guarded circuit breaker.
+ * See include/tools/email_instrument.h.
  */
 
 #include "tools/email_instrument.h"
@@ -34,7 +34,7 @@
 #include "logging.h"
 #include "tools/email_parse.h"
 
-/* Guarded-retry tuning (Phase 0). */
+/* Guarded-retry tuning. */
 #define EMAIL_BREAKER_COOLDOWN_SEC 60 /* min seconds between guarded retries per account */
 #define EMAIL_BREAKER_JITTER_MIN_MS 2000
 #define EMAIL_BREAKER_JITTER_SPAN_MS 2001 /* [2000, 4000] ms */

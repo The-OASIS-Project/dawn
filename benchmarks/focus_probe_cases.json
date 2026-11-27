@@ -455,7 +455,7 @@
     },
     {
       "case_id": "mothers_day_overinclusion",
-      "comment": "FAIL @ w_rec=0.15 — semantic over-inclusion on shared dominant token.  Query 'Mother's Day plans recently' hits the 'mother/mom' token strongly across many decoy memory_facts about the user's mother, none of which mention Mother's Day specifically.  Right answer is a recent memory_summary (~2 days, rec=0.95) about actual Mother's Day prep.  Under w_rec=0.15, the older 'mother' facts (rec=0.20-0.30, sem=0.78-0.85) win on semantic; under w_rec=0.30 the recent summary lifts.  Mirrors the live observation in docs/TODO.md (cross-encoder reranker entry — 'mother pulling birthday context for Mother's Day queries').",
+      "comment": "FAIL @ w_rec=0.15 — semantic over-inclusion on shared dominant token.  Query 'Mother's Day plans recently' hits the 'mother/mom' token strongly across many decoy memory_facts about the user's mother, none of which mention Mother's Day specifically.  Right answer is a recent memory_summary (~2 days, rec=0.95) about actual Mother's Day prep.  Under w_rec=0.15, the older 'mother' facts (rec=0.20-0.30, sem=0.78-0.85) win on semantic; under w_rec=0.30 the recent summary lifts.  Mirrors a live observation: 'mother' pulling birthday context for Mother's Day queries.",
       "user_query": "Did we talk about Mother's Day plans recently?",
       "memory_seed": [
         {"source_id": "memory_summary", "text": "Mother's Day prep: confirmed brunch reservation at the bayside cafe for Sunday, finalized the gift card combo (spa + bookstore), and coordinated with the sister-in-law on a joint card.",

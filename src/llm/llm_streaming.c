@@ -755,8 +755,8 @@ static void parse_openai_chunk(llm_stream_context_t *ctx, const char *event_data
       //   3. Gemini 3.x does not pay out cost savings even when it
       //      caches — discount is 2.5-family-only per Google's blog.
       // Gemini 2.5 Flash engages caching occasionally (observed 8793
-      // cached_tokens on a tool-loop iter 1) but inconsistently.  Full
-      // analysis: docs/TODO.md §1.  Claude + OpenAI are the reliable
+      // cached_tokens on a tool-loop iter 1) but inconsistently.
+      // Claude + OpenAI are the reliable
       // cache surfaces; Gemini caching is "sometimes-bonus."
       json_object *prompt_details;
       if (json_object_object_get_ex(usage_obj, "prompt_tokens_details", &prompt_details)) {

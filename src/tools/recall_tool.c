@@ -17,7 +17,7 @@
  * the project author(s).
  *
  * Unified cross-source recall tool — see recall_tool.h and
- * docs/CROSS_TOOL_RECALL_DESIGN.md.
+ * atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md ("Explicit recall tool").
  */
 
 #include "tools/recall_tool.h"

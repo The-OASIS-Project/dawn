@@ -25,7 +25,7 @@
  * management lives on the dawn-admin unix socket instead.  All four wrap
  * the shared messaging_engine_* functions (the single source of truth);
  * mutations key on the stable row id, not the mutable display_name.
- * See docs/MESSAGING_CHANNELS_DESIGN.md §13 Phase 6.
+ * See atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §13 Phase 6.
  */
 
 #include <json-c/json.h>

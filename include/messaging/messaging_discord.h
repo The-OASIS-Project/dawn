@@ -21,7 +21,7 @@
  * v1: DM-only, text-only, LLM-bound.  Connects to the Discord Gateway
  * via libwebsockets client mode and sends outbound via REST.  Same
  * forever-conversation semantics as SMS / Telegram.  See
- * docs/MESSAGING_CHANNELS_DESIGN.md §8 (Discord) and §13 Phase 3.
+ * atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §8 (Discord) and §13 Phase 3.
  */
 #ifndef MESSAGING_DISCORD_H
 #define MESSAGING_DISCORD_H

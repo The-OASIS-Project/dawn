@@ -57,7 +57,8 @@
 // FlareSolverr configuration for bypassing Cloudflare/bot protection
 // FlareSolverr is a Docker service that uses headless Chromium to solve JS challenges
 // Run: docker run -d --name flaresolverr -p 8191:8191 flaresolverr/flaresolverr:latest
-// These can be overridden via config file (see CONFIG_FILE_DESIGN.md [url_fetcher.flaresolverr])
+// These can be overridden via config file (see atlas/dawn/archive/CONFIG_FILE_DESIGN.md
+// [url_fetcher.flaresolverr])
 #ifndef FLARESOLVERR_ENDPOINT
 #define FLARESOLVERR_ENDPOINT "http://127.0.0.1:8191/v1"
 #endif

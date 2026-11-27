@@ -27,8 +27,8 @@
  * the satellite/voice paths; the OS routes keys to whichever browser
  * tab last successfully held the media-session slot.  Multi-tab
  * contention (DAWN open in two tabs) hands the slot to the most
- * recently primed tab — see docs/TODO.md for the planned
- * BroadcastChannel coordination follow-up.
+ * recently primed tab; coordinating tabs over a BroadcastChannel would
+ * fix that and is not built.
  *
  * Browser autoplay gating: HTMLMediaElement.play() is rejected when
  * called without a prior user-gesture chain.  This module exposes

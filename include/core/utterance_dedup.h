@@ -25,7 +25,8 @@
  * window wins and proceeds; any *different* session that calls check() inside
  * the window is told to suppress.  No transcript is ever compared — which also
  * catches cross-engine ASR divergence (Pi Whisper vs Jetson Whisper) and a
- * device whose ASR returns empty/garbage.  See docs/CROSS_DEVICE_DEDUP_DESIGN.md.
+ * device whose ASR returns empty/garbage.  See
+ * atlas/dawn/archive/CROSS_DEVICE_DEDUP_DESIGN.md.
  */
 
 #ifndef UTTERANCE_DEDUP_H

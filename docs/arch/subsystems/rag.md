@@ -67,7 +67,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 - **document_grep_tool.c** (`src/tools/`): Literal substring search over indexed document/note chunks
    - Returns the matched line plus adjacent context (not meaning-based) for exact lookups where semantic search is too fuzzy
    - Gap-safe range read (`document_db_chunk_read_range`, `BETWEEN chunk_index`) so an embed-failure gap in the chunk index doesn't misalign results
-   - Unindexed substring scan — see the FTS fast-path follow-up in `docs/TODO.md` for the large-corpus ceiling
+   - Unindexed substring scan, linear in chunk text; an FTS fast path for large corpora is not built yet
 
 - **document_read.c/h** (`src/tools/`): Paginated document reader
    - Parameters: `document` (name), `start_chunk` (offset), `count` (page size, max 20)

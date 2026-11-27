@@ -822,7 +822,7 @@ void phone_service_handle_event(const char *payload, int payload_len) {
        * The prefix-only wake-word match (not substring), the
        * sender-in-channels check, and the per-sender rate limits all
        * live inside messaging_engine_handle_sms_inbound — see
-       * docs/MESSAGING_CHANNELS_DESIGN.md §7. */
+       * atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §7. */
       /* Messaging-channel routing is a WebUI build feature; without it, inbound
        * SMS always falls through to the legacy local-context path below. */
       int sms_handled = 0;

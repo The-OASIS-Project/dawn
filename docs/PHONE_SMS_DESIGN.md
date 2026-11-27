@@ -631,7 +631,7 @@ Audio bridge thread over `/dev/ttyUSB4` (raw 16 kHz S16LE USB PCM — **no cross
 
 **Shipped (local helmet handset):** `src/tools/phone_audio_bridge.c` — a **single lockstep thread** (the SIM7600 USB PCM is synchronous full-duplex; two independent threads drift and the modem stops draining uplink) bridging the local mic ↔ ttyUSB4 ↔ speaker at 16 kHz mono via PulseAudio; tanh soft-limiter gains for level (modem CRXVOL/CTXVOL don't affect the USB PCM tap, so gain is digital). Live-verified two-way on a real 3rd-party call (`up_short=0` across the whole call). Started on `pcm_ready` (call-state-guarded), stopped on `call_ended`/`modem_lost`.
 
-**Remaining for full Phase 5:** (a) **audio quality** — uplink AGC/noise-gate + downlink level (uplink reads "microphone-y/inconsistent" = room mic + cellular AMR AGC/VAD; see TODO.md); (b) **WebUI/satellite routing** — the bridge currently targets only the local handset, not the browser/DAP2 Opus paths (the `webui_broadcast_phone_call` banner can *answer* a call but there's no browser call audio yet); (c) SMS end-to-end, rate limiting, edge cases already covered by earlier phases.
+**Remaining for full Phase 5:** (a) **audio quality** — uplink AGC/noise-gate + downlink level (uplink reads "microphone-y/inconsistent" = room mic + cellular AMR AGC/VAD); (b) **WebUI/satellite routing** — the bridge currently targets only the local handset, not the browser/DAP2 Opus paths (the `webui_broadcast_phone_call` banner can *answer* a call but there's no browser call audio yet); (c) SMS end-to-end, rate limiting, edge cases already covered by earlier phases.
 
 ### Phase 5.5: PDU Mode + Concatenated SMS ✓ (April 2026)
 
@@ -655,9 +655,9 @@ Flipped ECHO from text mode (`AT+CMGF=1`) to PDU mode (`AT+CMGF=0`) so SMS send/
 
 **Deferred to v2**: GSM7 *encode* for outbound (UCS2-only v1, so ASCII messages use 67 chars/segment instead of the 153 GSM7 packing would allow). Add once bandwidth metrics justify the packing code.
 
-**v2 follow-ups tracked**:
-- Phone routing to active user — currently incoming-call chimes fan out to every session equally, and the local speaker plays regardless of which satellite/browser the user is actually at. Paused `satellite_mappings` work in memory. Surfaced concrete failures 2026-04-22: WebUI refused to answer an actively-ringing call because that session's LLM context didn't reflect the ring state; satellite + local both tried `phone.answer` for the same call and raced. See `docs/TODO.md` High Impact.
-- MIRAGE long-SMS overflow — HUD notification frame doesn't wrap/clip long bodies, and PDU mode suddenly makes long inbound common. See `docs/TODO.md` High Impact.
+**v2 follow-ups (open)**:
+- Phone routing to active user — currently incoming-call chimes fan out to every session equally, and the local speaker plays regardless of which satellite/browser the user is actually at. The `satellite_mappings` work is paused. Surfaced concrete failures 2026-04-22: WebUI refused to answer an actively-ringing call because that session's LLM context didn't reflect the ring state; satellite + local both tried `phone.answer` for the same call and raced.
+- MIRAGE long-SMS overflow (the HUD notification frame didn't wrap or clip long bodies, which PDU mode made common): fixed on the MIRAGE side (mirage `049f9aa`).
 
 ### Phase 6: MMS Support (Future)
 Receive and send multimedia messages (images, video, contacts). The SIM7600G-H supports MMS via AT commands (`AT+CMMSINIT`, `AT+CMMSDOWN`, `AT+CMMSVIEW`, `AT+CMMSSEND`). MMS uses a WAP/HTTP data channel to the carrier's MMSC (Multimedia Messaging Service Center) — the image payload is not delivered inline like SMS text.
@@ -730,7 +730,7 @@ The marquee capability: a caller talks to **Friday** (the AI) over the phone —
 
 **Shape**:
 - A new **phone-call session type** whose audio I/O "device" is the modem (ttyUSB4), analogous to how a DAP2/WebUI session's device is a WebSocket. Downlink far-end PCM → ASR; TTS → uplink PCM.
-- **ASR over a phone line**: Whisper on narrowband, AGC-processed, noisy cellular audio — accuracy will be lower than the helmet mic; the audio-quality work (uplink AGC / cleanup, see TODO.md) feeds directly into this.
+- **ASR over a phone line**: Whisper on narrowband, AGC-processed, noisy cellular audio — accuracy will be lower than the helmet mic; the audio-quality work (uplink AGC / cleanup) feeds directly into this.
 - **Endpointing / turn-taking**: VAD tuned for phone audio to decide when the caller finished speaking (harder than a close mic; the far-end AGC/comfort-noise complicates silence detection).
 - **Barge-in**: caller talks over Friday → interrupt in-flight TTS (DAWN already has wake-word-interrupt machinery to borrow).
 - **TTS-during-call becomes required** (resolves the deferred decision in Phase 5's Bridge Thread Lifecycle) — here Friday *must* be audible on the line, so no TTS suppression.
@@ -754,10 +754,9 @@ The original tech-debt gap (no way for the LLM to delete SMS/call records) is re
 - Delete criteria in v1: `id`, `number`, or `older_than_days` — exactly one required. No by-contact-name (LLM pre-resolves). Bulk older-than-days is wired for both call log and SMS log.
 - **Send/call pending-state TTL backport (April 2026)**: applied the same 120s TTL from the delete path to the older `send_sms`/`confirm_sms` and `call`/`confirm_call` pairs. Previously those globals (`s_pending_call_*`, `s_pending_sms_*`) had no expiry — a stale "confirm" minutes later would still trigger. Now arm stamps `time(NULL)`, confirm checks against `PHONE_TOOL_PENDING_TTL_SEC`, clears state, and returns "Error: confirmation expired. Please retry the ... request." Live-validated on WebUI: `confirm_sms` called 135s after arm correctly rejected instead of sending.
 
-**Still open** — tracked in `docs/TODO.md`:
-- Migrate all `phone_tool` pending state from globals to session-scoped.
-- Clean up `phone_db.c`'s legacy `-1` error returns across insert/update/query.
-- SMS bulk delete by `older_than_days`.
+**Since done**: `phone_tool` pending state is session-scoped (`core/pending_slots.h`); `phone_db.c` no longer returns `-1`; SMS bulk delete by `older_than_days`.
+
+**Still open**:
 - WebUI deletion parity (deferred — only build if a user asks).
 
 ---

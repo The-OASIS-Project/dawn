@@ -672,7 +672,8 @@ void llm_set_timeout_override(int timeout_ms);
  * Silent-Observe — hardened LLM call mode for background observations
  * ============================================================================
  *
- * Phase 0 of the Dynamic Context Injection design (docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md).
+ * Phase 0 of the Dynamic Context Injection design
+ * (atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md).
  *
  * Architectural invariants (verified in CI / by inspection):
  *   1. Non-streaming, single-shot — uses provider's non-streaming completion path

@@ -20,7 +20,7 @@
  * about X" call that fans out across all focus sources (memory facts/entities/
  * relations/summaries, notes, documents, calendar) via the focus engine at a
  * larger budget than the per-turn injection.  See
- * docs/CROSS_TOOL_RECALL_DESIGN.md.
+ * atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md ("Explicit recall tool").
  */
 
 #ifndef TOOLS_RECALL_TOOL_H

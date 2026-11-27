@@ -25,7 +25,7 @@
  * session_id + last-seen sequence + exponential backoff on disconnect.
  * Telegram long-poll doesn't use this (it just retries with the same offset).
  *
- * See docs/MESSAGING_CHANNELS_DESIGN.md §4 (Reconnect state machine).
+ * See atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §4 (Reconnect state machine).
  */
 #ifndef CORE_WS_RECONNECT_H
 #define CORE_WS_RECONNECT_H

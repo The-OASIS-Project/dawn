@@ -668,8 +668,8 @@
                DawnHistory.handleContextCompacted(msg.payload);
                break;
             case 'silent_observation':
-               // Phase 0 of Dynamic Context Injection — see
-               // docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md.  The DawnSilentObserve
+               // Silent-observe events (atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md,
+               // "Phase 0 — Silent-Acknowledge Primitive").  The DawnSilentObserve
                // module owns the badge/peek/warning chip surface.
                if (window.DawnSilentObserve) {
                   window.DawnSilentObserve.handleEvent(msg.payload);

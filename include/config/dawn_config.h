@@ -631,7 +631,7 @@ typedef struct {
     * test"), > threshold of the candidate pool shares that token, and
     * the right-answer summary uses specific vocabulary.  Bench-validated
     * at canonical params via benchmarks/focus_probe_cases.json cases
-    * 16-18 (severe_dominant_token_*) — see docs/RERANKER_PHASE_A_DESIGN.md. */
+    * 16-18 (severe_dominant_token_*) — see atlas/dawn/memory/RERANKER_HEURISTIC.md. */
    struct {
       bool enabled;
       float threshold;    /* Pool-fraction share to call a token "dominant" */
@@ -639,7 +639,8 @@ typedef struct {
    } dominant_token_heuristic;
 } focus_injection_config_t;
 
-/* Unified cross-source `recall` tool (docs/CROSS_TOOL_RECALL_DESIGN.md).
+/* Unified cross-source `recall` tool (atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md,
+ * "Explicit recall tool").
  * Deep on-demand gather across all focus sources at a budget LARGER than the
  * per-turn injection, kept in a SEPARATE block so tuning the deep path never
  * disturbs the tuned per-turn `focus_injection` values.  recall_tool copies
@@ -831,7 +832,7 @@ typedef struct {
     * relevance threshold and injects them as a budget-bounded "current
     * context" block.  Disabled by default until adapters land in 1c/1d
     * and the prompt-builder integration ships in 1e.  See
-    * `docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md` §"Phase 1 — Per-Turn Focus". */
+    * `atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md`. */
    focus_injection_config_t focus_injection;
 
    /* Unified cross-source `recall` tool — deep gather at a larger budget than
@@ -1032,7 +1033,7 @@ typedef struct {
  * Runtime knobs for the messaging-channels engine (Telegram / Discord /
  * Slack / SMS).  Driver-specific tokens live in secrets.toml; this
  * section covers behavior tunables.  See
- * docs/MESSAGING_CHANNELS_DESIGN.md.
+ * atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md.
  * ============================================================================= */
 typedef struct {
    /* SMS-only: window after the LAST LLM-bound exchange during which
@@ -1107,20 +1108,20 @@ typedef struct {
 
    /* Telegram Bot API token (from @BotFather).  When empty, the
     * Telegram messaging driver is not registered.  See
-    * docs/MESSAGING_CHANNELS_DESIGN.md §8 (Telegram). */
+    * atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §8 (Telegram). */
    char telegram_bot_token[CONFIG_API_KEY_MAX];
 
    /* Discord bot token (from Developer Portal → Bot).  When empty, the
     * Discord messaging driver is not registered.  v1 is DM-only and
     * requires the privileged MESSAGE_CONTENT intent.  See
-    * docs/MESSAGING_CHANNELS_DESIGN.md §8 (Discord). */
+    * atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §8 (Discord). */
    char discord_bot_token[CONFIG_API_KEY_MAX];
 
    /* Slack App-level token (xapp-...) used by the Socket Mode driver to
     * open the outbound WebSocket via apps.connections.open.  When empty
     * (or slack_bot_token empty), the Slack messaging driver is not
     * registered.  v1 is DM-only, single-workspace install.  See
-    * docs/MESSAGING_CHANNELS_DESIGN.md §8 (Slack). */
+    * atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §8 (Slack). */
    char slack_app_token[CONFIG_API_KEY_MAX];
 
    /* Slack Bot User OAuth token (xoxb-...) used for chat.postMessage

@@ -18,7 +18,7 @@
  *
  * Messaging engine implementation.  See
  * include/messaging/messaging_engine.h for the public API and
- * docs/MESSAGING_CHANNELS_DESIGN.md for the design rationale.
+ * atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md for the design rationale.
  */
 #define MESSAGING_ENGINE_INTERNAL_ALLOWED
 
@@ -161,7 +161,7 @@ void webui_broadcast_messaging_channels_changed(int user_id,
 /* =============================================================================
  * Strong override: scheduler → messaging channel fan-out (Phase 5, schema v54)
  *
- * Sixth scheduler weak symbol per docs/MESSAGING_CHANNELS_DESIGN.md §9.
+ * Sixth scheduler weak symbol per atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §9.
  * The scheduler-side weak no-op lives in src/core/scheduler.c; this
  * strong definition wins when messaging_engine is linked.  Delegates to
  * messaging_engine_send, which:
@@ -241,7 +241,7 @@ int messaging_engine_init(void) {
    memset(s_inbound_queue, 0, sizeof(s_inbound_queue));
    memset(s_session_slots, 0, sizeof(s_session_slots));
 
-   /* Rate limiters.  Budgets per docs/MESSAGING_CHANNELS_DESIGN.md §12. */
+   /* Rate limiters.  Budgets per atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §12. */
    rate_limiter_config_t link_cfg = { .max_count = 5,
                                       .window_sec = 600,
                                       .slot_count = MESSAGING_RL_LINK_SLOTS };

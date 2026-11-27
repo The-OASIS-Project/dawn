@@ -1193,7 +1193,7 @@ add_dependencies(dawn models_toml_builtin)
 # Coding-harness CI invariant: forbid process-management primitives in the MCP
 # bridge / code-project sources (bridge is socket-only; git is in-process via
 # libgit2). Runs on every dawn build; passes trivially until harness files
-# exist. Scope is harness files only -- see docs/CODING_HARNESS_DESIGN.md.
+# exist. Scope is harness files only -- see atlas/dawn/archive/CODING_HARNESS_DESIGN.md.
 add_custom_target(no_process_mgmt_check
     COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_no_process_mgmt.sh
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -1223,7 +1223,7 @@ add_dependencies(dawn messaging_send_funnel_check)
 # already swept onto safe_strscpy()/safe_strncpy() (ratcheting COVERED_DIRS list
 # in the script).  Runs at -O0 on every build, so it catches regressions that
 # -Wstringop-truncation (optimizer-gated, dark in Debug) cannot.  See
-# docs/SAFE_STRNCPY_STANDARDIZATION_DESIGN.md.
+# CODING_STYLE_GUIDE.md, "String Safety".
 add_custom_target(no_raw_strncpy_check
     COMMAND ${CMAKE_SOURCE_DIR}/scripts/check_no_raw_strncpy.sh
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

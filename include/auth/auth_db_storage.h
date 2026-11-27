@@ -32,6 +32,16 @@
  *   minute.  secure_delete=FAST zeroes freed space inside pages rewritten
  *   anyway (it doesn't zero whole freed pages: draining removes those from
  *   the file; their old blocks are the filesystem's, like a deleted file's).
+ *   Incremental auto-vacuum is not free: its pointer-map pages cost about
+ *   15% on a 16 MB insert.
+ * - synchronous stays FULL (SQLite's build default on the main connection,
+ *   set explicitly on the storage thread's), so a commit survives a power
+ *   cut; the checkpoint moving off the lock is what bought the time back.
+ * - What a large write still holds the global mutex for is its own WAL
+ *   write and fsync (a 16 MB insert: about 90 ms).  Checkpoints can't take
+ *   that further; the next step would be not writing large blobs under the
+ *   global mutex at all (an out-of-line file, or a separate writer
+ *   connection for bulk rows).
  */
 
 #ifndef AUTH_DB_STORAGE_H

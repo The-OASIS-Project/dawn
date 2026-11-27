@@ -307,8 +307,7 @@ void handle_delete_satellite(ws_connection_t *conn, struct json_object *payload)
  * ============================================================================= */
 
 /* Two stacked core/rate_limiter instances express the dual-window contract.
- * Migrated from a per-file FNV-bucket reimplementation 2026-05-19 — see
- * docs/TODO.md "Extract shared webui_rate_limit.{c,h}".  Linear-scan + LRU
+ * Migrated from a per-file FNV-bucket reimplementation 2026-05-19.  Linear-scan + LRU
  * eviction in the underlying primitive eliminates the FNV-collision-bypass
  * surface entirely; the truncation fail-closed contract lives in
  * rate_limiter_check itself.

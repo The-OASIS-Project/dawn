@@ -22,7 +22,7 @@
  * path implements this contract.  The engine
  * (src/messaging/messaging_engine.c) registers drivers at init, owns the
  * per-user channel resolution, and routes inbound + outbound messages
- * through this interface.  See docs/MESSAGING_CHANNELS_DESIGN.md §4.
+ * through this interface.  See atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §4.
  */
 #ifndef MESSAGING_DRIVER_H
 #define MESSAGING_DRIVER_H

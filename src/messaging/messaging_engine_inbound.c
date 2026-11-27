@@ -23,8 +23,7 @@
  * gates, the bounded inbound queue producer, the worker drain that runs the
  * LLM turn, per-provider outbound shaping + truncation, the typing-indicator
  * keepalive, and the multi-part split delivery.  Split out of
- * messaging_engine.c; see messaging_engine_internal.h and
- * docs/MESSAGING_ENGINE_SPLIT_PLAN.md.
+ * messaging_engine.c; see messaging_engine_internal.h.
  */
 #define MESSAGING_ENGINE_INTERNAL_ALLOWED
 
@@ -213,7 +212,7 @@ int engine_inbound_dispatch(const messaging_inbound_t *msg) {
     * normal sentences ("New idea:", "new question:", ...).  Slack
     * users intercept '/' as a slash-command, so they reset by asking
     * the assistant to start a new conversation rather than via this
-    * shortcut.  See docs/MESSAGING_CHANNELS_DESIGN.md §13 Phase 2.5. */
+    * shortcut.  See atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §13 Phase 2.5. */
    if (body_len >= 4 && (body[0] == '/') && (body[1] == 'n' || body[1] == 'N') &&
        (body[2] == 'e' || body[2] == 'E') && (body[3] == 'w' || body[3] == 'W') &&
        (body_len == 4 || body[4] == ' ' || body[4] == '\t' || body[4] == '\n' || body[4] == '\r')) {
@@ -1017,7 +1016,7 @@ int messaging_engine_handle_sms_inbound(const char *sender_e164,
     * filter and channel-lookup so unlinked senders can't trigger
     * resets.  Same recognition shape as the Telegram path: case-
     * insensitive "/new" + EOF or whitespace; trailing content
-    * ignored.  See docs/MESSAGING_CHANNELS_DESIGN.md §13 Phase 2.5. */
+    * ignored.  See atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §13 Phase 2.5. */
    if (body_len >= 4 && (body[0] == '/') && (body[1] == 'n' || body[1] == 'N') &&
        (body[2] == 'e' || body[2] == 'E') && (body[3] == 'w' || body[3] == 'W') &&
        (body_len == 4 || body[4] == ' ' || body[4] == '\t' || body[4] == '\n' || body[4] == '\r')) {

@@ -61,7 +61,7 @@ All `ha_*` verbs are **admin-only** (`conn_require_admin`). Read verbs (`ha_stat
 `ha_test_connection`, `ha_list_entities`, `ha_refresh_entities`) return an
 `ha_entities_response`; the write verb (`ha_call_service`) returns
 `ha_call_service_response`. The browser-facing wire contract (request/response shapes,
-error strings) is documented for the consumer in `dawn-nextgen/docs/DAWN_UI_SIGNAL_MAP.md
+error strings) is documented for the consumer in `aurora/docs/DAWN_UI_SIGNAL_MAP.md
 §9.4`.
 
 - **Rich entity attributes (#7)**: `serialize_entity_list()` emits a per-entity
@@ -97,7 +97,7 @@ error strings) is documented for the consumer in `dawn-nextgen/docs/DAWN_UI_SIGN
   batch-applied under one write lock (`homeassistant_cache_apply_batch`), then pushed as an
   `ha_state_changed` **delta** to admin browsers (`ha_broadcast_state_changed` weak hook →
   `broadcast_json_to_admins`). A `ha_observe_state_changed` weak hook is the (unbuilt) SAGE
-  seam. See `docs/WEBSOCKET_PROTOCOL.md` (`ha_state_changed`) + `DAWN_UI_SIGNAL_MAP.md §9.4`.
+  seam. See `docs/WEBSOCKET_PROTOCOL.md` (`ha_state_changed`) + `aurora/docs/DAWN_UI_SIGNAL_MAP.md §9.4`.
 
 - **Server-authoritative reconcile**: on a successful `ha_call_service`, the handler
   re-polls HA (entity-only, via `homeassistant_snapshot_entities(force_refresh=true)`) and

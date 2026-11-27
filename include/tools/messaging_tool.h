@@ -17,7 +17,7 @@
  * the project author(s).
  *
  * Messaging LLM tool — exposes messaging_engine to the LLM.  See
- * docs/MESSAGING_CHANNELS_DESIGN.md §3.
+ * atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §3.
  */
 #ifndef MESSAGING_TOOL_H
 #define MESSAGING_TOOL_H
@@ -33,7 +33,7 @@ extern "C" {
  * engine (`messaging_engine_init()`) and the SMS driver (always — ECHO owns
  * the modem connection lifecycle); its start, once the daemon is up, registers
  * the Telegram/Discord/Slack drivers whose tokens are set in secrets.toml.
- * See `docs/MESSAGING_CHANNELS_DESIGN.md` §3.
+ * See `atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md` §3.
  *
  * @return SUCCESS on successful registration, FAILURE on engine init
  *         or registry failure.  Driver registration failures are

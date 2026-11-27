@@ -17,7 +17,7 @@
  * the project author(s).
  *
  * Telegram Bot API driver — long-poll inbound + REST outbound.  v1
- * text-only.  See docs/MESSAGING_CHANNELS_DESIGN.md §8 (Telegram).
+ * text-only.  See atlas/dawn/archive/MESSAGING_CHANNELS_DESIGN.md §8 (Telegram).
  *
  * Connection reuse: single persistent CURL handle with TCP keep-alive
  * and HTTP/2 enabled.  Listener thread runs on a 64 KB pthread stack.

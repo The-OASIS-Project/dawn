@@ -18,7 +18,7 @@
  *
  * Focus-source framework — pluggable adapter contract for per-turn context
  * injection.  Phase 1b of the Dynamic Context Injection workstream
- * (`docs/DYNAMIC_CONTEXT_INJECTION_DESIGN.md`).
+ * (`atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md`).
  *
  * Architecture:
  *   - Each candidate context source (memory facts, entities, relations,

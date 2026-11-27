@@ -19,7 +19,7 @@
  * part of the project and are adopted by the project author(s).
  *
  * Cross-device utterance dedup — static singleton suppression gate.
- * See docs/CROSS_DEVICE_DEDUP_DESIGN.md and core/utterance_dedup.h.
+ * See atlas/dawn/archive/CROSS_DEVICE_DEDUP_DESIGN.md and core/utterance_dedup.h.
  */
 
 #include "core/utterance_dedup.h"
