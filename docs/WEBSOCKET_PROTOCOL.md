@@ -2079,8 +2079,9 @@ a subscribe after that starts with a fresh fetch.
 The intervals are the earliest a retry can happen, not a schedule: once one has passed, the next
 fetch still needs the rule above (nothing cached, or the regular session open). So with a snapshot
 cached, a failure outside regular hours, or a relink then, is not retried until the session
-opens. A watchlist edit fetches at once, whatever the hour, unless one of these intervals is
-running.
+opens. A watchlist edit is the exception: it cancels any interval running, and its fetch
+happens at once, whatever the hour. If that fetch fails, it is retried when its own interval has
+passed, again whatever the hour, until one succeeds.
 
 Last-known numbers keep their original `as_of`, so show them dimmed with "as of …" rather than
 blanking. Before the first fetch completes, a frame built for the user says `not_connected` with no
