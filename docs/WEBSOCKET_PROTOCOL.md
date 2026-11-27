@@ -2048,7 +2048,9 @@ A live view of the logged-in user's Charles Schwab portfolio, and a watchlist of
 don't hold. Built only with the Schwab tool (`DAWN_ENABLE_SCHWAB_TOOL`); a daemon without it
 answers these types with `UNKNOWN_TYPE`. No feature flag. Every request needs a login (else
 `UNAUTHORIZED`); each user sees only their own Schwab link, and a user with none gets
-`status: "not_connected"`. Satellites never receive the pushes.
+`status: "not_connected"` on the portfolio. The watchlist is not a link check: an empty
+watchlist makes no Schwab request and answers `status: "ok"` with `symbols: []`, linked or not.
+Satellites never receive the pushes.
 
 The server keeps one snapshot per user and pushes it to every subscribed connection of that user;
 requests never fetch from Schwab themselves. A fetch happens when a connection of the user is
@@ -2069,10 +2071,16 @@ a subscribe after that starts with a fresh fetch.
 | `status` | Meaning | Numbers in the frame |
 |---|---|---|
 | `ok` | The last fetch succeeded | Yes |
-| `rate_limited` | Schwab answered 429; retried after 60 s, doubling to 10 min | Last-known, if any |
-| `error` | Network, Schwab or parse failure; retried after 60 s | Last-known, if any |
-| `not_connected` | The user has no Schwab link; retried every 5 min | Last-known, if any |
-| `token_expired` | The Schwab login expired (weekly); relink with `dawn-admin schwab auth`; retried every 5 min | Never |
+| `rate_limited` | Schwab answered 429; no retry for 60 s, doubling to 10 min | Last-known, if any |
+| `error` | Network, Schwab or parse failure; no retry for 60 s | Last-known, if any |
+| `not_connected` | The user has no Schwab link; no retry for 5 min | Last-known, if any |
+| `token_expired` | The Schwab login expired (weekly); relink with `dawn-admin schwab auth`; no retry for 5 min | Never |
+
+The intervals are the earliest a retry can happen, not a schedule: once one has passed, the next
+fetch still needs the rule above (nothing cached, or the regular session open). So with a snapshot
+cached, a failure outside regular hours, or a relink then, is not retried until the session
+opens. A watchlist edit fetches at once, whatever the hour, unless one of these intervals is
+running.
 
 Last-known numbers keep their original `as_of`, so show them dimmed with "as of …" rather than
 blanking. Before the first fetch completes, a frame built for the user says `not_connected` with no
