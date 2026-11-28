@@ -126,6 +126,21 @@ class Client:
             if f.get("type") == "load_conversation_response":
                 return f["payload"]
 
+    def wait_for(self, msg_type, timeout=10, match=None):
+        """The next frame of @p msg_type (and, given @p match, one it accepts);
+        frames before it are dropped.  Raises TimeoutError when none comes and
+        ConnectionError when the socket closes (the daemon may be gone)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                f = self._recv(deadline)
+            except (websocket.WebSocketConnectionClosedException, OSError) as e:
+                raise ConnectionError(f"the socket closed waiting for {msg_type}") from e
+            if f is None:
+                raise TimeoutError(f"no {msg_type} in {timeout} s")
+            if f.get("type") == msg_type and (match is None or match(f.get("payload"))):
+                return f.get("payload")
+
     def turn(self, text, timeout=60):
         """Send @p text as a typed message and wait for its turn to end."""
         self._ref += 1

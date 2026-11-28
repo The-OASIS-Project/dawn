@@ -457,6 +457,35 @@ void test_complete_history_sends_only_new_rows(void) {
                                  conv));
 }
 
+/* A reply whose preferences, corrections or topics aren't lists (a null, a
+ * string, an object) is read as having none of them: the rest is stored. */
+void test_lists_that_are_not_lists_are_read_as_none(void) {
+   static const char *const replies[] = {
+      "{\"facts\": [{\"text\": \"The user keeps a placeholder notebook.\"}], "
+      "\"preferences\": null, \"corrections\": \"none\", "
+      "\"summary\": \"A placeholder talk.\", \"topics\": {\"a\": 1}}",
+      "{\"facts\": [{\"text\": \"The user keeps a placeholder diary.\"}], "
+      "\"preferences\": \"none\", \"corrections\": null, "
+      "\"summary\": \"Another placeholder talk.\", \"topics\": null}",
+   };
+   for (size_t i = 0; i < sizeof(replies) / sizeof(replies[0]); i++) {
+      int64_t conv = 0;
+      TEST_ASSERT_EQUAL_INT(AUTH_DB_SUCCESS, conv_db_create(s_user, "Own", &conv));
+      const char *texts[] = { "placeholder question", "placeholder answer" };
+      const char *roles[] = { "user", "assistant" };
+      int64_t ids[2];
+      for (int j = 0; j < 2; j++) {
+         ids[j] = add(conv, roles[j], texts[j]);
+      }
+      s_reply = replies[i];
+      extract(conv, history_of(roles, texts, ids, 2), 2);
+      TEST_ASSERT_EQUAL_INT64(1, q1("SELECT COUNT(*) FROM memory_summaries WHERE "
+                                    "source_conversation_id = ?1",
+                                    conv));
+   }
+   TEST_ASSERT_EQUAL_INT64(2, q1("SELECT COUNT(*) FROM memory_facts WHERE user_id = ?1", s_user));
+}
+
 /* Another session's web result in the batch's range, its exchange missing
  * from this session's history: the model is asked (the batch has a question),
  * and the batch's summary and the conversation's floor record the web. */
@@ -1194,6 +1223,7 @@ int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_history_lacking_another_sessions_rows_sends_them);
    RUN_TEST(test_complete_history_sends_only_new_rows);
+   RUN_TEST(test_lists_that_are_not_lists_are_read_as_none);
    RUN_TEST(test_another_sessions_web_result_taints_a_model_batch);
    RUN_TEST(test_recovery_counts_a_falling_count_as_progress);
    RUN_TEST(test_a_turn_on_a_session_then_its_extraction);

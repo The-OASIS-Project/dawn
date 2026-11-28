@@ -140,6 +140,13 @@ typedef struct {
    char *text_buffer;      /* Accumulation buffer for fragmented text messages */
    size_t text_buffer_len; /* Current data length in text_buffer */
    size_t text_buffer_cap; /* Allocated capacity of text_buffer */
+   /* The request being handled now had at least one null-valued member (any
+    * depth), removed on receipt by json_drop_nulls, so a handler that must
+    * tell `"x": null` from a missing x can.  Set by handle_json_message before
+    * each dispatch and read by the handler it calls, both on the lws thread
+    * within that one request.  If dispatch ever leaves that thread, this
+    * belongs with the per-request state in webui_protocol.c. */
+   bool request_had_nulls;
 
    /* Auth state (populated at WebSocket establishment from HTTP cookie) */
    bool authenticated;

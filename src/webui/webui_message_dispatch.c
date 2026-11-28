@@ -45,6 +45,7 @@
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
 #include "core/image_rehydrate.h"
+#include "core/json_nulls.h"
 #include "core/missed_notifications_db.h"
 #include "core/scheduler.h"
 #include "core/scheduler_db.h"
@@ -286,8 +287,9 @@ static void dispatch_text_frame(ws_connection_t *conn, struct json_object *paylo
    }
    struct json_object *ref_obj = NULL;
    if (json_object_object_get_ex(payload, "client_ref", &ref_obj)) {
-      /* Anything but a string of the allowed shape is refused, null included;
-       * a string with an embedded NUL too (it couldn't be echoed unchanged). */
+      /* Anything but a string of the allowed shape is refused; a string with an
+       * embedded NUL too (it couldn't be echoed unchanged).  A null client_ref
+       * was dropped on receipt, so that turn runs without a ref. */
       const bool is_string = json_object_is_type(ref_obj, json_type_string);
       const char *ref = is_string ? json_object_get_string(ref_obj) : NULL;
       if (!webui_client_ref_valid(ref) ||
@@ -327,9 +329,12 @@ void handle_json_message(ws_connection_t *conn, const char *data, size_t len) {
       free(json_str);
       return;
    }
+   /* A null member reads as absent from here on: each handler's missing-field
+    * branch covers it, never a NULL string. */
+   conn->request_had_nulls = json_drop_nulls(root) > 0;
 
-   /* The type must be a string with no NUL inside: `"type": null` is found but
-    * NULL, and an embedded NUL would dispatch on a prefix. */
+   /* The type must be a string with no NUL inside: an embedded NUL would
+    * dispatch on a prefix. */
    struct json_object *type_obj = NULL;
    if (!json_object_object_get_ex(root, "type", &type_obj) ||
        !json_object_is_type(type_obj, json_type_string) ||

@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "auth/auth_db.h"
 #include "config/dawn_config.h"
@@ -62,8 +63,9 @@ static json_object *s_notified;
 
 void memory_consolidation_batch_notify(int user_id, int64_t conversation_id, int64_t batch_id) {
    (void)conversation_id;
-   json_object_put(s_notified);
-   s_notified = webui_memory_batch_notice(user_id, batch_id);
+   /* Atomic: an undo the handler starts notifies from its worker. */
+   json_object *notice = webui_memory_batch_notice(user_id, batch_id);
+   json_object_put(__atomic_exchange_n(&s_notified, notice, __ATOMIC_ACQ_REL));
 }
 
 /* ---- fixtures ---- */
@@ -409,6 +411,56 @@ void test_an_op_id_that_is_not_a_number_is_not_found(void) {
    json_object_put(b);
 }
 
+/* A null op_id is dropped when the frame is read (handle_json_message), so it
+ * arrives as no op_id with the request's dropped count set: refused, never a
+ * whole-batch undo. */
+void test_a_null_op_id_is_not_found(void) {
+   const int64_t batch = run(ONE_FACT("Jonathan Smith plays the cello"), NULL);
+   ws_connection_t conn;
+   memset(&conn, 0, sizeof(conn));
+   conn.auth_user_id = s_user;
+   conn.request_had_nulls = true;
+   char json[64];
+   snprintf(json, sizeof(json), "{\"batch_id\": %lld}", (long long)batch);
+   json_object *req = request(json);
+   handle_undo_memory_batch(&conn, req);
+   json_object *p = get(s_sent, "payload");
+   TEST_ASSERT_EQUAL_STRING("undo_memory_batch_response", str(s_sent, "type"));
+   TEST_ASSERT_EQUAL_STRING("Not found", str(p, "error"));
+   json_object_put(req);
+   json_object *b = webui_memory_batch_json(s_user, batch);
+   TEST_ASSERT_EQUAL_STRING("applied", str(b, "status")); /* nothing undone */
+   json_object_put(b);
+}
+
+/* No op_id and no null in the request: the whole batch is undone, as before. */
+void test_no_op_id_undoes_the_whole_batch(void) {
+   const int64_t batch = run(ONE_FACT("Jonathan Smith plays the cello"), NULL);
+   static session_t session; /* only its id is read: the reply's session */
+   session.session_id = 1;
+   ws_connection_t conn;
+   memset(&conn, 0, sizeof(conn));
+   conn.auth_user_id = s_user;
+   conn.session = &session;
+   json_object_put(s_notified);
+   s_notified = NULL;
+   char json[64];
+   snprintf(json, sizeof(json), "{\"batch_id\": %lld}", (long long)batch);
+   json_object *req = request(json);
+   handle_undo_memory_batch(&conn, req);
+   json_object_put(req);
+   /* The undo runs on a worker; its notice is the last thing it does that
+    * reads the database. */
+   for (int i = 0; i < 500 && !__atomic_load_n(&s_notified, __ATOMIC_ACQUIRE); i++) {
+      struct timespec ts = { 0, 10 * 1000 * 1000 };
+      nanosleep(&ts, NULL);
+   }
+   TEST_ASSERT_NOT_NULL(__atomic_load_n(&s_notified, __ATOMIC_ACQUIRE));
+   json_object *b = webui_memory_batch_json(s_user, batch);
+   TEST_ASSERT_EQUAL_STRING("undone", str(b, "status"));
+   json_object_put(b);
+}
+
 /* The model's reason and DAWN's say whose they are. */
 void test_each_reason_says_who_wrote_it(void) {
    stored("Jonathan Smith lives in Portland");
@@ -579,6 +631,8 @@ int main(void) {
    RUN_TEST(test_the_list_handler_replies_for_the_connections_user);
    RUN_TEST(test_an_undo_without_ids_is_not_found_at_once);
    RUN_TEST(test_an_op_id_that_is_not_a_number_is_not_found);
+   RUN_TEST(test_a_null_op_id_is_not_found);
+   RUN_TEST(test_no_op_id_undoes_the_whole_batch);
    RUN_TEST(test_each_reason_says_who_wrote_it);
    RUN_TEST(test_a_stale_undo_is_reported_with_its_op);
    RUN_TEST(test_an_undo_of_another_users_batch_is_not_found);

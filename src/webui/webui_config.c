@@ -308,36 +308,44 @@ void handle_get_config(ws_connection_t *conn) {
       }                                                   \
    } while (0)
 
-#define JSON_TO_CONFIG_INT(obj, key, dest)              \
-   do {                                                 \
-      struct json_object *_val;                         \
-      if (json_object_object_get_ex(obj, key, &_val)) { \
-         (dest) = json_object_get_int(_val);            \
-      }                                                 \
+/* A number, boolean or size is applied only when the value is of that type;
+ * any other value leaves the setting as it is. */
+#define JSON_IS_NUMBER(v) \
+   (json_object_is_type((v), json_type_int) || json_object_is_type((v), json_type_double))
+
+#define JSON_TO_CONFIG_INT(obj, key, dest)                                      \
+   do {                                                                         \
+      struct json_object *_val;                                                 \
+      if (json_object_object_get_ex(obj, key, &_val) && JSON_IS_NUMBER(_val)) { \
+         (dest) = json_object_get_int(_val);                                    \
+      }                                                                         \
    } while (0)
 
-#define JSON_TO_CONFIG_BOOL(obj, key, dest)             \
-   do {                                                 \
-      struct json_object *_val;                         \
-      if (json_object_object_get_ex(obj, key, &_val)) { \
-         (dest) = json_object_get_boolean(_val);        \
-      }                                                 \
+#define JSON_TO_CONFIG_BOOL(obj, key, dest)               \
+   do {                                                   \
+      struct json_object *_val;                           \
+      if (json_object_object_get_ex(obj, key, &_val) &&   \
+          json_object_is_type(_val, json_type_boolean)) { \
+         (dest) = json_object_get_boolean(_val);          \
+      }                                                   \
    } while (0)
 
-#define JSON_TO_CONFIG_DOUBLE(obj, key, dest)           \
-   do {                                                 \
-      struct json_object *_val;                         \
-      if (json_object_object_get_ex(obj, key, &_val)) { \
-         (dest) = (float)json_object_get_double(_val);  \
-      }                                                 \
+#define JSON_TO_CONFIG_DOUBLE(obj, key, dest)                                   \
+   do {                                                                         \
+      struct json_object *_val;                                                 \
+      if (json_object_object_get_ex(obj, key, &_val) && JSON_IS_NUMBER(_val)) { \
+         (dest) = (float)json_object_get_double(_val);                          \
+      }                                                                         \
    } while (0)
 
-#define JSON_TO_CONFIG_SIZE_T(obj, key, dest)           \
-   do {                                                 \
-      struct json_object *_val;                         \
-      if (json_object_object_get_ex(obj, key, &_val)) { \
-         (dest) = (size_t)json_object_get_int64(_val);  \
-      }                                                 \
+/* A negative size is ignored too: it would wrap to a huge one. */
+#define JSON_TO_CONFIG_SIZE_T(obj, key, dest)                                   \
+   do {                                                                         \
+      struct json_object *_val;                                                 \
+      if (json_object_object_get_ex(obj, key, &_val) && JSON_IS_NUMBER(_val) && \
+          json_object_get_double(_val) >= 0) {                                  \
+         (dest) = (size_t)json_object_get_int64(_val);                          \
+      }                                                                         \
    } while (0)
 
 /* Apply a settings-panel POST onto the live config.

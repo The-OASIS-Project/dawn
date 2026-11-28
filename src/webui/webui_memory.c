@@ -1495,9 +1495,29 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
          return;
       }
 
+      /* A facts or preferences member that isn't a list is refused; absent is none. */
+      json_object *facts_arr = NULL;
+      json_object *prefs_arr = NULL;
+      const char *not_list = NULL;
+      if (json_object_object_get_ex(data_obj, "facts", &facts_arr) &&
+          !json_object_is_type(facts_arr, json_type_array)) {
+         not_list = "facts must be an array";
+      } else if (json_object_object_get_ex(data_obj, "preferences", &prefs_arr) &&
+                 !json_object_is_type(prefs_arr, json_type_array)) {
+         not_list = "preferences must be an array";
+      }
+      if (not_list) {
+         json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
+         json_object_object_add(resp_payload, "error", json_object_new_string(not_list));
+         json_object_put(preview_arr);
+         json_object_object_add(response, "payload", resp_payload);
+         send_json_response(conn, response);
+         json_object_put(response);
+         return;
+      }
+
       /* Import facts */
-      json_object *facts_arr;
-      if (json_object_object_get_ex(data_obj, "facts", &facts_arr)) {
+      if (facts_arr) {
          int len = json_object_array_length(facts_arr);
          for (int i = 0; i < len && i < IMPORT_MAX_LINES; i++) {
             json_object *f = json_object_array_get_idx(facts_arr, i);
@@ -1537,8 +1557,7 @@ void handle_import_memories(ws_connection_t *conn, struct json_object *payload) 
       }
 
       /* Import preferences */
-      json_object *prefs_arr;
-      if (json_object_object_get_ex(data_obj, "preferences", &prefs_arr)) {
+      if (prefs_arr) {
          int len = json_object_array_length(prefs_arr);
          for (int i = 0; i < len && i < IMPORT_MAX_LINES; i++) {
             json_object *p = json_object_array_get_idx(prefs_arr, i);

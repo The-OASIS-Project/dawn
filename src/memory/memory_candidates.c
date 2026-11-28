@@ -890,7 +890,8 @@ int64_t memory_extraction_store_summary(int user_id,
 
       /* Build topics string */
       char topics[MEMORY_TOPICS_MAX] = { 0 };
-      if (json_object_object_get_ex(root, "topics", &topics_arr)) {
+      if (json_object_object_get_ex(root, "topics", &topics_arr) &&
+          json_object_is_type(topics_arr, json_type_array)) {
          int count = json_object_array_length(topics_arr);
          size_t toff = 0;
          size_t trem = MEMORY_TOPICS_MAX;

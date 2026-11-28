@@ -116,11 +116,13 @@ void session_history_append(struct json_object *history, struct json_object *msg
  * sanitize_utf8_for_json (tool-description hardening), which pulls the real
  * string_utils.c from dawn_common into the link — so its strcasestr_portable is
  * available and a stub would multiply-define it. */
+/* The tool every lookup finds: none unless a test sets one. */
+const void *g_stub_found_tool = NULL;
 const void *tool_registry_find(const char *name) {
    (void)name;
-   return NULL;
+   return g_stub_found_tool;
 }
-/* No tool is ever found (above), so no call's arguments are packed. */
+/* Packing always fails, so a found tool never runs. */
 int tool_pack_args(const void *meta,
                    struct json_object *args,
                    char *action_name,

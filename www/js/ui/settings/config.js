@@ -617,14 +617,18 @@
          if (input.type === 'checkbox') {
             value = input.checked;
          } else if (input.type === 'number' || input.type === 'range') {
+            if (input.value === '') return; // left as it is (see refuseEmptiedNumbers)
             const multiplier = parseFloat(input.dataset.multiplier) || 1;
-            value = input.value !== '' ? parseFloat(input.value) * multiplier : null;
+            value = parseFloat(input.value) * multiplier;
          } else if (input.dataset.type === 'model_list' || input.dataset.type === 'string_list') {
             // Convert newline-separated text to array, filtering empty lines
             value = input.value
                .split('\n')
                .map((line) => line.trim())
                .filter((line) => line.length > 0);
+         } else if (input.dataset.type === 'numeric_select') {
+            if (input.value === '') return; // nothing chosen: left as it is
+            value = Number(input.value);
          } else if (input.dataset.type === 'model_default_select') {
             // Parse as integer index
             value = parseInt(input.value, 10) || 0;
@@ -658,6 +662,76 @@
    let pendingSaves = 0;
    let saveHadError = false;
 
+   /**
+    * Refuse a save while a number field the user changed is empty or holds text
+    * the browser can't read (both read as ''): nothing is substituted.  Each is
+    * marked and the first brought into view (section opened, Advanced shown)
+    * and reported; one still hidden after that is hidden by another setting's
+    * choice, so it doesn't apply and is left out.
+    * @returns {boolean} true when the save was refused
+    */
+   function refuseEmptiedNumbers() {
+      const container = settingsElements.sectionsContainer;
+      const numbers = container ? container.querySelectorAll('input[type="number"][data-key]') : [];
+      let refused = Array.from(numbers).filter(
+         (el) => el.value === '' && (changedFields.has(el.dataset.key) || el.validity.badInput)
+      );
+      // A mark left from an earlier refusal goes when its field no longer needs one.
+      numbers.forEach((el) => {
+         if (el.classList.contains('input-error') && !refused.includes(el)) markRefused(el, false);
+      });
+      // A field another setting's choice hides (an inline display:none on it or a
+      // group above it) doesn't apply: left out before anything is opened for it.
+      refused = refused.filter((el) => {
+         for (let n = el; n && n !== container; n = n.parentElement) {
+            if (n.style.display === 'none') return false;
+         }
+         return true;
+      });
+      if (refused.length === 0) return false;
+      // One the search is hiding is still the user's edit: end the search to show it.
+      if (refused.some((el) => el.closest('.search-hidden')) && window.DawnSettingsSearch) {
+         window.DawnSettingsSearch.clearSearch();
+      }
+      // Opened through the panel's own toggles, so their state stays consistent.
+      refused.forEach((el) => {
+         const section = el.closest('.settings-section.collapsed');
+         if (section) section.querySelector(':scope > .section-header').click();
+      });
+      const advanced = document.getElementById('settings-advanced-toggle');
+      const hasAdvanced = refused.some((el) => el.closest('.advanced-field'));
+      if (advanced && hasAdvanced && !container.classList.contains('show-advanced')) {
+         advanced.click();
+      }
+      refused = refused.filter((el) => el.offsetParent !== null);
+      if (refused.length === 0) return false;
+      refused.forEach((el) => {
+         if (!el.classList.contains('input-error')) {
+            el.addEventListener('input', () => markRefused(el, false), { once: true });
+         }
+         markRefused(el, true);
+      });
+      const first = refused[0];
+      first.scrollIntoView({ block: 'center' });
+      first.focus();
+      first.reportValidity();
+      if (typeof DawnToast !== 'undefined') {
+         const label = container.querySelector(`label[for="${first.id}"]`);
+         const name = label ? label.textContent.replace(/\s*restart\s*$/, '').trim() : 'A field';
+         const n = refused.length - 1;
+         const rest = n === 0 ? ' needs' : ` and ${n} other field${n === 1 ? ' needs' : 's need'}`;
+         DawnToast.show(`Cannot save: ${name}${rest} a number`, 'error');
+      }
+      return true;
+   }
+
+   /** Mark or clear a refused number field: error class, aria-invalid and validity together. */
+   function markRefused(el, on) {
+      el.setCustomValidity(on ? 'Enter a number' : '');
+      el.classList.toggle('input-error', on);
+      on ? el.setAttribute('aria-invalid', 'true') : el.removeAttribute('aria-invalid');
+   }
+
    function saveConfig() {
       if (typeof DawnWS === 'undefined' || !DawnWS.isConnected()) {
          console.error('WebSocket not connected');
@@ -686,6 +760,8 @@
          typeof DawnMySettings !== 'undefined' &&
          DawnMySettings.hasUnsavedChanges &&
          DawnMySettings.hasUnsavedChanges();
+
+      if (configNeedSave && refuseEmptiedNumbers()) return;
 
       if (!configNeedSave && !toolsNeedSave && !myNeedSave) {
          if (typeof DawnToast !== 'undefined') {

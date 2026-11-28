@@ -1406,6 +1406,15 @@ static int llm_tools_execute_from_treg(const tool_call_t *call,
          result->success = false;
          return 1;
       }
+      /* A model not held to a schema can send [], 5 or "x": only an object
+       * names parameters. */
+      if (!json_object_is_type(args, json_type_object)) {
+         json_object_put(args);
+         snprintf(result->result, LLM_TOOLS_RESULT_LEN,
+                  "Error: the arguments to '%s' must be a JSON object", call->name);
+         result->success = false;
+         return 1;
+      }
    }
 
    /* Extract parameters based on tool metadata */

@@ -2701,6 +2701,13 @@ dawn_add_unit_test(test_tool_registry
    LIBS    dawn_common unity pthread ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# json_drop_nulls (header-only): null members removed at any depth, null
+# array elements kept, the count of what went.
+dawn_add_unit_test(test_json_nulls
+   SOURCES test_json_nulls.c
+   LIBS    unity ${JSONC_LIBRARIES}
+   LABEL   ci)
+
 # A tool call's JSON arguments become the callback's value the same way on
 # every path (a live call, a scheduled call stored as JSON).
 dawn_add_unit_test(test_tool_pack_args

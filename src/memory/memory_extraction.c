@@ -259,7 +259,8 @@ static int process_extraction_response(int user_id,
     * with that kind, never over a value that isn't (memory_db_pref_upsert),
     * and stays out of the session-start block. */
    struct json_object *prefs_arr;
-   if (json_object_object_get_ex(root, "preferences", &prefs_arr)) {
+   if (json_object_object_get_ex(root, "preferences", &prefs_arr) &&
+       json_object_is_type(prefs_arr, json_type_array)) {
       int count = json_object_array_length(prefs_arr);
       for (int i = 0; i < count; i++) {
          struct json_object *pref = json_object_array_get_idx(prefs_arr, i);
@@ -287,7 +288,8 @@ static int process_extraction_response(int user_id,
 
    /* Process corrections */
    struct json_object *corr_arr;
-   if (json_object_object_get_ex(root, "corrections", &corr_arr)) {
+   if (json_object_object_get_ex(root, "corrections", &corr_arr) &&
+       json_object_is_type(corr_arr, json_type_array)) {
       int count = json_object_array_length(corr_arr);
       for (int i = 0; i < count; i++) {
          struct json_object *corr = json_object_array_get_idx(corr_arr, i);
