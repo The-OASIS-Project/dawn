@@ -195,7 +195,13 @@ reply is finalized, so a tag the model was led to say is spoken or sent.
 
 **Someone else's text** (web pages, email, documents, calendar events, a coding agent's words) is
 wrapped in a tagged frame (`--- WEB CONTENT (dawn-ctx-…) ---` and its kin, `llm_third_party_frame()`
-in `src/llm/llm_third_party.c`). **Untrusted text never goes into the system role.**
+in `src/llm/llm_third_party.c`). **Untrusted text is kept out of the system role**, with two
+exceptions that are not yet closed. A scheduled briefing puts its tools' results (fetched web pages,
+email) into the system message of its summarizing call (`build_briefing_system_message()`,
+`src/core/scheduler.c`); that call is a single completion outside the tool loop, so no tool runs from it and what such
+text can reach is the briefing's own wording. Deep research hands its recorded claims and its report to the synthesis and
+completion-commentary turns unframed, in the user message (`src/tools/research_run_loop.c`); see
+[DEEP_RESEARCH_DESIGN.md](DEEP_RESEARCH_DESIGN.md) §11.
 
 **The injection filter** (`memory_filter_check()`) blocks high-confidence injection patterns
 before they are stored or acted on: memory writes, inbound messages and read history, focus
