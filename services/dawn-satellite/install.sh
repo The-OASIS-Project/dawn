@@ -717,8 +717,9 @@ log "Setting permissions"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
 # 755 for everything but the identity file: it holds the reconnect secret, which
 # the satellite writes 0600, and a blanket recursive mode made it world-readable
-# on every reinstall.  Symlinks (linked models) are left alone, as chmod -R leaves them.
-find "$DATA_DIR" ! -type l ! -name .dawn_satellite_identity -exec chmod 755 {} +
+# on every reinstall.  Symlinks inside it (linked models) are left alone, as
+# chmod -R leaves them; the data directory itself may be one and is followed.
+find -H "$DATA_DIR" ! -type l ! -name .dawn_satellite_identity -exec chmod 755 {} +
 if [ -f "$DATA_DIR/.dawn_satellite_identity" ]; then
     chmod 600 "$DATA_DIR/.dawn_satellite_identity"
 fi

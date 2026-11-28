@@ -548,11 +548,12 @@ chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
 # wherever data_dir points inside it, and nothing outside the account reads it.
 # (A blanket "chmod -R 755" here used to undo the key permissions set above.)
 # Only the certificates stay readable, for checking them without sudo.  Symlinks
-# (a linked www or models tree) are left alone, as chmod -R leaves them.
+# inside it (a linked www or models tree) are left alone, as chmod -R leaves them;
+# the data directory itself may be one (data kept on another disk) and is followed.
 chmod 755 "$DATA_DIR"
-find "$DATA_DIR" -mindepth 1 ! -type l -exec chmod u=rwX,go= {} +
+find -H "$DATA_DIR" -mindepth 1 ! -type l -exec chmod u=rwX,go= {} +
 chmod 755 "$DATA_DIR/ssl"
-find "$DATA_DIR/ssl" -maxdepth 1 -type f -name '*.crt' -exec chmod 644 {} +
+find -H "$DATA_DIR/ssl" -maxdepth 1 -type f -name '*.crt' -exec chmod 644 {} +
 chown -R root:root "$CONFIG_DIR"
 chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/dawn.toml"
 chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/secrets.toml"
