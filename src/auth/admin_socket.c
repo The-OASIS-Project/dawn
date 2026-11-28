@@ -831,25 +831,6 @@ static int send_list_response(int client_fd,
 }
 
 /**
- * @brief Dummy hash for timing attack prevention.
- *
- * When a user is not found or is not an admin, we still perform password
- * verification against this dummy hash to maintain constant timing and
- * prevent user enumeration attacks.
- *
- * Parameters must match AUTH_MEMLIMIT/AUTH_OPSLIMIT from auth_crypto.h:
- * - Jetson: m=16384 (16MB), t=3, p=1
- * - Pi:     m=8192  (8MB),  t=4, p=1
- */
-#ifdef PLATFORM_RPI
-static const char DUMMY_PASSWORD_HASH[] = "$argon2id$v=19$m=8192,t=4,p=1$AAAAAAAAAAAAAAAAAAAAAA$"
-                                          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-#else
-static const char DUMMY_PASSWORD_HASH[] = "$argon2id$v=19$m=16384,t=3,p=1$AAAAAAAAAAAAAAAAAAAAAA$"
-                                          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-#endif
-
-/**
  * @brief Verify admin authentication from payload prefix.
  *
  * @param payload Raw payload containing admin_auth_prefix_t
@@ -897,8 +878,9 @@ int verify_admin_auth(const char *payload, uint16_t payload_len, size_t *auth_si
 
    /* Always verify password to prevent timing attacks.
     * Use dummy hash if user not found or not admin. */
-   const char *hash_to_verify = (user_found && is_admin) ? user.password_hash : DUMMY_PASSWORD_HASH;
-   int verify_result = auth_verify_password(password, hash_to_verify);
+   const char *hash_to_verify = (user_found && is_admin) ? user.password_hash
+                                                         : AUTH_DUMMY_PASSWORD_HASH;
+   bool password_ok = auth_verify_password(hash_to_verify, password);
 
    auth_secure_zero(password, sizeof(password));
 
@@ -913,7 +895,7 @@ int verify_admin_auth(const char *payload, uint16_t payload_len, size_t *auth_si
       return FAILURE;
    }
 
-   if (verify_result != 0) {
+   if (!password_ok) {
       auth_db_log_event("ADMIN_AUTH_FAILED", username, NULL, "wrong password");
       return FAILURE;
    }
@@ -1270,10 +1252,8 @@ static int handle_list_sessions(int client_fd) {
 static int handle_revoke_session(int client_fd, const char *payload, uint16_t payload_len) {
    /* Verify admin credentials */
    size_t auth_size = 0;
-   int auth_result = verify_admin_auth(payload, payload_len, &auth_size);
-   if (auth_result != 0) {
-      return send_response(client_fd,
-                           (auth_result == -2) ? ADMIN_RESP_UNAUTHORIZED : ADMIN_RESP_FAILURE);
+   if (verify_admin_auth(payload, payload_len, &auth_size) != 0) {
+      return send_response(client_fd, ADMIN_RESP_UNAUTHORIZED);
    }
 
    /* Parse token prefix after auth */
@@ -1319,10 +1299,8 @@ static int handle_revoke_session(int client_fd, const char *payload, uint16_t pa
 static int handle_revoke_user_sessions(int client_fd, const char *payload, uint16_t payload_len) {
    /* Verify admin credentials */
    size_t auth_size = 0;
-   int auth_result = verify_admin_auth(payload, payload_len, &auth_size);
-   if (auth_result != 0) {
-      return send_response(client_fd,
-                           (auth_result == -2) ? ADMIN_RESP_UNAUTHORIZED : ADMIN_RESP_FAILURE);
+   if (verify_admin_auth(payload, payload_len, &auth_size) != 0) {
+      return send_response(client_fd, ADMIN_RESP_UNAUTHORIZED);
    }
 
    /* Parse username after auth */
@@ -1382,10 +1360,8 @@ static int handle_get_stats(int client_fd) {
 static int handle_db_compact(int client_fd, const char *payload, uint16_t payload_len) {
    /* Verify admin credentials */
    size_t auth_size = 0;
-   int auth_result = verify_admin_auth(payload, payload_len, &auth_size);
-   if (auth_result != 0) {
-      return send_response(client_fd,
-                           (auth_result == -2) ? ADMIN_RESP_UNAUTHORIZED : ADMIN_RESP_FAILURE);
+   if (verify_admin_auth(payload, payload_len, &auth_size) != 0) {
+      return send_response(client_fd, ADMIN_RESP_UNAUTHORIZED);
    }
 
    int rc = auth_db_vacuum();
@@ -1408,10 +1384,8 @@ static int handle_db_compact(int client_fd, const char *payload, uint16_t payloa
 static int handle_db_backup(int client_fd, const char *payload, uint16_t payload_len) {
    /* Verify admin credentials */
    size_t auth_size = 0;
-   int auth_result = verify_admin_auth(payload, payload_len, &auth_size);
-   if (auth_result != 0) {
-      return send_response(client_fd,
-                           (auth_result == -2) ? ADMIN_RESP_UNAUTHORIZED : ADMIN_RESP_FAILURE);
+   if (verify_admin_auth(payload, payload_len, &auth_size) != 0) {
+      return send_response(client_fd, ADMIN_RESP_UNAUTHORIZED);
    }
 
    /* Parse path after auth */

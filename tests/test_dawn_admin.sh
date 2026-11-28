@@ -318,6 +318,35 @@ test_user_unlock() {
     fi
 }
 
+test_wrong_admin_password() {
+    print_header "Testing: wrong admin password"
+
+    if [[ -z "$ADMIN_USER" ]]; then
+        skip "No admin user available for wrong-password test"
+        return
+    fi
+
+    # A privileged command with the right admin name and a wrong password must
+    # be refused.  unlock is harmless if it ever got through.
+    # The wrong password is a fixed, valid-length one: appending to the real
+    # password could pass the length limit and be refused before the hash runs.
+    local wrong_pass="not-the-admin-password"
+    if [[ "$wrong_pass" == "$ADMIN_PASS" ]]; then
+        wrong_pass="still-not-the-admin-password"
+    fi
+    info "Running unlock on '$ADMIN_USER' with a wrong admin password"
+    if output=$(DAWN_ADMIN_USER="$ADMIN_USER" DAWN_ADMIN_PASSWORD="$wrong_pass" \
+                $DAWN_ADMIN user unlock "$ADMIN_USER" 2>&1); then
+        fail "Privileged command accepted a wrong admin password"
+        echo "$output"
+    elif echo "$output" | grep -qi "unauthorized"; then
+        pass "Wrong admin password refused"
+    else
+        fail "Wrong admin password failed, but not as unauthorized"
+        echo "$output"
+    fi
+}
+
 test_session_list() {
     print_header "Testing: session list"
 
@@ -651,6 +680,7 @@ main() {
     test_user_list
     test_user_passwd
     test_user_unlock
+    test_wrong_admin_password
     test_session_list
     test_db_status
     test_db_backup

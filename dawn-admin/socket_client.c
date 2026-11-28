@@ -938,7 +938,9 @@ const char *admin_resp_strerror(admin_resp_code_t code) {
          return "dawn-admin and the running daemon are from different builds - restart "
                 "dawn after an update, or use the dawn-admin built with it";
       case ADMIN_RESP_UNAUTHORIZED:
-         return "Unauthorized - run as root, the daemon user, or a member of the daemon's group";
+         return "Unauthorized - wrong admin name or password, or this account may not use the "
+                "admin "
+                "socket (run as root, the daemon user, or a member of the daemon's group)";
       case ADMIN_RESP_LAST_ADMIN:
          return "Cannot delete the last admin user";
       case ADMIN_RESP_NOT_FOUND:

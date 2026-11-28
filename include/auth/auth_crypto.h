@@ -77,6 +77,23 @@
 #define AUTH_OPSLIMIT 3                  /* Standard iterations */
 #endif
 
+/*
+ * A well-formed hash, with the parameters above, of no known password.  A
+ * login or admin check for a user that doesn't exist verifies against it, so
+ * the reply takes as long as a real check and doesn't tell which names exist.
+ * libsodium refuses a malformed string without hashing, which would undo that:
+ * the salt and hash must be valid unpadded base64 of 16 and 32 bytes.
+ */
+#ifdef PLATFORM_RPI
+#define AUTH_DUMMY_PASSWORD_HASH                           \
+   "$argon2id$v=19$m=8192,t=4,p=1$AAAAAAAAAAAAAAAAAAAAAA$" \
+   "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+#else
+#define AUTH_DUMMY_PASSWORD_HASH                            \
+   "$argon2id$v=19$m=16384,t=3,p=1$AAAAAAAAAAAAAAAAAAAAAA$" \
+   "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+#endif
+
 /* Compile-time validation of OWASP minimums (best-effort) */
 #if AUTH_OPSLIMIT < 2
 #error "AUTH_OPSLIMIT must be at least 2 per OWASP guidelines"
