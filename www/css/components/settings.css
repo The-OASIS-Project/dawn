@@ -751,6 +751,11 @@
    border-color: var(--accent);
 }
 
+/* After the focus rule so a refused field keeps its error border while focused. */
+.setting-item input.input-error {
+   border-color: var(--error);
+}
+
 .setting-item input:disabled,
 .setting-item select:disabled {
    opacity: 0.5;

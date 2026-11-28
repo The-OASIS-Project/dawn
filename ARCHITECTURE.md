@@ -234,6 +234,10 @@ Layer 4 (Application) — deps: everything below
 │                               no-ops, and the WebUI-only pieces are left out (messaging channels, the job and
 │                               deep_research tools, the coding_agent tool, the OAuth and code-project
 │                               handlers, Home Assistant's realtime connection)
+│   ├── webui_message_dispatch.c
+│   │                           A handler it calls gets the frame with null members removed (json_drop_nulls):
+│   │                           a member present is never NULL.  Not so for satellite_register before login
+│   │                           (webui_server.c), the music socket or the HTTP login body: they check NULL
 │   ├── webui_email_exec*.c     The WebUI's email executor: per-account tasks on 4 workers, the IMAP lease
 │   │                           taken by ticket so no worker waits on an account, replies by session id; a
 │   │                           session's moves queue in order on its MOVE slot, never replaced

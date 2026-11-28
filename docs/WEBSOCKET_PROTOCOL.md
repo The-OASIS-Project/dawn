@@ -6,7 +6,8 @@ WebUI browser clients, and DAP2 satellite devices. All connections use the
 
 ## Transport
 
-- **Text messages**: JSON with `{"type": "...", "payload": {...}}`
+- **Text messages**: JSON with `{"type": "...", "payload": {...}}`. A member whose value
+  is `null`, at any depth, is treated as absent (`null` elements of an array stay).
 - **Binary messages**: Single type byte prefix followed by raw data
 - **Subprotocol**: `dawn-1.0` — **mandatory, and it fails silently.** libwebsockets
   selects its protocol handler by subprotocol name, so a client that negotiates none
@@ -192,7 +193,7 @@ Send a text message to the AI, with the images attached to it by id.
   isn't always a failed turn: `PERSIST_ERROR` comes after the reply was shown (it wasn't
   saved), so read the code, and `severity`, not just the ref. Other frames of the turn (stream
   deltas, the reply, other viewers' copies) don't carry it. A `client_ref` that isn't a
-  string of that shape (`null`, a number, empty, too long, or with other characters) refuses
+  string of that shape (a number, empty, too long, or with other characters) refuses
   the frame with `INVALID_CLIENT_REF` (that error carries no ref).
 - `from_visual` — optional, `true` only when the text is a rendered visual's prompt (a
   `render_visual` iframe's `sendPrompt` bridge), not the person typing. A visual is written by
@@ -2160,8 +2161,9 @@ doesn't exist and one that isn't the caller's answer the same: `"error": "Not fo
 {"type": "undo_memory_batch", "payload": {"batch_id": 412, "op_id": 9001}}
 ```
 `op_id` absent: every op of the batch that can be undone, the last applied first (a closed relation
-last, after the value that closed it).  An `op_id` that is present but not a number is "Not
-found", never the whole batch.  Each op is checked against what it left; if anything else changed
+last, after the value that closed it).  An `op_id` that is present but not a number, `null`
+included, is "Not found", never the whole batch (so is a request with no `op_id` that had
+any `null` member).  Each op is checked against what it left; if anything else changed
 that row since (a later batch's op still in effect on the same fact, relation, link or
 preference, or, for a merge, on the fact kept; a merge onto a fact it added; another conversation
 teaching it; a restore), it is left as it is and marked `stale`.  A closed relation stays closed while another value of it is open.

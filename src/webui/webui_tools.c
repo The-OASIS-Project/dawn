@@ -122,7 +122,8 @@ void handle_set_tools_config(ws_connection_t *conn, struct json_object *payload)
    json_object *resp_payload = json_object_new_object();
 
    json_object *tools_array;
-   if (!json_object_object_get_ex(payload, "tools", &tools_array)) {
+   if (!json_object_object_get_ex(payload, "tools", &tools_array) ||
+       !json_object_is_type(tools_array, json_type_array)) {
       json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
       json_object_object_add(resp_payload, "error",
                              json_object_new_string("Missing 'tools' array"));

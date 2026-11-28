@@ -19,15 +19,20 @@
  * Tool-call arguments that don't fit are flagged, on every path: the
  * streamed append (OpenAI, Responses and Claude deltas), the replace
  * (Gemini chunks, the Responses final arguments) and the non-streamed
- * parses.  A flagged call is refused, so a cut argument never reaches a tool.
+ * parses.  A flagged call is refused, so a cut argument never reaches a tool;
+ * so is a call whose arguments aren't a JSON object.
  */
 
 #include <json-c/json.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "llm/llm_tools.h"
+#include "tools/tool_registry.h"
 #include "unity.h"
+
+extern const void *g_stub_found_tool; /* test_llm_dup_check_stub.c */
 
 static char s_buf[LLM_TOOLS_ARGS_LEN];
 static tool_call_list_t s_calls;
@@ -184,6 +189,30 @@ static void test_claude_parse_flags_long_input(void) {
    free(big);
 }
 
+/* Arguments that parse to something other than an object ([], 5, "x", true)
+ * are refused before the tool's parameters are read: the tool never runs. */
+static void test_arguments_that_are_not_an_object_are_refused(void) {
+   static const tool_metadata_t tool = { .name = "note" };
+   g_stub_found_tool = &tool;
+   static const char *const args[] = { "[]", "5", "\"x\"", "true", "[{\"text\": \"x\"}]" };
+   for (size_t i = 0; i < sizeof(args) / sizeof(args[0]); i++) {
+      tool_call_t call;
+      memset(&call, 0, sizeof(call));
+      snprintf(call.id, sizeof(call.id), "call_%zu", i);
+      snprintf(call.name, sizeof(call.name), "note");
+      snprintf(call.arguments, sizeof(call.arguments), "%s", args[i]);
+      tool_result_t result;
+      memset(&result, 0, sizeof(result));
+      llm_tools_execute(&call, &result);
+      TEST_ASSERT_FALSE_MESSAGE(result.success, args[i]);
+      TEST_ASSERT_TRUE_MESSAGE(result.is_error, args[i]);
+      TEST_ASSERT_NOT_NULL_MESSAGE(strstr(tool_result_content(&result), "must be a JSON object"),
+                                   args[i]);
+      free(result.result_extended);
+   }
+   g_stub_found_tool = NULL;
+}
+
 int main(void) {
    UNITY_BEGIN();
    RUN_TEST(test_deltas_that_fit_are_joined);
@@ -194,5 +223,6 @@ int main(void) {
    RUN_TEST(test_a_full_length_only_flags);
    RUN_TEST(test_openai_parse_flags_long_arguments);
    RUN_TEST(test_claude_parse_flags_long_input);
+   RUN_TEST(test_arguments_that_are_not_an_object_are_refused);
    return UNITY_END();
 }

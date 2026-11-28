@@ -430,10 +430,13 @@ void handle_undo_memory_batch(ws_connection_t *conn, struct json_object *payload
    if (!conn_require_auth(conn)) {
       return;
    }
-   /* An op_id that is there but not a number names no op: never the whole batch. */
+   /* No op_id undoes the whole batch, so only a request that plainly has none
+    * gets that: an op_id that isn't a number names no op, and neither does a
+    * request that had a null member (the null was dropped on receipt, so an
+    * `"op_id": null` reads as absent here). */
    json_object *v = NULL;
    const bool named = payload && json_object_object_get_ex(payload, "op_id", &v);
-   if (named && !(v && json_object_is_type(v, json_type_int))) {
+   if ((named && !json_object_is_type(v, json_type_int)) || (!named && conn->request_had_nulls)) {
       memory_consolidation_outcome_t io;
       memset(&io, 0, sizeof(io));
       io.action = MEMORY_CONSOLIDATION_UNDO_OP;

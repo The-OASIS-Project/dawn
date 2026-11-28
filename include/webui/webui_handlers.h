@@ -30,6 +30,13 @@
  * be called from the LWS dispatch path in webui_message_dispatch.c.
  * Handlers self-gate auth via conn_require_auth / conn_require_admin
  * unless explicitly noted in the per-function comment.
+ *
+ * Called from that dispatch, a handler receives the frame with its
+ * null-valued members already removed (json_drop_nulls), so a member that is
+ * present is never NULL.  Exceptions that keep their own NULL checks:
+ * handle_satellite_register is also reached before login from webui_server.c
+ * with the raw payload, and the music socket (webui_music_server.c) and the
+ * HTTP login body (webui_http.c) parse their own frames.
  */
 
 #ifndef WEBUI_HANDLERS_H

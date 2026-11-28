@@ -304,7 +304,9 @@ void unregister_tokens_for_session(uint32_t session_id) {
 }
 
 session_t *lookup_session_by_token(const char *token) {
-   if (!token) {
+   /* The compare below reads a whole token's length from @p token: a shorter
+    * string (a client's) is no token, and must not be read past its end. */
+   if (!token || strnlen(token, WEBUI_SESSION_TOKEN_LEN) != WEBUI_SESSION_TOKEN_LEN - 1) {
       return NULL;
    }
 

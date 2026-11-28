@@ -112,6 +112,11 @@ only one with no symptom at the time you make the mistake.
 | 5 write | numbers/bools: `fprintf(fp, "key = %d\n", ...)` — **strings: `write_toml_string()`**, or `write_toml_string_multiline()` for free text |
 | 6 POST | `JSON_TO_CONFIG_STR` · `_INT` · `_BOOL` · `_DOUBLE` · `_SIZE_T` |
 
+`_INT`, `_DOUBLE` and `_SIZE_T` apply a JSON number only (`_SIZE_T` not a negative one), `_BOOL` a
+JSON boolean only; any other value, a numeric string included, leaves the setting unchanged. So the
+client must send the setting's own JSON type (a `dynamic_select` whose value is a number takes
+`numeric: true` in `schema.js`).
+
 > ⚠ **Never `fprintf` a string value raw.** `fprintf(fp, "key = \"%s\"\n", value)` looks harmless and
 > was the dominant pattern in this file, but it lets a value containing a quote or newline **forge TOML
 > keys** — an admin could inject settings the POST handler deliberately refuses to accept — and an

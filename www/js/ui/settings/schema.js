@@ -1014,6 +1014,7 @@
                type: 'dynamic_select',
                label: 'Default Voice User',
                dynamicKey: 'users',
+               numeric: true, // a user id: saved as a number
                hint: "User the local microphone speaks for while the Local Device is not assigned to a user on the satellite page (assigned, the mic and speaker are that user's). Satellites not assigned to a user are guests (no personal memory or data).",
                advanced: true,
             },
@@ -3118,7 +3119,7 @@
                }
             });
 
-            inputHtml = `<select id="${inputId}" data-key="${fullKey}" data-dynamic-key="${dynKey}">${dynOptionsHtml}</select>`;
+            inputHtml = `<select id="${inputId}" data-key="${fullKey}" data-dynamic-key="${dynKey}"${def.numeric ? ' data-type="numeric_select"' : ''}>${dynOptionsHtml}</select>`;
             break;
          case 'textarea':
             inputHtml = `<textarea id="${inputId}" rows="${def.rows || 3}" placeholder="${Utils.escapeAttr(def.placeholder || '')}" data-key="${fullKey}">${escapeHtml(value || '')}</textarea>`;
