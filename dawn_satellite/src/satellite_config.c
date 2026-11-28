@@ -972,6 +972,17 @@ void satellite_config_save_ui_prefs(const satellite_config_t *config) {
       return;
    }
 
+   /* The replacement keeps the mode of the file it replaces: the config holds the
+    * registration key, and a new file would otherwise take the umask's mode. */
+   struct stat old_st;
+   mode_t keep_mode = (stat(path, &old_st) == 0) ? (old_st.st_mode & 0777) : (S_IRUSR | S_IWUSR);
+   if (fchmod(fileno(fp), keep_mode) != 0) {
+      fprintf(stderr, "[CONFIG] Cannot set the mode of %s: %s\n", tmp_path, strerror(errno));
+      fclose(fp);
+      unlink(tmp_path);
+      return;
+   }
+
    for (int i = 0; i < line_count; i++) {
       /* Append missing keys at end of [sdl_ui] section */
       if (i == sdl_ui_end) {

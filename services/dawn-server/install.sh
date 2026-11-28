@@ -436,6 +436,9 @@ fi
 if [ -n "$SSL_DIR" ]; then
     log "Copying SSL certificates from $SSL_DIR"
     cp -r "$SSL_DIR"/. "$DATA_DIR/ssl/"
+    # The CA's private key signs new certificates; the daemon never reads it, so
+    # it does not belong in the service's directory.
+    rm -f "$DATA_DIR/ssl/ca.key"
     chmod 600 "$DATA_DIR/ssl/"*.key 2>/dev/null || true
     chmod 644 "$DATA_DIR/ssl/"*.crt 2>/dev/null || true
 fi
@@ -540,7 +543,17 @@ chmod 644 "$CONFIG_DIR/dawn-server.conf"
 # Set permissions
 log "Setting permissions"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
-chmod -R 755 "$DATA_DIR"
+# Private to the service account: this tree holds the databases, the key that
+# encrypts stored tokens and passwords, uploads, backups and the TLS private keys,
+# wherever data_dir points inside it, and nothing outside the account reads it.
+# (A blanket "chmod -R 755" here used to undo the key permissions set above.)
+# Only the certificates stay readable, for checking them without sudo.  Symlinks
+# inside it (a linked www or models tree) are left alone, as chmod -R leaves them;
+# the data directory itself may be one (data kept on another disk) and is followed.
+chmod 755 "$DATA_DIR"
+find -H "$DATA_DIR" -mindepth 1 ! -type l -exec chmod u=rwX,go= {} +
+chmod 755 "$DATA_DIR/ssl"
+find -H "$DATA_DIR/ssl" -maxdepth 1 -type f -name '*.crt' -exec chmod 644 {} +
 chown -R root:root "$CONFIG_DIR"
 chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/dawn.toml"
 chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/secrets.toml"
