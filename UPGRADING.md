@@ -27,6 +27,53 @@ passwd <name>`, or the WebUI), and look through `dawn-admin log show` for
 
 ---
 
+## 2026-11-28 — The installers left keys and secrets readable by every account
+
+**What changed.** Two installers finished by setting everything under the service's data
+directory to mode 755, which undid the private modes set earlier in the same run:
+
+- `services/dawn-server/install.sh` left `/var/lib/dawn` readable by every account on the
+  machine: the TLS private keys in `ssl/`, and, wherever `data_dir` points, the databases, the
+  uploads, and `dawn.key`, the key that encrypts the stored OAuth tokens and mail and calendar
+  passwords. (The daemon resets `auth.db` itself to private at each start, not the rest.) It also
+  copied the certificate authority's private key, `ca.key`, there, which the daemon never uses.
+- `services/dawn-satellite/install.sh` left `/var/lib/dawn-satellite/.dawn_satellite_identity`
+  (the satellite's reconnect secret) readable by every account on the satellite after a
+  reinstall, and `/etc/dawn-satellite/satellite.toml` (the registration key) on every install.
+  The satellite also loosened that file again whenever it saved a display setting.
+
+Both installers now leave these private, the server one no longer copies `ca.key`, the server
+service creates its files private, and the satellite keeps its config's mode when it saves. An
+install made by hand, or one that runs from a checkout as your own user, is not affected.
+
+**What you need to do.** Run the new installer again, which repairs an existing install. Or fix
+it by hand:
+
+```bash
+# server installed with services/dawn-server/install.sh (or scripts/install.sh)
+sudo chmod -R go= /var/lib/dawn
+sudo chmod 755 /var/lib/dawn /var/lib/dawn/ssl
+sudo chmod 644 /var/lib/dawn/ssl/*.crt
+sudo rm -f /var/lib/dawn/ssl/ca.key      # your own copy stays in the checkout's ssl/
+
+# each Raspberry Pi satellite installed with services/dawn-satellite/install.sh
+sudo chmod 600 /var/lib/dawn-satellite/.dawn_satellite_identity
+sudo chmod 660 /etc/dawn-satellite/satellite.toml*     # the config and the installer's copies of it
+```
+
+If other people have accounts on the server, treat what was readable as exposed. Make a new
+server certificate (from the checkout, `./generate_ssl_cert.sh --renew`, which creates a new
+server key and asks for the CA passphrase, then run the installer again to install it), and, since
+`dawn.key` could have been copied, change the stored mail and calendar passwords and withdraw
+DAWN's access to each Google account before signing it in again (signing in again alone leaves the
+old authorization working: remove DAWN under the Google account's third-party access, or
+disconnect the account in DAWN's settings, which revokes it). If other people have accounts on a
+satellite, change the registration key. It is one key for every satellite: set a new
+`satellite_registration_key` in the server's `secrets.toml`, put it in every satellite's
+`satellite.toml`, and restart the server and the satellites.
+
+---
+
 ## 2026-11-25 — WebUI logins end a week after you last use them
 
 **What changed.** A login no longer ends 24 hours after you sign in (30 days with "Remember
