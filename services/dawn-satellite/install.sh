@@ -695,8 +695,9 @@ else
     log "Installing satellite.toml from $CONFIG_SRC"
     cp "$CONFIG_SRC" "$CONFIG_DIR/satellite.toml"
 fi
-# Config must be writable by dawn user (satellite saves UI prefs back)
-chmod 664 "$CONFIG_DIR/satellite.toml"
+# Config must be writable by dawn user (satellite saves UI prefs back).  Not
+# readable by other accounts: it holds the registration key.
+chmod 660 "$CONFIG_DIR/satellite.toml"
 chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/satellite.toml"
 
 # Install environment file
@@ -707,7 +708,13 @@ chmod 644 "$CONFIG_DIR/dawn-satellite.conf"
 # Set permissions
 log "Setting permissions"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
-chmod -R 755 "$DATA_DIR"
+# 755 for everything but the identity file: it holds the reconnect secret, which
+# the satellite writes 0600, and a blanket recursive mode made it world-readable
+# on every reinstall.  Symlinks (linked models) are left alone, as chmod -R leaves them.
+find "$DATA_DIR" ! -type l ! -name .dawn_satellite_identity -exec chmod 755 {} +
+if [ -f "$DATA_DIR/.dawn_satellite_identity" ]; then
+    chmod 600 "$DATA_DIR/.dawn_satellite_identity"
+fi
 # OTA staging dirs must be 0700 — set AFTER the recursive 755 above (which would
 # otherwise clobber them); they hold transient downloads + the rollback copy.
 chmod 700 "$DATA_DIR/ota/tmp" "$DATA_DIR/ota/rollback"
