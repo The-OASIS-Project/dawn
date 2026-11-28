@@ -699,6 +699,13 @@ fi
 # readable by other accounts: it holds the registration key.
 chmod 660 "$CONFIG_DIR/satellite.toml"
 chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/satellite.toml"
+# The copies this script keeps of the config hold the same key.
+for copy in "$CONFIG_DIR"/satellite.toml.new "$CONFIG_DIR"/satellite.toml.bak.*; do
+    if [ -f "$copy" ] && [ ! -L "$copy" ]; then
+        chmod 660 "$copy"
+        chown "$SERVICE_USER:$SERVICE_USER" "$copy"
+    fi
+done
 
 # Install environment file
 log "Installing environment configuration"

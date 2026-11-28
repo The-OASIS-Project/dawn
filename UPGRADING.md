@@ -25,8 +25,10 @@ directory to mode 755, which undid the private modes set earlier in the same run
 - `services/dawn-satellite/install.sh` left `/var/lib/dawn-satellite/.dawn_satellite_identity`
   (the satellite's reconnect secret) readable by every account on the satellite after a
   reinstall, and `/etc/dawn-satellite/satellite.toml` (the registration key) on every install.
+  The satellite also loosened that file again whenever it saved a display setting.
 
-Both installers now leave these private, and the server one no longer copies `ca.key`. An
+Both installers now leave these private, the server one no longer copies `ca.key`, the server
+service creates its files private, and the satellite keeps its config's mode when it saves. An
 install made by hand, or one that runs from a checkout as your own user, is not affected.
 
 **What you need to do.** Run the new installer again, which repairs an existing install. Or fix
@@ -41,15 +43,19 @@ sudo rm -f /var/lib/dawn/ssl/ca.key      # your own copy stays in the checkout's
 
 # each Raspberry Pi satellite installed with services/dawn-satellite/install.sh
 sudo chmod 600 /var/lib/dawn-satellite/.dawn_satellite_identity
-sudo chmod 660 /etc/dawn-satellite/satellite.toml
+sudo chmod 660 /etc/dawn-satellite/satellite.toml*     # the config and the installer's copies of it
 ```
 
 If other people have accounts on the server, treat what was readable as exposed. Make a new
 server certificate (from the checkout, `./generate_ssl_cert.sh --renew`, which creates a new
-server key and asks for the CA passphrase, then run the installer again to install it), and sign
-the Google accounts in again and change the stored mail and calendar passwords, since `dawn.key`
-could have been copied. If other people have accounts on a satellite, give it a new registration
-key.
+server key and asks for the CA passphrase, then run the installer again to install it), and, since
+`dawn.key` could have been copied, change the stored mail and calendar passwords and withdraw
+DAWN's access to each Google account before signing it in again (signing in again alone leaves the
+old authorization working: remove DAWN under the Google account's third-party access, or
+disconnect the account in DAWN's settings, which revokes it). If other people have accounts on a
+satellite, change the registration key. It is one key for every satellite: set a new
+`satellite_registration_key` in the server's `secrets.toml`, put it in every satellite's
+`satellite.toml`, and restart the server and the satellites.
 
 ---
 

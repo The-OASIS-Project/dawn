@@ -39,6 +39,9 @@ StartLimitBurst=3
 SupplementaryGroups=audio video render
 
 # Security hardening
+# Files the daemon creates (databases, uploads, backups) are private to its
+# account, as the installer leaves the rest of /var/lib/dawn.
+UMask=0077
 ProtectSystem=strict
 ReadWritePaths=/var/lib/dawn /var/log/dawn /usr/local/etc/dawn
 NoNewPrivileges=true
