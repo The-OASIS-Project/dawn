@@ -68,7 +68,7 @@ void process_data(const uint8_t *buffer, size_t *length);
 ### Brace Style (K&R Style)
 - Opening brace on same line for functions, conditionals, loops
 - Closing brace on own line
-- **Always use braces for single-statement blocks** (enforced by clang-format)
+- **Always use braces for single-statement blocks** (not enforced: the pinned clang-format-14 can't insert braces, so review catches it)
 - **No single-line control structures** (e.g., no `if (x) do_thing();`)
 
 ```c
@@ -88,7 +88,7 @@ int my_function(int param) {
    }
 }
 
-/* NOT ALLOWED - clang-format will expand these */
+/* NOT ALLOWED - clang-format moves the body to its own line but adds no braces */
 // if (x) return;                    // BAD
 // for (int i = 0; i < 10; i++) x++; // BAD
 ```
@@ -264,19 +264,18 @@ if (voltage < MIN_SAFE_VOLTAGE) {
 
 ### Include Order
 - **Automatically sorted by clang-format** with the following priority:
-  1. System C headers (`<stdio.h>`, `<stdlib.h>`)
-  2. System C++ and other headers (`<iostream>`, etc.)
+  1. Angle-bracket `.h` headers, system and library alike (`<stdio.h>`, `<json-c/json.h>`)
+  2. Other angle-bracket headers (`<iostream>`, etc.)
   3. Local project headers (`"battery.h"`)
 - Blank lines separate groups
 - Headers alphabetically sorted within each group
 
 ```c
+#include <json-c/json.h>
+#include <mosquitto.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include <mosquitto.h>
-#include <json-c/json.h>
 
 #include "battery.h"
 #include "logging.h"
@@ -321,8 +320,6 @@ int read_sensor(i2c_bus_t *bus, uint8_t address, float *result);
 - For count/size functions, use a separate output parameter and return SUCCESS/FAILURE
 - **Allowed negative-return exceptions** (all other code must use positive codes):
   - **lws callbacks**: return `LWS_CLOSE_CONNECTION` (-1) per the libwebsockets API contract (defined in `include/webui/webui_internal.h`)
-  - **Music dispatch routing**: `MUSIC_NOT_HANDLED` (-1) signals "not handled, fall through to next handler" (defined in `include/webui/webui_music.h`)
-  - **`time_t` sentinels**: static `parse_iso8601` helpers return `(time_t)-1` to mirror `mktime()`'s standard failure convention
   - **Internal static index/slot finders**: private-to-file functions (e.g., `hash_lookup`, `find_free_slot`, `vocab_lookup`) return -1 as "not found" sentinel — never exposed in public API
   - **fd/socket creation**: `create_listening_socket` returns -1 per POSIX socket convention
   - **Vendored code**: everything under `third_party/` keeps its upstream conventions (see `third_party/README.md`)
@@ -336,7 +333,7 @@ int read_sensor(i2c_bus_t *bus, uint8_t address, float *result);
 /* Simple success/failure */
 int init_device(void) {
    if (!hardware_present()) {
-      LOG_ERROR("Hardware not present");
+      OLOG_ERROR("Hardware not present");
       return FAILURE;
    }
    return SUCCESS;
@@ -392,18 +389,18 @@ int read_data(uint8_t *buffer, size_t size, size_t *bytes_read) {
 ```c
 int ret = init_sensor();
 if (ret != SUCCESS) {
-   LOG_ERROR("Failed to initialize sensor: error code %d", ret);
+   OLOG_ERROR("Failed to initialize sensor: error code %d", ret);
    return FAILURE;
 }
 
 /* Check for specific errors */
 ret = configure_device(&config);
 if (ret == ERR_TIMEOUT) {
-   LOG_WARNING("Device configuration timeout, retrying...");
+   OLOG_WARNING("Device configuration timeout, retrying...");
    ret = configure_device(&config);
 }
 if (ret != SUCCESS) {
-   LOG_ERROR("Device configuration failed: %d", ret);
+   OLOG_ERROR("Device configuration failed: %d", ret);
    return ret;  /* Propagate specific error code */
 }
 ```
@@ -418,7 +415,7 @@ if (ret != SUCCESS) {
 int simple_function(void) {
    void *buffer = malloc(SIZE);
    if (!buffer) {
-      LOG_ERROR("Memory allocation failed");
+      OLOG_ERROR("Memory allocation failed");
       return FAILURE;
    }
 
@@ -477,7 +474,7 @@ memset(buffer, 0, sizeof(buffer));
 /* When dynamic allocation is necessary */
 char *buffer = malloc(size);
 if (!buffer) {
-   LOG_ERROR("Memory allocation failed");
+   OLOG_ERROR("Memory allocation failed");
    return FAILURE;
 }
 
@@ -762,9 +759,9 @@ if (typeof window !== 'undefined') {
 ```c
 #include "logging.h"
 
-LOG_INFO("System initialized");
-LOG_WARNING("Battery voltage low: %.2fV", voltage);
-LOG_ERROR("I2C communication failed: %d", error);
+OLOG_INFO("System initialized");
+OLOG_WARNING("Battery voltage low: %.2fV", voltage);
+OLOG_ERROR("I2C communication failed: %d", error);
 ```
 
 ### Configuration
@@ -792,7 +789,7 @@ The `.clang-format` configuration automatically handles:
 - **Pointer alignment**: Right-aligned (`int *ptr`)
 - **Include sorting**: Automatic grouping and alphabetizing
 - **Spacing**: Consistent spacing around operators, keywords, and comments
-- **No single-line blocks**: All control structures use braces on separate lines
+- **No single-line blocks**: a control statement's body goes on its own line (braces aren't added)
 
 ### What clang-format Does NOT Enforce
 

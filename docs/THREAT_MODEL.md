@@ -151,7 +151,9 @@ and an instruction. The defenses:
    - **a background job** may read, fetch and change state, but never act, prepare an action
      or work a device;
    - **an unattended turn** (a job's follow-up, an MQTT message or relay) may only read and
-     change session state.
+     change session state;
+   - **a turn carrying an email the user attached** may read, fetch, change state and prepare;
+     working a device or acting waits for the user to ask in a message of their own.
 2. **Preview, then confirm in the next message.** Email send and trash, phone calls and texts
    (by default, `[phone] confirm_outbound`; always when the recipient is uncertain), document
    delete, deep research, and Home Assistant actions that open a door (unlock, a garage or gate
@@ -191,8 +193,15 @@ call carrying it is refused. That last check is a tripwire: an encoded or split-
 through. Text streamed to TTS or a messaging channel goes out as the model writes it, before the
 reply is finalized, so a tag the model was led to say is spoken or sent.
 
-**Web content** is wrapped as `[BEGIN UNTRUSTED WEB CONTENT]` data. **Untrusted text never goes
-into the system role.**
+**Someone else's text** (web pages, email, documents, calendar events, a coding agent's words) is
+wrapped in a tagged frame (`--- WEB CONTENT (dawn-ctx-…) ---` and its kin, `llm_third_party_frame()`
+in `src/llm/llm_third_party.c`). **Untrusted text is kept out of the system role**, with two
+exceptions that are not yet closed. A scheduled briefing puts its tools' results (fetched web pages,
+email) into the system message of its summarizing call (`build_briefing_system_message()`,
+`src/core/scheduler.c`); that call is a single completion outside the tool loop, so no tool runs from it and what such
+text can reach is the briefing's own wording. Deep research hands its recorded claims and its report to the synthesis and
+completion-commentary turns unframed, in the user message (`src/tools/research_run_loop.c`); see
+[DEEP_RESEARCH_DESIGN.md](DEEP_RESEARCH_DESIGN.md) §11.
 
 **The injection filter** (`memory_filter_check()`) blocks high-confidence injection patterns
 before they are stored or acted on: memory writes, inbound messages and read history, focus

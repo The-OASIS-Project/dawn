@@ -14,10 +14,9 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 ┌───────────────────────────────────────────────────────────────────────┐
 │                     LLM TOOL INTERFACE                                │
 │  homeassistant_tool.c                                                │
-│  16 actions: get_state, turn_on, turn_off, toggle, set_brightness,   │
-│  set_color, set_color_temp, set_climate, lock, unlock, open_cover,   │
-│  close_cover, media_play, activate_scene, trigger_script,            │
-│  trigger_automation                                                  │
+│  17 actions: list, status, on, off, toggle, brightness, color,       │
+│  color_temp, temperature, lock, unlock, open, close, scene, script,  │
+│  automation, confirm                                                 │
 ├───────────────────────────────────────────────────────────────────────┤
 │                     SERVICE LAYER                                     │
 │  homeassistant_service.c                                             │
@@ -53,7 +52,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
   Unlock can't be scheduled; a scheduled open of a door is refused when it fires.
 - **Area-aware**: a satellite mapped to an area tells the model, with the turn's standing directions, to use that area for requests that don't name a room.
 - **Feature guard**: `DAWN_ENABLE_HOMEASSISTANT_TOOL` CMake option. (DAWN's standalone SmartThings tool was removed in May 2026 — its upstream OAuth flow was permanently broken by an AWS WAF rule. Install Home Assistant via `docs/HOMEASSISTANT_SETUP.md` and use HA's own SmartThings integration if you need SmartThings device coverage.)
-- **Entity cache**: avoids per-request API calls; refreshed on configurable interval.
+- **Entity cache**: avoids per-request API calls; refreshed when older than 5 minutes (`HA_ENTITY_CACHE_TTL_SEC`).
 
 ## WebUI WebSocket verbs (`webui_homeassistant.c`)
 

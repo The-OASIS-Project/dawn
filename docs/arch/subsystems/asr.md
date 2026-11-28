@@ -15,11 +15,11 @@ The ASR subsystem uses an abstraction layer (`asr_interface`) to support multipl
 ## Key Components
 
 - **`src/asr/asr_interface.c/h`**: ASR abstraction layer
-   - `ASRContext` struct: engine-agnostic context
+   - `asr_context_t` struct: engine-agnostic context
    - `asr_init()`: initialize selected ASR engine
-   - `asr_process_audio()`: process audio through selected engine
+   - `asr_process_partial()` / `asr_finalize()`: feed audio, then get the transcription
    - `asr_cleanup()`: clean up resources
-   - Engine selection based on compile-time flags (`ENABLE_VOSK`)
+   - Engine selection at startup: Whisper by default, Vosk with `-A vosk` when built with `ENABLE_VOSK`
 
 - **`common/src/asr/asr_whisper.c`, `common/include/asr/asr_whisper.h`**: Whisper ASR implementation (shared with satellite via the common library)
    - Uses whisper.cpp library

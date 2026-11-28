@@ -16,7 +16,7 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Text preprocessing for natural phrasing (em-dash conversion, etc.)
    - Supports streaming integration with LLM sentence buffer
 
-- **piper.cpp**: Piper TTS integration
+- **`third_party/piper/piper.cpp`**: Piper TTS integration (vendored)
    - Uses Piper library with ONNX Runtime
    - Phoneme-based synthesis
    - Multiple voice models supported

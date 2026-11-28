@@ -830,8 +830,7 @@ typedef struct {
     * Per-turn hook that retrieves relevant facts/entities/relations/
     * summaries/document chunks/calendar events/recent emails above a
     * relevance threshold and injects them as a budget-bounded "current
-    * context" block.  Disabled by default until adapters land in 1c/1d
-    * and the prompt-builder integration ships in 1e.  See
+    * context" block.  On by default.  See
     * `atlas/dawn/memory/DYNAMIC_CONTEXT_INJECTION.md`. */
    focus_injection_config_t focus_injection;
 

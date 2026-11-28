@@ -1506,10 +1506,9 @@ int session_broadcast_notice(const char *content);
 /**
  * @brief session_post_notice() on one user's interactive sessions
  *
- * For an event that is one user's (a watch they set): only the surfaces that
- * are theirs (session_effective_user_id()), so it never reaches another
- * household member's conversation.  A household-wide event (the phone) uses
- * session_broadcast_notice().
+ * For an event that is one user's (a watch they set, a call to the phone's
+ * owner): only the surfaces that are theirs (session_effective_user_id()), so
+ * it never reaches another household member's conversation.
  *
  * @return Number of sessions notified (0 for @p user_id <= 0).
  */

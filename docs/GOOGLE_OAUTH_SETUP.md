@@ -13,7 +13,7 @@ This guide walks through setting up Google OAuth for Calendar and Email integrat
 1. Go to **APIs & Services > Library**
 2. Search for and enable:
    - **CalDAV API** (required for calendar sync)
-   - **Gmail API** (required for email integration — enables IMAP/SMTP via XOAUTH2)
+   - **Gmail API** (required for email integration — DAWN reads and sends Gmail through it)
 
 ## 3. Configure OAuth Consent Screen
 
@@ -145,4 +145,4 @@ Calendar and email use **separate OAuth token sets** — revoking one does not a
 9. The popup will close automatically
 10. Click **Save Account**
 
-DAWN uses XOAUTH2 for both IMAP and SMTP — no app password needed for Google accounts.
+A Google OAuth account is read and sent through the Gmail API — no app password needed for Google accounts.

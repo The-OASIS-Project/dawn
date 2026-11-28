@@ -1,5 +1,7 @@
 # Unified Image Store System
 
+**Status (2026-11-27):** Phases 1–3 and Phase 6 shipped. Phases 4–5 (MMS) are not built: blocked on the modem firmware (Phase 4). Image generation and document image extraction are not built.
+
 ## Context
 
 Four features need image storage infrastructure: web image search, local image generation (sd.cpp), MMS received images, and document image extraction. DAWN already has `image_store.c` with SQLite BLOB storage for user-uploaded vision images, but BLOB storage bloats the database and requires malloc+memcpy per serve. Migrating to filesystem storage with SQLite metadata enables efficient `lws_serve_http_file()` zero-copy serving, proper retention policies per source type, and a single API surface for all consumers.
@@ -59,6 +61,8 @@ typedef enum {
    IMAGE_RETAIN_CACHE = 2,      /* LRU eviction at size cap */
 } image_retention_t;
 ```
+
+*As built (2026-11-27): `include/image_store.h` also has `IMAGE_SOURCE_CAPTURE = 5` (an image a tool returned, owner-only) and `IMAGE_RETAIN_UNBOUND = 3` (no row refers to it yet; reclaimed after a grace period).*
 
 ### API Changes
 
@@ -268,7 +272,7 @@ New `src/mms.c` module:
 
 ---
 
-## Phase 5: MMS Support — DAWN Side
+## Phase 5: MMS Support — DAWN Side — NOT BUILT (waits on Phase 4)
 
 Depends on Phase 1 (image store) + Phase 4 (ECHO MMS).
 

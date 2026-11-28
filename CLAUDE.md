@@ -182,16 +182,7 @@ Full standards in @CODING_STYLE_GUIDE.md. Critical gotchas that differ from typi
 
 ### Tool registration (modular — preferred for new tools)
 
-Tools are self-contained modules in `src/tools/` with metadata, config, and callbacks. Register via `src/tools/tools_init.c` in `tools_register_all()`. The registry provides O(1) name/device/alias lookup via FNV-1a hash tables. See `src/tools/memory_tool.c` or `src/tools/calendar_tool.c` for a clean template.
-
-### Command callbacks (legacy — for core system devices in `mosquitto_comms.c`)
-
-```c
-char *myCallback(const char *actionName, char *value, int *should_respond) {
-   // should_respond: 1 = return data to AI, 0 = handle directly
-   // Return: allocated string for AI (when should_respond=1), or NULL
-}
-```
+Tools are self-contained modules in `src/tools/` with metadata, config, and callbacks. Register via `src/tools/tools_init.c` in `tools_register_all()`. The registry provides O(1) name/device/alias lookup via FNV-1a hash tables. See `src/tools/memory_tool.c` or `src/tools/calendar_tool.c` for a clean template. A tool's callback is `char *cb(const char *action, char *value, int *should_respond)`: set `*should_respond` to 1 and return an allocated string to hand the result to the model, or leave it 0 and return NULL when the tool handled the request itself. MQTT commands reach the same callbacks through the registry; `mosquitto_comms.c` has none of its own.
 
 ### Logging
 

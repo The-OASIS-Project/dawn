@@ -8,7 +8,7 @@ the JARVIS-style completion-commentary turn** — all shipped and live-validated
 critic re-armed once then confirm-stopped→saturation). A **full six-lens pre-merge re-audit
 (arch/security/correctness/efficiency/UI/standards, 2026-08-15)** returned 0 Critical/High and a handful of
 Low/Medium fixes, all applied (see [Post-merge review §](#post-merge-review-2026-08-15)). **✅ Eval harness +
-quality tuning SHIPPED 2026-08-17→18** ([§16](#16-evaluation-harness--benchmark-driver) built; [§17](#17-synthesis-ab--comprehensiveness-max-shipped-2026-08-17)
+quality tuning SHIPPED 2026-08-17→18** ([§16](#16-evaluation-harness--benchmark-driver-shipped-2026-08-17) built; [§17](#17-synthesis-ab--comprehensiveness-max-shipped-2026-08-17)
 comp-max synthesis; [§18](#18-search-backend--tavily-vs-searxng-measured-2026-08-17) search-backend): DAWN
 benchmarked at **RACE 0.498→0.505 (reference parity) / FACT 0.852** on a DeepResearch-Bench subset (gpt-5.5 RACE /
 gpt-5.4-mini FACT, the current official evaluator), the comprehensiveness-max synthesis tune landed the +0.007,
@@ -67,7 +67,8 @@ unused `quote`/`source_kind` columns (was ~512 KB of `quote` over-read per repor
   `s_db.stmt_*` like `auth_db_jobs.c`), compounding the already-deferred per-round coverage `COUNT(DISTINCT)`
   N+1. Trigger: per-run question count → ~30, or concurrent runs. Cold behind LLM latency at P0 scale.
 - `llm_tools.c` is over the 2,500-line hard limit (+47 here, for the allowlist gate that correctly belongs
-  there) — a size-trajectory row, no code move.
+  there) — a size-trajectory row, no code move. *(As built: the gate now lives in `llm_tools_filter.c`, and
+  `llm_tools.c` is under 2,500 lines.)*
 - `jobs.js` crossed the 1,000-line JS soft limit; the research-event seam folds into the tracked jobs.js
   split. The research trail rows lack `role=list`/group semantics (folds into the tracked AT work).
 
@@ -123,7 +124,7 @@ one genuinely-hard question churned to budget death. Diagnosis: the budget ceili
 natural-ends didn't fire in time), so a *low* ceiling guillotines a productive run; the answer must never depend
 on the stop reason. Fixes, all shipped:
 - **Synthesis turn (§8):** a final NO-TOOLS generation turn (a `session->research_synthesizing` flag denies
-  every tool) writes the report — executive summary + a *direct answer/recommendation* to the brief + an honest
+  every tool; as built, `session_set_tools_suppressed()`) writes the report — executive summary + a *direct answer/recommendation* to the brief + an honest
   "what I could not determine" section — layered over the claims evidence. It runs on EVERY terminal path (budget
   included), so a run always hands back a real answer, never a raw dump. Persisted to the job conversation (so the
   WebUI viewer shows it, not a blank transcript) and to notes.
@@ -231,15 +232,15 @@ completeness critic's, not staleness's.
 ---
 
 **(Design register below — the original plan/scope. Git holds the build log; per-step + review detail lives in
-the commits and in the project memory note `project_deep_research_design.md`.)**
+the commits.)**
 
 **Builds on** [`BACKGROUND_JOBS_DESIGN.md`](BACKGROUND_JOBS_DESIGN.md) — deep research is a background-job
 sibling. It reuses the job-session pool, the `job_manager_*` primitives (begin/end/terminal/capacity),
 reconnect-replay, cancel, retention, and the `conversation_events` step log. Read that doc's §5 (lifecycle),
-§8 (ownership/authz/limits), and §14 (job schema) first; this doc only describes what is *new* on top.
+§8 (ownership/authz/limits), and §3 (job schema) first; this doc only describes what is *new* on top.
 
-**Reconciles to code** as of schema **v74** (`include/auth/auth_db_internal.h:66`); this feature adds
-migration **v75**. Signatures cited are verified against the tree at authoring time (August 2026).
+**Reconciles to code** as of schema **v74** (`AUTH_DB_SCHEMA_VERSION`, `include/auth/auth_db_internal.h`); this feature adds
+migration **v75** (and v76, §3). *(As of 2026-11 the schema is at v117.)* Signatures cited are verified against the tree at authoring time (August 2026).
 
 **Reviewed** by architecture / security / embedded-efficiency / plan-completeness lenses before build; every
 HIGH finding is folded into the text below (see §13 decisions and §14 gaps for the residuals). The two most
@@ -249,7 +250,7 @@ injection disabled/mode-scoped** because the output path re-enters privileged se
 ([§11](#11-security--untrusted-content-in-an-autonomous-loop-locked)).
 
 **To start building:** jump to [§15 — Implementation kickoff (P0 build order)](#15-implementation-kickoff-p0-build-order). Read
-[`BACKGROUND_JOBS_DESIGN.md`](BACKGROUND_JOBS_DESIGN.md) §5/§8/§14 first — this feature is a sibling of that substrate.
+[`BACKGROUND_JOBS_DESIGN.md`](BACKGROUND_JOBS_DESIGN.md) §5/§8/§3 first — this feature is a sibling of that substrate.
 
 **Reviewer note.** This design doc is tracked (committed on the `deep_research` branch per the design-doc commit policy — it describes
 shipped code) and is kept in sync as the feature lands; treat it as the source of truth, not scratch.
@@ -278,8 +279,6 @@ shipped code) and is kept in sync as the feature lands; treat it as the source o
 - [§16. Evaluation harness & benchmark driver (SHIPPED)](#16-evaluation-harness--benchmark-driver-shipped-2026-08-17)
 - [§17. Synthesis A/B — comprehensiveness-max (SHIPPED)](#17-synthesis-ab--comprehensiveness-max-shipped-2026-08-17)
 - [§18. Search backend — Tavily vs. SearXNG (measured)](#18-search-backend--tavily-vs-searxng-measured-2026-08-17)
-- [§15. Implementation kickoff (P0 build order)](#15-implementation-kickoff-p0-build-order)
-- [§16. Evaluation harness & benchmark driver](#16-evaluation-harness--benchmark-driver-p1-eval--planned)
 
 ---
 
@@ -434,6 +433,12 @@ CREATE TABLE IF NOT EXISTS research_claims (
 CREATE INDEX IF NOT EXISTS idx_research_claims_run ON research_claims(run_id, question_id);
 ```
 
+*As built (2026-11): the stored `stop_reason` values are the controller's `RESEARCH_STOP_*` set in
+`include/tools/research_run.h` — `concluded`, `coverage`, `saturation`, `budget`, `token_budget`, `cancelled`,
+`failed`; plus `interrupted` (daemon shutdown, or a hard kill caught at boot) and `timeout` (runtime reap),
+written by `research_worker.c` and `auth_db_research.c`. There is no `critic_complete` or `unanswerable`
+stop reason.*
+
 **Coverage is `COUNT(DISTINCT source_url)`, not a bump counter (plan HIGH-3).** A question is `answered` when
 it has `≥ min_sources` claims **from distinct `source_url`s** — the same page recorded twice must not satisfy
 "≥2 independent sources." There is deliberately **no `sources_count` column**: it would be a denormalized cache
@@ -484,7 +489,8 @@ loop (round = 1..budget):   [ the FETCH middle — bare session, NO private memo
   reconstruct: reset session history to []  and build ONE user directive from a BOUNDED digest
                {brief, top-K open questions, per-question rolled-up claim summary, last revision prose}  (§4a)
   dispatch:    core_text_input_dispatch(session, directive, …, &opts)   with opts.skip_prompt_rebuild = true
-               tool set = read-only allowlist {search, url_fetch, research_record, research_plan}  (§7,§11)
+               tool set = read-only allowlist {search, url_fetch, result_read, research_plan, research_record,
+                          research_conclude, research_mark_unanswerable}  (§7,§11; include/core/research_allowlist.h)
                the round's tool loop: LLM_TOOLS_MAX_ITERATIONS steps that may look things up, then one SAVE
                step (session turn_save_note): a note says it only records, tools stay on, only state-kind
                calls run (search/url_fetch/result_read refused), and the round ends after it with no reply.
@@ -774,6 +780,10 @@ registered under `#ifdef DAWN_ENABLE_DEEP_RESEARCH_TOOL` in `tools_init.c:tools_
 | `status` | `run_id` (int) | Ledger digest: rounds run, open/answered/unanswerable counts, stop-eligibility. **Ownership-validated** (`AUTH_DB_FORBIDDEN` if not the owner, like `job_tool.c:219`) and the returned digest passes `memory_filter_check_injection_commands` before it re-enters the caller's session (sec HIGH-2, MED-4). |
 | `cancel` | `run_id` (int) | Session cancel at the next round boundary. Ownership-validated. |
 
+*As built: `start` only proposes and returns a `pending_token`; a fourth action, `confirm_start`
+(`pending_token`), spawns the run ([§7a](#7a-invocation-routing--confirmation)). `mode` `private`/`both` is
+accepted but runs web-only (`deep_research_tool.c`).*
+
 **Default `mode = web`** (not `both`): the private-data path is opt-in, so the safe default carries no private
 context ([§11](#11-security--untrusted-content-in-an-autonomous-loop-locked)).
 
@@ -870,6 +880,9 @@ that chat with the report body — that is the `reinvoke_parent` path deliberate
 report text into your full-tool session is the injection vector. So you are notified and handed a link; if you
 then ask Friday about the findings in that chat, the report re-enters through the **injection-gated**
 `status` / note-read path ([§7](#7-tools)), never as an unfiltered auto-reinjection.
+*As built (2026-11): the completion message posted into the originating chat (the commentary take or the
+report's lead, `research_worker.c` → `job_report_post`) is not passed through the injection-command gate, so it
+is web-derived text in that chat's history; see §11 #2.*
 
 ---
 
@@ -919,9 +932,12 @@ max_input_tokens     = 1000000 # per-run input-token ceiling — a HIGH runaway 
 round_digest_max_chars = 6000  # cap on the reconstructed round prompt (§4a) — the "bounded context" knob
 min_sources          = 2       # DISTINCT source_url before a question is 'answered' (§3/§6)
 saturation_rounds    = 1       # consecutive dry rounds before the saturation stop (enforced, §6); 0 = off
+plan_freeze_round    = 2       # no new top-level questions after this round (P1; §6)
+stale_rounds         = 2       # auto-retire a question after N rounds with no new source (P1; §6)
 critic_max_rearm     = 2       # times the completeness critic may extend (P1)
-capture_revisions    = false   # debug: persist per-round report snapshots (§3; audit uses claims+events)
-# Parsed + round-tripped but NOT surfaced until the phase that enforces them (per CONFIGURATION_GUIDE):
+completion_commentary = true   # post a persona take on the finished run to the originating chat
+capture_revisions    = false   # debug: per-round report snapshots (§3) — parsed + round-tripped, not yet enforced
+# Planned for P2, not parsed yet:
 # hybrid_local_extract = false  # P2: route page extraction to the local model
 ```
 
@@ -978,6 +994,11 @@ corrected three load-bearing mitigations that were originally stated as settled 
    reinvoke path (`job_reinvoke.c:311`); (b) **`reinvoke_parent` is disabled for research** — delivery is
    notify + report link, so a web-derived report never re-engages the model in a privileged session
    ([§5](#5-lifecycle)).
+   *As built (2026-11): claims, planned questions and critic gaps are gated when recorded (`research_tools.c`,
+   `research_run_loop.c`), and the `status` digest is gated on output (`deep_research_tool.c`). The completion
+   message posted into the originating chat is not gated, and the claims and report reach the synthesis and
+   completion-commentary turns unframed in the user message (`research_run_loop.c`): gated at record, but not
+   framed as outside text. That framing, and a gate on the posted completion message, are an open gap.*
 3. **Private-data exfiltration — the positional boundary is the primary control.** The classic channel is the
    read tools themselves (`url_fetch`/`search` args steered to `evil.com/?leak=<secret>`) — SSRF-pinning does
    nothing here (the sink is public). The design's answer is to keep private memory **out of the fetch loop
@@ -998,7 +1019,9 @@ corrected three load-bearing mitigations that were originally stated as settled 
    `memory_filter_check_injection_commands` is a memory-poisoning gate, **not** an exfil control (it's a
    substring blocklist over an English-normalized string — CJK payloads pass, sec HIGH-3) — do not represent it
    as closing this channel.
-4. **SSRF via redirects — exploitable today (sec HIGH-1, CWE-918).** `url_fetcher.c` pins the *original* host
+4. **SSRF via redirects — exploitable at design time (sec HIGH-1, CWE-918).** *As built (P0): closed by
+   validating the actual connect IP of every hop, redirects included, plus `CURLOPT_REDIR_PROTOCOLS` http/https;
+   `FOLLOWLOCATION` stays on (`url_fetcher.c`), and the ranges below were widened.* `url_fetcher.c` pins the *original* host
    against private ranges but then sets `CURLOPT_FOLLOWLOCATION=1` (`url_fetcher.c:1390`); curl follows
    redirects itself, re-resolving each target with **no re-validation and no `REDIR_PROTOCOLS` restriction** on
    the native path. An attacker page returns `302 Location: http://169.254.169.254/…` and the loop follows it
@@ -1023,7 +1046,9 @@ items; note them as pairing work.
 
 ## 12. Phased plan
 
-Legend: ○ planned · ◑ in progress · ✅ shipped. All phases ○ (design only).
+Legend: ○ planned · ◑ in progress · ✅ shipped. *Status (2026-11): Phase 0 ✅; Phase 1 ◑ (controller, critic,
+plan-freeze and eval harness shipped; ledger-resume and the embedding novelty check not built); Phases 2–4 ○ (design only). The phase headings below keep
+their design-time markers.*
 
 ### Phase 0 — MVP loop + schema (○) — *proves the risky part*
 
@@ -1057,7 +1082,7 @@ hard-budget + all-closed stopping.
 - Fresh-context completeness critic with bounded re-arm + UNANSWERABLE verdict.
 - Effort-scaling (initial question count vs budget); clarification-at-spawn + non-blocking plan visibility.
 - Ledger-resume of a research run (upgrade from P0's block).
-- Eval harness grown to 10–20 + LLM-judge rubric → mechanized as the **unattended benchmark driver** ([§16](#16-evaluation-harness--benchmark-driver-p1-eval--planned)): a headless admin spawn path + Python orchestrator that runs external report-quality benchmarks (DeepResearch Bench primary) instead of hand-submitted smoke queries.
+- Eval harness grown to 10–20 + LLM-judge rubric → mechanized as the **unattended benchmark driver** ([§16](#16-evaluation-harness--benchmark-driver-shipped-2026-08-17)): a headless admin spawn path + Python orchestrator that runs external report-quality benchmarks (DeepResearch Bench primary) instead of hand-submitted smoke queries.
 
 ### Phase 2 — cost & speed (○)
 
@@ -1101,7 +1126,8 @@ hard-budget + all-closed stopping.
 6. **Read-only per-session tool allowlist,** enforced at schema advertisement **and** execution — no
    outward/side-effecting tools (plan HIGH-1).
 7. **All run output re-entering a session is injection-gated** (`memory_filter_check_injection_commands`), and
-   **`reinvoke_parent` is disabled for research** — delivery is notify + report link (sec HIGH-2).
+   **`reinvoke_parent` is disabled for research** — delivery is notify + report link (sec HIGH-2). *(As built,
+   text is gated when recorded and on the `status` digest, not on the completion message, and is unframed where a model reads it; see §11 #2.)*
 8. **Claim/result screening uses `memory_filter_check_injection_commands`,** not the full blocklist; it is a
    memory-poisoning gate, not an exfil control (sec HIGH-3).
 9. **SSRF redirect re-validation + private-range widening ship with P0** (the current `url_fetch` is
@@ -1176,11 +1202,12 @@ section that specifies it. Build + format + the relevant unit test after each lo
      so the read-only allowlist is the real enforcement point even with the builder skipped.
 
 0b. **Per-session cancel decision** ([§5](#5-lifecycle).6, [§14](#14-open-items--known-gaps)) — the shared tool
-   loop honors the *global* `llm_interrupt_requested` today, so one run's cancel / a wake-word aborts every
-   concurrent run. Decide: land the shared-loop session-cancel fix as its own change **first** (recommended),
+   loop honored the *global* `llm_interrupt_requested` at design time, so one run's cancel / a wake-word aborted every
+   concurrent run. *(As built: a background turn now breaks only on its own session cancel flag,
+   `llm_tool_loop.c`; see §14.)* Decide: land the shared-loop session-cancel fix as its own change **first** (recommended),
    or scope research cancellation around it. This is a real prerequisite, not a nicety.
 
-0c. **Read** `BACKGROUND_JOBS_DESIGN.md` §5 (lifecycle), §8 (ownership/authz/limits), §14 (job schema) — P0
+0c. **Read** `BACKGROUND_JOBS_DESIGN.md` §5 (lifecycle), §8 (ownership/authz/limits), §3 (job schema) — P0
    reuses `job_manager_*`, the `conversation_events` log, and the `conv_db_create_job` path.
 
 ### Build order
@@ -1316,7 +1343,7 @@ must rely on the `[jobs]` caps as the only fuse.
 
 **(3) Extraction + scoring is Python-only, read-only, off the daemon.** `capture_baseline.py` already reads the
 final report — from the **final `research_report_revisions` row** (always written unconditionally at synthesis,
-`research_run_loop.c:~959`; `capture_revisions` gates only *per-round* snapshots, so a benchmark run needs **no**
+`research_run_loop.c:~916`; `capture_revisions`, not yet enforced, would gate only *per-round* snapshots, so a benchmark run needs **no**
 config change) — but today it reads claims only as **aggregate counts**. The per-claim
 `{claim, source_url, quote}` projection the FACT citation scorer needs is a **new (trivial) read-only query**
 (`SELECT claim, source_url, quote FROM research_claims WHERE run_id=?`) — on the correct side of the seam (no
@@ -1452,7 +1479,7 @@ Root cause was **synthesis, not gather**: the reports were "summary prose + a la
 and the old `RESEARCH_SYNTHESIS_PROMPT` explicitly told the model *not* to restate the claims ("that
 evidence is appended automatically"). The evidence was already recorded; the prose just wasn't using it.
 
-**The change** (`RESEARCH_SYNTHESIS_PROMPT`, `research_run_loop.c`): tell synthesis to INTEGRATE every
+**The change** (`RESEARCH_SYNTHESIS_PROMPT`, now in `include/prompts.h`): tell synthesis to INTEGRATE every
 sub-question's findings into the report body — specific numbers/dates/entities woven into prose + markdown
 tables for anything quantitative/comparative, conflicting figures reconciled to a single best-estimate with
 a variance note — plus a readability guard (clear headings, tables over walls of prose). Structure (exec

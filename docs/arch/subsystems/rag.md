@@ -29,9 +29,9 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
 │                                                                        │
 │  document_search(query)        document_read(document, start, count)  │
 │  ├─ Embed query                ├─ Find document by name/ID            │
-│  ├─ Load all user chunks       ├─ Load chunks in order (paginated)    │
-│  ├─ Cosine similarity rank     ├─ Return text with pagination hint    │
-│  ├─ Keyword boost (top 50)     └─ LLM calls again for next page      │
+│  ├─ Top 200 chunks by cosine   ├─ Load chunks in order (paginated)    │
+│  ├─ + BM25 keyword hits (50)   ├─ Return text with pagination hint    │
+│  ├─ Hybrid + phrase rank       └─ LLM calls again for next page      │
 │  └─ Return top 5 with scores                                          │
 │                                                                        │
 └───────────────────────────────────────────────────────────────────────┘
@@ -50,19 +50,19 @@ Part of the [D.A.W.N. architecture](../../../ARCHITECTURE.md) — see the main d
    - Uses shared `auth.db` handle with prepared statements
    - `document_db_create()`, `document_db_delete()`, `document_db_list()`
    - `document_db_find_by_name()`: fuzzy name lookup with LIKE + exact-match priority
-   - `document_db_chunk_create()`, `document_db_chunk_read()`, `document_db_chunk_search_load()`
+   - `document_db_chunk_create()`, `document_db_chunk_read()`, `document_db_chunk_search_bm25()`
    - Access control: queries filter by `user_id = ? OR is_global = 1`
 
 - **document_chunker.c/h** (`src/tools/`): Text chunking for embedding
    - Paragraph-aware splitting (double newline boundaries)
    - Sentence boundary splitting for oversized paragraphs
-   - Configurable target/max token sizes and overlap
+   - Target/max token sizes and overlap (500 / 1000 / 50 by default, `document_chunker.h`; not in `dawn.toml`)
    - **Structure-aware chunking** for YAML sequences and CSV: one record per chunk, so a search hit maps to a single record instead of a windowed span
 
 - **document_search.c/h** (`src/tools/`): Semantic search tool
-   - Two-pass scoring: cosine similarity first, keyword boost on top 50 only
+   - Hybrid ranking (`document_rank.c`): top 200 chunks by cosine plus up to 50 BM25 keyword hits, with a phrase bonus
    - Results formatted with source citations and relevance scores
-   - Uses `result_extended` for results exceeding the 8KB fixed buffer
+   - Result buffer allocated to fit the results
 
 - **document_grep_tool.c** (`src/tools/`): Literal substring search over indexed document/note chunks
    - Returns the matched line plus adjacent context (not meaning-based) for exact lookups where semantic search is too fuzzy
@@ -101,7 +101,7 @@ Two tables in `auth.db`:
 documents (id, user_id, filename, filepath, filetype, file_hash,
            num_chunks, is_global, created_at, original_blob_id, outside, own)
 
-document_chunks (id, document_id, chunk_index, text, embedding, embedding_norm)
+document_chunks (id, document_id, chunk_index, text, embedding, embedding_norm, created_at)
 ```
 
 Indexes: `idx_doc_chunks_doc`, `idx_documents_user`, `idx_documents_hash`.
@@ -140,12 +140,7 @@ and is own too.  `document_index` stays outside (it reports on a fetched page).
 
 ```toml
 [documents]
-chunk_target_tokens = 500
-chunk_max_tokens = 1000
-chunk_overlap_tokens = 50
-max_search_results = 5
-max_context_tokens = 2000
-max_file_size_mb = 10
+max_file_size_kb = 10240
 max_index_size_kb = 2048       # Per-document index size limit
 max_indexed_documents = 50     # Per-user document count limit
 

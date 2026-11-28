@@ -8,7 +8,7 @@ DAWN provides two ways to interact:
 
 1. **Local Voice Interface** - Uses your device's microphone and speakers. Requires audio device configuration. Say a wake phrase (e.g., "Hey Friday", "Okay Friday") followed by your command.
 
-2. **Web UI** - Browser-based interface at `http://localhost:3000`. Supports both text and voice input. Voice requires HTTPS for remote access (see [SSL Setup](#7-ssl-setup-for-remote-voice)).
+2. **Web UI** - Browser-based interface at `http://localhost:3000`. Supports both text and voice input. Voice requires HTTPS for remote access (see [SSL Setup](#7-ssl-setup-recommended)).
 
 Both interfaces share the same AI backend (ASR, LLM, TTS).
 
@@ -248,7 +248,7 @@ openai_api_key = "sk-your-openai-key"
 # gemini_api_key = "your-gemini-key"
 # openrouter_api_key = "sk-or-your-key"   # Optional: OpenRouter (one key, any model) — set [llm.cloud] provider = "openrouter"
 # plex_token = "your-plex-token"          # Optional: adds Plex library to unified music DB
-# home_assistant_token = "your-ha-token"  # Optional: for Home Assistant smart home control
+# Home Assistant token: goes under [secrets.home_assistant] (see secrets.toml.example)
 # tavily_api_key = "tvly-your-tavily-key" # Optional: commercial search + URL extract (see Tavily section)
 ```
 
@@ -257,15 +257,20 @@ openai_api_key = "sk-your-openai-key"
 **Alternative**: Use environment variables instead of secrets.toml:
 ```bash
 export OPENAI_API_KEY="sk-your-openai-key"
-# or: export CLAUDE_API_KEY="sk-ant-..." or GEMINI_API_KEY="..."
+# or: export ANTHROPIC_API_KEY="sk-ant-..." or GEMINI_API_KEY="..."
 ```
 
 **dawn.toml** - Select the provider your key is for. A key alone selects nothing: with no provider
 selected, DAWN uses the local LLM (`[llm.local]`). Set it here, or later in the Web UI (Settings →
-Language Model → Cloud Provider):
+Language Model → Cloud Provider). The file copied from `dawn.toml.example` already has both tables,
+so set these keys under the existing `[llm.cloud]` and `[webui]` headers; don't add the headers
+a second time (a repeated table stops the file loading):
 ```toml
 [llm.cloud]
 provider = "openai"   # or "claude", "gemini", "openrouter"
+
+[webui]
+enabled = true        # the Web UI is off unless enabled
 ```
 Everything else is optional; the defaults work for most users and can be changed later in the Web UI.
 
@@ -277,7 +282,7 @@ DAWN uses an LLM in three independent roles. They don't have to be the same mode
 
 | Role | `dawn.toml` setting | Recommendation |
 |------|---------------------|----------------|
-| **Chat** — what you actually talk to | `[llm.cloud]` `provider` + `model` | Your main quality/latency lever; pick a capable current model from your provider. We run `claude-haiku-5-5` (Claude): on DAWN's quality suite it matched `gpt-5.6-luna` on correctness at about the same cost and gave its first word about 3 s sooner (p90), with reasoning off (reasoning on didn't improve it and slowed the first word 2.5×). `gpt-5.6-luna` (OpenAI) remains a strong choice. |
+| **Chat** — what you actually talk to | `[llm.cloud]` `provider` + `<provider>_models` / `<provider>_default_model_idx` | Your main quality/latency lever; pick a capable current model from your provider. We run `claude-haiku-5-5` (Claude): on DAWN's quality suite it matched `gpt-5.6-luna` on correctness at about the same cost and gave its first word about 3 s sooner (p90), with reasoning off (reasoning on didn't improve it and slowed the first word 2.5×). `gpt-5.6-luna` (OpenAI) remains a strong choice. |
 | **Memory extraction** — background fact-building at session end | `[memory]` `extraction_provider` + `extraction_model` | **`claude-haiku-5-5` with `extraction_effort = "medium"`.** Benchmark-validated (LoCoMo answer accuracy 0.769, against 0.728 for `claude-haiku-4-5`, at about a fifth of its cost). A bigger/"smarter" model does *not* extract better (larger models over-fragment the entity graph and retrieve less reliably), so a small fast model is the correct pick, not a compromise. |
 | **Compaction** — background summarization of long conversations | `[llm]` `compact_provider` + `compact_model` | **`claude-haiku-5-5`**, by the same reasoning — compaction is a summarization pass that doesn't need your top model. (Not separately benchmarked; extraction is.) |
 
@@ -695,8 +700,8 @@ Or configure everything in WebUI Settings → Music & Media → Plex Connection 
 Control lights, switches, climate, locks, and more through voice commands. Requires a Home Assistant instance on your network. See [docs/HOMEASSISTANT_SETUP.md](docs/HOMEASSISTANT_SETUP.md) for bare metal setup on Jetson, or use any existing HA installation. Add your Long-Lived Access Token to `secrets.toml`:
 
 ```toml
-[secrets]
-home_assistant_token = "your-long-lived-access-token"
+[secrets.home_assistant]
+token = "your-long-lived-access-token"
 ```
 
 Then configure the HA connection URL in the WebUI admin panel (Settings → Home Assistant).
@@ -810,7 +815,7 @@ The two toggles are independent — you can use Tavily for search while keeping 
 
 ### MQTT Security (Authentication + TLS)
 
-By default, MQTT traffic is sent in plaintext on port 1883 with no authentication. For hardened deployments, OASIS supports MQTT username/password authentication and TLS encryption across all components (DAWN, MIRAGE, STAT).
+By default, MQTT traffic is sent in plaintext on port 1883 with no authentication. Anything that can publish on the broker can make DAWN act as the local user, so broker authentication (username/password, with ACLs) is required whenever the broker is reachable by anything other than the DAWN daemon itself, and TLS is required when that traffic crosses a network. OASIS supports both across all components (DAWN, MIRAGE, STAT).
 
 For the complete setup guide covering broker configuration, certificate generation, and client configuration for all OASIS components, see **[docs/MQTT_SETUP.md](docs/MQTT_SETUP.md)**.
 
@@ -863,7 +868,7 @@ For iCloud, Nextcloud, Radicale, and other CalDAV servers:
 
 ### Email (IMAP/SMTP)
 
-DAWN can check, read, search, send, trash, and archive email via voice commands. It works with any IMAP/SMTP provider (Gmail, iCloud, Outlook, Fastmail, Proton Mail via Bridge, self-hosted). Supports both app password and Google OAuth 2.0 (XOAUTH2) authentication.
+DAWN can check, read, search, send, trash, and archive email via voice commands. It works with any IMAP/SMTP provider (Gmail, iCloud, Outlook, Fastmail, Proton Mail via Bridge, self-hosted). Supports both app password and Google OAuth 2.0 authentication (an OAuth Gmail account goes through the Gmail API).
 
 The model can't use email until you opt in, because it has `TOOL_CAP_DANGEROUS` — email send is irreversible.
 
@@ -944,7 +949,7 @@ DAWN can place and receive cellular calls and text messages on a real phone numb
 
    DAWN and ECHO exchange calls and texts (including SMS link and reply codes) over MQTT, so run the broker with authentication and ACLs on `echo/#`, and TLS when it's on another machine; see [MQTT Security](#mqtt-security-authentication--tls). DAWN warns at startup when the broker connection isn't encrypted.
 
-3. Restart DAWN. Callers are matched against your [Contacts](#persistent-memory) for name + photo on the HUD and WebUI banner.
+3. Restart DAWN. Callers are matched against your [Contacts](README.md#persistent-memory) for name + photo on the HUD and WebUI banner.
 
 **Test it:** *"Text Bob that I'm on my way"* (two-step: draft → confirm), or place a call in and answer with *"Friday, answer"* or the browser banner.
 

@@ -201,7 +201,7 @@ Each case declares checks:
   with an Opus-class one. Re-runs are free.
 
 ### 3.6 Cases
-- **Count:** 120–150 cases in versioned YAML (`llm_testing/cases/*.yaml`). Action and answer checks are cheap
+- **Count:** 120–150 cases in versioned YAML (`llm_testing/quality/cases/*.yaml`). Action and answer checks are cheap
   once mocks exist. A stratified subset gets the voice judge.
 - **Categories:**
   - single tool (music, weather, search, calendar, email, scheduler, Home Assistant, memory, calculator

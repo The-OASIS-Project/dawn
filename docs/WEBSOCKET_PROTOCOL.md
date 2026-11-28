@@ -508,6 +508,181 @@ Response: `restart_response`
 
 ---
 
+### Home Assistant and Phone Audio (Admin Only)
+
+The admin panels for the Home Assistant connection and entity board, and the phone's call audio.
+**Admin only**: other users get an `error` frame `FORBIDDEN` (`UNAUTHORIZED` without a login). No
+payload, except `ha_call_service`.
+Built with the Home Assistant tool (`DAWN_ENABLE_HOMEASSISTANT_TOOL`) and the phone tool
+(`DAWN_ENABLE_PHONE_TOOL`); a daemon without the tool answers its type with `UNKNOWN_TYPE`.
+Both settings are saved with `set_config`, in a `home_assistant` or `phone` section, and that
+save is also answered with the frame below.
+
+#### `ha_status`
+```json
+{ "type": "ha_status" }
+```
+Response:
+```json
+{
+   "type": "ha_status_response",
+   "payload": {
+      "configured": true, "connected": true,
+      "entity_count": 42, "version": "2026.11.0", "url": "http://192.0.2.10:8123",
+      "led_hue_correction": 0
+   }
+}
+```
+- `configured`: the Home Assistant service is set up (URL and token). `connected`: DAWN
+  currently reaches it.
+- `entity_count`, `version`, `url`: always present (`version` and `url` are `""` when unknown).
+- `led_hue_correction`: the configured hue offset for LED lights, 0–60 degrees.
+- No `success` member. Also sent after a `set_config` that changes the `home_assistant` section
+  (`url`, `enabled`, `led_hue_correction`).
+
+#### `ha_test_connection`
+Call Home Assistant now.
+```json
+{ "type": "ha_test_connection" }
+```
+Response `ha_test_connection_response`, whose payload is `{"success": true, "version": "2026.11.0"}`,
+or `{"success": false, "error": "…"}` with
+"Home Assistant not configured", "Network error", "API error", "Rate limited" or "Memory
+allocation failed". The reply waits for Home Assistant's answer.
+
+#### `ha_list_entities` / `ha_refresh_entities`
+The Home Assistant entities DAWN knows, for the admin's entity board. No payload.
+`ha_list_entities` reads DAWN's cache, which is refetched first when it is older than 5 minutes (that
+reply then waits for Home Assistant too); `ha_refresh_entities` first fetches every entity from
+Home Assistant again (the reply waits for it).
+```json
+{ "type": "ha_list_entities" }
+```
+Both are answered with `ha_entities_response`:
+```json
+{
+   "type": "ha_entities_response",
+   "payload": {
+      "success": true,
+      "count": 2,
+      "cached_at": 1785000000,
+      "entities": [
+         { "entity_id": "light.office", "friendly_name": "Office Light", "domain": "light",
+           "state": "on", "area": "Office", "attributes": { "brightness": 180 } },
+         { "entity_id": "lock.front_door", "friendly_name": "Front Door", "domain": "lock",
+           "state": "locked" }
+      ]
+   }
+}
+```
+- At most 512 entities. `cached_at`: epoch seconds of the cache the list was read from.
+- `area`: present only when the entity has a Home Assistant area.
+- `attributes`: present only for the domains below; an entity without it is a plain on/off
+  toggle or a display row.
+
+| `domain` | `attributes` |
+|---|---|
+| `light` | `brightness` (0–255) |
+| `fan` | `percentage` |
+| `cover` | `current_position` |
+| `climate` | `hvac_mode` (when known), `hvac_modes` (array, when known), `current_temperature`, `temperature` (the target) |
+| `sensor`, `binary_sensor` | `unit_of_measurement`, `device_class` (each only when set; no `attributes` when neither is) |
+
+- On failure `success: false` with `error`: "Not connected" (DAWN can't reach Home Assistant),
+  "Home Assistant not configured", "Home Assistant not connected", "Network error", "API
+  error", "Rate limited", "Memory allocation failed" or "Out of memory".
+- The same frame also arrives unasked after a successful `ha_call_service`, to every browser
+  connection of the admin who called it, while the realtime stream (`ha_state_changed`) isn't
+  connected. With the stream connected the change arrives as `ha_state_changed` instead.
+
+#### `ha_call_service`
+Call a Home Assistant service on one entity: the entity board's controls.
+```json
+{
+   "type": "ha_call_service",
+   "payload": {
+      "entity_id": "light.office",
+      "service": "turn_on",
+      "data": { "brightness": 128 }
+   }
+}
+```
+- `entity_id` (required): lowercase letters, digits, `_` and a `.`, under 128 bytes.
+- `service` (required).
+- `domain` (optional): the service's domain; absent or `""` takes the part of `entity_id`
+  before the `.`.
+- `data` (optional object): the service's parameters, sent to Home Assistant with `entity_id`
+  added. A `data` that isn't an object is ignored.
+- Only these `domain` / `service` pairs are allowed; any other is refused with "Service not
+  permitted" (the model's Home Assistant tool isn't limited by this list):
+
+| `domain` | `service` |
+|---|---|
+| `light`, `switch`, `input_boolean` | `turn_on`, `turn_off` |
+| `fan` | `turn_on`, `turn_off`, `set_percentage` |
+| `lock` | `lock`, `unlock` |
+| `cover` | `open_cover`, `close_cover`, `set_cover_position` |
+| `climate` | `set_hvac_mode`, `set_temperature` |
+| `media_player` | `media_play`, `media_pause` |
+
+Response, after Home Assistant has answered:
+```json
+{
+   "type": "ha_call_service_response",
+   "payload": { "success": true, "entity_id": "light.office", "error": null }
+}
+```
+- On failure `success: false` with `error`: "entity_id and service are required" (no
+  `entity_id` echoed then), "Not connected", "Service not permitted", "Invalid service data",
+  "Invalid parameter" (a malformed `entity_id`, domain or service), "Network error", "API
+  error", "Rate limited" or "Memory allocation failed".
+- A success is followed by the entity's new state: `ha_state_changed` while the realtime stream
+  is connected, else an unasked `ha_entities_response` (above).
+
+#### `get_phone_audio_config`
+The call-audio settings of the cellular modem bridge.
+```json
+{ "type": "get_phone_audio_config" }
+```
+Response (note the name: not `get_phone_audio_config_response`):
+```json
+{
+   "type": "phone_audio_config_response",
+   "payload": {
+      "webrtc_available": true,
+      "bridge_active": false,
+      "pcm_port": "",
+      "pcm_port_default": "/dev/ttyUSB4",
+      "uplink": { "agc": true, "fixed_gain_db": 1.0, "agc_ramp_db_per_s": 3.0,
+                  "max_output_noise_dbfs": -50.0, "ns_level": "moderate", "high_pass": true,
+                  "echo_cancel": true },
+      "downlink": { "agc": false, "fixed_gain_db": 1.0, "agc_ramp_db_per_s": 3.0,
+                    "max_output_noise_dbfs": -50.0, "ns_level": "moderate", "high_pass": true },
+      "downlink_apm": false,
+      "downlink_gain": 0.0
+   }
+}
+```
+- `webrtc_available`: the daemon was built with WebRTC audio processing; without it every
+  `uplink` / `downlink` control has no effect.
+- `bridge_active`: a call's audio is running now (a change applies to it live).
+- `pcm_port`: the modem audio device set in `dawn.toml`, `""` when the default
+  (`pcm_port_default`) is used.
+- `uplink` (the caller hears) / `downlink` (from the caller): `fixed_gain_db` 0–49,
+  `agc_ramp_db_per_s` 0.1–100, `max_output_noise_dbfs` −90–0, `ns_level` `off` / `low` /
+  `moderate` / `high` / `veryhigh`. `echo_cancel` is uplink only.
+- `downlink_apm`: processing on the downlink; the downlink's `agc` always follows it.
+  `downlink_gain`: a fixed gain on the downlink (0 = the bridge's default, at most 32).
+
+A `set_config` with a `phone` section (any of the members above except `webrtc_available`,
+`bridge_active` and `pcm_port_default`; absent members keep their value) is answered with this
+frame too, holding the stored values after clamping. A `pcm_port` that isn't `/dev/ttyUSB<n>`,
+`/dev/ttyACM<n>` or a `/dev/serial/by-id` / `by-path` alias, or is 128 bytes or longer, is
+refused: nothing in the section is applied, and the frame carries the stored values with an
+`error` sentence.
+
+---
+
 ### Audio & Model Discovery
 
 #### `get_audio_devices`
@@ -655,6 +830,43 @@ No response. Requires authentication.
 
 ---
 
+### Always-On Voice (Authenticated)
+
+Always-on mode: the browser streams its microphone continuously and the server listens for the
+wake word itself (VAD and wake word on the server, no wake-word model in the browser). Audio is
+sent as ordinary `AUDIO_IN` (`0x01`) binary frames, at most 150,000 bytes a second per
+connection (frames past that are dropped). Each request below is answered with an
+`always_on_state` frame (below) or an `error` frame. One always-on connection per browser login:
+another machine logged in as the same user has its own.
+
+#### `always_on_enable`
+```json
+{"type": "always_on_enable", "payload": {"sample_rate": 48000}}
+```
+- `sample_rate` (optional, default 48000): the capture rate; one of 8000, 16000, 22050, 44100,
+  48000, else `INVALID_SAMPLE_RATE`.
+- Refused with `PTT_ACTIVE` while a push-to-talk recording is in progress on the connection,
+  `ALREADY_ACTIVE` when another connection of the same browser login has it on, `INIT_FAILED`
+  when it can't be started.
+- Already on for this connection: answered with `always_on_state` `listening` again.
+
+On success: `always_on_state` `listening`.
+
+#### `always_on_disable`
+```json
+{"type": "always_on_disable"}
+```
+Answered with `always_on_state` `disabled` (also when it was already off).
+
+#### `always_on_state_request`
+Ask for the current state again (a tab coming back from the background).
+```json
+{"type": "always_on_state_request"}
+```
+Answered with `always_on_state`; `disabled` when always-on isn't on for this connection.
+
+---
+
 ### User Management (Admin Only)
 
 #### `list_users`
@@ -684,24 +896,34 @@ Delete a user account.
 {
    "type": "delete_user",
    "payload": {
-      "user_id": 2
+      "username": "alice"
    }
 }
 ```
 Response: `delete_user_response`
 
 #### `change_password`
-Change a user's password.
+Change a password. Any logged-in user may change **their own**; an admin may change anyone's.
 ```json
 {
    "type": "change_password",
    "payload": {
-      "user_id": 2,
+      "username": "alice",
+      "current_password": "oldpass123",
       "new_password": "newpass123"
    }
 }
 ```
-Response: `change_password_response`
+- `username` and `new_password` are required. `new_password` must be at least 8 characters.
+- A non-admin may name only their own `username` (else `"Cannot change another user's
+  password"`), and must send `current_password` (`"Current password required"` /
+  `"Current password incorrect"`). An admin needs no `current_password`, for their own
+  password or another user's.
+- Changing your own password ends every other login of yours and keeps this one. Changing
+  another user's ends all of theirs (their connections get `force_logout`).
+
+Response: `change_password_response`, with `success`, and `message` (`"Password changed"`) or
+`error` (also `"User not found"`).
 
 #### `unlock_user`
 Unlock a locked-out user account.
@@ -709,11 +931,185 @@ Unlock a locked-out user account.
 {
    "type": "unlock_user",
    "payload": {
-      "user_id": 2
+      "username": "alice"
    }
 }
 ```
 Response: `unlock_user_response`
+
+---
+
+### Satellite Administration (Admin Only)
+
+Every request here is **admin only** (`FORBIDDEN` otherwise). Failures come back as an
+`error` frame (`INVALID_PARAM`, `NOT_FOUND`, `DB_ERROR`, `FORBIDDEN`, `OTA_ERROR`), not as a
+`success: false` response. The device side of OTA (`ota_offer`, `ota_ack`, `ota_reject`,
+`ota_status`) is under DAP2 Satellite Messages, OTA.
+
+#### `list_satellites`
+List every registered satellite, the users it can be assigned to, and the Home Assistant
+areas.
+```json
+{"type": "list_satellites"}
+```
+Response `list_satellites_response`:
+```json
+{
+   "type": "list_satellites_response",
+   "payload": {
+      "satellites": [
+         {
+            "uuid": "11111111-2222-3333-4444-555555555555",
+            "name": "Kitchen", "location": "Kitchen", "ha_area": "Kitchen",
+            "user_id": 3, "tier": 1, "enabled": true,
+            "last_seen": 1795000000, "created_at": 1790000000, "online": true,
+            "firmware_version": "2.0.0", "ota_state": "idle", "ota_target_version": ""
+         }
+      ],
+      "users": [ { "id": 3, "display_name": "alice" } ],
+      "ha_areas": [ "Kitchen", "Office" ]
+   }
+}
+```
+- At most 64 satellites are listed.
+- `user_id`: `0` when the satellite is assigned to no one. `tier` `0` is the **Local Device**
+  (uuid `00000000-0000-0000-0000-000000000000`): the daemon's own microphone and speaker.
+- `firmware_version` / `ota_state` / `ota_target_version`: what the device last reported, and
+  any update in flight. `ota_state` is one of `idle`, `offered`, `downloading`, `verifying`,
+  `applying`, `rebooting`, `success`, `failed`, `unknown`; a device with no OTA record shows
+  `""` / `"idle"` / `""`.
+- `users[].display_name` is the username.
+- `ha_areas` is present only while Home Assistant is configured and reports areas.
+
+#### `update_satellite`
+Assign a satellite to a user and/or set its Home Assistant area.
+```json
+{
+   "type": "update_satellite",
+   "payload": {
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "user_id": 3,
+      "ha_area": "Kitchen"
+   }
+}
+```
+- `uuid` (required): 36 characters, else `INVALID_PARAM`. Unknown → `NOT_FOUND`.
+- `user_id` (optional): the user to assign; `0` or less unassigns. A user that can't be
+  assigned → `DB_ERROR` "Could not assign that user". Assigning the Local Device also moves
+  the daemon's own microphone to that user (between local turns).
+- `ha_area` (optional): any character other than letters, digits, space, `-` and `_` is
+  replaced by `_`. The satellite's `location` is unchanged.
+- The satellite is then disconnected so it reconnects with the new settings (even when nothing
+  changed).
+
+Response `update_satellite_response`: `{success: true, satellite: {…}}`, the satellite object
+as `list_satellites` gives it, with `online: false` (it is reconnecting), except that `user_id`
+echoes the request's value (a negative one is stored as unassigned but echoed as sent).
+
+#### `delete_satellite`
+Remove a satellite's registration. It is disconnected first.
+```json
+{"type": "delete_satellite", "payload": {"uuid": "11111111-2222-3333-4444-555555555555"}}
+```
+The Local Device can't be deleted (`FORBIDDEN`; reassign it instead). Unknown uuid →
+`NOT_FOUND`. Response `delete_satellite_response`: `{success: true, uuid}`.
+
+#### `get_satellite_registration_key`
+Fetch the satellite registration key, to show it as a pairing QR code.
+```json
+{"type": "get_satellite_registration_key"}
+```
+Response type **`satellite_registration_key_response`** (not `get_…_response`):
+```json
+{
+   "type": "satellite_registration_key_response",
+   "payload": { "key_set": true, "key": "<64 hex characters>", "tls_enabled": true }
+}
+```
+- `key` is `""` when `key_set` is false.
+- `tls_enabled`: the WebUI serves HTTPS; a client must not build a `ws://` pairing payload
+  then.
+- Limited to 5 fetches a minute and 30 an hour per source address (IPv6 per /64): past it,
+  an `error` frame with code `rate_limited`. A configured key that isn't exactly 64
+  characters gets an `error` frame with code `malformed_key`. (These two codes are
+  lowercase.)
+- Every fetch is audit-logged; the key itself never is.
+
+#### `ota_list`
+The releases the daemon can offer.
+```json
+{"type": "ota_list"}
+```
+Response `ota_list_response`:
+```json
+{
+   "type": "ota_list_response",
+   "payload": {
+      "enabled": true,
+      "releases": [ { "platform": "rpi", "tier": 1, "version": "2.1.0" } ]
+   }
+}
+```
+`enabled`: whether `[ota]` is on; with it off every push fails.
+
+#### `ota_push`
+Offer one release to one device.
+```json
+{
+   "type": "ota_push",
+   "payload": {
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "version": "2.1.0",
+      "allow_downgrade": false
+   }
+}
+```
+- `uuid` and `version` required: absent → `INVALID_PARAM`; present but empty → `OTA_ERROR`. `allow_downgrade` defaults to false and is
+  passed to the device in the offer.
+- The release's platform follows the device's tier (tier 2 → `esp32`, else `rpi`).
+- The device must be online and must have advertised `capabilities.ota` at registration.
+- Failures are an `error` frame, code `OTA_ERROR`, with message `"device is already
+  mid-update"`, `"device is offline"`, or `"no matching release, or push failed"` (also:
+  unknown device, no OTA capability, OTA off).
+
+Response `ota_push_response`: `{success: true, uuid, version}`. Progress then shows in the
+device's `ota_state` (`list_satellites`).
+
+#### `ota_push_all`
+Start a fleet rollout of one release to every eligible device of a platform: one canary first,
+then the rest once the canary comes back on the new version.
+```json
+{
+   "type": "ota_push_all",
+   "payload": { "platform": "rpi", "version": "2.1.0", "allow_downgrade": false }
+}
+```
+- `platform` (`"rpi"` or `"esp32"`) and `version` required (`INVALID_PARAM`).
+- Eligible: online devices of that tier not already on `version`, at most 64 (the rest are
+  counted as skipped).
+- One rollout at a time. The canary has 10 minutes to report the new version.
+- A rollout that can't start is an `error` frame, code `OTA_ERROR`, whose message says why
+  (`"A rollout is already in progress (abort it first)."`, `"No eligible devices (none online,
+  or all already on 2.1.0)."`, the canary couldn't be offered, …).
+
+Response `ota_push_all_response`: `{success: true, summary}`, `summary` a sentence such as
+`"Rollout started: canary <uuid> for 2.1.0, 3 device(s) queued, 1 skipped."`
+
+#### `ota_rollout_status`
+```json
+{"type": "ota_rollout_status"}
+```
+Response `ota_rollout_status_response`: `{status}`, a sentence for people, not for parsing:
+`"No rollout has run."`, `"Rollout starting…"`, or `"Rollout rpi/2.1.0 — rolling out (tier 1):
+4 target(s), 1 committed, 0 failed, 1 skipped. Canary: <uuid>."` (state is one of `waiting on
+canary`, `rolling out`, `done`, `failed`; a ` Last error: …` may follow). No `success` field.
+
+#### `ota_rollout_abort`
+Stop the rollout in progress (offers already made aren't withdrawn).
+```json
+{"type": "ota_rollout_abort"}
+```
+Response `ota_rollout_abort_response`: `{aborted}`; `false` when no rollout was running.
 
 ---
 
@@ -769,10 +1165,12 @@ Revoke (terminate) a specific session.
 {
    "type": "revoke_session",
    "payload": {
-      "session_token": "abc123..."
+      "token_prefix": "abc123def4567890"
    }
 }
 ```
+`token_prefix` is the 16-character prefix `list_my_sessions` returns; a shorter value is refused.
+
 Response: `revoke_session_response`
 
 #### `session_keepalive_enable`
@@ -800,6 +1198,152 @@ Requires an authenticated session. No response frame.
 
 ---
 
+### Messaging Channels (Authenticated)
+
+Each user manages their own Telegram, Discord, Slack and SMS channels (a channel answers only
+the person who linked it). Everything is scoped to the logged-in user, and operations key on the
+channel's `id`, never its name. A malformed request (a missing or bad `id`, a value out of
+range) is refused with an `error` frame (`INVALID_PARAM`, `NOT_FOUND`); an operation on a
+channel answers in its own response type, failure included:
+`{success: true, id}` or `{success: false, id, code, message}`, where `message` is a sentence
+to show the user.
+
+#### `list_channels`
+```json
+{"type": "list_channels"}
+```
+Response `list_channels_response`, most recently used first:
+```json
+{
+   "type": "list_channels_response",
+   "payload": {
+      "channels": [
+         {
+            "id": 12, "name": "my phone", "provider": "sms",
+            "enabled": true, "verified": false, "verify_ttl_seconds": 420,
+            "last_used_at": 1795000000, "conversation_id": 0,
+            "llm_type": "", "cloud_provider": "", "model": "",
+            "thinking_mode": "", "reasoning_effort": ""
+         }
+      ]
+   }
+}
+```
+- `enabled`: `false` for an unlinked channel (`reenable_channel` brings it back).
+- `verified`: `false` for an SMS link still waiting for the code texted to the number; then
+  `verify_ttl_seconds` is the code's remaining life (`0` expired, `-1` none sent). Absent when
+  verified.
+- `conversation_id`: the channel's conversation, `0` until its first message. The `llm_*`,
+  `model`, `thinking_mode`, `reasoning_effort` fields are that conversation's model settings;
+  `""` follows the default.
+- No `success` field: a failure gives an empty `channels` array.
+
+#### `create_link_code`
+Make a code to send from the chat (`/link CODE`) to link it to this account.
+```json
+{"type": "create_link_code", "payload": {"provider": "telegram"}}
+```
+- `provider` (optional): `telegram`, `discord`, `slack` or `sms`; another value is
+  `INVALID_PARAM`. Omitted or `""`: the code works from any provider.
+- A code is 8 characters and lasts 10 minutes. A user may hold at most 5 unused codes: past
+  that, an `error` frame `RATE_LIMITED`. Any other failure: `SERVICE_ERROR`.
+
+Response `create_link_code_response`: `{code, ttl_seconds: 600, provider}` (`provider` `""`
+when none was given).
+
+When the chat sends the code, the server pushes `messaging_channels_changed` with `change`
+`linked` (or `pending` for an SMS number, which still needs the code DAWN texts back) and the
+code that was used as `link_code`.
+
+#### `unlink_channel`
+```json
+{"type": "unlink_channel", "payload": {"id": 12}}
+```
+Response `unlink_channel_response`. `code`: `NOT_FOUND` (already unlinked), `SERVICE_ERROR`.
+The channel stays in the list with `enabled: false`.
+
+#### `reenable_channel`
+Undo an unlink.
+```json
+{"type": "reenable_channel", "payload": {"id": 12}}
+```
+Response `reenable_channel_response`. `code`: `NOT_FOUND` (it isn't unlinked), `NAME_TAKEN`
+(an active channel has its name), `ALREADY_LINKED` (the chat is linked to another DAWN account),
+`NOT_VERIFIED` (an SMS number that must be linked again with a new code), `SERVICE_ERROR`.
+
+#### `rename_channel`
+```json
+{"type": "rename_channel", "payload": {"id": 12, "name": "work phone"}}
+```
+- `name` required and non-empty (`INVALID_PARAM` error frame). Under 64 bytes, with no quotes,
+  angle brackets, backslashes or control characters (`code` `INVALID_PARAM` in the response).
+
+Response `rename_channel_response` (`{success, id}`; the new name isn't echoed). `code`:
+`NOT_FOUND`, `NAME_TAKEN`, `INVALID_PARAM`, `SERVICE_ERROR`.
+
+#### `verify_channel`
+Finish an SMS link with the code DAWN texted to the number.
+```json
+{"type": "verify_channel", "payload": {"id": 12, "code": "123456"}}
+```
+Response `verify_channel_response`. `code`: `BAD_CODE` (missing, not a string, or wrong: a code
+lasts 10 minutes and a number allows 10 tries a day), `NOT_FOUND` (the channel isn't waiting
+for a code), `ALREADY_LINKED` (the number is linked to another account), `SERVICE_ERROR`.
+
+#### `resend_channel_code`
+Text a new code to an SMS channel waiting for one.
+```json
+{"type": "resend_channel_code", "payload": {"id": 12}}
+```
+Response `resend_channel_code_response`. `code`: `RATE_LIMITED` (3 codes a day per number, 5
+per account), `UNAVAILABLE` (the phone service isn't running), `NOT_FOUND`, `SERVICE_ERROR`.
+
+#### `set_channel_llm`
+Set the model a channel's conversation runs on.
+```json
+{
+   "type": "set_channel_llm",
+   "payload": {
+      "conversation_id": 345,
+      "llm_type": "cloud",
+      "cloud_provider": "claude",
+      "model": "claude-example-model",
+      "thinking_mode": "adaptive",
+      "reasoning_effort": "medium"
+   }
+}
+```
+- `conversation_id` (required): the channel's `conversation_id` from `list_channels`. `0` (no
+  message yet) is refused with `INVALID_PARAM`. It must be the user's and a messaging channel's
+  conversation (`NOT_FOUND` / `INVALID_PARAM`).
+- The other fields are optional; absent or `""` follows the default. `llm_type`: `local` |
+  `cloud`; `cloud_provider`: `openai` | `claude` | `anthropic` | `gemini` | `openrouter`;
+  `thinking_mode`: `disabled` | `adaptive` | `enabled` | `auto`; `reasoning_effort`: `none` |
+  `minimal` | `low` | `medium` | `high` | `xhigh` | `max`. `model` up to 63 bytes, the others up
+  to 15. A value outside these is an `INVALID_PARAM` error frame.
+- A choice that can't run (a provider without its key) is not saved.
+
+Response `set_channel_llm_response`: `{success, conversation_id, error?}`, `error` saying why it
+wasn't saved. The channel's next message runs on the new settings.
+
+#### `messaging_channels_changed` (push)
+The user's channel list changed: a chat sent `/link`, a code was verified or sent, a channel
+was unlinked, renamed or re-enabled (from any tab or `dawn-admin`), or unverified SMS links
+expired. To every browser connection of the channel's owner. Re-read with `list_channels`.
+```json
+{
+   "type": "messaging_channels_changed",
+   "payload": { "channel_id": 12, "change": "pending", "link_code": "ABCD2345" }
+}
+```
+- `change`: `linked`, `pending` (an SMS number waiting for its code), `code_sent`,
+  `code_voided` (a code that couldn't be sent), `verified`, `unlinked`, `renamed`, `enabled`,
+  `removed` (expired unverified SMS links; `channel_id` `0`).
+- `link_code`: only with `linked` / `pending`, the link code the chat used, so a client showing
+  that code can close it.
+
+---
+
 ### Conversation History (Authenticated)
 
 #### `list_conversations`
@@ -821,7 +1365,7 @@ Create a new conversation (clears current session context).
 {
    "type": "new_conversation",
    "payload": {
-      "save_current": true
+      "title": "New Title"
    }
 }
 ```
@@ -918,6 +1462,22 @@ continuations, which went private with it. Then, once any memory extraction in f
 finished, a `conversation_learned` frame reports what the conversation already taught, so the
 client can offer to forget it.
 
+#### `set_pinned`
+Pin or unpin a conversation.
+```json
+{
+   "type": "set_pinned",
+   "payload": {
+      "conversation_id": 42,
+      "is_pinned": true
+   }
+}
+```
+Response `set_pinned_response`: `{success: true, conversation_id, is_pinned, message}`, or
+`{success: false, error}` (`"Missing conversation_id or is_pinned"`, `"Conversation not
+found"` for one that isn't the user's, `"Failed to update pinned state"`). Other tabs aren't
+told; they see it on their next `list_conversations`.
+
 #### `conversation_learned_request`
 Ask again what a private conversation taught (the same report `set_private` sends).
 ```json
@@ -970,6 +1530,54 @@ Reassign a conversation to a different user. **Admin only.**
 ```
 Response: `reassign_conversation_response`
 
+#### `export_conversation`
+One of the user's conversations as a self-contained JSON document, for a download.
+```json
+{ "type": "export_conversation", "payload": { "conversation_id": 42, "format": "json" } }
+```
+- `conversation_id`: required. The user's own conversations only, an admin's too.
+- `format`: optional, `"json"` (default) or `"html"`, echoed back. The server sends the same JSON
+  document either way; the client renders HTML from it.
+- A request without a `payload` gets no reply.
+
+Response:
+```json
+{
+   "type": "export_conversation_response",
+   "payload": {
+      "success": true,
+      "format": "json",
+      "data": {
+         "exported_at": "2026-11-27T15:00:00Z",
+         "dawn_version": "0.1.0",
+         "conversation": {
+            "id": 42, "title": "Trip planning",
+            "created_at": "2026-11-20T10:00:00Z", "updated_at": "2026-11-20T10:30:00Z",
+            "message_count": 12, "origin": "webui", "is_private": false,
+            "continued_from": null,
+            "llm_settings": { "follows_default": true, "llm_type": "cloud", "cloud_provider": "claude",
+                              "model": "…", "thinking_mode": "auto", "reasoning_effort": "medium" }
+         },
+         "messages": [
+            { "role": "user", "content": "Find me a train to the coast.", "timestamp": "2026-11-20T10:00:05Z" }
+         ]
+      }
+   }
+}
+```
+- Times are ISO 8601 UTC strings. `llm_settings` has the shape of `load_conversation`'s.
+- `messages`: every stored message in order (tool rows included), with `email_ref` on a user row
+  that asked about an attached email and `stopped: true` on a reply the user stopped. Request
+  context the daemon adds for the model is left out, and so is image data (an image appears as
+  its marker in `content`).
+- The whole document is one frame.
+
+On failure `success: false` with `error` "Missing conversation_id", "Conversation not found",
+"Access denied" (another user's), "Database error", "Failed to load messages", "Conversation has
+N messages, exceeding export limit of M" (`[webui] export_max_messages`, default 5000; 0 means no
+limit) or "Another export is in progress, try again": the daemon runs one export at a time, for
+all users.
+
 #### `search_conversations`
 Search through conversation history.
 ```json
@@ -991,9 +1599,7 @@ persist the **assistant's final answer** (role `assistant`).
    "payload": {
       "conversation_id": 42,
       "role": "assistant",
-      "content": "The weather is sunny.",
-      "thinking": "...",
-      "tool_results": "[...]"
+      "content": "The weather is sunny."
    }
 }
 ```
@@ -1155,6 +1761,153 @@ read, aliases included: advance `offset` by `count`, not by `entities.length`.
 | `alias_count`, `is_user_self` | Linked aliases; whether it is the user |
 | `relations` | Its relations, outgoing first, then incoming from outside the card. Each has `relation`, `object_name`, `object_entity_id`, `direction` (`out`/`in`), `confidence`, `mention_count`, and `valid_from`/`valid_to` when set. For `in`, `object_name`/`object_entity_id` name the other end's card |
 | `relations_total` | All of the card's relations. At most 50 per direction are sent, most seen first; when `relations_total` is larger, the rest exist but weren't sent |
+
+#### The entity graph: delete, merge, aliases, proposals
+
+These edit the Graph tab's entities. Every verb is scoped to the logged-in user: an id
+that isn't the caller's reads as not found. Replies carry `success` and, on failure,
+`error` (a human-readable string, not a code). A request without a `payload` gets no reply
+for `delete_memory_entity`, `merge_memory_entities`, `entity_link_request`,
+`entity_unlink_request` and `entity_proposal_resolve_request`.
+
+An entity can be an **alias** of another (its **canonical**): a soft link that keeps both
+rows and can be split again. A merge or a hard link removes the source row for good.
+
+##### `delete_memory_entity`
+Delete an entity and every relation that names it (as subject or object).
+```json
+{ "type": "delete_memory_entity", "payload": { "entity_id": 812 } }
+```
+Response: `delete_memory_entity_response` with `success` and `message` ("Entity deleted"),
+or `error`: "Missing entity_id", "Entity not found", "Failed to delete entity". The id is not
+echoed back. The delete counts as the user's removal: what memory had put from it into the
+user's conversations is withdrawn, in the background.
+
+##### `merge_memory_entities`
+Merge one entity into another for good: the source's relations, the facts filed under it and
+its contacts move to the target, duplicates that creates are dropped, the target takes the
+source's mention count and seen range, and the source row is deleted. Not undoable (use
+`entity_link_request` for a link that can be split).
+```json
+{ "type": "merge_memory_entities", "payload": { "source_id": 812, "target_id": 640 } }
+```
+Response: `merge_memory_entities_response` with `success` and `message` ("Entities merged"), or
+`error`: "Missing source_id or target_id", "Cannot merge an entity with itself", "Entity not
+found or not owned by user", "Failed to merge entities". The ids are not echoed back.
+
+##### `entity_aliases_request`
+List an entity's current aliases (split links are left out), newest first, at most 64.
+```json
+{ "type": "entity_aliases_request", "payload": { "entity_id": 640 } }
+```
+Response:
+```json
+{
+   "type": "entity_aliases_response",
+   "payload": {
+      "success": true,
+      "entity_id": 640,
+      "aliases": [
+         {
+            "link_id": 31,
+            "source_entity_id": 812,
+            "source_canonical_name": "alice smith",
+            "link_kind": "soft",
+            "composite_score": 0.93,
+            "linked_at": 1791648000
+         }
+      ]
+   }
+}
+```
+| Field | Meaning |
+|---|---|
+| `link_id` | The link, for `entity_unlink_request` |
+| `source_entity_id` | The alias entity; `0` for a hard link, whose source row is gone |
+| `source_canonical_name` | The alias's canonical name as it was when linked |
+| `link_kind` | `soft` (can be split) or `hard` (can't) |
+| `composite_score` | The match score that made the link; `-1` when none was recorded (a link the user made) |
+| `linked_at` | Unix seconds |
+
+Errors: "Missing entity_id", "Invalid entity_id" (not positive), "Failed to list aliases". This
+verb answers even with no `payload` ("Missing entity_id").
+
+##### `entity_merge_proposal_list_request`
+The caller's pending merge proposals (pairs memory judged likely the same entity but not sure
+enough to link), newest first, at most 64. No payload; any payload is ignored.
+```json
+{ "type": "entity_merge_proposal_list_request" }
+```
+Response:
+```json
+{
+   "type": "entity_merge_proposal_list_response",
+   "payload": {
+      "success": true,
+      "proposals": [
+         {
+            "proposal_id": 7,
+            "source_entity_id": 812,
+            "target_entity_id": 640,
+            "source_canonical_name": "al smith",
+            "target_canonical_name": "alice smith",
+            "composite_score": 0.78,
+            "proposed_at": 1791648000
+         }
+      ]
+   }
+}
+```
+A name is `""` when its entity has since been deleted. Error: "Failed to list proposals". The
+count of pending proposals is pushed as `memory_proposals_changed`.
+
+##### `entity_link_request`
+Link one entity as a soft alias of another (the user's own link).
+```json
+{
+   "type": "entity_link_request",
+   "payload": { "source_entity_id": 812, "target_entity_id": 640, "reason": "same person" }
+}
+```
+- `source_entity_id`, `target_entity_id` (required): the source becomes an alias of the target.
+- `reason` (optional, default `"operator"`): kept in the link's record; cut to 128 bytes, and
+  refused when the prompt-injection filter matches it.
+
+Response: `entity_link_response` with `success`, `link_id`, `source_entity_id` and
+`target_entity_id`, or `error`: "Missing source_entity_id or target_entity_id", "Reason failed
+prompt-injection filter", or "Link failed (entity not found, self-link, or source has
+dependents)" (the source is itself the canonical of other aliases).
+
+##### `entity_unlink_request`
+Split a soft link: the alias becomes an entity of its own again.
+```json
+{ "type": "entity_unlink_request", "payload": { "link_id": 31, "reason": "different people" } }
+```
+- `link_id` (required).
+- `reason` (optional, default `"split-by-operator"`): 128 bytes, filtered as for
+  `entity_link_request`.
+
+Response: `entity_unlink_response` with `success` and `link_id`, or `error`: "Missing link_id",
+"Reason failed prompt-injection filter", "Link not found or already unlinked", and, for any
+other failure, "Hard merges cannot be split — use 'dawn-admin memory reextract'".
+
+##### `entity_proposal_resolve_request`
+Approve or reject a pending merge proposal. Approving makes the source a soft alias of the target.
+```json
+{
+   "type": "entity_proposal_resolve_request",
+   "payload": { "proposal_id": 7, "resolution": "approved" }
+}
+```
+- `proposal_id` (required, positive); `resolution` (required): `approved` or `rejected`.
+
+Response: `entity_proposal_resolve_response` with `success`, `proposal_id`, `resolution`, and
+`link_id` when an approval made a link; or `error`: "Missing proposal_id or resolution",
+"Invalid proposal_id or resolution", "resolution must be 'approved' or 'rejected'", "Proposal not
+found or already resolved", or "Approve failed (entity not found, self-link, or source has
+dependents); proposal still pending". On success every connection of the user (satellites
+included) gets
+`memory_proposals_changed` with the new pending count.
 
 #### `get_memory_fact_source`
 Return the verbatim source conversation messages a fact was extracted from (memory provenance).
@@ -1466,17 +2219,103 @@ A batch a forget removed (its conversation forgotten) comes as its id alone:
 ```
 Drop it (its row and its conversation marker) wherever it is shown.
 
+#### `export_memories`
+The user's memories, for a backup or for another assistant.
+```json
+{ "type": "export_memories", "payload": { "format": "json" } }
+```
+- `format`: optional, `"json"` (default) or `"text"`; anything else is refused with "Invalid
+  format (use 'json' or 'text')". The payload may be left out.
+
+`json` response, lossless enough to import back:
+```json
+{
+   "type": "export_memories_response",
+   "payload": {
+      "success": true, "format": "json", "fact_count": 1, "pref_count": 1, "entity_count": 1,
+      "data": {
+         "version": 1, "format": "dawn_memory", "exported_at": 1785000000,
+         "facts": [ { "fact_text": "Alice prefers window seats", "confidence": 0.9,
+                      "source": "explicit", "created_at": 1784000000, "origin": 0, "outside": 0 } ],
+         "preferences": [ { "category": "communication", "value": "brief answers", "confidence": 0.8,
+                            "source": "inferred", "created_at": 1784000000, "outside": 0 } ],
+         "entities": [ { "name": "Bob", "entity_type": "person", "mention_count": 4, "first_seen": 1783000000,
+                         "relations": [ { "relation": "works_at", "object_name": "Example Corp",
+                                          "confidence": 0.8, "mention_count": 2 } ] } ]
+      }
+   }
+}
+```
+- `outside`: where the item's text came from (`outside_kind_t`, as on documents). `origin`: how a
+  fact was learned.
+- An entity's `relations` include its aliases' (an alias has no entry of its own).
+
+`text` response: `{success, format: "text", data, fact_count, pref_count}`, where `data` is one
+string: a `# My Memories` heading, a `## Facts` list (`- <fact>`) and a `## Preferences` list
+(`- <category>: <value>`). No entities.
+
+The whole export is one frame, however large. On failure `success: false` with "Failed to read
+memories", "Memory allocation failed" or "Memories changed during the export; try again".
+
+#### `import_memories`
+Add memories from a DAWN JSON export or from pasted text (one fact per line, as another
+assistant lists them). Preview first, then commit.
+```json
+{ "type": "import_memories", "payload": { "format": "text", "text": "- Alice prefers window seats\n- Alice is allergic to peanuts", "commit": false } }
+```
+```json
+{ "type": "import_memories", "payload": { "format": "json", "data": { "facts": [ … ], "preferences": [ … ] }, "commit": true } }
+```
+- `format`: optional, `"text"` (default) or `"json"`.
+- `commit`: optional, default false. False is a preview: nothing is written and the reply lists
+  what would be imported.
+- `text` (format text): required, at most 256 KB ("Text too large (256KB max)"). Read line by
+  line, at most 200 lines; a line starting `#` is skipped and a leading `- ` or `* ` is dropped;
+  a line under 3 characters is skipped as empty. Each fact gets confidence 0.7.
+- `data` (format json): required; an export's `data` object. Up to 200 of its `facts` and 200 of
+  its `preferences` are read; `entities` are ignored. A fact's `confidence` (clamped to 0–1,
+  default 0.8) and `outside` are kept; a missing or out-of-range `outside` is stored as not known.
+- A fact is cut to 511 bytes and a preference to a 31-byte category and 255-byte value.
+- A request without a `payload` gets no reply.
+
+Response:
+```json
+{
+   "type": "import_memories_response",
+   "payload": {
+      "success": true, "committed": false,
+      "imported_facts": 2, "imported_prefs": 0,
+      "skipped_dupes": 0, "skipped_empty": 0, "skipped_blocked": 0, "skipped_failed": 0,
+      "preview": [
+         { "type": "fact", "text": "Alice prefers window seats", "confidence": 0.7 },
+         { "type": "preference", "category": "communication", "value": "brief answers" }
+      ]
+   }
+}
+```
+- `preview`: only when `commit` is false.
+- `skipped_dupes`: a fact the user already has (committing marks the existing one as stated by
+  the user). `skipped_blocked`: refused by the memory filter. `skipped_failed`: a fact whose save
+  failed on commit. A preference is upserted by category (no duplicate check).
+- Imported facts are stored without an embedding; they become searchable by meaning once the
+  background embedder reaches them.
+- On failure `success: false` with "Invalid format (use 'json' or 'text')",
+  "Missing data", "Missing text", "Empty text", "Text too large (256KB max)" or "Memory
+  allocation failed".
+
 #### `delete_memory_preference`
-Delete a specific user preference.
+Delete one of the user's preferences, by its category.
 ```json
 {
    "type": "delete_memory_preference",
    "payload": {
-      "preference_id": 3
+      "category": "communication"
    }
 }
 ```
-Response: (uses `delete_memory_fact_response` type)
+Response: `delete_memory_preference_response` with `success` and `message` ("Preference deleted"),
+or `error`: "Missing category", "Preference not found", "Failed to delete preference". A request
+without a `payload` gets no reply.
 
 #### `delete_memory_summary`
 Delete a specific conversation summary.
@@ -1488,7 +2327,9 @@ Delete a specific conversation summary.
    }
 }
 ```
-Response: (uses `delete_memory_fact_response` type)
+Response: `delete_memory_summary_response` with `success` and `message` ("Summary deleted"), or
+`error`: "Missing summary_id", "Summary not found", "Failed to delete summary". A request without
+a `payload` gets no reply.
 
 #### `delete_all_memories`
 Delete all memories for the current user. Requires confirmation.
@@ -1507,10 +2348,135 @@ extracted, so their memories aren't learned again from them.
 
 ---
 
+### Contacts (Authenticated)
+
+Each user's contacts: an email address, phone number or postal address attached to a person in
+their memory (an entity). Every reply is `<type>_response` with `success` and, on failure,
+`error`. A request in this section without a `payload` (except `contacts_list`) gets no
+reply. `entity_set_photo` and `entity_ensure`, at the end, set the person's photo the panel
+shows.
+
+**A contact:**
+```json
+{"contact_id": 7, "entity_id": 88, "entity_name": "Bob", "field_type": "email",
+ "value": "bob@example.com", "label": "work", "photo_id": "img_0123"}
+```
+`photo_id` only when the person has a photo.
+
+**Values** (`contacts_add`, `contacts_update`): `field_type` is `email`, `phone` or `address`.
+`value` at most 255 bytes, `label` at most 31. An email needs `user@domain.tld` and is
+lowercased. A phone number may contain digits, spaces, `-`, `(`, `)` and `.`, and a leading
+`+`; it is stored as E.164: `+` and 7 to 15 digits, or a 10-digit US number (or 11 digits
+starting with `1`) given `+1`. An address isn't checked.
+
+#### `contacts_list`
+```json
+{"type": "contacts_list", "payload": {"field_type": "phone", "limit": 20, "offset": 0}}
+```
+All optional: `field_type` filters; `limit` 1–100 (default 20); `offset` default 0. Ordered by
+name. Response: `{success, contacts: [...], has_more}`.
+
+#### `contacts_search`
+Contacts by person name.
+```json
+{"type": "contacts_search", "payload": {"name": "bob", "field_type": "email"}}
+```
+`name` required (`"Missing 'name' field"`). Matches the whole name first, then a whole word of
+it or of another name of the same person, then a part of a word; at most 20. An empty name, or
+one over 200 bytes, finds nothing. `field_type` optional. Response: `{success, contacts}`.
+
+#### `contacts_add`
+```json
+{
+   "type": "contacts_add",
+   "payload": {
+      "entity_name": "Bob",
+      "field_type": "email",
+      "value": "bob@example.com",
+      "label": "work"
+   }
+}
+```
+- `field_type`, `value` required; `label` optional.
+- The person: `entity_id` (one of the user's entities), or `entity_name` (required when there's
+  no `entity_id`). A name that is exactly one of the user's entities uses it. Otherwise, when
+  people with similar names exist, nothing is added and the reply asks which one:
+  ```json
+  {"success": false, "needs_disambiguation": true, "entered_name": "Bob",
+   "candidates": [ {"id": 88, "name": "Bob Smith", "mention_count": 12} ]}
+  ```
+  Send again with the chosen `entity_id`, or with `force_create: true` to make a new person of
+  that name. With no similar person, a new one is made.
+- An `entity_id` that isn't the user's → `"Failed to add contact"`; an `entity_id` of 0 or less →
+  `"Failed to find or create entity"`.
+
+Response: `{success: true, entity_id, entity_created}`.
+
+#### `contacts_update`
+Replace a contact's type, value and label.
+```json
+{
+   "type": "contacts_update",
+   "payload": {"contact_id": 7, "field_type": "phone", "value": "555 010 0199", "label": "mobile"}
+}
+```
+`contact_id`, `field_type`, `value` required; `label` optional (absent clears it). Checked as
+`contacts_add`. Not the user's or unknown → `"Failed to update contact"`. Response `{success}`.
+
+#### `contacts_delete`
+```json
+{"type": "contacts_delete", "payload": {"contact_id": 7}}
+```
+Not the user's or unknown → `"Failed to delete contact"`. Response `{success}`.
+
+#### `contacts_search_entities`
+People in the user's memory whose names match, to pick one for `contacts_add`.
+```json
+{"type": "contacts_search_entities", "payload": {"query": "bo"}}
+```
+`query` required; empty gives no results. At most 10, persons only. Response:
+`{success, entities: [{id, name, entity_type: "person", mention_count}]}`.
+
+#### `entity_set_photo`
+Set or clear the photo shown for an entity (the contacts panel's avatar).
+```json
+{ "type": "entity_set_photo", "payload": { "entity_id": 640, "photo_id": "img_0123abcd" } }
+```
+- `entity_id` (required): one of the caller's entities.
+- `photo_id` (optional): an uploaded image's id, which must be the caller's. Absent, `null` or
+  `""` clears the photo.
+
+The new photo is kept for good (exempt from image retention); a photo it replaces goes back to
+normal retention.
+
+Response: `entity_set_photo_response` with `success`, `entity_id` and `photo_id` (when one was
+set), or `error`: "Missing 'entity_id' field", "Image not found", "Image does not belong to you",
+"Entity not found or not owned by you", "Database error".
+
+#### `entity_ensure`
+Find the caller's entity by name, or create it as a person, so a photo can be set on someone
+memory hasn't met yet.
+```json
+{ "type": "entity_ensure", "payload": { "name": "Alice Smith" } }
+```
+- `name` (required, non-empty). It is matched by its canonical form (ASCII lower-cased, trailing
+  spaces trimmed, at most 63 bytes). A new entity has type `person`; an existing one keeps its type, counts one more
+  mention, and takes the new `name` when it is longer than its own.
+
+Response: `entity_ensure_response` with `success`, `entity_id` and `created` (a new entity), or
+`error`: "Missing 'name' field", "Failed to create entity".
+
+---
+
 ### Document Library (Authenticated)
 
-The library panel's other requests (`doc_library_*`) are described in
-`include/webui/webui_doc_library.h`; this section covers whose words a document holds.
+The document library panel: uploaded documents and notes the model can search. Every request
+needs a login (else `UNAUTHORIZED`); each user works on their own documents and reads the global
+ones. Every reply is `<request>_response` with `{success, error?, …}` (`set_document_own`, below,
+is the exception). `doc_library_delete`, `_index`, `_toggle_global`, `_note_save`,
+`_note_update`, `_doc_update`, `_version_list` and `_version_restore` need a `payload`: a
+request without one gets no reply. A note is a one-chunk document whose filename is its label
+and whose `filetype` is `"note"`.
 
 In `doc_library_list_response`, each row of a document the requester owns carries:
 - `outside`: where its text came from (`outside_kind_t`, `include/core/outside_kind.h`): `0` the
@@ -1538,6 +2504,313 @@ or `{"document_id": 42, "error": "..."}` (a missing field, or not the user's doc
 edit or append by the model in a turn that read outside text clears the vouch; the next list
 shows it.  A deleted document recovered comes back without it.
 
+#### `doc_library_list`
+A page of the user's documents and notes, newest first, or the results of a search.
+```json
+{ "type": "doc_library_list", "payload": { "scope": "notes", "limit": 20, "offset": 0 } }
+```
+All members optional (the payload may be left out):
+- `limit`: 1–20, default 20; any other value is treated as 20.
+- `offset`: rows to skip, default 0.
+- `scope`: `"documents"` (no notes), `"notes"` (notes only); anything else, or absent, both.
+- `show_all`: admins only, ignored for others: every user's documents, each row with `user_id`
+  and `owner_name`. `scope` is ignored with `show_all`.
+- `query`: a word search over labels and text (BM25). One page of at most `limit` rows, one per
+  document; `offset` and `show_all` are ignored and `has_more` is false.
+
+Without `query` (or `show_all`): the user's own documents and the global ones.
+
+Response:
+```json
+{
+   "type": "doc_library_list_response",
+   "payload": {
+      "success": true,
+      "count": 2,
+      "has_more": false,
+      "documents": [
+         { "id": 42, "filename": "Wifi password", "filetype": "note", "is_note": true,
+           "text": "The guest network is example-guest.", "num_chunks": 1,
+           "is_global": false, "created_at": 1785000000, "outside": 0, "own": true },
+         { "id": 41, "filename": "manual.pdf", "filetype": "pdf", "is_note": false,
+           "num_chunks": 18, "is_global": false, "created_at": 1784990000, "outside": 5,
+           "own": false, "has_original": true, "original_blob_id": "0123456789abcdef0123456789abcdef" }
+      ]
+   }
+}
+```
+- `text`: a note's body, so the panel can show and edit it without another request. Documents
+  carry none; read one with `doc_library_get`.
+- `has_original`, `original_blob_id`: on documents (not notes) the requester owns or that are
+  global. The uploaded file is downloadable at `GET /api/documents/original/<original_blob_id>`.
+- `outside`, `own`: see above; only on the requester's own documents.
+- `has_more`: the page was full (so it can be true when nothing follows).
+- On failure `success: false`, `error` "Failed to list documents".
+
+#### `doc_library_get`
+A document's full text.
+```json
+{ "type": "doc_library_get", "payload": { "id": 41 } }
+```
+Response `{success: true, id, filename, filetype, text}`. One error for every refusal
+(missing, another user's private document, or an upload too old to have its full text stored):
+`{success: false, id, error: "Document unavailable"}`, so the reply doesn't tell whether an id
+exists. `id` is echoed on every reply but this one: a request with no `id` (or no payload)
+gets `{success: false, error: "Missing document id"}`.
+
+#### `doc_library_delete`
+```json
+{ "type": "doc_library_delete", "payload": { "id": 41 } }
+```
+The owner, or an admin for anyone's. Response `{success: true, id}`, or `success: false` with
+"Missing document id", "Document not found", "Permission denied" or "Delete failed". Its passages
+are withdrawn from the conversations they were recalled into, and its versions are kept, so it
+appears in `doc_library_deleted_list` and can be restored.
+
+#### `doc_library_index`
+Add a document from text the client extracted. Uploading the file first (`POST /api/documents`)
+returns its stored original's blob id, which the client passes back here.
+```json
+{
+   "type": "doc_library_index",
+   "payload": {
+      "filename": "manual.pdf", "filetype": "pdf", "text": "…the extracted text…",
+      "is_global": false, "original_blob_id": "0123456789abcdef0123456789abcdef"
+   }
+}
+```
+- `filename`, `filetype`, `text`: required (stored up to 255 and 15 bytes).
+- `is_global`: optional; honoured for admins only, others always add a private document.
+- `original_blob_id`: optional, links the document to its uploaded original.
+
+The text is chunked and embedded before the reply. Response `{success: true, id, filename,
+num_chunks, failed_chunks?}` (`failed_chunks`: chunks that couldn't be embedded, when any), or
+`success: false` with "Missing required fields" or the indexer's message: "Document text is
+empty", "Document text exceeds maximum size" (over `[documents] max_index_size_kb`, default
+2048 KB), "Document limit reached (N max)" (`[documents] max_indexed_documents` per user,
+default 50), "Embedding engine not available", "Document already indexed (id=N)",
+"Failed to chunk document text", "No chunks could be embedded", "Failed to create document record", "Memory allocation failed".
+
+#### `doc_library_toggle_global`
+Share a document with every user, or stop sharing it.
+```json
+{ "type": "doc_library_toggle_global", "payload": { "id": 41, "is_global": true } }
+```
+The owner, or an admin. Response `{success: true, id, is_global}`, or `success: false` with
+"Missing id or is_global", "Document not found", "Permission denied" or "Update failed".
+
+#### `doc_library_note_save`
+Create a note.
+```json
+{ "type": "doc_library_note_save", "payload": { "label": "Wifi password", "text": "The guest network is example-guest." } }
+```
+Both required. Response `{success: true, id, label}`, or `success: false` with "A label and text
+are required", "A note with that label already exists" (the user's own notes; edit it with
+`doc_library_note_update`), "Note label is empty", "Note text is empty", "Note is too long to
+file as a single note — …" (over about 1,000 tokens: index it as a document instead), "Document
+limit reached", "Embedding engine not available", "Failed to create note record", "Failed to embed
+note text", "Failed to store note chunk" or "Memory allocation failed". A new note is always private.
+
+#### `doc_library_note_update`
+Replace a note's label and text; its id stays.
+```json
+{ "type": "doc_library_note_update", "payload": { "id": 42, "label": "Wifi password", "text": "Updated text." } }
+```
+All three required. The previous content is kept as a version. Response `{success: true, id,
+label}`, or `success: false` with "id, label, and text are required", "Another note already
+uses that label", or the indexer's message (as for `doc_library_note_save`, plus a refusal for a
+note that isn't the user's). The note keeps its `outside` kind and the user's vouch.
+
+#### `doc_library_doc_update`
+Replace a document's full text (re-chunked and re-embedded); its id stays. Notes are refused.
+```json
+{ "type": "doc_library_doc_update", "payload": { "id": 41, "text": "…the full new text…" } }
+```
+The owner only. The previous content is kept as a version. Response `{success: true, id}`, or
+`success: false` with "a valid id and text are required", "Document not found (or not yours)",
+"That item is a note — edit it via doc_library_note_update", or the indexer's message (an
+upload too old to have its full text stored asks to be re-saved first).
+
+#### `doc_library_version_list`
+A note's or document's earlier versions, newest first (at most 32).
+```json
+{ "type": "doc_library_version_list", "payload": { "id": 42 } }
+```
+Response:
+```json
+{
+   "type": "doc_library_version_list_response",
+   "payload": {
+      "success": true, "id": 42,
+      "versions": [ { "id": 901, "filename": "Wifi password", "preview": "The guest network is…", "archived_at": 1785000100 } ]
+   }
+}
+```
+`preview`: the start of that version's text (under 160 bytes). Each row's `id` is a version id,
+for `doc_library_version_restore`. A document that isn't the user's lists no versions
+(`success: true`, empty). `success: false` only for "a valid id is required".
+
+#### `doc_library_deleted_list`
+The user's deleted notes and documents that can still be restored, newest first (at most 32).
+Payload optional.
+```json
+{ "type": "doc_library_deleted_list" }
+```
+Response `{success: true, deleted: [{version_id, filename, preview, archived_at}]}`.
+
+#### `doc_library_version_restore`
+Bring back a version.
+```json
+{ "type": "doc_library_version_restore", "payload": { "version_id": 901 } }
+```
+- When the item still exists, its content is replaced in place, and its current content is kept
+  as a version first (so the restore can be undone).
+- When it was deleted, it is created again under the version's label: as a note, or as a
+  document when the text is too long for one note. It gets a new `id`, and leaves
+  `doc_library_deleted_list`.
+- The item takes back the `outside` kind the version had.
+
+Response `{success: true, id, label, recreated}` (`recreated`: it was deleted and is new), or
+`success: false` with "a valid version_id is required", "Version not found (or not yours)" or
+the indexer's message.
+
+---
+
+### Code Projects
+
+Git repositories indexed into a code graph the model can search (the coding harness). Built only
+with code projects (`DAWN_ENABLE_CODE_PROJECTS`); a daemon without it answers these types with
+`UNKNOWN_TYPE`. Every request needs a login (else `UNAUTHORIZED`). A user sees their own projects
+and the global ones; an admin sees every project. Only a project's importer, or an admin, may
+refresh, rebuild, change the branch of or delete it. The payload is optional on every request,
+and every request gets a reply.
+
+Replies use `{ok, message}`, not `success` / `error`: `message` is a sentence for people, on
+success too. `code_projects_list`, `code_projects_import` and `code_projects_link` reply with
+`<request>_response`; `code_projects_refresh`, `_rebuild`, `_set_branch` and `_delete` all reply
+with **`code_projects_action_response`**, so a client with two of those outstanding can't tell
+the replies apart.
+
+Work runs on a background thread: an accepted import, link, refresh or rebuild is only queued,
+and `code_project_status_changed` (below) reports each change of a project's state.
+
+#### `code_projects_list`
+```json
+{ "type": "code_projects_list" }
+```
+Response (at most 64 projects):
+```json
+{
+   "type": "code_projects_list_response",
+   "payload": {
+      "ok": true,
+      "projects": [
+         { "id": 5, "name": "example-repo", "status": "ready", "status_msg": "",
+           "is_global": false, "source_url": "https://git.example.com/alice/example-repo.git",
+           "indexed_at": 1785000000, "kind": "clone", "branch": "main", "owned": true }
+      ]
+   }
+}
+```
+- `status`: `"cloning"`, `"indexing"`, `"ready"` or `"error"` (`status_msg` says why).
+- `kind`: `"clone"` (DAWN's own clone of `source_url`) or `"local"` (a linked checkout on the
+  server, `code_projects_link`).
+- `owned`: whether this user may act on it (always true for an admin).
+- `indexed_at`: epoch seconds of the last index, `0` before one.
+- On a database failure `ok: false` with an empty `projects`.
+
+#### `code_projects_import`
+Clone a remote repository and index it.
+```json
+{
+   "type": "code_projects_import",
+   "payload": { "url": "https://git.example.com/alice/example-repo.git", "name": "example-repo", "branch": "main", "global": false }
+}
+```
+- `url`: required.
+- `name`: optional; defaults to the URL's last path segment without `.git` (up to 63 bytes).
+- `branch`: optional; the remote's default branch when absent.
+- `global`: optional; honoured for admins only, others always import a private project.
+- Refused with "Code projects are disabled." when `[code_projects] enabled` is off, and with
+  "Importing projects is restricted to administrators." for a non-admin when
+  `[code_projects] import_user_required` is `"admin"`.
+
+Response `{ok: true, message: "Checking repository '<name>'…"}` means accepted for checking: the
+server then checks the repository exists before adding anything. If it does, the project appears
+(`code_project_status_changed`) and is cloned and indexed; if not, `code_project_import_failed`
+goes to the user. `ok: false` with "A repository URL is required." or "Import rejected (invalid
+name/URL, duplicate, or blocked host)."
+
+#### `code_projects_link`
+Index an existing checkout on the server, in place. **Admin only**, whatever
+`import_user_required` says. DAWN never changes its branch or deletes its files.
+```json
+{ "type": "code_projects_link", "payload": { "path": "/srv/src/example-repo", "name": "example-repo" } }
+```
+- `path`: required; a git checkout under one of `[code_projects] allowed_local_roots`.
+- `name`: optional; defaults to the path's last component.
+
+Response `{ok: true, message: "Local repository linked; indexing…"}`, or `ok: false` with "Code
+projects are disabled.", "Linking a local repository is restricted to administrators.", "A local
+path is required." or "Link rejected (path not allowed, not a git repo, or duplicate name)."
+
+#### `code_projects_refresh`
+Fetch the latest commits (a clone) and re-index what changed.
+```json
+{ "type": "code_projects_refresh", "payload": { "name": "example-repo" } }
+```
+Response `code_projects_action_response`: `ok: true`, "Re-index queued.", or `ok: false` with
+"Refresh failed." or one of the shared refusals below.
+
+#### `code_projects_rebuild`
+Fetch (a clone), discard the project's code graph and index it again from scratch.
+```json
+{ "type": "code_projects_rebuild", "payload": { "name": "example-repo" } }
+```
+Response `code_projects_action_response`: "Clean rebuild queued (may take a few minutes).", or
+`ok: false` with "Rebuild failed." or a shared refusal.
+
+#### `code_projects_set_branch`
+Switch a clone to another branch and rebuild its index.
+```json
+{ "type": "code_projects_set_branch", "payload": { "name": "example-repo", "branch": "develop" } }
+```
+Response `code_projects_action_response`: "Branch set; rebuilding index (may take a few
+minutes).", or `ok: false` with "A branch name is required.", "Set branch failed (linked repos
+track their live checkout)." (a linked project, or a branch name git doesn't accept) or a shared
+refusal.
+
+#### `code_projects_delete`
+Remove a project: its code graph, its row and, for a clone, DAWN's clone on disk (a linked
+checkout's files are never touched).
+```json
+{ "type": "code_projects_delete", "payload": { "name": "example-repo" } }
+```
+Response `code_projects_action_response`: "Project deleted.", or `ok: false` with "Delete
+failed." or a shared refusal. `code_project_status_changed` follows for the removed id.
+
+Shared refusals of refresh, rebuild, set_branch and delete (`ok: false`): "A project name is
+required.", "No such project.", "You can only manage projects you imported.". These act on a
+project by its `name`, not its `id`, and they don't check `[code_projects] enabled`.
+
+#### `code_project_status_changed` (push)
+A project was added, changed state or was deleted.
+```json
+{ "type": "code_project_status_changed", "payload": { "project_id": 5 } }
+```
+Sent to every logged-in connection of every user (satellites included), whoever owns the
+project: it carries only the id, and each client refetches its own `code_projects_list`.
+
+#### `code_project_import_failed` (push)
+An accepted `code_projects_import` (or `code_projects_link`) was dropped before the project was
+added: the repository wasn't found or reachable (an import), or another project took the name
+meanwhile. Sent to the
+user who asked, every connection.
+```json
+{ "type": "code_project_import_failed", "payload": { "name": "example-repo", "reason": "Repository not found or unreachable." } }
+```
+`reason` is a sentence for people.
+
 ---
 
 ### Music Streaming
@@ -1553,6 +2826,29 @@ browser sends it: the cookie is same-site whatever the port); otherwise it gets
 `auth_failed`. When the session is destroyed (logout, expiry) the server closes the
 music socket.
 
+The music socket's replies are bare objects, not `payload`-wrapped: on success
+`{"type":"auth_ok"}`, then the audio starts; a refusal (an unknown token, a session that isn't
+this login's, too many music connections) is `{"type":"auth_failed","reason":"invalid_token"}`
+and the socket is closed. An `auth` message without a `token` gets no reply. After `auth_ok`
+the only message the client sends is its buffer report (`music_buffer`, below); anything else
+is ignored.
+
+#### `music_buffer` (music socket)
+After `auth_ok`, the only message a client sends on the music socket: how much music it has
+buffered and not yet played, so the server can pace the stream. Top-level fields, no `payload`:
+```json
+{ "type": "music_buffer", "buffered_ms": 1840 }
+```
+- `buffered_ms`: decoded audio waiting to play plus frames waiting to decode, in milliseconds.
+  Values below 0 count as 0, above 10000 as 10000.
+- Send it often (the WebUI sends one with every playback ring report, about every 32 ms) and
+  `0` at once after a flush (a seek, a skip, a stop), so the server refills quickly.
+- The server keeps the client about 2 seconds ahead while reports are fresh, and bursts to
+  refill after a drain. With no report for 1 second (or a client that never sends one) it falls
+  back to sending at real time.
+- No reply. Anything else the client sends on the socket after auth, malformed or binary
+  included, is ignored and never closes the socket.
+
 #### `music_subscribe`
 Subscribe to music streaming for this connection.
 ```json
@@ -1560,7 +2856,7 @@ Subscribe to music streaming for this connection.
    "type": "music_subscribe",
    "payload": {
       "quality": "high",
-      "audio_codecs": ["opus"]
+      "bitrate_mode": "vbr"
    }
 }
 ```
@@ -1578,12 +2874,13 @@ Control music playback.
 {
    "type": "music_control",
    "payload": {
-      "action": "play|pause|resume|stop|next|previous|seek",
+      "action": "play|pause|stop|next|previous|seek",
       "position_sec": 30.0
    }
 }
 ```
-- `action`: `play`, `pause`, `resume`, `stop`, `next`, `previous`, `seek`
+- `action`: `play`, `pause`, `stop`, `next`, `previous`, `seek`, `play_index`, `add_to_queue`,
+  `remove_from_queue`, `clear_queue`, `add_artist`, `add_album`, `toggle_shuffle`, `cycle_repeat`, `volume`
 - `position_sec`: only for `seek` action
 - `play` behaviour depends on the payload and current state:
   - with `path` or `query` — plays that specific track / search hit (adds to top of queue)
@@ -1615,7 +2912,7 @@ Browse the music library (artists, albums, tracks).
 {
    "type": "music_library",
    "payload": {
-      "view": "artists|albums|tracks",
+      "type": "stats|tracks|artists|albums|tracks_by_artist|tracks_by_album",
       "artist": "Queen",
       "album": "A Night at the Opera"
    }
@@ -1637,44 +2934,481 @@ Manage the playback queue.
 {
    "type": "music_queue",
    "payload": {
-      "action": "add|clear|remove|play_index",
+      "action": "list|add|clear|remove",
       "path": "/path/to/song.flac",
       "index": 0
    }
 }
 ```
-Response: `music_queue_response`
+Response: `music_queue_response` for `list`; `music_state` for `add`, `clear` and `remove`.
 
 ---
 
 ### Scheduler
 
 #### `scheduler_action`
-Dismiss, snooze, or cancel a scheduler event (alarm/timer/reminder).
+List, dismiss, snooze, cancel and edit the user's scheduled events (alarms, timers, reminders,
+tasks, briefings), and clear missed ones. One message type; `action` picks the verb.
 ```json
 {
    "type": "scheduler_action",
    "payload": {
-      "action": "dismiss|snooze|cancel",
+      "action": "snooze",
       "event_id": 42,
-      "snooze_minutes": 5
+      "snooze_minutes": 10
    }
 }
 ```
-- `action`: `dismiss` (stop ringing), `snooze` (reschedule, alarms only), `cancel` (delete pending)
-- `event_id`: Database ID of the scheduled event
-- `snooze_minutes`: Optional, defaults to configured snooze duration (default 5 min). Pass 0 for default.
-- Requires authentication
-- No direct response; server broadcasts updated `scheduler_notification` to all clients
+Sent by browsers and by satellites (a satellite needs no login). A request without a `payload` gets
+no reply. Failures come as an `error` frame (`code`, `message`), not as a response; only `list`
+has a response. The others answer with broadcasts: `scheduler_events_changed` (the queue
+changed: refetch with `list`) and, for a dismiss or snooze, `scheduler_notification`. Both go
+to every connection of the event's owner, satellites included, the sender among them.
+
+| `action` | Fields | Does | On success |
+|---|---|---|---|
+| `list` | — | The user's events | `scheduler_events_response` (below) |
+| `dismiss` | `event_id` | Stops a ringing timer, alarm or reminder; a repeating one gets its next occurrence | `scheduler_notification` (`dismissed`), `scheduler_events_changed` |
+| `snooze` | `event_id`, `snooze_minutes` | Snoozes a ringing timer, alarm or reminder | `scheduler_notification` (`snoozed`, message "Snoozed for N minutes", or "Snoozed for 1 minute"), `scheduler_events_changed` |
+| `cancel` | `event_id` | Cancels a pending or snoozed event; a repeating one's series ends | `scheduler_events_changed` |
+| `cancel_occurrence` | `event_id` | Cancels this occurrence only; a repeating event's next occurrence is scheduled | `scheduler_events_changed` |
+| `clear_missed` | `event_id` | Clears an event from the missed list | `scheduler_events_changed` |
+| `update` | `event_id`, `instructions` | Sets a briefing's summarization instructions | `scheduler_events_changed` |
+| `dismiss_missed` | `missed_notif_id`, `event_id` (optional) | Deletes a missed-notification replay (see `scheduler_notification`); with `event_id`, also dismisses that event if it is the user's and still ringing | nothing; with a still-ringing `event_id`, the same broadcasts as `dismiss` |
+
+- `event_id`: the event's id (from `list` or a notification); required (positive) for every
+  action but `list` and `dismiss_missed`.
+- `snooze_minutes` (optional): `0` or absent uses `[scheduler] default_snooze_minutes`; at most
+  120. An event already snoozed `[scheduler] max_snooze_count` times is dismissed instead (no
+  error).
+- `instructions`: a string, required (an empty string clears them); cut to 1023 bytes on a
+  character boundary. Only a briefing that hasn't fired or been cancelled can be edited.
+- `update` needs a browser login (a satellite gets `UNAUTHORIZED`). `dismiss_missed` needs a
+  user: a browser's login, or the user a satellite is assigned to.
+
+Who may act on an event: `dismiss` and `snooze` take any event from a satellite (it can stop
+what it announced), and only the user's own from a browser. Every other action takes only the
+user's own events, from either.
+
+Errors (`code`: `message`):
+- every action: `INVALID_PARAM`: "Missing action" / "Missing or invalid event_id" / "Unknown
+  scheduler action"
+- `dismiss`, `snooze`: `NOT_FOUND`: "Event not found"; `FORBIDDEN`: "Not your event";
+  `PROCESSING_ERROR`: "Could not dismiss" (the event is still ringing: a running task or
+  briefing ends itself and can't be dismissed); `NOT_FOUND`: "No ringing event to snooze". A
+  dismiss of an event that already stopped ringing is not an error: the server re-sends its
+  `scheduler_notification` so other clients close their banner.
+- `cancel`, `cancel_occurrence`, `clear_missed`, `update`: `NOT_FOUND`: "Event not found" (also
+  for another user's event); `ALREADY_RESOLVED`: "Event already fired or cancelled" / "Event was
+  not in 'missed' state" / "Briefing can no longer be edited (it already fired or was
+  cancelled)"
+- `update`: `INVALID_PARAM`: "Missing instructions string" / "Instructions can only be set on a
+  briefing (this is a timer)"; `INTERNAL_ERROR`: "Could not update briefing instructions"
+- `dismiss_missed`: `INVALID_PARAM`: "Missing missed_notif_id"; `FORBIDDEN`: "Not authenticated"
+
+##### `scheduler_events_response`
+The reply to `list`: the user's active events (pending, snoozed, ringing; soonest first, at most
+50), then their missed ones (most recent first, at most 50). A satellite with no user gets an
+empty list.
+```json
+{
+   "type": "scheduler_events_response",
+   "payload": {
+      "success": true,
+      "events": [
+         {
+            "id": 42,
+            "event_type": "briefing",
+            "status": "pending",
+            "name": "Morning briefing",
+            "message": "",
+            "fire_at": 1791702000,
+            "effective_fire_at": 1791702000,
+            "created_at": 1791648000,
+            "duration_sec": 0,
+            "snoozed_until": 0,
+            "snooze_count": 0,
+            "say_aloud": 1,
+            "deliver_to": "",
+            "instructions": "Keep it short.",
+            "recurrence": "weekdays",
+            "recurrence_days": "",
+            "original_time": "07:00",
+            "source_location": "",
+            "tool_name": "",
+            "tool_action": "",
+            "tool_value": "",
+            "steps": [
+               { "tool_name": "weather", "tool_action": "forecast", "tool_value": "" }
+            ]
+         }
+      ]
+   }
+}
+```
+| Field | Meaning |
+|---|---|
+| `event_type` | `timer`, `alarm`, `reminder`, `task` or `briefing` |
+| `status` | `pending`, `ringing`, `snoozed` or `missed` (the list holds no others) |
+| `fire_at`, `created_at`, `snoozed_until` | Unix seconds; `snoozed_until` is 0 unless snoozed |
+| `effective_fire_at` | When it fires next: `snoozed_until` when snoozed, else `fire_at`. Sort on this |
+| `duration_sec` | A timer's length |
+| `snooze_count` | Times snoozed |
+| `say_aloud` | 1 when it is spoken when it fires |
+| `deliver_to` | Where a briefing's output goes (a messaging channel), or `""` |
+| `instructions` | A briefing's summarization instructions |
+| `recurrence` | `once`, `daily`, `weekdays`, `weekends`, `weekly` or `custom`; `recurrence_days` for `custom` |
+| `original_time` | The time of day as it was asked for |
+| `source_location` | Where it was set |
+| `tool_name`, `tool_action`, `tool_value` | A task's tool call; a `tool_value` over 203 bytes is cut to at most 200 bytes plus `...` |
+| `steps` | Only on a briefing with steps (at most 8): its tool calls in order, each `tool_value` cut as above |
+
+---
+
+### Watches (Authenticated)
+
+The proactive-attention watches panel: rules that watch a metric (suit, STAT, network and
+component telemetry) and alert the user when it crosses a line, changes too fast, or goes
+silent. The `attention` tool edits the same watches by voice, so a watch made either way is
+editable from both. Every verb acts on the logged-in user's watches only. Replies are
+`{success, error?}`; a request without a `payload` gets no reply, except `watch_list` and
+`watch_readings_subscribe`. A user has at most 64 watches. Edits aren't pushed to the user's
+other tabs: ask `watch_list` again.
+
+Alerts themselves arrive as `attention_alert`; live values as `watch_readings`. These are not
+the Stocks Panel's ticker watchlist (`stocks_watch_*`), nor the `stocks` tool's `watch_add` /
+`watch_remove` actions.
+
+#### `watch_list`
+The user's watches, the metric catalog, and whether proactive attention is on. No payload.
+```json
+{ "type": "watch_list" }
+```
+Response:
+```json
+{
+   "type": "watch_list_response",
+   "payload": {
+      "success": true,
+      "attention_enabled": true,
+      "watches": [
+         {
+            "id": 12,
+            "name": "CO2 above 1500",
+            "named": false,
+            "metric": "suit.co2_ppm",
+            "label": "CO2",
+            "unit": "ppm",
+            "rule_type": "threshold",
+            "direction": "above",
+            "threshold": 1500,
+            "absence_after_sec": 0,
+            "notify": "alert",
+            "enabled": true,
+            "source": "",
+            "has_current": true,
+            "current": 612,
+            "breaching": false
+         }
+      ],
+      "catalog": [
+         {
+            "key": "suit.co2_ppm",
+            "label": "CO2",
+            "unit": "ppm",
+            "rule_type": "threshold",
+            "default_direction": "above",
+            "default_threshold": 1500
+         }
+      ]
+   }
+}
+```
+- `attention_enabled`: the `[attention] enabled` switch. While it is off no watch fires and no
+  `watch_readings` are sent; say so rather than show live-looking watches.
+- A watch:
+
+| Field | Meaning |
+|---|---|
+| `id` | The watch, for the other verbs |
+| `name`, `named` | Its name; `named` is true for a name the user chose (kept, and spoken in alerts). A system name follows the condition and changes when it is edited |
+| `metric`, `label`, `unit` | The catalog metric it watches |
+| `rule_type` | `threshold` (a level), `slope` (a rate), `absence` (the feed went silent) or `match` |
+| `direction` | `above` / `below` for `threshold`, `rising` / `falling` for `slope` |
+| `threshold` | The level; absent on a `slope` watch |
+| `slope_per_min`, `slope_window_sec` | Only on a `slope` watch: the rate (units per minute, positive) and the window it is measured over |
+| `absence_after_sec` | Seconds of silence before an `absence` watch fires |
+| `notify` | `alert`, `ambient` or `digest` |
+| `enabled` | Off: kept but never fires |
+| `source` | `seed` for a watch DAWN created by default, otherwise `""` |
+| `has_current`, `current` | Whether the metric has a value now, and the value (absent when none) |
+| `breaching` | Whether the condition holds now (the same state the readings stream carries) |
+
+- `catalog`: every metric a watch can use, for an add form. `rule_type` and
+  `default_direction` are the metric's defaults; `default_threshold` its default level.
+
+Error: "Failed to list watches".
+
+#### `watch_add`
+Add a watch on a catalog metric, starting from the metric's defaults.
+```json
+{
+   "type": "watch_add",
+   "payload": { "metric": "suit.co2_ppm", "direction": "above", "threshold": 1200, "notify": "alert" }
+}
+```
+- `metric` (required): a catalog `key`.
+- Optional, each as in `watch_update`: `name`, `rule_type`, `direction`, `threshold`,
+  `slope_per_min`, `slope_window_sec`, `notify`.
+- An add whose condition is identical to an existing watch's updates that watch (and enables
+  it) instead of adding a second one.
+
+Response: `watch_add_response` (`success`; no id: ask `watch_list`). Errors: "Missing metric",
+"Unknown metric", "A watch with that name already exists", "Couldn't save the watch (you may be
+at the watch limit)", and the condition errors listed under `watch_update`.
+
+#### `watch_update`
+Change a watch. Only the fields sent change.
+```json
+{
+   "type": "watch_update",
+   "payload": { "id": 12, "rule_type": "slope", "direction": "rising", "slope_per_min": 50 }
+}
+```
+- `id` (required, positive).
+- `name`: a name of the user's own (control characters removed, trailing spaces trimmed, at most
+  63 bytes); unique among the user's watches, ignoring case. An empty name leaves the name as
+  it is.
+- `rule_type`: `threshold` or `slope` switches a numeric watch between the two (the direction
+  defaults to `above` or `rising` when the current one doesn't fit). Any other value is
+  ignored. An `absence` or `match` watch can't change kind.
+- `direction`: `above`, `below`, `rising`, `falling` (any case); anything else leaves it.
+- `threshold`: the level. On an `absence` watch it sets `absence_after_sec` instead (seconds,
+  clamped to 0..604800).
+- `slope_per_min` (positive) and `slope_window_sec` (positive, at most 604800): a `slope`
+  watch's rate and window. Zero or negative values are ignored.
+- `notify`: `alert`, `ambient` or `digest`; anything else leaves it.
+
+Response: `watch_update_response`. Errors: "Missing watch id", "Watch not found", "This
+metric's rule kind can't be changed", "A rising/falling watch needs a rate (slope_per_min > 0)",
+"A rising/falling watch needs direction 'rising' or 'falling'", "An above/below watch needs
+direction 'above' or 'below'", "A watch with that name already exists", "Couldn't update the
+watch".
+
+#### `watch_set_enabled`
+Turn a watch on or off.
+```json
+{ "type": "watch_set_enabled", "payload": { "id": 12, "enabled": false } }
+```
+- `id` (required); `enabled` (optional, default `true`).
+
+Response: `watch_set_enabled_response`. Errors: "Missing watch id", "Couldn't update the watch"
+(also for an id that isn't the user's).
+
+#### `watch_remove`
+Delete a watch.
+```json
+{ "type": "watch_remove", "payload": { "id": 12 } }
+```
+Response: `watch_remove_response`. Errors: "Missing watch id", "Couldn't remove the watch".
+
+#### `watch_readings_subscribe`
+Start or stop `watch_readings` for this connection. Subscribe while the panel is shown and
+unsubscribe when it is hidden; a new connection starts unsubscribed.
+```json
+{ "type": "watch_readings_subscribe", "payload": { "enabled": true } }
+```
+- `enabled`: `true` subscribes, `false` unsubscribes. **Absent (or no payload) unsubscribes.**
+
+Response: `watch_readings_subscribe_response` (`success: true`, always).
 
 ---
 
 ### Calendar
 
-Calendar account management (`calendar_list_accounts`, `calendar_add_account`, …) is
-handled per-user in `webui_calendar.c`. The read-only *data* requests:
+Built only with the calendar tool (`DAWN_ENABLE_CALENDAR_TOOL`); a daemon without it answers
+every `calendar_*` type with `UNKNOWN_TYPE`. Every request needs a login (else an `error` frame
+`UNAUTHORIZED`) and acts only on the user's own CalDAV accounts: an account or calendar of
+another user answers like a missing one (except `calendar_toggle_calendar`, which answers
+"Access denied"). Not admin-only. Every reply is `<request>_response`
+with `{success, error?, …}`; `error` is a sentence for people, not a code. Every request below
+except `calendar_list_accounts`, `calendar_list_my_calendars` and `calendar_upcoming_events`
+needs a `payload`: a request without one gets no reply.
 
-#### `calendar_list_my_calendars`
+#### Account management
+
+##### `calendar_list_accounts`
+The user's CalDAV accounts (at most 32). No payload.
+```json
+{ "type": "calendar_list_accounts" }
+```
+Response:
+```json
+{
+   "type": "calendar_list_accounts_response",
+   "payload": {
+      "success": true,
+      "accounts": [
+         {
+            "id": 3, "name": "Personal", "caldav_url": "https://caldav.example.com/",
+            "username": "alice", "has_password": true, "auth_type": "basic",
+            "oauth_account_key": "", "enabled": true, "read_only": false,
+            "last_sync": 1785000000,
+            "principal_url": "https://caldav.example.com/principals/alice/",
+            "calendar_home_url": "https://caldav.example.com/calendars/alice/"
+         }
+      ]
+   }
+}
+```
+- `auth_type`: `"basic"` (username + password) or `"oauth"` (a linked Google account, named by
+  `oauth_account_key`; see Google account linking).
+- `has_password`: a password is stored. The password itself never leaves the daemon.
+- `last_sync`: epoch seconds, `0` before the first sync. `principal_url` /
+  `calendar_home_url`: what discovery found, `""` before it ran.
+
+##### `calendar_add_account`
+```json
+{
+   "type": "calendar_add_account",
+   "payload": {
+      "name": "Personal",
+      "caldav_url": "https://caldav.example.com/",
+      "username": "alice",
+      "password": "app-password-here",
+      "read_only": false
+   }
+}
+```
+- `name`, `caldav_url`: required (stored up to 127 and 511 bytes).
+- `auth_type`: optional; `"oauth"`, or anything else (default) for a username and password.
+- `username`, `password`: required unless `auth_type` is `"oauth"`.
+- `oauth_account_key`: for `"oauth"`, the `account_key` from `oauth_exchange_code`. For a Google
+  account the browser sends `caldav_url`
+  `https://apidata.googleusercontent.com/caldav/v2/<account email>/`.
+- `read_only`: optional, default false. A read-only account is never written to.
+- A `password` member is refused when the WebUI isn't served over HTTPS (`[webui] https`):
+  "Cannot send password over unencrypted connection. Enable HTTPS in webui configuration."
+
+Response: `{"success": true}`, or `success: false` with `error` "Missing required fields: …",
+"Account already exists" (the same OAuth key, or the same username and URL, for this user) or
+"Failed to add account". The reply carries no `id`: refetch with `calendar_list_accounts`.
+
+The reply is sent after the server has run discovery on the new account (a network round trip
+on the socket's thread). When discovery works its calendars are stored and a first sync is
+queued, and `calendar_sync_done` follows when it ends. When discovery fails the account is
+still added (`success: true`) with no calendars; `calendar_test_account` discovers them later.
+
+##### `calendar_edit_account`
+Change an account's name, URL, username and, optionally, password.
+```json
+{
+   "type": "calendar_edit_account",
+   "payload": {
+      "id": 3, "name": "Personal", "caldav_url": "https://caldav.example.com/",
+      "username": "alice", "password": ""
+   }
+}
+```
+- `id`, `name`, `caldav_url`, `username`: all required, an OAuth account's included (send its
+  current `username`, `""` if it has none).
+- `password`: optional; a non-empty one replaces the stored password, an empty one keeps it.
+  Any `password` member, even an empty one, is refused when the WebUI isn't on HTTPS.
+- `auth_type`, `oauth_account_key`, `read_only` and `enabled` aren't changed here.
+
+Response: `{"success": true}`, or `success: false` with `error` "Missing required fields: id,
+name, caldav_url, username", "Account not found or access denied", "Failed to encrypt
+password" or "Failed to update account". An edit doesn't re-run discovery or a sync.
+
+##### `calendar_remove_account`
+```json
+{ "type": "calendar_remove_account", "payload": { "id": 3 } }
+```
+Deletes the account with its calendars and cached events. For an OAuth account, the Google
+grant is also revoked and its tokens deleted, unless one of the user's email accounts uses the
+same `oauth_account_key`. Response: `{"success": true}`, or `success: false` with "Missing
+account id", "Account not found or access denied" or "Failed to remove account".
+
+##### `calendar_test_account`
+Log in and run discovery: stores the principal and calendar-home URLs and adds any calendar not
+seen before (a new calendar starts active unless the server marks it read-only, such as a
+subscribed feed; existing ones keep their setting).
+```json
+{ "type": "calendar_test_account", "payload": { "id": 3 } }
+```
+Response:
+```json
+{
+   "type": "calendar_test_account_response",
+   "payload": { "success": true, "message": "Connection successful, calendars discovered" }
+}
+```
+or `success: false` with "Missing account id", "Account not found or access denied" or
+"Connection test failed — check URL, username, and password". The reply waits for the server's
+answers. It doesn't sync events: send `calendar_sync_account` for that.
+
+##### `calendar_sync_account`
+Ask for a sync now.
+```json
+{ "type": "calendar_sync_account", "payload": { "id": 3 } }
+```
+Response `{"success": true, "queued": true, "id": 3}` at once; the sync runs on the server's
+sync thread and `calendar_sync_done` reports how it ended (and `calendar_events_changed`
+follows when it changed anything). On failure `success: false`, `id`, and `error` "Missing
+account id" (no `id` then), "Account not found or access denied" or "Sync could not start".
+
+##### `calendar_list_calendars`
+One account's calendars (at most 32), active or not.
+```json
+{ "type": "calendar_list_calendars", "payload": { "account_id": 3 } }
+```
+Response:
+```json
+{
+   "type": "calendar_list_calendars_response",
+   "payload": {
+      "success": true,
+      "calendars": [
+         { "id": 7, "display_name": "Work", "color": "#3b82f6", "is_active": true,
+           "caldav_path": "/calendars/alice/work/" }
+      ]
+   }
+}
+```
+or `success: false` with "Missing account_id", "Account not found or access denied" or
+"Failed to list calendars". Note the request member is `account_id`, not `id`.
+
+##### `calendar_toggle_calendar`
+Turn one calendar on or off. Only active calendars are synced, searched by the model and
+returned by `calendar_upcoming_events` / `calendar_list_my_calendars`.
+```json
+{ "type": "calendar_toggle_calendar", "payload": { "id": 7, "is_active": false } }
+```
+- `id`: the calendar's id (from `calendar_list_calendars`), not the account's.
+
+Response: `{"success": true}`, or `success: false` with "Missing id or is_active", "Calendar not
+found", "Access denied" (another user's calendar) or "Failed to toggle calendar". No push follows:
+refetch the panel's events.
+
+##### `calendar_toggle_read_only`
+```json
+{ "type": "calendar_toggle_read_only", "payload": { "id": 3, "read_only": true } }
+```
+Response `{"success": true, "read_only": true}`: `read_only` is the stored value read back, not
+the request echoed. On failure `success: false` with "Missing id or read_only", "Account not
+found or access denied" or "Failed to update read-only flag".
+
+##### `calendar_set_enabled`
+Turn a whole account on or off; a disabled account isn't synced or used.
+```json
+{ "type": "calendar_set_enabled", "payload": { "id": 3, "enabled": false } }
+```
+Response: `{"success": true}`, or `success: false` with "Missing id or enabled", "Account not
+found or access denied" or "Failed to update enabled flag".
+
+#### Calendar data
+
+##### `calendar_list_my_calendars`
 List the user's active calendars flat across all accounts — the `calendar_id`→{name, color}
 map a panel needs to group/color the events returned by `calendar_upcoming_events`, in one
 call (instead of `calendar_list_accounts` + per-account `calendar_list_calendars`). No payload.
@@ -1697,7 +3431,7 @@ Response `calendar_list_my_calendars_response`:
 - Active calendars only — exactly the set the pull draws events from.
 - Re-run on `calendar_events_changed` (a newly-synced calendar can appear).
 
-#### `calendar_upcoming_events`
+##### `calendar_upcoming_events`
 Read a window of upcoming occurrences from the offline cache (build a calendar panel).
 Authenticated; each user sees only their own accounts' events.
 ```json
@@ -1744,6 +3478,108 @@ Authenticated; each user sees only their own accounts' events.
     force an extra join, and the id is the stable key).
   - `start_date`/`end_date`: `YYYY-MM-DD`, only meaningful when `all_day` is true.
   - `start`/`end` (top level): echo the resolved window.
+
+---
+
+### Google account linking (OAuth)
+
+The Google sign-in that calendar and email accounts use. Built when the calendar or the email
+tool is (`DAWN_ENABLE_CALENDAR_TOOL` or `DAWN_ENABLE_EMAIL_TOOL`); a daemon with neither answers
+these with `UNKNOWN_TYPE`. Every request needs a login (else `UNAUTHORIZED`) and a `payload`
+(a request without one gets no reply), and acts on the logged-in user's own Google tokens.
+Google is the only provider: a `provider` member, which the browser sends, is ignored. The
+server needs Google OAuth credentials in `secrets.toml`; without them the replies say "Google
+OAuth not configured".
+
+The flow:
+1. Optionally `oauth_check_scopes`: if a linked account already has the scopes, skip to step 4
+   with its `account_key`.
+2. `oauth_get_auth_url`, then open the returned `url` (the browser uses a popup). Google
+   redirects to the daemon's `/oauth/callback` page (the redirect URL configured in
+   `secrets.toml`, by default `https://localhost:<port>/oauth/callback`), which posts the
+   `code` and `state` back to the window that opened it (`postMessage`, same origin only).
+3. `oauth_exchange_code` with that `code` and `state`: the tokens are stored, encrypted.
+4. Create the account that uses them: `calendar_add_account` or `email_add_account` with
+   `auth_type: "oauth"` and `oauth_account_key` set to the `account_key`.
+
+#### `oauth_get_auth_url`
+```json
+{
+   "type": "oauth_get_auth_url",
+   "payload": { "scopes": "https://www.googleapis.com/auth/calendar" }
+}
+```
+- `scopes`: required; space-separated, each starting `https://www.googleapis.com/auth/` or
+  `https://mail.google.com/` (read up to 1023 bytes). The server always adds
+  `https://www.googleapis.com/auth/userinfo.email`, and adds every scope already granted to
+  the user's linked Google accounts, so authorizing a second service doesn't drop the first's.
+
+Response:
+```json
+{
+   "type": "oauth_get_auth_url_response",
+   "payload": { "success": true, "url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=…&state=…" }
+}
+```
+or `success: false` with `error` "Missing OAuth scopes", "Invalid OAuth scopes", "Google OAuth
+not configured" or "Failed to generate auth URL". The last also means the user already has two
+sign-ins pending (the server keeps at most two per user and eight in all). A pending sign-in
+lasts 5 minutes; its `state` is single-use and only the user who asked for it can exchange it.
+
+#### `oauth_exchange_code`
+```json
+{ "type": "oauth_exchange_code", "payload": { "code": "4/0Example-code", "state": "example-state" } }
+```
+Both required. Response:
+```json
+{
+   "type": "oauth_exchange_code_response",
+   "payload": {
+      "success": true,
+      "account_key": "alice@example.com",
+      "scopes": "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/userinfo.email"
+   }
+}
+```
+- `account_key`: the Google account's email, or `google_<user id>` when Google didn't return
+  one. Linking the same Google account again replaces its stored tokens.
+- `scopes`: what Google granted, space-separated.
+
+On failure `success: false` with "Missing code or state", "Google OAuth not configured", "Token
+exchange failed" (an unknown, expired or used `state`, or Google refused the code) or "Failed to
+store tokens". No calendar or email account is created here.
+
+#### `oauth_disconnect`
+Revoke a linked Google account at Google and delete its tokens.
+```json
+{ "type": "oauth_disconnect", "payload": { "account_key": "alice@example.com" } }
+```
+Response `{"success": true}` whenever the request is well formed and Google OAuth is configured:
+the tokens are deleted locally even when revoking at Google fails. Otherwise `success: false`
+with "Missing account_key" or "Google OAuth not configured". It doesn't check whether a calendar
+or email account still uses the key; those accounts stop working until relinked. Removing the
+account itself (`calendar_remove_account`) is the usual way out: it revokes the grant only when
+no other account uses it.
+
+#### `oauth_check_scopes`
+Whether one of the user's linked Google accounts already has every scope asked for.
+```json
+{ "type": "oauth_check_scopes", "payload": { "scopes": "https://www.googleapis.com/auth/calendar" } }
+```
+Response:
+```json
+{
+   "type": "oauth_check_scopes_response",
+   "payload": { "success": true, "has_scopes": true, "account_key": "alice@example.com" }
+}
+```
+- `has_scopes: true`: `account_key` is the first linked account (of at most 8 looked at) that
+  has them all. An empty `scopes` string counts as covered by any linked account.
+- `has_scopes: false`: `account_key`, when present, is the user's first linked account (for a
+  scope upgrade through `oauth_get_auth_url`); absent when the user has none.
+- `success: false` with "Missing scopes" when `scopes` is absent.
+
+---
 
 ### Email
 
@@ -2050,7 +3886,8 @@ answers these types with `UNKNOWN_TYPE`. No feature flag. Every request needs a 
 `UNAUTHORIZED`); each user sees only their own Schwab link, and a user with none gets
 `status: "not_connected"` on the portfolio. The watchlist is not a link check: an empty
 watchlist makes no Schwab request and answers `status: "ok"` with `symbols: []`, linked or not.
-Satellites never receive the pushes.
+Satellites never receive the pushes. (This stock watchlist, `stocks_watch_*`, is not the
+proactive-attention watches of `watch_list` / `watch_add`; see Watches.)
 
 The server keeps one snapshot per user and pushes it to every subscribed connection of that user;
 requests never fetch from Schwab themselves. A fetch happens when a connection of the user is
@@ -2347,6 +4184,14 @@ Application-level keepalive (every 10 seconds).
 {"type": "satellite_ping"}
 ```
 Response: `satellite_pong`
+
+#### `volume_state`
+A satellite reports its playback volume, in answer to `volume_set` (Tier 1 sends it after
+applying one). Satellite connections only; no response.
+```json
+{"type": "volume_state", "payload": {"level": 65}}
+```
+`level`: 0–100 (clamped). The `volume` tool's `get` reports it.
 
 #### `ping`
 Application-level liveness probe for **browser (WebUI)** clients — the
@@ -2805,6 +4650,7 @@ WebUI configuration (sent after session).
       "audio_chunk_ms": 200,
       "music_enabled": true,
       "music_port": 3001,
+      "aurora_enabled": false,
       "version": "2.0.0",
       "protocol": 1,
       "features": ["logout_closes_sockets"]
@@ -2815,10 +4661,26 @@ WebUI configuration (sent after session).
   `false`, a client should not open the music socket.
 - `music_port`: Port of the dedicated music-stream server (subprotocol `dawn-music`).
   Advertised so clients don't have to assume `main_port + 1`.
+- `aurora_enabled`: the daemon serves the Aurora client at `/aurora/` (`[webui] aurora_path`
+  is set). The WebUI shows its link to Aurora only then.
 - `version`: The DAWN daemon version (`VERSION_NUMBER`, compile-time). Advertised so
   clients can detect the daemon version for compatibility/telemetry.
 - `protocol`, `features`: the protocol version and feature flags (see
   [Protocol version and feature flags](#protocol-version-and-feature-flags)).
+
+#### `server_features`
+Sent once on connect, right after `config`: features compiled into this daemon.
+```json
+{"type": "server_features", "payload": {"home_assistant": true}}
+```
+- `home_assistant`: the Home Assistant tool is built in (not whether it's configured).
+
+#### `config_changed`
+An admin saved settings (`set_config` succeeded). Sent to every admin browser connection,
+the saving one included. Empty payload: re-send `get_config` to see the new values.
+```json
+{"type": "config_changed", "payload": {}}
+```
 
 #### `turn_waiting`
 Flag `turn_wait`.  The turn this session just sent waits for another turn running on the same
@@ -2872,21 +4734,40 @@ State machine update.
 - `detail`: Optional status message during long operations
 - `tools`: Optional array of active tool calls (during parallel execution)
 
-> **Precedence trap — `state: "speaking"` vs `always_on_state: "recording"`.**
-> In the always-on bare-wake-word flow (user says only the wake word, then speaks a
-> command), DAWN plays a short greeting ("Hello.") *while the always-on state machine
-> is already in `recording`*. The greeting is normal TTS, so the client receives a
-> top-level `state: "speaking"` **concurrent with** the `always_on_state: "recording"`
-> frame. These read as contradictory. **Contract:
-> during always-on `recording`, `always_on_state: "recording"` wins** — the client
-> keeps its mic **open** and relies on client-side echo cancellation (AEC) to remove
-> the greeting from its capture; it must **not** mute on `state: "speaking"` until
-> recording clears (`recording` → `processing`, which precedes the *reply's*
-> `state: "speaking"`). A client that mutes on `state: "speaking"` will gag its own
-> command window. Corollary: the client's TTS playback must be **AEC-referenceable**
-> (route through a media element the browser's echo canceller sees, not a bare Web
-> Audio destination) or the greeting will bleed uncancelled into the live mic and
-> keep the server's VAD from ever reaching end-of-speech.
+> **Always-on `recording` and `state`.** When the user says only the wake word (then speaks
+> the command), the server speaks **no** greeting: the `always_on_state: "recording"` frame is
+> the ready cue. A client that wants an acknowledgement plays a short non-speech chime, which
+> the server's VAD won't take for speech if it bleeds into the microphone; a spoken
+> acknowledgement played into the live microphone can keep the VAD from reaching end-of-speech.
+> **Contract: during always-on `recording`, `always_on_state: "recording"` wins**: the client
+> keeps its microphone open until recording clears (`recording` → `processing`, which precedes
+> the reply's `state: "speaking"`), and doesn't mute on a `state` frame meanwhile.
+
+#### `always_on_state`
+Always-on mode's state, for this connection only.
+```json
+{"type": "always_on_state", "payload": {"state": "listening"}}
+```
+- `listening`: waiting for the wake word.
+- `wake_check`: speech started; the utterance is being collected.
+- `wake_pending`: the utterance ended and is being checked for the wake word (`listening`
+  follows when it had none).
+- `recording`: the wake word was heard on its own and the command is being recorded. This
+  frame is the ready cue; the server speaks no greeting here (a client may play a short
+  non-speech chime). A wake word with the command in the same utterance goes straight to
+  `processing`.
+- `processing`: the command is transcribed and answered. The client mutes its microphone
+  here; `listening` follows when the answer's turn ends (`state` `idle`), or when nothing was
+  heard or no turn started.
+- `disabled`: always-on is off: on request, or turned off by the server after 60 seconds with
+  no audio outside `processing` (4 minutes after an answer, so a long spoken reply can finish).
+- Not every return to listening is announced: a wake-word check that stalls for 10 s, and a
+  bare wake word followed by 6 s with no command, go back to listening without a frame, so a
+  client may still show `wake_pending` or `recording`. Re-sync with `always_on_state_request`.
+- While waiting in `processing`, a turn that runs too long is given up: the client gets
+  `always_on_state` `listening` and an `error` frame `ALWAYS_ON_GAVE_UP`, severity `warning`,
+  whose message says what happened (a spoken turn is stopped; a typed turn still running keeps
+  running and the command runs after it).
 
 #### `error`
 Error or informational notification.
@@ -3188,7 +5069,7 @@ Notification that conversation context was reset (via tool).
 ```
 
 #### `context_citations`
-Memory-citation signal (feature-gated on `[memory] citation_enabled`). Emitted at turn
+Memory-citation signal (feature-gated on `[memory.decay] citation_enabled`). Emitted at turn
 end when the model cited ≥1 injected memory, so a "Context for this turn" panel can
 gold-highlight the rows the model actually used. Delivered only to the WEBUI session on
 the matching active conversation.
@@ -3244,8 +5125,8 @@ Proactive LLM configuration update (sent when session config changes).
 Server-initiated pushes from the proactive-attention (SAGE), focus, and memory
 subsystems. These are **WebUI-only UI primitives** (satellites do not render them)
 and are routed to the owning user's browser sessions. A read-mostly dashboard
-consumes them as ambient notices; see the consumer-facing map in
-`aurora/docs/DAWN_UI_SIGNAL_MAP.md`.
+consumes them as ambient notices. This document is the contract for them; the Aurora
+client's widget map (`aurora/docs/DAWN_UI_SIGNAL_MAP.md`) only says where it shows them.
 
 #### `attention_alert`
 The SAGE proactive-attention banner. Its own channel (not `scheduler_notification`)
@@ -3257,6 +5138,25 @@ so it shows an ATTENTION badge and never triggers the scheduler chime.
 }
 ```
 - `level`: `alert` (needs the user) or `ambient` (informational)
+
+#### `watch_readings`
+The watches' live values, about once a second, to each browser connection that sent
+`watch_readings_subscribe` with `enabled: true`. Not sent while `[attention] enabled` is off, nor
+when the user has no watches. Only the moving numbers: the rest of a watch comes from
+`watch_list`. Every watch of the user is listed, disabled ones included.
+```json
+{
+   "type": "watch_readings",
+   "payload": {
+      "readings": [
+         { "id": 12, "has_current": true, "current": 612, "breaching": false },
+         { "id": 15, "has_current": false, "breaching": false }
+      ]
+   }
+}
+```
+- `current` is absent when `has_current` is false. An id not in the client's list means a watch
+  was added elsewhere: ask `watch_list`.
 
 #### `silent_observation`
 A quieter rail-icon / peek primitive: DAWN noticed something worth surfacing
@@ -3274,6 +5174,12 @@ without a banner.
 ```
 - `ts`: Unix seconds
 - `filter_match`: whether it matched an active user watch/filter
+
+A test frame can be asked for with
+`{"type": "test_silent_observation", "payload": {"category": "calendar", "note": "test", "filter_match": false}}`
+(a `payload` is required, and may be `{}`; its fields are optional: defaults `system`, `test event`, false), sent to the requesting user.
+**Admin only** (`FORBIDDEN` otherwise), and only while `[debug] silent_observe_test_endpoint` is on;
+with it off the request is dropped without a reply. No response frame.
 
 #### `context_injection`
 Diagnostic: what the focus system pulled into context for a turn (the "why did it
@@ -3363,9 +5269,11 @@ client that ignores it stays correct via the entity poll backstop. **Bind these 
    }
 }
 ```
-The HA request verbs (`ha_list_entities` / `ha_refresh_entities` / `ha_call_service` etc.)
-and the `ha_entities_response` per-domain `attributes` shape are documented consumer-side in
-`aurora/docs/DAWN_UI_SIGNAL_MAP.md §9.4`.
+The Home Assistant requests (`ha_status`, `ha_test_connection`, `ha_list_entities`,
+`ha_refresh_entities`, `ha_call_service`) and the `ha_entities_response` per-domain
+`attributes` shape are documented under Home Assistant and Phone Audio (Admin Only); this
+document is their contract. The Aurora client's widget map (`aurora/docs/DAWN_UI_SIGNAL_MAP.md
+§9.4`) only says which widget sends and shows what.
 
 ---
 
@@ -3392,6 +5300,18 @@ progress, `phone_status` gets no reply.
 - `status`: `ringing`, `active`, or `ended`
 - `elapsed_sec`: call duration (for `active` / `ended`)
 - `photo`: optional contact-photo object; omitted when none
+
+#### `phone_action` (client → server)
+Answer or reject a ringing call, or hang up the active one, from a call banner.
+```json
+{"type": "phone_action", "payload": {"action": "answer"}}
+```
+- `action`: `answer`, `reject` or `hangup`; anything else is an `error` frame
+  `INVALID_PARAM`.
+- Only the phone's owner (user id 1; the owner is not configurable yet), from a browser, may send it: anyone else gets
+  `FORBIDDEN` "Not the modem owner".
+- No reply: the result shows as `phone_call_notification` (`active` or `ended`). One action at
+  a time: a `phone_action` sent while one is still running is dropped without a reply.
 
 ---
 
@@ -3466,7 +5386,8 @@ Queue operation result.
 ### Scheduler Notifications
 
 #### `scheduler_notification`
-Broadcast to all authenticated WebUI clients when a scheduled event fires, is dismissed, or is snoozed.
+Sent when a scheduled event fires, is dismissed, or is snoozed, to the event owner's connections
+(see Recipients below).
 ```json
 {
    "type": "scheduler_notification",
@@ -3497,7 +5418,15 @@ Broadcast to all authenticated WebUI clients when a scheduled event fires, is di
   **click-to-open** (jump to that conversation). Absent (or `0`) for events with no conversation,
   such as a plain alarm or timer.
 - Alarms pulse and support snooze; timers/reminders auto-dismiss after firing
-- Not sent to satellite connections (satellites don't have WebUI notification UI)
+- More fields: `tts_routed` (bool, live notifications): the event's speech is being played to
+  a WebUI client, so skip the chime. `event_type` can also be `briefing`.
+- **Missed notifications.** A ringing event of a user with no connection open is kept, and
+  replayed to each new connection of that user (up to 32) as a `scheduler_notification` with
+  `missed: true` and `missed_notif_id`. Replays repeat on every connect until a client sends
+  `scheduler_action` `dismiss_missed` with that `missed_notif_id`, or until it is 24 hours old. A replay is history, never a
+  live ring: don't offer snooze on it.
+- Recipients: the event owner's connections, **satellites assigned to that user included**; an
+  event with no user goes to every logged-in connection and every satellite.
 
 #### `scheduler_events_changed`
 Signal-only: the scheduled-event queue changed (event added, edited, or removed).
@@ -3602,6 +5531,14 @@ satellite `satellite_ping` is accepted on `is_satellite`, a browser `ping` is
 authenticated via `conn_require_auth` (so a revoked/expired session gets an
 `error` frame and **no** `pong`).
 
+#### `volume_set`
+Set the satellite's playback volume (the model's volume tool, on a satellite's own turn). The
+satellite applies it and answers with `volume_state`.
+```json
+{"type": "volume_set", "payload": {"level": 65}}
+```
+`level`: 0–100.
+
 Satellites also receive the same streaming messages as WebUI clients:
 `state`, `error`, `transcript`, `stream_start`, `stream_delta`, `stream_end`.
 
@@ -3635,20 +5572,46 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `list_interfaces` | `list_interfaces_response` |
 | `list_llm_models` | `list_llm_models_response` |
 | `restart` | `restart_response` |
+| `ha_status` | `ha_status_response` |
+| `ha_test_connection` | `ha_test_connection_response` |
+| `ha_list_entities` | `ha_entities_response` |
+| `ha_refresh_entities` | `ha_entities_response` |
+| `ha_call_service` | `ha_call_service_response` |
+| `get_phone_audio_config` | `phone_audio_config_response` |
 | `set_session_llm` | `set_session_llm_response` |
 | `get_system_prompt` | `system_prompt_response` |
 | `get_tools_config` | `get_tools_config_response` |
 | `set_tools_config` | `set_tools_config_response` |
 | `get_metrics` | `get_metrics_response` |
+| `always_on_enable` | `always_on_state` |
+| `always_on_disable` | `always_on_state` |
+| `always_on_state_request` | `always_on_state` |
 | `list_users` | `list_users_response` |
 | `create_user` | `create_user_response` |
 | `delete_user` | `delete_user_response` |
 | `change_password` | `change_password_response` |
 | `unlock_user` | `unlock_user_response` |
+| `list_satellites` | `list_satellites_response` |
+| `update_satellite` | `update_satellite_response` |
+| `delete_satellite` | `delete_satellite_response` |
+| `get_satellite_registration_key` | `satellite_registration_key_response` |
+| `ota_list` | `ota_list_response` |
+| `ota_push` | `ota_push_response` |
+| `ota_push_all` | `ota_push_all_response` |
+| `ota_rollout_status` | `ota_rollout_status_response` |
+| `ota_rollout_abort` | `ota_rollout_abort_response` |
 | `get_my_settings` | `get_my_settings_response` |
 | `set_my_settings` | `set_my_settings_response` |
 | `list_my_sessions` | `list_my_sessions_response` |
 | `revoke_session` | `revoke_session_response` |
+| `list_channels` | `list_channels_response` |
+| `create_link_code` | `create_link_code_response` |
+| `unlink_channel` | `unlink_channel_response` |
+| `reenable_channel` | `reenable_channel_response` |
+| `rename_channel` | `rename_channel_response` |
+| `verify_channel` | `verify_channel_response` |
+| `resend_channel_code` | `resend_channel_code_response` |
+| `set_channel_llm` | `set_channel_llm_response` |
 | `list_conversations` | `list_conversations_response` |
 | `new_conversation` | `new_conversation_response` |
 | `load_conversation` | `load_conversation_response` |
@@ -3656,9 +5619,11 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `delete_conversation` | `delete_conversation_response` |
 | `rename_conversation` | `rename_conversation_response` |
 | `set_private` | `set_private_response` |
+| `set_pinned` | `set_pinned_response` |
 | `conversation_learned_request` | `conversation_learned` |
 | `forget_conversation_memories` | `forget_conversation_memories_response` |
 | `reassign_conversation` | `reassign_conversation_response` |
+| `export_conversation` | `export_conversation_response` |
 | `search_conversations` | `search_conversations_response` |
 | `save_message` | `save_message_response` |
 | `update_context` | *(no response)* |
@@ -3669,25 +5634,86 @@ Satellites also receive the same streaming messages as WebUI clients:
 | `list_memory_facts` | `list_memory_facts_response` |
 | `search_memory` | `search_memory_response` |
 | `list_memory_entities` | `list_memory_entities_response` |
+| `delete_memory_entity` | `delete_memory_entity_response` |
+| `merge_memory_entities` | `merge_memory_entities_response` |
+| `entity_aliases_request` | `entity_aliases_response` |
+| `entity_merge_proposal_list_request` | `entity_merge_proposal_list_response` |
+| `entity_link_request` | `entity_link_response` |
+| `entity_unlink_request` | `entity_unlink_response` |
+| `entity_proposal_resolve_request` | `entity_proposal_resolve_response` |
 | `get_memory_fact_source` | `get_memory_fact_source_response` |
 | `delete_memory_fact` | `delete_memory_fact_response` |
+| `delete_memory_preference` | `delete_memory_preference_response` |
+| `delete_memory_summary` | `delete_memory_summary_response` |
 | `delete_all_memories` | `delete_all_memories_response` |
 | `list_memory_superseded` | `list_memory_superseded_response` |
 | `restore_memory_fact` | `restore_memory_fact_response` |
 | `list_memory_batches` | `list_memory_batches_response` |
 | `undo_memory_batch` | `undo_memory_batch_response` (when the worker ends) |
 | `keep_memory_op` | `keep_memory_op_response` (when the worker ends) |
+| `export_memories` | `export_memories_response` |
+| `import_memories` | `import_memories_response` |
+| `contacts_list` | `contacts_list_response` |
+| `contacts_search` | `contacts_search_response` |
+| `contacts_add` | `contacts_add_response` |
+| `contacts_update` | `contacts_update_response` |
+| `contacts_delete` | `contacts_delete_response` |
+| `contacts_search_entities` | `contacts_search_entities_response` |
+| `entity_set_photo` | `entity_set_photo_response` |
+| `entity_ensure` | `entity_ensure_response` |
 | `set_document_own` | `set_document_own_response` |
+| `doc_library_list` | `doc_library_list_response` |
+| `doc_library_get` | `doc_library_get_response` |
+| `doc_library_delete` | `doc_library_delete_response` |
+| `doc_library_index` | `doc_library_index_response` |
+| `doc_library_toggle_global` | `doc_library_toggle_global_response` |
+| `doc_library_note_save` | `doc_library_note_save_response` |
+| `doc_library_note_update` | `doc_library_note_update_response` |
+| `doc_library_doc_update` | `doc_library_doc_update_response` |
+| `doc_library_version_list` | `doc_library_version_list_response` |
+| `doc_library_deleted_list` | `doc_library_deleted_list_response` |
+| `doc_library_version_restore` | `doc_library_version_restore_response` |
+| `code_projects_list` | `code_projects_list_response` |
+| `code_projects_import` | `code_projects_import_response` |
+| `code_projects_link` | `code_projects_link_response` |
+| `code_projects_refresh` | `code_projects_action_response` |
+| `code_projects_rebuild` | `code_projects_action_response` |
+| `code_projects_set_branch` | `code_projects_action_response` |
+| `code_projects_delete` | `code_projects_action_response` |
 | `music_subscribe` | `music_state` |
 | `music_control` | `music_state` |
 | `music_search` | `music_search_response` |
 | `music_library` | `music_library_response` |
 | `music_queue` | `music_queue_response` |
-| `scheduler_action` | *(broadcast: `scheduler_notification`)* |
+| `music_buffer` (music socket) | *(no response)* |
+| `scheduler_action` | `scheduler_events_response` for `list`; otherwise none (broadcasts `scheduler_events_changed`, and `scheduler_notification` for a dismiss or snooze; `dismiss_missed` broadcasts only when its `event_id` is still ringing) |
+| `watch_list` | `watch_list_response` |
+| `watch_add` | `watch_add_response` |
+| `watch_update` | `watch_update_response` |
+| `watch_set_enabled` | `watch_set_enabled_response` |
+| `watch_remove` | `watch_remove_response` |
+| `watch_readings_subscribe` | `watch_readings_subscribe_response` |
+| `calendar_list_accounts` | `calendar_list_accounts_response` |
+| `calendar_add_account` | `calendar_add_account_response` |
+| `calendar_edit_account` | `calendar_edit_account_response` |
+| `calendar_remove_account` | `calendar_remove_account_response` |
+| `calendar_test_account` | `calendar_test_account_response` |
+| `calendar_sync_account` | `calendar_sync_account_response`, then `calendar_sync_done` |
+| `calendar_list_calendars` | `calendar_list_calendars_response` |
+| `calendar_toggle_calendar` | `calendar_toggle_calendar_response` |
+| `calendar_toggle_read_only` | `calendar_toggle_read_only_response` |
+| `calendar_set_enabled` | `calendar_set_enabled_response` |
 | `calendar_list_my_calendars` | `calendar_list_my_calendars_response` |
 | `calendar_upcoming_events` | `calendar_upcoming_events_response` |
+| `oauth_get_auth_url` | `oauth_get_auth_url_response` |
+| `oauth_exchange_code` | `oauth_exchange_code_response` |
+| `oauth_disconnect` | `oauth_disconnect_response` |
+| `oauth_check_scopes` | `oauth_check_scopes_response` |
+| `phone_action` | *(no response; `phone_call_notification`)* |
+| `test_silent_observation` | *(no response; `silent_observation`)* |
 | `satellite_register` | `satellite_register_ack` |
 | `satellite_ping` | `satellite_pong` |
+| `volume_state` | *(no response)* |
 | `ping` | `pong` |
 
 ---
@@ -3712,20 +5738,34 @@ All `*_response` messages follow a common pattern:
 
 | File | Purpose |
 |------|---------|
-| `src/webui/webui_server.c` | Main message dispatch, streaming, state |
+| `src/webui/webui_server.c` | WebSocket server, streaming, state |
+| `src/webui/webui_message_dispatch.c` | Main message dispatch |
 | `src/webui/webui_broadcasts.c` | Push broadcasts: attention, silent-observation, context-injection, memory, job/conversation notices |
 | `src/core/attention/attention_core.c` | Proactive-attention engine (drives `attention_alert`) |
 | `src/webui/webui_scheduler.c` | Scheduler events + notifications |
 | `src/webui/webui_phone.c` | Phone call notifications |
-| `src/webui/webui_homeassistant.c` | Home Assistant entity list/state |
+| `src/webui/webui_homeassistant.c` | Home Assistant status, test, entity list/refresh, service calls, state deltas |
+| `src/webui/webui_phone_config.c` | Phone call-audio settings |
 | `src/webui/webui_config.c` | Config get/set, audio devices, models |
 | `src/webui/webui_satellite.c` | DAP2 satellite registration and queries |
-| `src/webui/webui_music.c` | Music streaming, search, library, queue |
+| `src/webui/webui_admin_satellite.c` | Satellite administration: list, update, delete, registration key |
+| `src/webui/webui_ota.c` | OTA releases, pushes and fleet rollouts |
+| `src/webui/webui_music.c` | Music streaming |
+| `src/webui/webui_music_handlers.c` | Music control, search, library, queue |
+| `src/webui/webui_music_server.c` | The music socket: authentication, buffer reports |
 | `src/webui/webui_history.c` | Conversation CRUD, search, context |
 | `src/webui/webui_email.c` | Email account settings, test connection |
 | `src/webui/webui_email_panel.c` | The mail panel's verbs (list, search, read, flags, counts) |
 | `src/webui/webui_email_exec.c` | Email work off the socket thread, one task per account |
-| `src/webui/webui_memory.c` | Memory facts, preferences, summaries |
+| `src/webui/webui_memory.c` | Memory facts, preferences, summaries, the entity graph, export and import |
+| `src/webui/webui_contacts.c` | Contacts, entity photos, `entity_ensure` |
+| `src/webui/webui_attention.c` | Proactive-attention watches and live readings |
+| `src/webui/webui_calendar.c` | Calendar accounts, calendars, upcoming events |
+| `src/webui/webui_oauth.c` | Google account linking (OAuth) |
+| `src/webui/webui_doc_library.c` | Document library and notes |
+| `src/webui/webui_code_projects.c` | Code projects |
+| `src/webui/webui_messaging.c` | Messaging channels |
+| `src/webui/webui_always_on.c` | Always-on voice (server-side VAD and wake word) |
 | `src/webui/webui_memory_batches.c` | What memory learned per batch: list, undo, keep (the Learned tab, the marker) |
 | `src/webui/webui_admin.c` | User management (CRUD, unlock) |
 | `src/webui/webui_session.c` | Session list and revocation |

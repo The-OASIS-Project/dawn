@@ -1,19 +1,20 @@
 # Durable Background Jobs — Design
 
 **Status:** LIVING DESIGN — the north-star plan for the durable-background-jobs program. Phase 0, Phase 1,
-and the server half of Phase 2 are shipped; Phases 2 (browser surface), 3, 4, and 5 are ahead. This doc is
+Phase 1.5, most of Phase 2 (server half, jobs panel, live view, completion marker) and Phase 3's
+`reinvoke_parent` are shipped; CP5 (the live-watch panel), Phase 3's trees, and Phases 4 and 5 are ahead. This doc is
 the **plan, scope, and design details** — not a build log. The shipped-commit history lives in git and the
 commit messages; when the program completes, the design record graduates to `atlas/dawn/archive/`.
 
 - **Current state (one line):** background turns generate independently of the viewing socket (P1); text-only
   jobs run in a separate pool with a lifecycle, tool, and completion delivery (P2-minimal); a durable event
-  log + attach/replay + a jobs panel expose them (Phase 2 server half). Trees, the browser transcript
-  surface, workspace/sandbox, and the TUI are ahead.
+  log + attach/replay + a jobs panel expose them (Phase 2 server half). Trees, the CP5 live-watch
+  panel, workspace/sandbox, and the TUI are ahead.
 - **Where the details live:** §3 data model · §4/§4a hazards + the turn-queue foundation · §5 lifecycle ·
   §6 stream/observe contract · §7 config · §8 security invariants · §10 phased plan with status · §14
   shipped/remaining ledger + known open defects.
 - Authored 2026-07-22. This revision reconciles the doc to the code as of the `background-jobs-p2-observe`
-  branch (schema v74).
+  branch (schema v74). *As of 2026-11 the schema is at v117; v75 added the `job_kind` column (§3).*
 
 > **Reviewer note:** §14 is self-contained for shipped/remaining state; the known-open-defect list
 > at the end of §14 is the authoritative "what's broken now" record.
@@ -87,6 +88,8 @@ A job is a `conversations` row with `parent_id` set (or, for a root user-initiat
 | `deliver_to` | TEXT DEFAULT NULL | Completion-notification target for `notify` (messaging-origin job answers on its own channel; same semantics as scheduler `deliver_to`). Bound by `conv_db_create_job`; read by the monitor's notify batch. |
 | `job_goal` | TEXT DEFAULT NULL | The instruction the job was created with, durable **from CREATE** so a capacity-refused job can still be resumed (§5 resume). Read only by the resume path; deliberately not on `job_record_t` (that struct is bulk-copied for snapshots). |
 
+*As built: v75 added a 14th column, `job_kind` (TEXT DEFAULT NULL; NULL = an ordinary job, `research` = a deep-research run, `coding` = a coding-agent task — `JOB_KIND_*` in `include/auth/auth_db.h`). The plain job worker never resumes a `research` or `coding` row (`auth_db_jobs.c`).*
+
 `user_id` is **not** a job column — the child inherits the spawner's `user_id` via `conv_db_create` and every read is ownership-JOINed (§8). A tree is single-user by invariant. **`is_private` is likewise inherited** from the parent (existing column, not new), so a job under a private conversation is private.
 
 **Fan-out/join is derived, not stored** — "parent resumable iff it has no `running` children with `on_complete='reinvoke_parent'`" is one index-assisted scan over the (≤4) child set. Index `idx_conversations_parent (parent_id, job_status)`. A `conversation_waits` table is added only if multi-child *ordered* joins ever materialize (deferred).
@@ -100,7 +103,7 @@ CREATE TABLE IF NOT EXISTS conversation_events (
    id INTEGER PRIMARY KEY AUTOINCREMENT,
    conversation_id INTEGER NOT NULL,
    seq INTEGER NOT NULL,              -- per-conversation monotonic
-   kind TEXT NOT NULL,               -- status | tool_call | tool_result | terminal_chunk | spawn | complete
+   kind TEXT NOT NULL,               -- status | tool_call | tool_result | terminal_chunk | spawn | complete (+ later kinds, §6)
    payload TEXT,                     -- kind-specific JSON, secret-redacted + size-capped (event_chunk_cap)
    created_at INTEGER NOT NULL,
    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
@@ -113,7 +116,7 @@ CREATE INDEX IF NOT EXISTS idx_conv_events ON conversation_events(conversation_i
 - Final assistant text is **not** duplicated here — it lives in `messages`. `complete` carries `final_message_id`, and the finished text is pushed as a `message_appended` frame so a pure tailer gets the answer (§6).
 - Retention is kind-aware (§8.8), driven by `event_retention_days` (default 30, ON).
 
-**Migration discipline:** each version's body is its own `auth_db_migrations_v7N.c` (matching `_v67.c`); only the ~15-line AND-gated ladder block is appended to the size-exempt `auth_db_migrations.c`. `conv_column_exists()` probe + literal-DEFAULT. **Current schema version: 74** (`AUTH_DB_SCHEMA_VERSION`, `include/auth/auth_db_internal.h`).
+**Migration discipline:** each version's body is its own `auth_db_migrations_v7N.c` (matching `_v67.c`); only the ~15-line AND-gated ladder block is appended to the size-exempt `auth_db_migrations.c`. `conv_column_exists()` probe + literal-DEFAULT. Schema version at this revision: 74; current: 117 (`AUTH_DB_SCHEMA_VERSION`, `include/auth/auth_db_internal.h`).
 
 ---
 
@@ -137,9 +140,9 @@ Re-engaging a parent by streaming into the user's **live** viewer session races 
 
 - **`src/core/turn_queue.c` (Layer-1 leaf).** A per-session FIFO guaranteeing **at most one turn runs on a given `session_t` at a time**. All WebUI turn producers — user **text**, **push-to-talk voice**, and **background reinvoke** — enqueue instead of `pthread_create`-ing the worker directly. "Two turns never touch one session's streaming state concurrently" becomes a structural property. One leaf mutex, never held across the spawn/free closures; `TURN_SOURCE_USER` (cap 16) vs `TURN_SOURCE_BACKGROUND` (cap 8).
 - **Reinvoke rides the queue.** `reinvoke_run` finds+retains the live viewer and enqueues a marker as a background turn (or falls back to a detached job-pool session when there's no viewer). The envelope is built at **dequeue** (re-querying the parent's pending jobs so late siblings coalesce), with an **exactly-once release matrix** for `{session_release, inflight_release, mark_dirty, free}` across every path. A re-engagement is marked fired only once its reply is actually saved (client-saved foreground, or server-persisted when backgrounded/client-gone).
-- **Teardown safety (closes Hazard 3 for the interactive path).** `session_t.being_destroyed` (set first in `session_destroy`) + a slot `closing` flag + purge-before-ref-wait; `session_begin_turn_flags` **no-ops under being_destroyed** so a turn spawned into the pop-to-run window can't resurrect the teardown cancel. The interactive ref-wait is **bounded-retry-then-leak-don't-free** (`SESSION_DESTROY_REF_WAIT_MAX_SEC` = 30) — leaking a few-KB `session_t` is recoverable; freeing it under a running worker is a UAF. `session_t.last_activity` is `_Atomic` (was written under `history_mutex`, read under `session_manager_rwlock`).
+- **Teardown safety (closes Hazard 3 for the interactive path).** `session_t.being_destroyed` (set first in `session_destroy`) + a slot `closing` flag + purge-before-ref-wait; `session_begin_turn_flags` **no-ops under being_destroyed** so a turn spawned into the pop-to-run window can't resurrect the teardown cancel. The interactive ref-wait is **bounded-retry-then-leak-don't-free** (`SESSION_DESTROY_REF_WAIT_MAX_SEC` = 30; as built, `session_destroy()` no longer waits — the session reaper, `session_reaper.c`, does) — leaking a few-KB `session_t` is recoverable; freeing it under a running worker is a UAF. `session_t.last_activity` is `_Atomic` (was written under `history_mutex`, read under `session_manager_rwlock`).
 
-**Producer coverage:** the DAP2 `satellite_query` path is the one turn producer **not** yet on the queue (distinct session objects + reinvoke only targets WEBUI sessions, so the invariant holds today). Route it through when a third concurrent producer per satellite session appears.
+**Producer coverage:** *As built: the DAP2 `satellite_query` path is on the queue too (`turn_queue_enqueue(..., TURN_SOURCE_USER, ...)` in `webui_satellite.c`).*
 
 ---
 
@@ -180,7 +183,7 @@ Cancel sets the target's `cancel_requested`, marks `job_status='cancelled'`, set
 
 ### Restart semantics (honest, structural)
 
-The job body dies with the daemon (no-subprocess rule). On boot: scan `job_status='running'` → set `interrupted` + `job_error`, stamp `finished_at = s_boot_time - 1` (the work stopped when the *previous* daemon died), queue a notification. The monitor's restart-safety rule is per-tick on `finished_at < s_boot_time`, so it never auto-reinvokes a parent across a restart. If `workspace_ref` is present (Phase 4), attempt MCP reattach only after validating its generation nonce. **Resume is explicit** (§6) — no seamless survival is promised.
+The job body dies with the daemon (no-subprocess rule). On boot: scan `job_status='running'` (and `'queued'`) → set `interrupted` + `job_error`, stamp `finished_at = s_boot_time - 1` (the work stopped when the *previous* daemon died), queue a notification. The monitor's restart-safety rule is per-tick on `finished_at < s_boot_time`, so it never auto-reinvokes a parent across a restart. If `workspace_ref` is present (Phase 4), attempt MCP reattach only after validating its generation nonce. **Resume is explicit** (§6) — no seamless survival is promised.
 
 ### Memory extraction
 
@@ -199,12 +202,13 @@ One attach protocol, two renderers. All server→client frames go through the `s
    - **`status` is SCOPED**: emitted for job conversations, background/reinvoke turns, and turns whose conversation is a job (`job_status IS NOT NULL`) — three terms because none alone covers a user typing into a job conversation from their own session. Interactive conversations are already observable via the sidebar chip; universal emission roughly doubled the event table for no added visibility.
    - **`tool_call`/`tool_result` are NOT scoped** — they fire for every conversation (real content, and this lets the event log eventually back the debug transcript). *This decision has a cost the current build has not paid down — see §14 known defects (redaction gap + write amplification).*
    - **`complete` carries terminal disposition**: `{disposition, error?, final_message_id}`.
+   - *As built, more kinds exist (`include/core/conv_event.h`): `resume` (restart boundary), the deep-research kinds `research_round`, `research_claim`, `research_stop`, `research_conclude`, `research_unanswerable`, `research_critic`, and the coding-agent kinds `agent_step`, `agent_request`, `agent_end`.*
 3. **`message_appended`** `{conversation_id, message_id, role, text}` — pushed when a turn's final assistant message persists, so a pure event-tailer receives the **answer body** (which lives in `messages`, not events). Required for the TUI verification.
 4. **Job list frames, split by object LIFETIME:**
 
    | Frame | Carries | Bound |
    |---|---|---|
-   | `jobs_snapshot` | the complete ACTIVE set, full rows, on `jobs_request` | structurally bounded (active set ≤ `max_active_jobs`, clamped ≤ 256); says `truncated: true` if ever hit |
+   | `jobs_snapshot` | the complete ACTIVE set, full rows, on `jobs_request` | structurally bounded (read buffer sized `max_active_jobs` + `max_queued_per_user`, each clamped ≤ 256, capped at 512 — `webui_jobs.c`); says `truncated: true` if ever hit |
    | `job_update` | one job's row, on every lifecycle transition | — |
    | `list_jobs_response` | one keyset-paginated page of TERMINAL jobs (history) | unbounded feed — **never feed a count from it** |
    | `jobs_invalidate` | contentless "re-sync your job views" nudge for STRUCTURAL changes the deltas don't cover (a job removed by the parent-delete cascade) | — |
@@ -336,7 +340,7 @@ Separate program consuming the Phase-2 contract; nothing daemon-side. Blocked on
 ## 12. Open items / deferred
 
 - `conversation_waits` explicit join table; multi-child *ordered* joins — deferred (derive first).
-- Voice/Session-0 turns do not background (they may *spawn* jobs); scoped out. Backgrounded-**voice**-answer server-persist is not mirrored from the text path yet.
+- Voice/Session-0 turns do not background (they may *spawn* jobs); scoped out. (The WebUI voice reply is now persisted server-side like the text path, `webui_audio.c`.)
 - Token-durable logging — rejected (step granularity only).
 - True blocking `awaited` — rejected under slot scarcity; re-addable only after a generation-context refactor.
 - `seq` MAX+1 → in-memory counter — deferred optimization if contention shows.
@@ -363,8 +367,8 @@ Separate program consuming the Phase-2 contract; nothing daemon-side. Blocked on
 
 ## 14. Implementation status & ledger
 
-**Shipped (branch `background-jobs-p2-observe`, on top of P0/P1 merged to `main` via PR #23):**
-Phase 0, Phase 1, Phase 1.5, the Phase-2 **server half** + CP4a jobs panel, the **watched-job live view** (a running job streams its text + live tool-call/visual entries to browser viewers via the normal turn's stream/transcript fan-out), and **CP4b** (the terminal completion-disposition marker via `DawnAgentEvents` + `attach_conversation` on job View — §Phase 2). Schema at v74. See the phase table (§10) and git history for per-commit detail.
+**Shipped (branch `background-jobs-p2-observe`, on top of P0/P1 merged to `main` via PR #23; all on `main` now):**
+Phase 0, Phase 1, Phase 1.5, the Phase-2 **server half** + CP4a jobs panel, the **watched-job live view** (a running job streams its text + live tool-call/visual entries to browser viewers via the normal turn's stream/transcript fan-out), and **CP4b** (the terminal completion-disposition marker via `DawnAgentEvents` + `attach_conversation` on job View — §Phase 2). Schema at v74 at the time (v117 now). See the phase table (§10) and git history for per-commit detail.
 
 **Remaining (the single checklist — no scope lost):**
 
@@ -379,9 +383,9 @@ Phase 0, Phase 1, Phase 1.5, the Phase-2 **server half** + CP4a jobs panel, the 
 | Trees: `spawn_depth=parent+1`, enforce depth/children caps, cascade cancel, spawn-into-cancelling-tree guard, parent-delete reap, settings inheritance, `awaited` UI sugar | 3 | ○ AHEAD — job→job spawn blocked until caps enforced |
 | Workspace/sandbox (`workspace_ref` semantics, MCP reattach, nonce, `terminal_chunk`, sandbox cap) | 4 | ○ AHEAD — column reserved, zero semantics |
 | TUI client | 5 | ○ STRETCH |
-| Backgrounded-**voice**-answer server-persist (mirror the text path) | — | ○ deferred residual |
+| Backgrounded-**voice**-answer server-persist (mirror the text path) | — | ✅ SHIPPED — the WebUI voice worker persists the reply server-side (`webui_persist_final_answer`, `webui_audio.c`) |
 
-**Unused config knobs (shadows of the above):** `max_queued_per_user`, `max_spawn_depth`, `max_children_per_tree` — parsed + round-tripped, zero read sites outside `src/config/`. (`event_chunk_cap` is now enforced — the earlier "unused" listing was stale.)
+**Unused config knobs (shadows of the above):** `max_queued_per_user`, `max_spawn_depth`, `max_children_per_tree` — parsed + round-tripped, not enforced. `max_spawn_depth`/`max_children_per_tree` have no read site outside `src/config/` and the WebUI POST handler; `max_queued_per_user` is read only to size the `jobs_snapshot` buffer (`webui_jobs.c`). (`event_chunk_cap` is now enforced — the earlier "unused" listing was stale.)
 
 ### Known open defects (authoritative "what's broken now")
 
@@ -391,10 +395,10 @@ Surfaced by the branch review (2026-07-27). A pre-Phase-3 hardening batch addres
 2. ✅ **FIXED — `delivery_claim` stale-index OOB (was High).** `-1` found-sentinel + insert at `s_delivery_n`; `test_delivery_claim_after_full_table_sweep`. (`src/core/job_manager.c`.)
 3. **`on_complete_fired` is one bit answering two questions (Medium — deferred to Phase-3 start).** It gates both "parent re-engaged?" and "user told?"; the delivery path is coherent via the single `job_notify_user()` writer (live-verified), so this is a *structural* hardening, not an active bug. Its whole purpose is to survive Phase-3 cascade-cancel adding fire sites, so it lands at Phase-3 kickoff — next to the code that stresses it, with its own review. Split into `reinvoke_fired` + `notified_at` **before** the trees work.
 4. ✅ **FIXED — `event_chunk_cap` minimum clamp (was Medium, memory safety).** `JOBS_EVENT_CHUNK_CAP_MIN` (256) floor in `config_clamp_jobs()` + defensive re-floor in `payload_cap()`; `test_event_chunk_cap_has_a_floor`.
-5. ◑ **PARTLY FIXED — event write amplification.** `tool_call`/`tool_result` persistence + fan-out are now **gated to the observe set** (`session->events_observable`), so ordinary interactive turns no longer write step events (live-verified). Remaining: the drain/append still `prepare`/`finalize` per call under the global lock — cache into `s_db.stmt_*` (hardening-batch C2).
-6. **Tool-loop honors the *global* interrupt, not the session cancel flag (Medium).** A job wedged in a tool call ignores its session cancel (only the reap's counter-reclaim saves the slot), and a wake-word barge-in / shutdown kills concurrent jobs and files them as "no response from model." Changing it alters cancellation for voice/WebUI/messaging alike, so it's its own change.
-7. **UI (Low/Medium):** the 1-s live rebuild drops keyboard focus from View/Open buttons; the observe panel has no `aria-live` region. `jobs.js` is 952 lines (approaching the 1,000 JS soft limit before CP4b).
-8. **Files over limits:** `session_manager.c` is 2,855 lines (over the 2,500 hard limit; pre-existing, drifting). Extract the job-pool-integration block on next touch.
+5. ◑ **PARTLY FIXED — event write amplification.** `tool_call`/`tool_result` persistence + fan-out are now **gated to the observe set** (`session->events_observable`), so ordinary interactive turns no longer write step events (live-verified). The append now uses a cached statement (`s_db.stmt_event_append`); remaining: the event list read and the retention prune still `prepare`/`finalize` per call under the global lock (`auth_db_events.c`).
+6. ◑ **PARTLY FIXED — tool-loop cancellation.** A background turn now breaks only on its own session cancel flag, and only a foreground turn also honors the global wake-word / Ctrl+C interrupt (`llm_interrupt_ctx_t`, `llm_tool_loop.c`), so a barge-in no longer kills concurrent jobs. Remaining: a job wedged inside a synchronous tool call runs until the call returns (only the reap's counter-reclaim saves the slot).
+7. **UI (Low/Medium):** the observe panel has no `aria-live` region. (Keyboard focus now survives the active-list rebuild: `captureFocus`/`restoreFocus` in `jobs.js`.) `jobs.js` is 1,261 lines (over the 1,000 JS soft limit).
+8. ✅ **FIXED — file size:** `session_manager.c` is 2,192 lines (under the 2,500 hard limit).
 
 ### Fold-ins carried on this branch (not core-feature, enumerated for accounting)
 

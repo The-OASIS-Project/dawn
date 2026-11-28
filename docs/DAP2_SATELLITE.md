@@ -100,6 +100,7 @@ including for a binary that won't even launch — so a bad update can't brick th
 **One-time per fleet — provision your verify key (offline signing):**
 
 ```bash
+make -C build-debug ota-keytool                            # built on demand only
 ./build-debug/ota-keytool keygen --out-dir /tmp/otakeys     # private key stays OFFLINE
 sudo install -m644 -o root -g root /tmp/otakeys/ota_signing.pub /etc/dawn/ota_pubkey
 sudo systemctl restart dawn-satellite
@@ -320,7 +321,7 @@ enabled = false       # Requires libsdl2-dev libsdl2-ttf-dev, build with -DENABL
 width = 1024          # Display resolution
 height = 600
 brightness = 100      # Saved brightness (10-100)
-volume_pct = 80       # Saved volume (0-100)
+volume = 80           # Saved volume (0-100)
 time_24h = false      # 12-hour (false) or 24-hour (true) clock format
 theme = "cyan"        # UI color theme: cyan, purple, green, blue, terminal
 
@@ -381,7 +382,7 @@ DAWN uses a private Certificate Authority (CA) to secure WebSocket connections. 
    scp ssl/ca.crt pi@satellite-ip:/etc/dawn/ca.crt
    ```
 
-3. Configure the satellite (`/etc/dawn/satellite.toml`):
+3. Configure the satellite (`/etc/dawn-satellite/satellite.toml`):
    ```toml
    [server]
    ssl = true
@@ -469,7 +470,7 @@ Or via CLI: `--registration-key <key>`
 #define SECRET_REGISTRATION_KEY "your-64-char-hex-key-here"
 ```
 
-**Environment variable** (alternative for all client types):
+**Environment variable** (on the daemon, instead of `secrets.toml`):
 ```bash
 export DAWN_SATELLITE_KEY="your-64-char-hex-key-here"
 ```
@@ -677,7 +678,7 @@ git clone --recursive https://github.com/The-OASIS-Project/dawn.git
 cd dawn
 ```
 
-The `--recursive` flag fetches the whisper.cpp submodule. The build system links against whisper.cpp even when only Vosk ASR is enabled, so the submodule must be present.
+The `--recursive` flag fetches the whisper.cpp submodule, which the build needs when Whisper ASR is enabled (`-DENABLE_WHISPER_ASR=ON`).
 
 ### Step 3.5: Download Models
 
@@ -786,8 +787,8 @@ sudo ./services/dawn-satellite/install.sh
 
 This installs:
 
-- `/usr/local/bin/dawn_satellite` — main binary
-- `/usr/local/etc/dawn-satellite/satellite.toml` — configuration (edit this after install)
+- `/var/lib/dawn-satellite/bin/dawn_satellite` — main binary (started by `/usr/bin/dawn-satellite-launch`)
+- `/etc/dawn-satellite/satellite.toml` — configuration (edit this after install)
 - `/var/lib/dawn-satellite/` — runtime state (UUID, reconnect secret)
 - `/var/log/dawn-satellite/` — logs with logrotate
 - `/etc/systemd/system/dawn-satellite.service` — systemd unit
@@ -870,7 +871,7 @@ aplay -l    # Playback devices
 #   Subdevice #0: subdevice #0
 ```
 
-Configure in `/usr/local/etc/dawn-satellite/satellite.toml` (after running the service installer):
+Configure in `/etc/dawn-satellite/satellite.toml` (after running the service installer):
 
 ```toml
 [audio]
@@ -932,7 +933,7 @@ journalctl -u dawn-satellite -f               # follow logs
 **Strategy 1: Per-device config files**
 ```bash
 # On each satellite, customize identity after service install:
-sudo nano /usr/local/etc/dawn-satellite/satellite.toml
+sudo nano /etc/dawn-satellite/satellite.toml
 # Set: name = "Kitchen", location = "kitchen"
 sudo systemctl restart dawn-satellite
 ```
@@ -946,7 +947,7 @@ sudo systemctl edit dawn-satellite
 ```ini
 [Service]
 ExecStart=
-ExecStart=/usr/local/bin/dawn_satellite \
+ExecStart=/usr/bin/dawn-satellite-launch --config /etc/dawn-satellite/satellite.toml \
   --name "Kitchen" --location "kitchen"
 ```
 
@@ -1131,16 +1132,16 @@ If the satellite starts but logs `Failed to load model` or `[vosk] ERROR: failed
 ./setup_models.sh --vosk-small   # for default Vosk ASR
 ```
 
-After the service installer has run, models also need to be accessible to the `dawn` service user. `services/dawn-satellite/install.sh` handles this by default (symlinks models into `/usr/local/share/dawn-satellite/models/`). Verify with:
+After the service installer has run, models also need to be accessible to the `dawn` service user. `services/dawn-satellite/install.sh` handles this by default (copies models into `/var/lib/dawn-satellite/models/`; `--symlink-models` links them instead). Verify with:
 
 ```bash
-ls -la /usr/local/share/dawn-satellite/models/
+ls -la /var/lib/dawn-satellite/models/
 ```
 
 Check the paths in your config match what's on disk:
 
 ```bash
-grep -E 'model_path|config_path' /usr/local/etc/dawn-satellite/satellite.toml
+grep -E 'model_path|config_path' /etc/dawn-satellite/satellite.toml
 ```
 
 ### Connection Issues
@@ -1179,11 +1180,10 @@ sudo systemctl status dawn-satellite
 journalctl -u dawn-satellite -f
 
 # Check if binary exists
-which dawn_satellite
-ls -la /usr/local/bin/dawn_satellite
+ls -la /var/lib/dawn-satellite/bin/dawn_satellite
 
 # Check config file
-cat /usr/local/etc/dawn-satellite/satellite.toml
+cat /etc/dawn-satellite/satellite.toml
 ```
 
 ### Memory Issues (Pi Zero 2 W)

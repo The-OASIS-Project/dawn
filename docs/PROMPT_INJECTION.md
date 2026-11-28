@@ -72,8 +72,8 @@ From most to least load-bearing:
    and prepare; a device change or an action (a memory saved included) waits for a message of the
    user's own.
 2. **Confirms** (`include/core/turn_origin.h`): an action that was prepared runs only on the user's
-   next turn in the same session, never in a turn a rendered visual started or one carrying an
-   attached email.
+   next turn in the same session (a few turns later for the coding agent's confirms, whose tables
+   allow it), never in a turn a rendered visual started or one carrying an attached email.
 3. **Outside text in tool results, framed** (`src/llm/llm_third_party.c`): an email or web page goes
    in its frame (`EMAIL CONTENT`, `WEB CONTENT`) with the conversation's secret tag and a line saying
    it is data; a stored one read again (`result_read`, `context_expand`) is framed again. An attached

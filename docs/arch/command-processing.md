@@ -28,15 +28,21 @@ static const tool_metadata_t my_tool_metadata = {
 
 - **O(1) lookup**: FNV-1a hash tables for name, device_string, and aliases
 - **Self-registration**: each tool calls `tool_registry_register()` during init
-- **LLM schema generation**: `tool_registry_generate_llm_tools()` builds provider-specific schemas
+- **LLM schema generation**: `llm_tools_get_openai_format()` / `llm_tools_get_claude_format()` build provider-specific schemas
 - **Capability flags**: `TOOL_CAP_NETWORK`, `TOOL_CAP_DANGEROUS`, etc. for safety classification
 
-**Registered tools** (as of March 2026):
+**Registered tool modules** (as of November 2026, named by their register function;
+`tools_register_all()` in `src/tools/tools_init.c` is the list of record, some behind build options. A
+module's tool name can differ, e.g. `homeassistant` registers `home_assistant`, `schwab` registers
+`stocks`, `url` registers `url_fetch`, and a module can register more than one tool; MCP servers' tools are added at runtime by the MCP bridge):
 
-- audio_tools, calculator_tool, calendar_tool, datetime_tool, document_read_tool
-- document_search_tool, email_tool, homeassistant_tool, hud_tools, llm_status_tool
-- memory_tool, music_tool, plan_executor_tool, reset_conversation_tool, scheduler_tool
-- search_tool, shutdown_tool, switch_llm_tool, url_tool, viewing_tool, volume_tool, weather_tool
+- attention, audio_device, calculator, calendar, code_project, coding_agent, context_expand, date
+- deep_research, document_grep, document_index, document_manage, document_read, document_search
+- email, faceplate, homeassistant, hud_control, hud_mode, image_search, job, llm_status, memory
+- messaging, music, phone, plan_executor, recall, recording, render_visual, research_conclude
+- research_mark_unanswerable, research_plan, research_record, reset_conversation, result_read
+- scheduler, schwab, search, sfx, shutdown, stat, suit, switch_llm, time, tts, url, viewing
+- visual_offset, voice_amplifier, volume, weather
 
 ## Command Flow
 
@@ -60,7 +66,7 @@ static const tool_metadata_t my_tool_metadata = {
 │   PATH 1: DIRECT MATCHING    │       │         PATH 2: LLM INVOCATION       │
 │   (text_to_command_nuevo.c)  │       │                                      │
 │                              │       │    ┌────────────────────────────┐    │
-│  Regex patterns from JSON:   │       │    │  tools enabled = true?     │    │
+│  Device-type patterns:       │       │    │  tools enabled = true?     │    │
 │  "turn on %device_name%"     │       │    └────────────┬───────────────┘    │
 │  "play %value%"              │       │                 │                    │
 │                              │       │                 ▼                    │
@@ -91,8 +97,8 @@ static const tool_metadata_t my_tool_metadata = {
 │                                                                             │
 │   command_execute(device, action, value, mosq, &result)                     │
 │                                                                             │
-│   1. Look up device in command_registry                                     │
-│   2. If has_callback → invoke deviceCallbackArray[type].callback()          │
+│   1. Look up device in tool_registry                                        │
+│   2. If callback → invoke tool->callback()                                  │
 │   3. If mqtt_only → publish JSON to MQTT topic                              │
 │   4. If sync_wait → use command_router for response (viewing)               │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -100,14 +106,14 @@ static const tool_metadata_t my_tool_metadata = {
                ┌─────────────────────────────┼─────────────────────────────┐
                ▼                             ▼                             ▼
 ┌──────────────────────┐       ┌──────────────────────┐       ┌─────────────────┐
-│ C CALLBACKS          │       │ MQTT-ONLY            │       │ SYNC WAIT       │
-│ (mosquitto_comms.c)  │       │ (Hardware)           │       │ (viewing)       │
+│ TOOL CALLBACKS       │       │ MQTT-ONLY            │       │ SYNC WAIT       │
+│ (src/tools/*.c)      │       │ (Hardware)           │       │ (viewing)       │
 │                      │       │                      │       │                 │
-│ deviceCallbackArray: │       │ Publish to topic:    │       │ Wait for MQTT   │
-│ - weather → get_wea  │       │ - "hud" → helmet     │       │ response via    │
-│ - music → play_music │       │ - "helmet" → helmet  │       │ command_router  │
-│ - search → web_sear  │       │ - "homeassistant"    │       │                 │
-│ - date → get_date    │       │                      │       │                 │
+│ tool->callback:      │       │ Publish to topic:    │       │ Wait for MQTT   │
+│ - weather_tool       │       │ - "hud" → helmet     │       │ response via    │
+│ - music_tool         │       │ - "helmet" → helmet  │       │ command_router  │
+│ - search_tool        │       │                      │       │                 │
+│ - datetime_tool      │       │                      │       │                 │
 └──────────────────────┘       └──────────────────────┘       └─────────────────┘
 ```
 
@@ -120,9 +126,9 @@ Commands are defined via the **modular tool_registry** system:
    - Registered via `tool_registry_register()` during `tools_register_all()`
    - O(1) lookup via FNV-1a hash tables for name, device_string, and aliases
 
-2. **Legacy Device Callbacks** (`mosquitto_comms.c`)
-   - `deviceCallbackArray[]` maps device types to C functions
-   - Core system devices: weather, music, search, homeassistant, etc.
+2. **MQTT commands** (`mosquitto_comms.c`)
+   - Look up the device's callback in the tool registry (`tool_registry_get_callback()`); there is
+     no separate callback table
 
 ## Native Tool Calling
 
@@ -171,8 +177,9 @@ resolves) supplies `classify_call`.
 
 **The caller** is decided from the turn (`tool_call_policy_caller`, `src/core/tool_call_policy.c`):
 the **user**; an **unverified sender** (an SMS session: a text can claim any number); a
-background **job** on its own session; or **unattended** (a background turn such as a job's
-follow-up, or no running user turn at all).
+background **job** on its own session; **unattended** (a background turn such as a job's
+follow-up, or no running user turn at all); or a user turn **carrying an email the user attached**.
+On the last step of a turn that ends on a save, every caller is narrowed to the save-step row.
 
 | Caller \ kind | act | read | fetch | state | device | prepare |
 |---|---|---|---|---|---|---|
@@ -180,6 +187,8 @@ follow-up, or no running user turn at all).
 | unverified sender | code | allow | code | allow | code | allow |
 | job | refuse | allow | allow | allow | refuse | refuse |
 | unattended | refuse | allow | refuse | allow | refuse | refuse |
+| attached email | refuse | allow | allow | allow | refuse | allow |
+| save step | refuse | refuse | refuse | allow | refuse | refuse |
 
 **code** = the call is held and DAWN texts the number what was asked plus a 6-digit code
 (`llm_tools_reply_code.c`, `core/tool_call_challenge.c`, `core/reply_code.c`). The held call runs
@@ -198,7 +207,9 @@ allowed at create time).
 **Confirms are bound to their preview.** A `PREPARE` stages one item per session and kind in
 `core/pending_slots` with a fresh id, which its preview shows and its confirm must name. Each
 item records where it was made (`turn_origin_t`, `include/core/turn_origin.h`). A confirm
-runs only in the same session, in the user's very next turn (or, approved by the user's SMS
-reply code, a later turn of that session), and only for the item its id names. So an item staged again (a forged text, content the model read) is never what an earlier
+runs only in the same session, in the user's very next turn (or one of the next few where its
+table allows it, or, approved by the user's SMS reply code, a later turn of that session), never in
+a turn carrying an attached email or for an item prepared in a turn the user stopped, and only for
+the item its id names. So an item staged again (a forged text, content the model read) is never what an earlier
 preview's "yes" carries out. Email drafts keep their own tables with random ids under the same
 rule.

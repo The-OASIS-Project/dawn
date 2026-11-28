@@ -17,7 +17,7 @@ Memory extraction happens at session end, not during conversation — zero laten
 │                    DURING CONVERSATION                                 │
 ├───────────────────────────────────────────────────────────────────────┤
 │  • Full conversation in LLM context window                            │
-│  • Core facts + preferences + entity graph pre-loaded at session start│
+│  • Preferences + summaries in USER MEMORY; ranked items each turn     │
 │  • Memory tool available for explicit remember/search/forget          │
 │  • Hybrid search: keyword + semantic similarity via embeddings        │
 │  • Zero extraction overhead                                           │
@@ -53,8 +53,8 @@ Memory extraction happens at session end, not during conversation — zero laten
    - Entity upsert with `RETURNING id` (SQLite 3.37.2+) + `memory_db_entity_upsert_at()` variant accepting `first_seen` / `last_seen` overrides for reextract parity (so re-extracting a 2026-Jan conversation in May doesn't stamp every row with today's date)
    - Relation creation with entity FK or literal value; `memory_db_relation_supersede_ex()` closes the old value with `valid_to` for a one-at-a-time relation (married_to, born_in, born_on, favorite_color, favorite_food, primary_language), or when extraction marks a new value as replacing an old one (`"replaces"`: a person can have several emails, phones, vehicles, jobs, schools and homes); the old fact is superseded in the same transaction once no open relation rests on it; a closed row records the fact that closed it (`closed_by_fact_id`, schema v103), and a superseded fact whether it was a merged duplicate or a replaced value (`superseded_kind`, schema v104), so `memory_db_fact_restore()` (`memory_db_facts_restore.c`) can bring a merged or replaced fact back and reopen exactly the relations its replacement closed (not one stated as ended, nor a one-at-a-time value while another is open); `memory_db_fact_list_superseded()` lists them for the memory tool's `list_merged` / `restore`, the Memory panel's **Duplicates & old values** dialog and `dawn-admin memory superseded` / `restore`; `memory_db_fact_forget()` deletes a fact with the facts merged into it (left alone they would come back as current: `superseded_by` is `ON DELETE SET NULL`). The rule on every path: a merged fact is the same fact as its keeper, a replaced fact is its history. Merge and replace supersede only a current fact onto a current one (never onto a note's gloss); a merge moves the duplicate's relations and replaced values to the keeper, each marked with where it came from (`merged_from_fact_id`, `merged_from_id`, schema v104) so restoring the duplicate moves them back, while what it closed stays on it (restore and reopen look through merged facts); a replace (the tool's `newer_fact_id`) closes the old fact's open relations by the newer one; an extraction correction (`memory_db_fact_correct`) files the old fact as replaced and leaves its relations open. A user's forget (one fact, `memory_db_fact_forget` in `memory_db_forget.c`, with `memory_db_fact_forget_preview` for its confirm; or a conversation) settles what it leaves in `memory_db_fact_settle.c`: a fact under a going one passes to the nearest fact up its chain that stays (as replaced if any link on the way was), or, when the chain's head goes, is current again with the relations the going facts closed reopened, and a replaced value that comes back is reported. The prunes (stale, low-confidence, expired) delete a fact with its whole history and bring nothing back, a hundred facts per transaction; `prune_superseded` removes merged duplicates only, handing what they still hold to their keeper
    - Entity search by keyword (LIKE) and by ID; Bundle 2 (May 2026) adds correlated subqueries on `_get_by_name` + `_search` + admin canonical-list aggregating `mention_count` (SUM) / `first_seen` (MIN) / `last_seen` (MAX) across the equivalence class `WHERE id = e.id OR canonical_id = e.id`
-   - Bulk relation loading (`memory_db_relation_list_all_by_user()`)
-   - Windowed list functions (Bundle 3, May 2026): `memory_db_fact_list_window` + `_summary_list_window` take `(since_ts, until_ts, sort_asc, limit)` — `until_ts=0` sentinel resolves to INT64_MAX. Four new prepared statements (ASC/DESC × fact/summary) back the new `recent` parameters (`limit` / `sort` / `before`). The legacy `_list_since` statements are subsumed by `_list_window` with `until_ts=0` and queued for retirement.
+   - Bulk relation loading for a set of entities (`memory_db_relation_list_for_entities()`)
+   - Windowed list functions (Bundle 3, May 2026): `memory_db_fact_list_window` + `_summary_list_window` take `(since_ts, until_ts, sort_asc, limit)` — `until_ts=0` sentinel resolves to INT64_MAX. Four new prepared statements (ASC/DESC × fact/summary) back the new `recent` parameters (`limit` / `sort` / `before`). The legacy `_list_since` statements are gone, subsumed by `_list_window` with `until_ts=0`.
    - Entity listing for extraction prompt dedup
    - Similarity detection for duplicate prevention
    - Access counting with time-gated confidence reinforcement
@@ -92,7 +92,7 @@ Memory extraction happens at session end, not during conversation — zero laten
    - Incremental (Oct 2026): `build_focus_block` returns the top_k items as data (`composed_prompt_t.focus_items`); the turn's seam (`session_focus.c`, `core/focus/focus_incremental.c`) reads which items the history's earlier turn contexts already show (newest line per `[M#]` handle; withdrawn lines and summarized-away turns show nothing) and sends only the new or changed ones under a `[retrieved items: N]` line, naming the rest on a `[still relevant: M3, M7]` line. Nothing is tracked beside the history, so a reload, a compaction or a forget is handled by what the history itself shows. The context panel is told each item's state (`new` / `changed` / `in_context` / `referenced`)
    - Memory-tool double-dip mitigation: the system prompt's context rules tell the LLM the retrieved items already hold its top hits
    - Source-type tagging via `focus_source.h` taxonomy (INTERNAL / EXTERNAL / USER_CONTENT) routes the injection filter only at the trust boundary
-- **memory_citation.c** (Aug 2026, feature-gated on `[memory] citation_enabled`): the citation signal (from RMM, arXiv 2503.08026 — the readout only, not its RL reranker). When on, the focus block numbers each citeable candidate `[M# source]`; the model echoes the ones it used in a trailing `<cited>M1,M7</cited>` tag that `llm_response_finalize` strips (a live stream-strip seam, `text_filter_cited_tags`, keeps it out of the browser mid-stream). Each turn's injected-vs-cited item ids + their `final_score` land in the `memory_citation_audit` table (schema v78; since v99 the items a turn named again rather than sent are listed apart, in `referenced_ids`, and are citable that turn; an earlier turn's item is citable only while the history still shows it) → **injection precision** (are we injecting memory the model actually uses?) via `benchmarks/citation_audit_summary.py`. A `context_citations` WS frame gold-highlights the cited rows in the WebUI Context panel. Cited facts can also be reinforced: when `[memory] citation_reinforcement_boost` is above 0 (the compiled-in default is 0, off; `dawn.toml.example` sets 0.05), each fact the model cited gets a confidence bump via `memory_db_fact_reinforce_citation()` (at most once per fact per hour, ceilinged at 1.0); cited summaries and relations are audited but not reinforced. See [MEMORY_CITATION_DESIGN.md](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/memory/MEMORY_CITATION_DESIGN.md) in atlas.
+- **memory_citation.c** (Aug 2026, feature-gated on `[memory.decay] citation_enabled`, off by default): the citation signal (from RMM, arXiv 2503.08026 — the readout only, not its RL reranker). When on, the focus block numbers each citeable candidate `[M# source]`; the model echoes the ones it used in a trailing `<cited>M1,M7</cited>` tag that `llm_response_finalize` strips (a live stream-strip seam, `text_filter_cited_tags`, keeps it out of the browser mid-stream). Each turn's injected-vs-cited item ids + their `final_score` land in the `memory_citation_audit` table (schema v78; since v99 the items a turn named again rather than sent are listed apart, in `referenced_ids`, and are citable that turn; an earlier turn's item is citable only while the history still shows it) → **injection precision** (are we injecting memory the model actually uses?) via `benchmarks/citation_audit_summary.py`. A `context_citations` WS frame gold-highlights the cited rows in the WebUI Context panel. Cited facts can also be reinforced: when `[memory.decay] citation_reinforcement_boost` is above 0 (the compiled-in default is 0, off; `dawn.toml.example` sets 0.05), each fact the model cited gets a confidence bump via `memory_db_fact_reinforce_citation()` (at most once per fact per hour, ceilinged at 1.0); cited summaries and relations are audited but not reinforced. See [MEMORY_CITATION_DESIGN.md](https://github.com/The-OASIS-Project/atlas/blob/main/dawn/memory/MEMORY_CITATION_DESIGN.md) in atlas.
 
 - **memory_fact_search.c/h**: Hybrid-search public surface
    - Extracted from `memory_embeddings.c` (header-only split May 2026)
@@ -127,10 +127,10 @@ Memory extraction happens at session end, not during conversation — zero laten
    - Hybrid search combining keyword and semantic results with configurable weights
    - Provider implementations: `memory_embed_ollama.c`, `memory_embed_openai.c`, `memory_embed_onnx.c`
 
-- **memory_context.c/h**: Session start context builder
-   - `memory_build_context()` builds ~800 token block
-   - Loads preferences, top facts by confidence, recent summaries
-   - Injected into LLM system prompt
+- **memory_context.c/h**: The USER MEMORY block
+   - `memory_build_context()` builds it, bounded by per-item caps (10 preferences, 3 summaries of the last 30 days)
+   - Loads preferences and recent summaries (facts reach a turn through the focus items)
+   - Sent in front of the question when it changed since the conversation last had it (`MESSAGE_KIND_MEMORY`), not in the system prompt
 
 - **memory_extraction.c/h**: Session end extraction
    - Triggered via `memory_trigger_extraction()`
@@ -158,9 +158,9 @@ Memory extraction happens at session end, not during conversation — zero laten
    - `append_graph_context()`: the named entities' relations, appended to search output when `as_of` or `include_historical` is given
    - Tool descriptor (canonical source) lives in `src/tools/memory_tool.c` (`memory_params[]`) — 18 params, generated into per-provider schemas by the tool registry
 
-- **memory_filter.c/h**: Injection filter — runs at the trust boundary only (raw user input at ingestion + USER_CONTENT at retrieval); see "Security Guardrails" below
+- **memory_filter.c/h** (`src/core/`): Injection filter — runs at the trust boundary only (raw user input at ingestion + USER_CONTENT at retrieval); see "Security Guardrails" below
    - Unicode normalization: zero-width/invisible char stripping, homoglyph mapping, Latin-1 accent stripping, fullwidth ASCII mapping, tag character handling
-   - ~118 blocked patterns across 17 categories (substring matching on normalized text)
+   - ~104 blocked patterns across 15 categories (`BLOCKED_PATTERNS`, substring matching on normalized text)
    - ReAct co-occurrence check (blocks when >= 2 of thought:/action:/observation: appear)
    - Called where raw user text is stored: `remember` and `merge_entities` (`memory_callback.c`), the WebUI's preference and merge edits (`webui_memory.c`), imports (`memory_import.c`) and note glosses (`memory_note_bridge.c`). Extraction output is LLM paraphrase and is not filtered
    - Stateless and thread-safe (pure function, no mutexes)
@@ -305,7 +305,7 @@ Full rationale, research citations, and risk model: [atlas/dawn/memory/INJECTION
 [memory]
 enabled = true
 context_budget_tokens = 800
-session_timeout_minutes = 15
+conversation_idle_timeout_min = 15   # Voice conversations saved after this idle time
 extraction_provider = "local"          # "local", "openai", "claude", "openrouter"
 extraction_model = "qwen2.5:7b"        # Model for extraction
 extraction_effort = "off"              # "off", "low", "medium", "high"
@@ -371,7 +371,7 @@ The memory viewer provides a browser-based interface for inspecting and managing
 - **Delete**: per-item delete with confirmation, bulk "Forget Everything"
 - **Import / Export**: transfer memories between DAWN instances or other AI assistants
 - **Keyboard accessible**: tabindex, ARIA roles, Enter/Space activation, `aria-label` updates alongside `title` so screen-reader users learn about pending proposals
-- **Endpoints**: `GET /api/memory/{facts,preferences,summaries,entities,stats}`, `DELETE /api/memory/{facts,preferences,summaries,entities}/:id`
+- **Endpoints**: WebSocket `list_memory_{facts,preferences,summaries,entities}`, `get_memory_stats`, `search_memory`, `delete_memory_{fact,preference,summary,entity}`; HTTP `/api/memory/entities/...` and `/api/memory/entity-merge-proposals` for aliases and merges
 
 ## Memory Import / Export
 
@@ -399,14 +399,15 @@ Users can export their memories for backup or transfer, and import memories from
 ## Data Flow (Memory Lifecycle)
 
 ```
-1. Session Start (WebSocket connect)
+1. A turn begins
    ↓
-2. Load user profile: memory_build_context(user_id)
+2. memory_build_context(user_id): preferences + recent summaries;
+   build_focus_block: the ranked items for this message
    ↓
-3. Inject facts/preferences/entity names into LLM system prompt
+3. Sent in front of the question: USER MEMORY (when it changed) and the turn's context
    ↓
 4. During conversation:
-   - User: "Remember I'm vegetarian" → memory_remember() → immediate storage
+   - User: "Remember I'm vegetarian" → memory_action_remember() → immediate storage
    - User: "What do you know about me?" → hybrid_search() → keyword + semantic
    - With `as_of` or `include_historical`, search also returns the named entities' relations (`Entities:` section)
    ↓

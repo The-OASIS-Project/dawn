@@ -110,8 +110,8 @@ sudo apt install libgmime-3.0-dev
 
 ## MQTT Broker
 
-MQTT is always required — there is no compile-time flag to disable it. The daemon initializes
-MQTT at startup and uses it for device command routing.
+MQTT is always compiled in — there is no compile-time flag to disable it. The daemon initializes
+MQTT at startup (unless `[mqtt] enabled = false`) and uses it for device command routing.
 
 For cloud deployments:
 
@@ -160,7 +160,7 @@ ESP32) connect over WebSocket and handle their own audio I/O.
 git clone --recursive https://github.com/The-OASIS-Project/dawn.git
 cd dawn
 
-# Configure (CPU-only, no CUDA)
+# Configure (CUDA is auto-detected; add -DENABLE_CUDA=OFF for CPU-only)
 cmake --preset debug
 
 # Build
@@ -178,6 +178,8 @@ Minimal `dawn.toml` for a cloud WebUI server:
 ```toml
 [general]
 ai_name = "friday"
+
+[localization]
 timezone = "America/New_York"
 
 [llm]
@@ -186,14 +188,14 @@ type = "cloud"
 [llm.cloud]
 # the provider your key is for (a key alone selects nothing; none selected = the local LLM)
 provider = "claude"  # or "openai", "gemini", "openrouter"
-model = "claude-sonnet-4-20250514"
+claude_models = ["claude-haiku-5-5", "claude-sonnet-5-5"]  # models to choose from
+claude_default_model_idx = 0                              # the one used by default
 
 [asr]
-engine = "whisper"
-model_path = "models/whisper.cpp/ggml-base.en.bin"
+model = "base.en"            # Whisper model, from models/whisper.cpp
 
 [tts]
-voice_model = "models/en_US-lessac-medium.onnx"
+voice_model = "en_GB-alba-medium"   # Piper voice name, from models/
 
 [audio]
 backend = "pulse"             # or "alsa" — required at compile time
@@ -203,7 +205,7 @@ enabled = true
 bind_address = "0.0.0.0"     # Listen on all interfaces
 port = 3000
 # For HTTPS (recommended for cloud):
-# https_enabled = true
+# https = true
 # ssl_cert_path = "/etc/letsencrypt/live/yourdomain/fullchain.pem"
 # ssl_key_path = "/etc/letsencrypt/live/yourdomain/privkey.pem"
 
@@ -212,11 +214,12 @@ broker = "localhost"
 port = 1883
 
 [network]
-session_timeout_minutes = 30
+session_timeout_sec = 1800
 ```
 
 API keys in `secrets.toml`:
 ```toml
+[secrets]
 claude_api_key = "sk-ant-..."
 # openai_api_key = "sk-..."
 ```

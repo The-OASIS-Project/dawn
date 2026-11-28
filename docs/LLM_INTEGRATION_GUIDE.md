@@ -56,12 +56,12 @@ openai_api_key = "sk-proj-..."
 type = "cloud"
 
 [llm.cloud]
-provider = "openai"    # "openai", "claude", or "gemini"
+provider = "openai"    # "openai", "claude", "gemini", or "openrouter"
 
 # Model lists for quick switching via WebUI or voice command
-openai_models = ["gpt-5-mini", "gpt-5.2", "gpt-5-nano", "gpt-5"]
-claude_models = ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"]
-gemini_models = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview"]
+openai_models = ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.2-astra"]
+claude_models = ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-2"]
+gemini_models = ["gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon"]
 ```
 
 3. Run DAWN — it uses the model at the provider's `*_default_model_idx` (the first one when unset).
@@ -109,7 +109,7 @@ provider = "auto"    # Auto-detects llama.cpp vs Ollama
 |---------|-------|
 | API Key | `secrets.toml`: `openai_api_key = "sk-proj-..."` |
 | Endpoint | Default: `https://api.openai.com/v1` (configurable) |
-| Models | gpt-5-mini, gpt-5.2, gpt-5-nano, gpt-5, o3-mini |
+| Models | gpt-6-luna, gpt-6.1-terra, gpt-6.2-sol, gpt-6.2-astra |
 | Vision | Supported (enabled by default for cloud) |
 | Tools | Native function calling |
 | Thinking | Supported via `reasoning_effort` parameter (o-series and GPT-5) |
@@ -120,10 +120,10 @@ provider = "auto"    # Auto-detects llama.cpp vs Ollama
 |---------|-------|
 | API Key | `secrets.toml`: `claude_api_key = "sk-ant-..."` |
 | Endpoint | Default: `https://api.anthropic.com/v1` |
-| Models | claude-sonnet-4-5, claude-opus-4-5, claude-haiku-4-5 |
+| Models | claude-haiku-5-5, claude-sonnet-5-5, claude-opus-5-5, claude-fable-5-2 |
 | Vision | Supported |
 | Tools | Native function calling |
-| Thinking | Supported via `budget_tokens` parameter |
+| Thinking | Adaptive thinking sized by `output_config.effort` on current models; `budget_tokens` on models that take only budget thinking (`models.toml` `[thinking.anthropic]`) |
 
 ### Gemini (Google)
 
@@ -131,7 +131,7 @@ provider = "auto"    # Auto-detects llama.cpp vs Ollama
 |---------|-------|
 | API Key | `secrets.toml`: `gemini_api_key = "AIza..."` |
 | Endpoint | OpenAI-compatible endpoint (auto-configured) |
-| Models | gemini-3.8-flash, gemini-3.5-flash-lite, gemini-3.1-pro-preview |
+| Models | gemini-4-hydrogen, gemini-4-carbon, gemini-4-argon |
 | Vision | Supported |
 | Tools | Native function calling |
 | Thinking | Supported via `reasoning_effort`, which Google maps to `thinking_level` (3.x) or `thinking_budget` (2.5); DAWN sends low/medium/high and never turns it off |
@@ -148,14 +148,14 @@ key. Its model list uses `vendor/model` IDs.
 | API Key | `secrets.toml`: `openrouter_api_key = "sk-or-..."` (get one at [openrouter.ai/keys](https://openrouter.ai/keys)) |
 | Enable | `dawn.toml`: `[llm.cloud] provider = "openrouter"` |
 | Endpoint | `https://openrouter.ai/api/v1` (fixed) |
-| Models | `vendor/model` IDs, e.g. `anthropic/claude-sonnet-4`, `openai/gpt-5.4`, `google/gemini-3.5-flash-lite` |
+| Models | `vendor/model` IDs, e.g. `anthropic/claude-haiku-5.5`, `openai/gpt-6-luna`, `google/gemini-4-hydrogen` |
 | Vision / Tools / Thinking | Depend on the selected upstream model |
 
 ```toml
 [llm.cloud]
 provider = "openrouter"
 # Curated shortlist shown in the WebUI/voice model switcher (vendor/model IDs):
-openrouter_models = ["anthropic/claude-sonnet-4", "openai/gpt-5.4", "google/gemini-3.5-flash-lite", "meta-llama/llama-3.3-70b-instruct"]
+openrouter_models = ["anthropic/claude-haiku-5.5", "openai/gpt-6-luna", "google/gemini-4-hydrogen"]
 openrouter_default_model_idx = 0
 ```
 
@@ -171,20 +171,20 @@ openrouter_default_model_idx = 0
 
 ### Model Lists and Runtime Switching
 
-Each provider has a configurable model list. The first model is the default; users can switch via the WebUI settings panel or by voice ("Use GPT-5" / "Switch to Claude Opus").
+Each provider has a configurable model list. The model at `*_default_model_idx` (the first when unset) is the default; users can switch via the WebUI settings panel or by voice ("Use GPT-5" / "Switch to Claude Opus").
 
 ```toml
 [llm.cloud]
 provider = "openai"
 
-# Each list's first entry is the default when switching to that provider
-openai_models = ["gpt-5-mini", "gpt-5.2", "gpt-5-nano", "gpt-5"]
+# Each list's *_default_model_idx entry is the default when switching to that provider
+openai_models = ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.2-astra"]
 openai_default_model_idx = 0
 
-claude_models = ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"]
+claude_models = ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-2"]
 claude_default_model_idx = 0
 
-gemini_models = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
+gemini_models = ["gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon"]
 gemini_default_model_idx = 0
 
 # Custom endpoint (empty = use provider's default URL)
@@ -283,7 +283,7 @@ budget_high = 16384
 | Provider | Mechanism | Notes |
 |----------|-----------|-------|
 | OpenAI (o-series, GPT-5) | `reasoning_effort` parameter | Maps directly to low/medium/high |
-| Claude | `budget_tokens` parameter | Uses the token budget for the selected effort level |
+| Claude | `output_config.effort` (adaptive) or `budget_tokens` | Adaptive where `models.toml` lists it; otherwise the token budget for the selected effort level |
 | Gemini (2.5+) | `reasoning_effort` parameter | Google maps it to `thinking_level` (3.x) or `thinking_budget` (2.5). DAWN sends at least `low`, never off: 3.x can't turn thinking off, and Flash-Lite's own default (`minimal`) cuts tool loops short |
 | Local (llama.cpp) | `budget_tokens` parameter | Works with models that support thinking (Qwen3, DeepSeek-R1) |
 
@@ -317,8 +317,8 @@ DAWN uses native LLM tool calling (function calling) for all providers.
 ```toml
 [llm.tools]
 enabled = true              # native tool/function calling on (true) or off (false)
-local_enabled = []          # Tools for local voice (empty = all)
-remote_enabled = []         # Tools for WebUI/remote (empty = all)
+local_enabled = []          # Tools for local voice (empty = none; leave out for all non-dangerous)
+remote_enabled = []         # Tools for WebUI/remote (empty = none; leave out for all non-dangerous)
 ```
 
 Tools execute in parallel when the LLM requests multiple independent actions. Each tool has a safety classification that determines whether it can run without confirmation.
@@ -429,21 +429,21 @@ max_tokens = 16384              # Reply ceiling; a streamed reply that reasons g
 compact_soft_threshold = 0.60   # Async background compaction trigger
 compact_hard_threshold = 0.85   # Blocking compaction trigger (safety net)
 compact_use_session = true      # Use session's LLM for compaction
-compact_provider = ""           # Dedicated compaction provider (claude/openai/gemini/local)
-compact_model = ""              # Dedicated compaction model (e.g., claude-haiku-4-5)
+compact_provider = ""           # Dedicated compaction provider (claude/openai/gemini/openrouter/local)
+compact_model = ""              # Dedicated compaction model (e.g., claude-haiku-5-5)
 rate_limit_enabled = true       # Throttle cloud API calls
 rate_limit_rpm = 40             # Max requests per minute
 
 [llm.cloud]
-provider = "openai"             # "openai", "claude", or "gemini"
+provider = "openai"             # "openai", "claude", "gemini", or "openrouter"
 endpoint = ""                   # Custom endpoint (empty = provider default)
 vision_enabled = true           # Cloud models support vision by default
 
-openai_models = ["gpt-5-mini", "gpt-5.2", "gpt-5-nano", "gpt-5"]
+openai_models = ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.2-astra"]
 openai_default_model_idx = 0
-claude_models = ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"]
+claude_models = ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-2"]
 claude_default_model_idx = 0
-gemini_models = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
+gemini_models = ["gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon"]
 gemini_default_model_idx = 0
 
 [llm.local]
@@ -470,7 +470,7 @@ claude_api_key = "sk-ant-..."
 gemini_api_key = "AIza..."
 ```
 
-Environment variable overrides are available for all settings. Pattern: `DAWN_<SECTION>_<KEY>` (e.g., `DAWN_LLM_TYPE`, `DAWN_LLM_CLOUD_PROVIDER`). API keys use: `OPENAI_API_KEY`, `CLAUDE_API_KEY`, `GEMINI_API_KEY`.
+Environment variable overrides are available for all settings. Pattern: `DAWN_<SECTION>_<KEY>` (e.g., `DAWN_LLM_TYPE`, `DAWN_LLM_CLOUD_PROVIDER`). API keys use: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`.
 
 ---
 

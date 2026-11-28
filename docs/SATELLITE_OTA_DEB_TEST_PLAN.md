@@ -1,5 +1,7 @@
 # Satellite OTA + .deb — Manual Test Plan
 
+*Status (2026-11-27): the `satellite_ota` work this plan covers is merged to `main`; see `docs/OTA_DESIGN.md`.*
+
 Covers everything on branch `satellite_ota` **since the last manual test (server-side OTA #11)**:
 Phase 3 device-apply, the runtime keyring, the Debian-correct path migration, and the `.deb`.
 Run on a Tier-1 Pi (dawn-kitchen) with an **SSH session held open + a known-good binary copy** for
@@ -95,7 +97,7 @@ A healthy boot prints `PSRAM found: size=2097152`.
 | 6 | Oversize | manifest `image_size` > slot cap | `ota_reject "malformed offer"` |
 | 7 | Single-flight | two rapid pushes | second → `ota_reject "busy"` |
 | 8 | **SHA mismatch** | serve a patched image, manifest unchanged | post-reboot download fails hash → boot NOT switched → boots OLD image → server marks `failed` on re-register |
-| 9 | **Boot-count rollback** | push an image that boots, **reboots**, but can't register (e.g. wrong server in a test build). NB: the guard only counts *reboots* — an image that **hangs/crashes in `setup()` without rebooting** (e.g. the PSRAM trap above) will NOT be reverted (OTA_DESIGN §8 limitation), so don't induce this case with a hanging image | after 3 verify boots the NVS guard reverts to the old slot (Serial "rollback — … reverting"); old image registers |
+| 9 | **Boot-count rollback** | push an image that boots, **reboots**, but can't register (e.g. wrong server in a test build). NB: the guard only counts *reboots* — an image that **hangs/crashes in `setup()` without rebooting** (e.g. the PSRAM trap above) will NOT be reverted by this guard alone (row 13's verify-boot watchdog covers hangs), so don't induce this case with a hanging image | after 3 verify boots the NVS guard reverts to the old slot (Serial "rollback — … reverting"); old image registers |
 | 10 | Empty/blank old slot | (first-ever OTA, sibling slot blank) force the rollback path | guard logs "no bootable old slot", does NOT switch (no brick), clears state |
 | 11 | Power-cut mid-download | pull power during the download path | boots OLD image (boot partition never switched pre-hash); server marks `failed` on re-register; re-push works |
 | 12 | NTP unavailable | block NTP during the download path | download aborts cleanly (no cert-date failure loop), boots OLD image |
@@ -106,4 +108,4 @@ B passes (clean install, no missing libs, service up) + C (keyring fail-closed +
 1/2/3/7/8/12 at minimum.  The ✅/◑ decision cores now run in CI; the remaining device runs verify the
 integration aspects (ELF swap, systemd cadence, download, timers, power loss).  ESP32 Phase 4 (§E2) is
 hardware-only — rows 1/2/8/9/11 at minimum before relying on it.  Then commit + merge `satellite_ota`.
-Phase 5 (canary, signed-downgrade-flag, optional ESP32 native-rollback bootloader) remains.
+Phase 5: the `push all` canary rollout has since shipped; signed-downgrade-flag and the optional ESP32 native-rollback bootloader remain.
