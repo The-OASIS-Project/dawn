@@ -2684,6 +2684,32 @@ dawn_add_unit_test(test_auth_db
    LIBS    dawn_common unity sqlite3 pthread m stemmer ${JSONC_LIBRARIES}
    LABEL   ci)
 
+# dawn-admin's admin-password check: only an admin's right password passes.
+# The admin socket's other dependencies are stubbed.  Built with auth (the
+# WebUI), like the admin socket itself.
+if(ENABLE_AUTH)
+   dawn_add_unit_test(test_admin_verify_auth
+      SOURCES test_admin_verify_auth.c test_admin_verify_auth_stub.c
+              ${SRC_ROOT}/src/auth/admin_socket.c
+              ${SRC_ROOT}/src/auth/auth_crypto.c
+              ${AUTH_DB_SOURCES}
+      LIBS    dawn_common unity sqlite3 pthread m stemmer sodium ${JSONC_LIBRARIES}
+      LABEL   ci)
+endif()
+
+# The WebUI's change_password request: a non-admin needs their current password
+# for their own, and can't change anyone else's.  Built with the WebUI, like
+# its source.
+if(ENABLE_WEBUI)
+   dawn_add_unit_test(test_webui_change_password
+      SOURCES test_webui_change_password.c
+              ${SRC_ROOT}/src/webui/webui_admin.c
+              ${SRC_ROOT}/src/auth/auth_crypto.c
+              ${AUTH_DB_SOURCES}
+      LIBS    dawn_common unity sqlite3 pthread m stemmer sodium ${JSONC_LIBRARIES}
+      LABEL   ci)
+endif()
+
 # A tool's config section survives a settings save: the registry refuses a
 # parser with no writer, and a writer writes back what the parser read.
 dawn_add_unit_test(test_tool_config_roundtrip

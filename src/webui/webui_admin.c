@@ -310,7 +310,10 @@ void handle_change_password(ws_connection_t *conn, struct json_object *payload) 
 
    /* Non-admin self-change requires current password verification */
    if (!is_admin && is_self_change) {
-      if (!json_object_object_get_ex(payload, "current_password", &current_password_obj)) {
+      /* Only a string can be a password: null or a number is refused here,
+       * not passed on as NULL. */
+      if (!json_object_object_get_ex(payload, "current_password", &current_password_obj) ||
+          !json_object_is_type(current_password_obj, json_type_string)) {
          json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
          json_object_object_add(resp_payload, "error",
                                 json_object_new_string("Current password required"));
@@ -323,7 +326,7 @@ void handle_change_password(ws_connection_t *conn, struct json_object *payload) 
       const char *current_password = json_object_get_string(current_password_obj);
       auth_user_t user;
       if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS ||
-          auth_verify_password(current_password, user.password_hash) != 0) {
+          !auth_verify_password(user.password_hash, current_password)) {
          json_object_object_add(resp_payload, "success", json_object_new_boolean(0));
          json_object_object_add(resp_payload, "error",
                                 json_object_new_string("Current password incorrect"));

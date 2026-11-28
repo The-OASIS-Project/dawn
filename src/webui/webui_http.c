@@ -93,14 +93,6 @@ _Static_assert((CSRF_USED_NONCE_COUNT & (CSRF_USED_NONCE_COUNT - 1)) == 0,
 /* Login rate limiting */
 #define LOGIN_RATE_LIMIT_SLOTS 32 /* Track up to 32 concurrent IPs */
 
-#ifdef ENABLE_AUTH
-/* Dummy password hash for timing equalization on non-existent users.
- * Uses Argon2id with same parameters as real hashes to ensure constant timing. */
-static const char DUMMY_PASSWORD_HASH[] = "$argon2id$v=19$m=16384,t=3,p=1$"
-                                          "aaaaaaaaaaaaaaaaaaaaaa$"
-                                          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-#endif
-
 /* =============================================================================
  * Module State
  * ============================================================================= */
@@ -871,7 +863,7 @@ static int handle_auth_login(struct lws *wsi, struct http_session_data *pss) {
    if (auth_db_get_user(username, &user) != AUTH_DB_SUCCESS) {
       /* Timing equalization: perform dummy password hash verification
        * to prevent timing attacks that could enumerate valid usernames */
-      (void)auth_verify_password(DUMMY_PASSWORD_HASH, password);
+      (void)auth_verify_password(AUTH_DUMMY_PASSWORD_HASH, password);
       json_object_put(req);
       OLOG_WARNING("WebUI: Login failed - user not found: %s from %s", username, client_ip);
       auth_db_log_attempt(normalized_ip, username, false);

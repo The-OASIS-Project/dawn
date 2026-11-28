@@ -12,6 +12,21 @@ This is not a changelog: git history and the pull requests cover everything else
 
 ---
 
+## 2026-11-28 — Two password checks that let anything through
+
+**What changed.** Until this version, `dawn-admin` accepted any password for an existing admin
+user, so anyone allowed to connect to the admin socket (root, the daemon's user, and members of
+the daemon's group) could run its admin commands by naming an admin. And a signed-in WebUI user
+who isn't an admin could change their own password without knowing the current one. Both now
+check the password.
+
+**What you need to do.** If accounts other than yours are in the daemon's group, or a WebUI
+login may have been used by someone else, change the affected passwords (`dawn-admin user
+passwd <name>`, or the WebUI), and look through `dawn-admin log show` for
+`PASSWORD_CHANGED` and other admin actions you don't recognise.
+
+---
+
 ## 2026-11-25 — WebUI logins end a week after you last use them
 
 **What changed.** A login no longer ends 24 hours after you sign in (30 days with "Remember
